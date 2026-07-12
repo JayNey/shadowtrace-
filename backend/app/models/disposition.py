@@ -95,6 +95,14 @@ OperationParams = Annotated[
     Field(discriminator="operation_code"),
 ]
 
+# Each intent envelope carries exactly one params variant (intro §4.6.18/19).
+_INTENT_PARAMS: dict[DispositionIntentKind, type[BaseModel]] = {
+    DispositionIntentKind.EVENT_STATUS_UPDATE: SetEventDispositionParams,
+    DispositionIntentKind.ENTITY_ACTION_SUBMIT: SubmitEntityActionParams,
+    DispositionIntentKind.EXECUTION_RESULT_RECORD: RecordExecutionResultParams,
+    DispositionIntentKind.COMPENSATION_RECORD: RecordCompensationParams,
+}
+
 
 class TargetDispositionResult(BaseModel):
     """Outbound per-target result: allowlisted, no free message / raw_result."""
@@ -142,6 +150,24 @@ class DispositionCommand(BaseModel):
             and self.execution_owner is not ExecutionOwner.XDR_MANAGED
         ):
             raise ValueError("EVENT_STATUS_UPDATE must be XDR_MANAGED")
+        return self
+
+    @model_validator(mode="after")
+    def _operation_code_and_intent_are_consistent(self) -> DispositionCommand:
+        # The top-level operation_code must not disagree with the discriminated
+        # params, and each intent_kind carries exactly one params variant — an
+        # outbound envelope must never claim one operation while carrying another.
+        if self.operation_code != self.operation_params.operation_code:
+            raise ValueError(
+                "operation_code must equal operation_params.operation_code "
+                f"({self.operation_code!r} != {self.operation_params.operation_code!r})"
+            )
+        expected = _INTENT_PARAMS.get(self.intent_kind)
+        if expected is not None and not isinstance(self.operation_params, expected):
+            raise ValueError(
+                f"intent_kind {self.intent_kind.value} requires "
+                f"{expected.__name__} operation_params"
+            )
         return self
 
 

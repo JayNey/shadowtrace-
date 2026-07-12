@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -95,6 +97,31 @@ def test_direct_tool_cannot_submit_entity_action() -> None:
 def test_event_status_update_must_be_xdr_managed() -> None:
     with pytest.raises(ValidationError):
         _command(execution_owner=ExecutionOwner.DIRECT_TOOL)
+
+
+def test_command_rejects_operation_code_params_mismatch() -> None:
+    # Top-level operation_code disagreeing with the params variant must fail.
+    with pytest.raises(ValidationError):
+        _command(operation_code="record_execution_result")
+
+
+def test_intent_kind_must_match_params_type() -> None:
+    # EVENT_STATUS_UPDATE intent carrying non-SetEventDisposition params fails.
+    with pytest.raises(ValidationError):
+        _command(
+            operation_code="record_execution_result",
+            operation_params={"operation_code": "record_execution_result"},
+        )
+
+
+def test_outbound_command_json_keys_are_allowlisted() -> None:
+    # Serialize and prove only the allowlisted envelope fields ever appear;
+    # Action.parameters / reason / raw_result can never ride along outbound.
+    allowed = set(DispositionCommand.model_fields.keys())
+    dumped = json.loads(_command().model_dump_json())
+    assert set(dumped.keys()) <= allowed
+    for forbidden in ("reason", "parameters", "raw_result", "raw"):
+        assert forbidden not in dumped
 
 
 def test_target_disposition_result_is_allowlisted() -> None:
