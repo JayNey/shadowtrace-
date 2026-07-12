@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app.api.v1 import health as health_module
 from app.core.config import Settings, get_settings
 from app.main import app
 
 
 @pytest.fixture(autouse=True)
-def _clear_settings_cache() -> None:
+def _clear_settings_cache() -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -65,7 +66,7 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_degraded_when_postgres_down(client: AsyncClient) -> None:
+async def test_health_degraded_returns_503_when_postgres_down(client: AsyncClient) -> None:
     settings = Settings(SIMULATION_ENABLED=True)
     app.dependency_overrides[get_settings] = lambda: settings
 
@@ -76,6 +77,40 @@ async def test_health_degraded_when_postgres_down(client: AsyncClient) -> None:
         response = await client.get("/api/v1/health")
 
     app.dependency_overrides.clear()
-    assert response.status_code == 200
+    assert response.status_code == 503
     assert response.json()["status"] == "degraded"
     assert response.json()["postgres"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_health_degraded_returns_503_when_redis_down(client: AsyncClient) -> None:
+    settings = Settings(SIMULATION_ENABLED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="error"),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 503
+    assert response.json()["status"] == "degraded"
+    assert response.json()["redis"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_check_postgres_returns_error_on_exception() -> None:
+    with patch(
+        "app.api.v1.health._get_engine",
+        side_effect=RuntimeError("boom"),
+    ):
+        assert await health_module.check_postgres("postgresql+asyncpg://x") == "error"
+
+
+@pytest.mark.asyncio
+async def test_check_redis_returns_error_on_exception() -> None:
+    failing = AsyncMock()
+    failing.ping.side_effect = RuntimeError("boom")
+    with patch("app.api.v1.health._get_redis", return_value=failing):
+        assert await health_module.check_redis("redis://x") == "error"

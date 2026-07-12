@@ -4,39 +4,66 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from redis.asyncio import Redis
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.core.config import Settings, get_settings
 
 router = APIRouter(tags=["health"])
 
+# Process-wide caches so health probes reuse one pool/connection per URL
+# instead of building and tearing one down on every request.
+_ENGINES: dict[str, AsyncEngine] = {}
+_REDIS_CLIENTS: dict[str, Redis] = {}
+
+
+def _get_engine(database_url: str) -> AsyncEngine:
+    engine = _ENGINES.get(database_url)
+    if engine is None:
+        engine = create_async_engine(database_url, pool_pre_ping=True)
+        _ENGINES[database_url] = engine
+    return engine
+
+
+def _get_redis(redis_url: str) -> Redis:
+    client = _REDIS_CLIENTS.get(redis_url)
+    if client is None:
+        client = Redis.from_url(redis_url, decode_responses=True)
+        _REDIS_CLIENTS[redis_url] = client
+    return client
+
+
+async def shutdown_health_clients() -> None:
+    """Dispose cached engines / Redis clients on application shutdown."""
+    for engine in _ENGINES.values():
+        await engine.dispose()
+    _ENGINES.clear()
+    for client in _REDIS_CLIENTS.values():
+        await client.aclose()
+    _REDIS_CLIENTS.clear()
+
 
 async def check_postgres(database_url: str) -> str:
     """Return 'ok' if SELECT 1 succeeds, else 'error'."""
-    engine = create_async_engine(database_url, pool_pre_ping=True)
     try:
+        engine = _get_engine(database_url)
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return "ok"
     except Exception:  # noqa: BLE001 — health must never raise
         return "error"
-    finally:
-        await engine.dispose()
 
 
 async def check_redis(redis_url: str) -> str:
     """Return 'ok' if PING succeeds, else 'error'."""
-    client = Redis.from_url(redis_url, decode_responses=True)
     try:
+        client = _get_redis(redis_url)
         pong = await client.ping()
         return "ok" if pong else "error"
     except Exception:  # noqa: BLE001 — health must never raise
         return "error"
-    finally:
-        await client.aclose()
 
 
 def _component_summary(*, status: str, mode: str, capability: dict[str, str]) -> dict[str, Any]:
@@ -49,11 +76,21 @@ def _component_summary(*, status: str, mode: str, capability: dict[str, str]) ->
 
 
 @router.get("/health")
-async def health(settings: Annotated[Settings, Depends(get_settings)]) -> dict[str, Any]:
-    """Report dependency and adapter placeholder health."""
+async def health(
+    settings: Annotated[Settings, Depends(get_settings)],
+    response: Response,
+) -> dict[str, Any]:
+    """Report dependency and adapter placeholder health.
+
+    Returns 200 when every hard dependency is reachable, otherwise 503 so that
+    HTTP-only probes (compose `curl -f`, load balancers) detect degradation.
+    """
     postgres = await check_postgres(settings.database_url)
     redis_status = await check_redis(settings.redis_url)
 
+    # NOTE: capability values below are UNVERIFIED placeholders for the Mock
+    # phase. Once real adapters land they must be replaced with actual
+    # capability probing (live capabilities default to UNKNOWN).
     source_adapter = _component_summary(
         status="ok" if settings.source_mode == "mock_xdr" else "degraded",
         mode=settings.source_mode,
@@ -90,6 +127,8 @@ async def health(settings: Annotated[Settings, Depends(get_settings)]) -> dict[s
     )
 
     overall = "ok" if postgres == "ok" and redis_status == "ok" else "degraded"
+    if overall != "ok":
+        response.status_code = 503
 
     return {
         "status": overall,
