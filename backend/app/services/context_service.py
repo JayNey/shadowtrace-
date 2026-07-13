@@ -460,6 +460,16 @@ class EventContextStore:
                 raw[field_name] = self._unwrap_journal_value(value)
         return _assemble_event_context(raw)
 
+    async def get_field_version(self, event_id: str, key: str) -> int | None:
+        """Authoritative current version for a field, or None when unset.
+
+        Reads ``event_context_field_version`` (the sole version source); callers
+        must not treat the Redis ``{key}__version`` cache as authority.
+        """
+        async with self._session_factory() as session:
+            row = await session.get(orm.EventContextFieldVersion, (event_id, key))
+            return int(row.current_version) if row is not None else None
+
     @staticmethod
     async def _load_field_versions(session: AsyncSession, event_id: str) -> dict[str, int]:
         rows = await session.execute(
