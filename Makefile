@@ -1,4 +1,4 @@
-.PHONY: up down test lint fmt migrate migrate-down ci-lint ci-test ci-build
+.PHONY: up down test lint fmt migrate migrate-down integration-test ci-lint ci-test ci-build
 
 COMPOSE := docker compose -f infra/docker-compose.yml
 # Host-side URLs for tests that talk to Compose postgres/redis from the workstation / CI runner.
@@ -27,6 +27,26 @@ lint:
 
 fmt:
 	cd backend && ruff check --fix app tests && ruff format app tests
+
+# --- ISSUE-017 data-foundation integration quality gate ------------------ #
+integration-test:
+	$(COMPOSE) up -d postgres redis
+	@echo "Waiting for postgres + redis to become healthy..."
+	@ok=0; for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do \
+		if $(COMPOSE) exec -T postgres pg_isready -U shadowtrace -d shadowtrace >/dev/null 2>&1 \
+			&& $(COMPOSE) exec -T redis redis-cli ping 2>/dev/null | grep -q PONG; then \
+			ok=1; break; \
+		fi; \
+		sleep 2; \
+	done; \
+	if [ "$$ok" != "1" ]; then \
+		echo "postgres/redis health check timed out"; \
+		$(COMPOSE) ps; \
+		$(COMPOSE) logs postgres redis || true; \
+		exit 1; \
+	fi
+	cd backend && DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		$(PYTHON) -m pytest tests/integration/test_data_pipeline.py -m integration -v
 
 # --- ISSUE-009 local / CI parity gates ------------------------------------ #
 # Prefer the project venv when present so bare `make ci-*` matches CI's

@@ -139,6 +139,19 @@ def _ref_dump(ref: SourceReference) -> dict[str, Any]:
     return ref.model_dump(mode="json")
 
 
+def _source_snapshot_from_row(row: orm.SecurityEvent) -> dict[str, Any]:
+    """Return immutable source evidence only; never include mutable current_* state."""
+    return {
+        "creation_source_ref": dict(row.creation_source_ref),
+        "source_reference_snapshots": [
+            dict(item) for item in (row.source_reference_snapshots or [])
+        ],
+        "raw_alert_snapshot": (
+            dict(row.raw_alert_snapshot) if row.raw_alert_snapshot is not None else None
+        ),
+    }
+
+
 def _security_event_from_row(row: orm.SecurityEvent) -> SecurityEvent:
     creation = SourceReference.model_validate(row.creation_source_ref)
     snapshots = [SourceReference.model_validate(s) for s in (row.source_reference_snapshots or [])]
@@ -682,6 +695,12 @@ class EventService:
             set_result = await self._store.set(row.event_id, "event", summary)
             redis_ok = redis_ok and set_result.redis_ok
 
+        snapshot_result = await self._ensure_source_snapshot(
+            row,
+            overwrite=force_context_refresh,
+        )
+        redis_ok = redis_ok and snapshot_result
+
         if not redis_ok:
             logger.warning(
                 "Redis context sync failed for event_id=%s; marking degraded",
@@ -703,6 +722,32 @@ class EventService:
                     "title": row.title,
                 },
             )
+
+    async def _ensure_source_snapshot(
+        self,
+        row: orm.SecurityEvent,
+        *,
+        overwrite: bool,
+    ) -> bool:
+        """Write immutable source evidence; repair when the field was never initialized.
+
+        ``overwrite=True`` (create/promote) refreshes snapshots after association
+        changes. ``overwrite=False`` (idempotent replay) only fills a missing
+        field so a crash between ``event`` init and snapshot write can heal.
+        """
+        snapshot = _source_snapshot_from_row(row)
+        if not overwrite:
+            async with self._session_factory() as session:
+                exists = await session.scalar(
+                    select(orm.EventContextFieldVersion.current_version).where(
+                        orm.EventContextFieldVersion.event_id == row.event_id,
+                        orm.EventContextFieldVersion.field_name == "source_snapshot",
+                    )
+                )
+            if exists is not None:
+                return True
+        result = await self._store.set(row.event_id, "source_snapshot", snapshot)
+        return result.redis_ok
 
     async def _ingest_with_unique_retry(self, source: IngestableSource) -> _CreateBundle:
         """Resolve concurrent delivery races by rereading the canonical row/link."""
@@ -1129,13 +1174,14 @@ class EventService:
             if await session.scalar(query) is not None:
                 return True
 
-        # ``event`` is the initialization record. Any additional context field
-        # means an Agent/Service has started work (including approval_records).
+        # ``event`` and ``source_snapshot`` are ingestion initialization records.
+        # Any other context field means an Agent/Service has started work
+        # (including approval_records).
         context_activity = await session.scalar(
             select(orm.EventContextJournal.id)
             .where(
                 orm.EventContextJournal.event_id == event_id,
-                orm.EventContextJournal.field_name != "event",
+                orm.EventContextJournal.field_name.not_in(("event", "source_snapshot")),
             )
             .limit(1)
         )
