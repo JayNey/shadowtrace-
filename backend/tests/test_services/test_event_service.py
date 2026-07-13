@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -256,6 +256,58 @@ async def test_idempotent_retry_repairs_missing_context(
     assert repaired.event_id
     assert (await store.get(repaired.event_id, "event"))["event_id"] == repaired.event_id
     assert await redis_client.get_client().hget(ctx_key(repaired.event_id), "event") is not None
+
+
+@pytest.mark.asyncio
+async def test_idempotent_retry_repairs_missing_source_snapshot(
+    event_service: EventService,
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: RedisClient,
+) -> None:
+    """Crash between event init and snapshot write must heal on replay."""
+    sfx = _sfx()
+    src = IngestableSource(
+        reference=_ref(
+            kind=SourceObjectKind.INCIDENT,
+            object_id=f"INC-snap-{sfx}",
+            connector_id=f"conn-snap-{sfx}",
+        ),
+        title="snapshot-repair",
+        source_type="mock_xdr",
+    )
+    created = await event_service.ingest_source_object(src)
+    assert created.event_id
+    assert await store.get(created.event_id, "source_snapshot") is not None
+
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text(
+                    "DELETE FROM event_context_journal "
+                    "WHERE event_id = :event_id AND field_name = 'source_snapshot'"
+                ),
+                {"event_id": created.event_id},
+            )
+            await session.execute(
+                text(
+                    "DELETE FROM event_context_field_version "
+                    "WHERE event_id = :event_id AND field_name = 'source_snapshot'"
+                ),
+                {"event_id": created.event_id},
+            )
+    await redis_client.get_client().hdel(
+        ctx_key(created.event_id),
+        "source_snapshot",
+        "source_snapshot:version",
+    )
+
+    repaired = await event_service.ingest_source_object(src)
+    assert repaired.idempotent is True
+    snapshot = await store.get(created.event_id, "source_snapshot")
+    assert snapshot is not None
+    assert snapshot["creation_source_ref"]["source_object_id"] == f"INC-snap-{sfx}"
+    assert await redis_client.get_client().hget(ctx_key(created.event_id), "source_snapshot")
 
 
 @pytest.mark.asyncio
