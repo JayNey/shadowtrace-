@@ -467,6 +467,12 @@ def get_tool_registry() -> ToolRegistry:
 
 tool_registry = ToolRegistry()
 tool_registry.auto_discover()
+from app.core.config import get_settings  # noqa: E402
+
+if get_settings().tool_mode == "mock" and get_settings().simulation_enabled:
+    from app.providers.tools.mock_provider import get_mock_tool_provider  # noqa: E402
+
+    get_mock_tool_provider().register_bindings(tool_registry)
 
 
 __all__ = [
