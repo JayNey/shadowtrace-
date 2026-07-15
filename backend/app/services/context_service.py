@@ -8,7 +8,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from pydantic import BaseModel
 from sqlalchemy import select, text
@@ -74,6 +74,7 @@ def _pick_by_priority(present: set[Any], priority: tuple[Any, ...]) -> Any | Non
         if candidate in present:
             return candidate
     return None
+
 
 # EventContext Hash field names (excludes companion ``{key}__version`` keys).
 CONTEXT_FIELD_NAMES: frozenset[str] = frozenset(EventContext.model_fields.keys())
@@ -741,10 +742,9 @@ class EventContextStore:
                 blocked_action_ids.append(action.action_id)
 
         if applicable_actions:
-            aggregate_readiness = _pick_by_priority(
-                set(readiness_counts), READINESS_AGGREGATE_PRIORITY
-            )
-            assert aggregate_readiness is not None
+            picked = _pick_by_priority(set(readiness_counts), READINESS_AGGREGATE_PRIORITY)
+            assert picked is not None
+            aggregate_readiness = cast(WritebackReadiness, picked)
         elif required_actions:
             # Required policy, but no action is (yet) applicable to a writable
             # source object — never invent READY from an empty applicable set.

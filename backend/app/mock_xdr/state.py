@@ -899,7 +899,8 @@ class MockXDRState:
             required_connectors = {
                 c.connector_id
                 for c in self.connectors.values()
-                if c.disposition_policy_default.value == "required"
+                if c.disposition_policy_default is not None
+                and c.disposition_policy_default.value == "required"
             }
         else:
             required_connectors = set(self.connectors)

@@ -491,7 +491,11 @@ class SourceIngester:
                 row.capabilities = {
                     key.value: value.value for key, value in item.capabilities.items()
                 }
-                row.disposition_policy_default = item.disposition_policy_default.value
+                row.disposition_policy_default = (
+                    item.disposition_policy_default.value
+                    if item.disposition_policy_default is not None
+                    else None
+                )
                 row.last_sync_at = item.last_sync_at
                 row.schema_version = item.schema_version
                 metadata = dict(item.metadata)

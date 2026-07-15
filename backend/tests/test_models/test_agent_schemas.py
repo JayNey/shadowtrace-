@@ -603,9 +603,7 @@ def test_agent_input_models_reject_unknown_fields() -> None:
 
     for _name, model in AGENT_INPUT_MODELS.items():
         required = {
-            field_name
-            for field_name, field in model.model_fields.items()
-            if field.is_required()
+            field_name for field_name, field in model.model_fields.items() if field.is_required()
         }
         kwargs: dict[str, object] = {"event_id": "evt-20260101-0a1b2c3d"}
         for field_name in required:

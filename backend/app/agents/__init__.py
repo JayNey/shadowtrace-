@@ -1,8 +1,9 @@
 """Agents package (ISSUE-005)."""
 
-from app.agents.base import AgentInput, AgentOutput, BaseAgent
+from app.agents.base import AgentOutput, BaseAgent
 from app.models.agent_io import (
     AGENT_INPUT_MODELS,
+    AgentInput,
     EvidenceAgentInput,
     GraphAgentInput,
     MemoryAgentInput,

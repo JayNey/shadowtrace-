@@ -341,9 +341,7 @@ class CapabilityManifest(BaseModel):
             return CapabilityState.UNKNOWN
 
         max_specificity = max(specificity for specificity, _ in scored)
-        winning_states = {
-            state for specificity, state in scored if specificity == max_specificity
-        }
+        winning_states = {state for specificity, state in scored if specificity == max_specificity}
         if len(winning_states) == 1:
             return next(iter(winning_states))
         # Conflicting equally-specific bindings → fail closed.

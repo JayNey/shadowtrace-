@@ -66,9 +66,7 @@ WRITEBACK_MAX_RETRIES = 5
 
 # Levels a system may auto-approve without a human ApprovalRecord (ISSUE-093 §4).
 # L2+ is human-in-the-loop by default; auto_execute never bypasses this for L2+.
-AUTO_APPROVABLE_ACTION_LEVELS: frozenset[ActionLevel] = frozenset(
-    {ActionLevel.L0, ActionLevel.L1}
-)
+AUTO_APPROVABLE_ACTION_LEVELS: frozenset[ActionLevel] = frozenset({ActionLevel.L0, ActionLevel.L1})
 
 # Budget (§4.10) — defaults mirrored in Settings.
 GLOBAL_TOKEN_BUDGET = 1_000_000

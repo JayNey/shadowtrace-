@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.agent_io import AGENT_INPUT_BY_NAME, AgentInput
+from app.models.agent_io import AGENT_INPUT_BY_NAME, AgentInput, AgentName
 from app.services.working_memory import BoundWorkingMemory
 
 TIn = TypeVar("TIn", bound="AgentInput")
@@ -72,7 +72,7 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
 
     async def execute(self, input: TIn) -> TOut:
         """Template method: budget → pre_hooks → _run → guardrails → post_hooks → trace."""
-        expected_input = AGENT_INPUT_BY_NAME.get(self.agent_name)  # type: ignore[arg-type]
+        expected_input = AGENT_INPUT_BY_NAME.get(cast(AgentName, self.agent_name))
         if expected_input is None or type(input) is not expected_input:
             expected_name = (
                 expected_input.__name__ if expected_input is not None else "<AgentName>Input"

@@ -502,9 +502,7 @@ async def test_writeback_summary_readiness_aggregate_fails_closed_on_worst_actio
 
     ctx = await store.rebuild_context(event_id)
     assert ctx.writeback_summary is not None
-    assert (
-        ctx.writeback_summary.aggregate_readiness is WritebackReadiness.CAPABILITY_UNSUPPORTED
-    )
+    assert ctx.writeback_summary.aggregate_readiness is WritebackReadiness.CAPABILITY_UNSUPPORTED
     assert ctx.writeback_summary.required_action_count == 2
     assert ctx.writeback_summary.applicable_action_count == 2
     assert f"act-blocked-{sfx}" in ctx.writeback_summary.blocked_action_ids

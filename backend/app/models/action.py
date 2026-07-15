@@ -131,9 +131,7 @@ class Action(BaseModel):
         """
         if not self.writeback_required:
             if self.writeback_applicable:
-                raise ValueError(
-                    "writeback_required=false forbids writeback_applicable=true"
-                )
+                raise ValueError("writeback_required=false forbids writeback_applicable=true")
             if self.writeback_readiness is not WritebackReadiness.NOT_REQUIRED:
                 raise ValueError(
                     "writeback_required=false requires writeback_readiness=NOT_REQUIRED"
