@@ -403,10 +403,11 @@ async def test_thin_wrapper_uses_the_bound_mock_provider_state(
 @pytest.mark.asyncio
 async def test_pending_projection_timeout_is_not_reported_as_effect_failure(
     state: MockEnvironmentState,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = MockToolProvider(
         state,
-        config=MockToolProviderConfig(observation_delay_ms=500),
+        config=MockToolProviderConfig(observation_delay_ms=60_000),
     )
     completed = await _run_action(
         provider,
@@ -417,9 +418,26 @@ async def test_pending_projection_timeout_is_not_reported_as_effect_failure(
     )
     registry = ToolRegistry()
     registry.auto_discover()
+
+    pending = await state.get_observation(
+        "ip_blocks",
+        "203.0.113.39",
+        include_pending=True,
+        job_id=completed.job_id,
+    )
+    assert pending is not None
+    assert (
+        await state.get_observation(
+            "ip_blocks",
+            "203.0.113.39",
+            job_id=completed.job_id,
+        )
+        is None
+    )
+
     timed_out = await _run_verify(
         registry,
-        MockVerificationRuntime(state, wait_timeout_ms=1, poll_interval_ms=1),
+        MockVerificationRuntime(state, wait_timeout_ms=0, poll_interval_ms=1),
         "check_ip_block_status",
         _target("ip", "203.0.113.39", job_id=completed.job_id),
     )
@@ -428,7 +446,10 @@ async def test_pending_projection_timeout_is_not_reported_as_effect_failure(
     assert timed_out.data["is_verified"] is False
     assert timed_out.data["detail"] == "observation_not_visible"
 
-    await asyncio.sleep(0.51)
+    future_now = pending.available_at + timedelta(seconds=1)
+    monkeypatch.setattr("app.tools.mock_state._utc_now", lambda: future_now)
+    monkeypatch.setattr("app.providers.tools.mock_provider._utc_now", lambda: future_now)
+
     visible = await _run_verify(
         registry,
         MockVerificationRuntime(state),
