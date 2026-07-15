@@ -874,9 +874,7 @@ class MockXDRState:
                     ),
                     "confirmation_evidence": None,
                     "provider_code": (
-                        "readback_mismatch"
-                        if authoritative_changed
-                        else "readback_not_yet_applied"
+                        "readback_mismatch" if authoritative_changed else "readback_not_yet_applied"
                     ),
                     "provider_message": (
                         "authoritative state changed to a different disposition"
