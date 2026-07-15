@@ -116,8 +116,10 @@ def _primary_entities(record: dict[str, Any]) -> list[str]:
 def _alert_type(records: list[dict[str, Any]]) -> str:
     channels = {str(record.get("channel") or "").lower() for record in records}
     actions = {str(record.get("action") or "").lower() for record in records}
-    if "dlp" in channels or "upload" in actions or any(
-        _as_int(record.get("bytes_out")) >= 1_000_000 for record in records
+    if (
+        "dlp" in channels
+        or "upload" in actions
+        or any(_as_int(record.get("bytes_out")) >= 1_000_000 for record in records)
     ):
         return "data_exfiltration"
     if "endpoint" in channels:

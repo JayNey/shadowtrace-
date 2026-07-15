@@ -38,10 +38,22 @@ ALL_SOURCE_KINDS = [
     SourceObjectKind.ASSET,
     SourceObjectKind.LOG,
 ]
+EVIDENCE_CONNECTOR_ID = "mock_xdr-evidence"
 
 
 async def _count(session: AsyncSession, model: type[Any]) -> int:
     return int(await session.scalar(select(func.count()).select_from(model)) or 0)
+
+
+async def _count_ingested_source_objects(session: AsyncSession) -> int:
+    return int(
+        await session.scalar(
+            select(func.count())
+            .select_from(orm.SourceObject)
+            .where(orm.SourceObject.connector_id != EVIDENCE_CONNECTOR_ID)
+        )
+        or 0
+    )
 
 
 @pytest.mark.asyncio
@@ -67,7 +79,7 @@ async def test_mock_xdr_http_pipeline_persists_queryable_frozen_context(
     assert summary.watermark_after is not None
 
     assert await _count(db_session, orm.SecurityEvent) == 1
-    assert await _count(db_session, orm.SourceObject) >= 10
+    assert await _count_ingested_source_objects(db_session) >= 10
     assert await _count(db_session, orm.SourceEventLink) == 4
 
     expected_assets = {
@@ -85,7 +97,7 @@ async def test_mock_xdr_http_pipeline_persists_queryable_frozen_context(
             await db_session.scalars(
                 select(orm.SourceObject.source_object_id).where(
                     orm.SourceObject.source_kind == SourceObjectKind.ASSET.value,
-                    orm.SourceObject.connector_id != "mock_xdr-evidence",
+                    orm.SourceObject.connector_id != EVIDENCE_CONNECTOR_ID,
                 )
             )
         ).all()
@@ -94,7 +106,7 @@ async def test_mock_xdr_http_pipeline_persists_queryable_frozen_context(
         await db_session.scalars(
             select(orm.SourceObject).where(
                 orm.SourceObject.source_kind == SourceObjectKind.LOG.value,
-                orm.SourceObject.connector_id != "mock_xdr-evidence",
+                orm.SourceObject.connector_id != EVIDENCE_CONNECTOR_ID,
             )
         )
     ).all()
@@ -107,7 +119,7 @@ async def test_mock_xdr_http_pipeline_persists_queryable_frozen_context(
         (
             await db_session.scalars(
                 select(orm.SourceObject.source_object_id).where(
-                    orm.SourceObject.connector_id == "mock_xdr-evidence"
+                    orm.SourceObject.connector_id == EVIDENCE_CONNECTOR_ID
                 )
             )
         ).all()
@@ -242,7 +254,7 @@ async def test_bad_schema_records_quality_degrades_connector_and_halts_watermark
     assert bad.watermark_before is None
     assert bad.watermark_after is None
 
-    assert await _count(db_session, orm.SourceObject) == 7
+    assert await _count_ingested_source_objects(db_session) == 7
     assert (await event_service.list_events()).total == 1
     quality = await db_session.scalar(
         select(orm.DataQualityError).where(
@@ -250,7 +262,13 @@ async def test_bad_schema_records_quality_degrades_connector_and_halts_watermark
         )
     )
     assert quality is not None
-    connectors = (await db_session.scalars(select(orm.SourceConnector))).all()
+    connectors = (
+        await db_session.scalars(
+            select(orm.SourceConnector).where(
+                orm.SourceConnector.connector_id != EVIDENCE_CONNECTOR_ID
+            )
+        )
+    ).all()
     assert connectors
     assert all(row.status == ConnectorStatus.DEGRADED.value for row in connectors)
 
@@ -324,7 +342,7 @@ async def test_cursor_resume_and_delivery_replay_do_not_duplicate_event(
     assert resumed.duplicate > 0
     assert resumed.degraded is False
     assert await _count(db_session, orm.SecurityEvent) == 1
-    assert await _count(db_session, orm.SourceObject) == 10
+    assert await _count_ingested_source_objects(db_session) == 10
 
     incident = next(
         stored.body
