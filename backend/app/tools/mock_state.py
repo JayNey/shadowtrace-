@@ -419,7 +419,13 @@ class MockEnvironmentState:
         idempotency_field = hashlib.sha256(
             f"{record.surface}|{record.target}|{record.job_id}".encode()
         ).hexdigest()
-        encoded_record = RedisClient.dumps(record.model_dump(mode="json"))
+        serialized_record = record.model_dump(mode="json")
+        if not record.source_refs:
+            # Redis' bundled Lua cjson turns an empty JSON array into ``{}``
+            # during decode/encode. Omitting this default preserves the model
+            # contract because Pydantic restores ``source_refs=[]`` on read.
+            serialized_record.pop("source_refs")
+        encoded_record = RedisClient.dumps(serialized_record)
         if self._observation_memory is not None:
             async with self._lock:
                 assert self._observation_idempotency_memory is not None
@@ -451,9 +457,10 @@ class MockEnvironmentState:
                     + 1
                 )
                 records.append(
-                    record.model_copy(update={"projection_generation": generation}).model_dump(
-                        mode="json"
-                    )
+                    {
+                        **serialized_record,
+                        "projection_generation": generation,
+                    }
                 )
                 self._observation_memory[field] = RedisClient.dumps(
                     records[-_MAX_OBSERVATION_GENERATIONS:]

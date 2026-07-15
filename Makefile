@@ -23,10 +23,10 @@ test:
 	cd backend && python -m pytest tests/test_infra/test_health.py -v
 
 lint:
-	cd backend && ruff check app tests && mypy app
+	cd backend && $(PYTHON) -m ruff check app tests && $(PYTHON) -m mypy app
 
 fmt:
-	cd backend && ruff check --fix app tests && ruff format app tests
+	cd backend && $(PYTHON) -m ruff check --fix app tests && $(PYTHON) -m ruff format app tests
 
 # --- ISSUE-017 data-foundation integration quality gate ------------------ #
 integration-test:
@@ -46,7 +46,7 @@ integration-test:
 		exit 1; \
 	fi
 	cd backend && DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
-		$(PYTHON) -m pytest tests/integration/test_data_pipeline.py -m integration -v
+		$(PYTHON) -m pytest tests/integration -m integration -v
 
 # --- ISSUE-009 local / CI parity gates ------------------------------------ #
 # Prefer the project venv when present so bare `make ci-*` matches CI's
@@ -55,9 +55,9 @@ PYTHON ?= $(shell if [ -x "$(CURDIR)/backend/.venv/bin/python" ]; then echo "$(C
 
 ci-lint:
 	cd backend && $(PYTHON) -m pip install -e ".[dev]" -q
-	cd backend && ruff check app tests
-	cd backend && ruff format --check app tests
-	cd backend && mypy app
+	cd backend && $(PYTHON) -m ruff check app tests
+	cd backend && $(PYTHON) -m ruff format --check app tests
+	cd backend && $(PYTHON) -m mypy app
 	cd frontend && (corepack enable && corepack prepare pnpm@9.15.9 --activate || true)
 	cd frontend && pnpm install --frozen-lockfile
 	cd frontend && pnpm lint
