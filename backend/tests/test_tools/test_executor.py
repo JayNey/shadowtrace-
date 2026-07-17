@@ -16,7 +16,6 @@ from sqlalchemy.pool import NullPool
 from app.core.errors import ToolExecutionError
 from app.models.enums import (
     ActionCategory,
-    ActionExecutionPhase,
     DispositionIntentKind,
     ExecutionJobStatus,
     ExecutionOwner,
@@ -266,6 +265,7 @@ async def test_retry_backoff_uses_exponential_delays(
 @pytest.mark.asyncio
 async def test_circuit_opens_after_five_failures_and_half_open_recovers(
     registry: ToolRegistry,
+    audit: RecordingAuditService,
 ) -> None:
     clock = {"now": 0.0}
 
@@ -279,6 +279,7 @@ async def test_circuit_opens_after_five_failures_and_half_open_recovers(
     )
     executor = ToolExecutor(
         registry=registry,
+        audit_service=audit,
         breaker_registry=breaker_registry,
     )
     event_id = f"evt-{_sfx()}"
@@ -292,6 +293,8 @@ async def test_circuit_opens_after_five_failures_and_half_open_recovers(
         )
         assert result.status is ToolResultStatus.FAILED
 
+    starts_before_block = audit.starts
+    finishes_before_block = audit.finishes
     blocked = await executor.call(
         "fake_flaky",
         {"fail_times": 999},
@@ -299,6 +302,8 @@ async def test_circuit_opens_after_five_failures_and_half_open_recovers(
         retry_policy=RetryPolicy(max_retries=0),
     )
     assert blocked.status is ToolResultStatus.CIRCUIT_OPEN
+    assert audit.starts == starts_before_block + 1
+    assert audit.finishes == finishes_before_block + 1
 
     clock["now"] = 60.0
     recovered = await executor.call(

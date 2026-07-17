@@ -13,7 +13,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import ValidationError
 
-from app.core.errors import ShadowTraceError, is_retryable
+from app.core.errors import is_retryable
 from app.core.event_bus import EventBus
 from app.models.enums import ExecutionJobStatus, ExecutionOwner, ToolCategory
 from app.models.execution import ActionExecutionJob
@@ -27,16 +27,15 @@ from app.models.tool_meta import (
     WrongExecutionChannelError,
     ensure_tool_provider_executable,
 )
+from app.models.workflow import validate_job_status_transition
 from app.providers.tools.mock_provider import (
     ToolExecutionContext,
-    bind_mock_tool_provider,
     bind_tool_execution_context,
 )
 from app.services.tool_call_log_service import ToolCallLogService
 from app.tools.circuit_breaker import CircuitBreakerRegistry
 from app.tools.registry import ToolRegistry, ToolValidationError
 from app.tools.retry import RetryPolicy
-from app.models.workflow import validate_job_status_transition
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +68,7 @@ class ConvergenceGuardPort(Protocol):
 
 @runtime_checkable
 class BudgetServicePort(Protocol):
-    async def charge_tool(
-        self, event_id: str, agent_name: str, tool_name: str
-    ) -> None: ...
+    async def charge_tool(self, event_id: str, agent_name: str, tool_name: str) -> None: ...
 
 
 @runtime_checkable
@@ -127,9 +124,7 @@ class NoopConvergenceGuard:
 
 
 class NoopBudgetService:
-    async def charge_tool(
-        self, event_id: str, agent_name: str, tool_name: str
-    ) -> None:
+    async def charge_tool(self, event_id: str, agent_name: str, tool_name: str) -> None:
         return None
 
 
@@ -156,18 +151,12 @@ class ToolExecutor:
     """Validate, guard, retry, break, audit, and dispatch tool calls."""
 
     registry: ToolRegistry
-    audit_service: ToolCallLogService | NullAuditService = field(
-        default_factory=NullAuditService
-    )
+    audit_service: ToolCallLogService | NullAuditService = field(default_factory=NullAuditService)
     event_bus: EventBus | NullEventBus = field(default_factory=NullEventBus)
-    convergence_guard: ConvergenceGuardPort | None = field(
-        default_factory=NoopConvergenceGuard
-    )
+    convergence_guard: ConvergenceGuardPort | None = field(default_factory=NoopConvergenceGuard)
     budget_service: BudgetServicePort | None = field(default_factory=NoopBudgetService)
     job_store: ExecutionJobStorePort | None = None
-    breaker_registry: CircuitBreakerRegistry = field(
-        default_factory=CircuitBreakerRegistry
-    )
+    breaker_registry: CircuitBreakerRegistry = field(default_factory=CircuitBreakerRegistry)
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     provider_context: Callable[[], AbstractContextManager[None]] | None = None
 
@@ -189,15 +178,11 @@ class ToolExecutor:
         meta = registered.tool_meta
         call_nature = derive_call_nature(meta)
         policy = retry_policy or RetryPolicy()
-        effective_timeout = (
-            float(timeout) if timeout is not None else float(meta.default_timeout_s)
-        )
+        effective_timeout = float(timeout) if timeout is not None else float(meta.default_timeout_s)
 
         if call_nature is CallNature.VIRTUAL:
             ensure_tool_provider_executable(meta)
-            raise WrongExecutionChannelError(
-                tool_name, routing_kind=meta.routing_kind
-            )
+            raise WrongExecutionChannelError(tool_name, routing_kind=meta.routing_kind)
 
         binding_provider = "tool_provider"
         if call_nature is CallNature.SIDE_EFFECT:
@@ -214,9 +199,7 @@ class ToolExecutor:
                 [],
             )
             if binding.execution_channel is not ExecutionChannel.TOOL_PROVIDER:
-                raise WrongExecutionChannelError(
-                    tool_name, routing_kind=meta.routing_kind
-                )
+                raise WrongExecutionChannelError(tool_name, routing_kind=meta.routing_kind)
             binding_provider = binding.provider_name
             await self._assert_precreated_job(
                 execution_job_id=execution_job_id,  # type: ignore[arg-type]
@@ -227,13 +210,6 @@ class ToolExecutor:
         self.registry.validate_input(tool_name, params)
 
         breaker = self.breaker_registry.get(tool_name)
-        if not breaker.allow_request():
-            return self._circuit_open_result(
-                tool_name,
-                provider_name=binding_provider,
-                call_id=new_call_id(),
-            )
-
         call_id = new_call_id()
         audit_started = await self._safe_audit_start(
             call_id=call_id,
@@ -352,9 +328,7 @@ class ToolExecutor:
                     )
 
                 if self.budget_service is not None:
-                    await self.budget_service.charge_tool(
-                        event_id, agent_name, tool_name
-                    )
+                    await self.budget_service.charge_tool(event_id, agent_name, tool_name)
 
                 await self._finalize(
                     call_id=call_id,
@@ -365,7 +339,7 @@ class ToolExecutor:
                 )
                 return result
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 status = (
                     ToolResultStatus.UNKNOWN
                     if call_nature is CallNature.SIDE_EFFECT and dispatch_started
@@ -375,7 +349,7 @@ class ToolExecutor:
                 if self._should_retry(
                     call_nature=call_nature,
                     meta=meta,
-                    exc=asyncio.TimeoutError(),
+                    exc=TimeoutError(),
                     attempt=attempt,
                     policy=policy,
                     side_effect_dispatched=dispatch_started,
@@ -458,9 +432,7 @@ class ToolExecutor:
                 execution_owner=execution_owner or ExecutionOwner.DIRECT_TOOL,
             )
             provider_cm = (
-                self.provider_context()
-                if self.provider_context is not None
-                else nullcontext()
+                self.provider_context() if self.provider_context is not None else nullcontext()
             )
             with bind_tool_execution_context(context), provider_cm:
                 return await registered.execute(params)
@@ -733,7 +705,11 @@ tool_executor: ToolExecutor | None = None
 
 
 def get_tool_executor() -> ToolExecutor:
-    """FastAPI dependency returning the process executor singleton."""
+    """FastAPI dependency returning the process executor singleton.
+
+    Production wiring must replace ``NullAuditService`` with a real
+    ``ToolCallLogService`` (and inject EventBus / job store as needed).
+    """
     global tool_executor
     if tool_executor is None:
         from app.tools.registry import tool_registry

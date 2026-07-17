@@ -42,9 +42,7 @@ class CircuitBreaker:
             return True
         if self._state is CircuitState.OPEN:
             opened_at = self._opened_at
-            if opened_at is not None and (
-                self._clock() - opened_at >= self.recovery_timeout_s
-            ):
+            if opened_at is not None and (self._clock() - opened_at >= self.recovery_timeout_s):
                 self._state = CircuitState.HALF_OPEN
                 self._half_open_probe_in_flight = False
                 return True
