@@ -40,9 +40,11 @@ migrate:
 migrate-down:
 	cd backend && $(PYTHON) -m alembic downgrade base
 
+# --- ISSUE-042 / ISSUE-043 / ISSUE-044 knowledge base loaders -------------- #
 load-kb:
 	cd backend && $(PYTHON) -m scripts.load_attack_kb
 	cd backend && $(PYTHON) -m scripts.load_case_kb
+	cd backend && $(PYTHON) -m scripts.load_playbook_kb
 
 test:
 	cd backend && $(PYTHON) -m pytest tests/test_infra/test_health.py -v
