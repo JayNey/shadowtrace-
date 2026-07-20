@@ -482,12 +482,12 @@ class TestArchiveEventAsCase:
                     """
                     INSERT INTO report
                         (report_id, event_id, title, summary,
-                         final_verdict, risk_score, severity)
+                         sections, final_verdict, risk_score, severity, version)
                     VALUES
                         (:rid, :eid, 'Test Report',
                          'Data exfiltration confirmed via DLP logs; '
                          'attacker used WebDAV',
-                         'confirmed_threat', 75, 'high')
+                         '[]', 'confirmed_threat', 75, 'high', 1)
                     ON CONFLICT (report_id) DO NOTHING
                     """
                 )
