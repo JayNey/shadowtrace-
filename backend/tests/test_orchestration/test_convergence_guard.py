@@ -704,6 +704,86 @@ class TestResetLifecycle:
 
 
 # --------------------------------------------------------------------------- #
+# Working memory persistence on stop
+# --------------------------------------------------------------------------- #
+
+
+class _MockBoundWorkingMemory:
+    def __init__(self, writer_name: str = "ConvergenceGuard") -> None:
+        self.writer_name = writer_name
+        self._store: dict[str, object] = {}
+
+    async def read(self, event_id: str, key: str) -> object:
+        return self._store.get(key)
+
+    async def write(self, event_id: str, key: str, value: object) -> None:
+        self._store[key] = value
+
+
+class TestWorkingMemoryPersistence:
+    async def test_stop_writes_convergence_state(self, event_id: str) -> None:
+        wm = _MockBoundWorkingMemory(writer_name="ConvergenceGuard")
+        guard = ConvergenceGuard(working_memory=wm)
+        for _ in range(GLOBAL_MAX_STEPS):
+            await guard.record_step(event_id, "llm_call")
+        decision = await guard.should_stop(event_id)
+        assert decision.stop is True
+        stored = await wm.read(event_id, "convergence_state")
+        assert isinstance(stored, dict)
+        assert stored["stop_reason"] == StopReason.GLOBAL_MAX_STEPS.value
+        assert stored["total_steps"] == GLOBAL_MAX_STEPS
+        assert "stop_detail" in stored
+
+    async def test_no_working_memory_still_stops(self, event_id: str) -> None:
+        guard = ConvergenceGuard()
+        for _ in range(GLOBAL_MAX_STEPS):
+            await guard.record_step(event_id, "llm_call")
+        decision = await guard.should_stop(event_id)
+        assert decision.stop is True
+
+
+# --------------------------------------------------------------------------- #
+# tool_name + params fingerprint (Protocol path)
+# --------------------------------------------------------------------------- #
+
+
+class TestToolNameParamsSignature:
+    async def test_protocol_params_build_full_signature(
+        self, guard: ConvergenceGuard, event_id: str
+    ) -> None:
+        await guard.record_step(
+            event_id,
+            tool_name="query_ip",
+            params={"ip": "1.1.1.1"},
+        )
+        state = guard.get_state(event_id)
+        expected = make_tool_call_signature("query_ip", {"ip": "1.1.1.1"})
+        assert state.tool_call_signatures[expected] == 1
+
+    async def test_same_tool_different_params_no_duplicate_stop(
+        self, guard: ConvergenceGuard, event_id: str
+    ) -> None:
+        for i in range(MAX_DUPLICATE_TOOL_CALLS):
+            await guard.record_step(
+                event_id,
+                tool_name="query_ip",
+                params={"ip": f"10.0.0.{i}"},
+            )
+        decision = await guard.should_stop(event_id)
+        assert decision.stop is False
+
+    async def test_same_tool_same_params_duplicate_stop(
+        self, guard: ConvergenceGuard, event_id: str
+    ) -> None:
+        params = {"ip": "10.0.0.99"}
+        for _ in range(MAX_DUPLICATE_TOOL_CALLS + 1):
+            await guard.record_step(event_id, tool_name="query_ip", params=params)
+        decision = await guard.should_stop(event_id)
+        assert decision.stop is True
+        assert decision.reason == StopReason.DUPLICATE_TOOL_CALLS
+
+
+# --------------------------------------------------------------------------- #
 # Protocol compliance — structural subtyping
 # --------------------------------------------------------------------------- #
 

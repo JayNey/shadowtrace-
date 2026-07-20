@@ -3,8 +3,9 @@ duplicate-tool-call detection (ISSUE-052).
 
 Per the spec (§4.12 / ISSUE-052), every orchestration path must call
 ``record_step`` before each substantive action and ``should_stop`` afterwards.
-When a stop condition fires the guard writes ``convergence_state`` into
-``EventContext`` so the orchestrator can escalate to human review.
+When a stop condition fires and a ``BoundWorkingMemory`` is configured, the
+guard writes ``convergence_state`` into ``EventContext`` so the orchestrator
+can escalate to human review.
 
 Implements ``ConvergenceGuardPort`` from ``app.tools.executor`` so it can be
 injected directly into ``ToolExecutor``.
@@ -25,12 +26,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.core.errors import ShadowTraceError
 from app.models.workflow import (
     GLOBAL_MAX_STEPS,
     MAX_DUPLICATE_TOOL_CALLS,
     MAX_OSCILLATION,
     MAX_TOTAL_LLM_CALLS,
 )
+from app.services.working_memory import BoundWorkingMemory
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +123,7 @@ class ConvergenceGuard:
         await guard.record_step(event_id, step_type, signature=...)
         decision = await guard.should_stop(event_id)
         if decision:  # bool delegates to decision.stop
-            ctx.convergence_state = guard.get_state(event_id).model_dump()
+            # convergence_state is persisted when working_memory is configured
             # escalate to human / abort further automation
     """
 
@@ -128,9 +131,10 @@ class ConvergenceGuard:
     # Lifecycle
     # ------------------------------------------------------------------ #
 
-    def __init__(self) -> None:
-        # In-process store.  When Redis is available this can be swapped for
-        # a Redis-backed store without changing the public API.
+    def __init__(self, *, working_memory: BoundWorkingMemory | None = None) -> None:
+        # In-process store remains the primary accumulator; working_memory
+        # persists convergence_state on stop (Redis-backed EventContext).
+        self._working_memory = working_memory
         self._states: dict[str, ConvergenceState] = {}
 
     # ------------------------------------------------------------------ #
@@ -143,6 +147,7 @@ class ConvergenceGuard:
         step_type: str = "tool_call",
         *,
         tool_name: str | None = None,
+        params: dict[str, Any] | None = None,
         signature: str | None = None,
     ) -> None:
         """Accumulate one step for *event_id*.
@@ -165,12 +170,17 @@ class ConvergenceGuard:
                        ``tool_call``, ``llm_call``.  Defaults to ``"tool_call"``
                        for Protocol compatibility.
             tool_name: Keyword-only shorthand used by ``ToolExecutor``.
-                       When given, ``signature`` is set to *tool_name*.
+            params: Optional tool parameters; combined with *tool_name* via
+                    ``make_tool_call_signature`` when *signature* is omitted.
             signature: Explicit stable fingerprint of ``(tool_name, params)``.
-                       Takes precedence over *tool_name*.
+                       Takes precedence over *tool_name* / *params*.
         """
-        # Resolve the effective signature (Protocol → rich).
-        effective_sig: str | None = signature or tool_name
+        if signature is not None:
+            effective_sig: str | None = signature
+        elif tool_name is not None and params is not None:
+            effective_sig = make_tool_call_signature(tool_name, params)
+        else:
+            effective_sig = tool_name
 
         is_known = step_type in _VALID_STEP_TYPES
         if not is_known:
@@ -239,31 +249,30 @@ class ConvergenceGuard:
         try:
             # 1. Global step cap
             if state.total_steps >= GLOBAL_MAX_STEPS:
-                return StopDecision(
-                    stop=True,
-                    reason=StopReason.GLOBAL_MAX_STEPS,
-                    detail=(
-                        f"total_steps={state.total_steps} >= GLOBAL_MAX_STEPS={GLOBAL_MAX_STEPS}"
-                    ),
+                return await self._stop_decision(
+                    event_id,
+                    state,
+                    StopReason.GLOBAL_MAX_STEPS,
+                    f"total_steps={state.total_steps} >= GLOBAL_MAX_STEPS={GLOBAL_MAX_STEPS}",
                 )
 
             # 2. LLM call cap
             if state.llm_calls >= MAX_TOTAL_LLM_CALLS:
-                return StopDecision(
-                    stop=True,
-                    reason=StopReason.MAX_LLM_CALLS,
-                    detail=(
-                        f"llm_calls={state.llm_calls} >= MAX_TOTAL_LLM_CALLS={MAX_TOTAL_LLM_CALLS}"
-                    ),
+                return await self._stop_decision(
+                    event_id,
+                    state,
+                    StopReason.MAX_LLM_CALLS,
+                    (f"llm_calls={state.llm_calls} >= MAX_TOTAL_LLM_CALLS={MAX_TOTAL_LLM_CALLS}"),
                 )
 
             # 3. Duplicate tool calls
             for sig, count in state.tool_call_signatures.items():
                 if count > MAX_DUPLICATE_TOOL_CALLS:
-                    return StopDecision(
-                        stop=True,
-                        reason=StopReason.DUPLICATE_TOOL_CALLS,
-                        detail=(
+                    return await self._stop_decision(
+                        event_id,
+                        state,
+                        StopReason.DUPLICATE_TOOL_CALLS,
+                        (
                             f"tool_call signature '{sig}' called {count} times "
                             f"(limit={MAX_DUPLICATE_TOOL_CALLS})"
                         ),
@@ -272,10 +281,11 @@ class ConvergenceGuard:
             # 4. Oscillation (A, B, A, B pattern)
             osc = self._detect_oscillation(state.recent_actions)
             if osc:
-                return StopDecision(
-                    stop=True,
-                    reason=StopReason.OSCILLATION,
-                    detail=f"A/B oscillation detected: '{osc[0]}' ↔ '{osc[1]}'",
+                return await self._stop_decision(
+                    event_id,
+                    state,
+                    StopReason.OSCILLATION,
+                    f"A/B oscillation detected: '{osc[0]}' ↔ '{osc[1]}'",
                 )
 
             return StopDecision(stop=False, reason=StopReason.NONE)
@@ -320,6 +330,40 @@ class ConvergenceGuard:
         if event_id not in self._states:
             self._states[event_id] = ConvergenceState()
         return self._states[event_id]
+
+    async def _stop_decision(
+        self,
+        event_id: str,
+        state: ConvergenceState,
+        reason: StopReason,
+        detail: str,
+    ) -> StopDecision:
+        decision = StopDecision(stop=True, reason=reason, detail=detail)
+        await self._persist_convergence_state(event_id, state, decision)
+        return decision
+
+    async def _persist_convergence_state(
+        self,
+        event_id: str,
+        state: ConvergenceState,
+        decision: StopDecision,
+    ) -> None:
+        wm = self._working_memory
+        if wm is None:
+            return
+        payload = {
+            **state.model_dump(),
+            "stop_reason": decision.reason.value,
+            "stop_detail": decision.detail,
+        }
+        try:
+            await wm.write(event_id, "convergence_state", payload)
+        except ShadowTraceError:
+            logger.exception(
+                "Failed to persist convergence_state for event=%s reason=%s",
+                event_id,
+                decision.reason.value,
+            )
 
     @staticmethod
     def _detect_oscillation(actions: list[str]) -> tuple[str, str] | None:
