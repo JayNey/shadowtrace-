@@ -1,9 +1,13 @@
-"""Agents package (ISSUE-005 / ISSUE-033 / ISSUE-049)."""
+"""Agents package (ISSUE-005 / ISSUE-033 / ISSUE-049 / ISSUE-035)."""
 
 from app.agents.base import AgentOutput, BaseAgent
+from app.agents.confidence_calibration import calibrate_confidence
 from app.agents.evidence_agent import EvidenceAgent
 from app.agents.evidence_parser import EvidenceParser
 from app.agents.planner_agent import PlannerAgent
+from app.agents.risk_agent import RiskAgent
+from app.agents.risk_scoring_engine import RiskScoringEngine, severity_from_score
+from app.agents.verdict_resolver import VerdictResolver
 from app.models.agent_io import (
     AGENT_INPUT_MODELS,
     AgentInput,
@@ -36,9 +40,14 @@ __all__ = [
     "RAGAgentInput",
     "ReportAgentInput",
     "ResponseAgentInput",
+    "RiskAgent",
     "RiskAgentInput",
+    "RiskScoringEngine",
     "SuperAgentInput",
     "ToolAgentInput",
     "TriageAgentInput",
+    "VerdictResolver",
     "VerifyAgentInput",
+    "calibrate_confidence",
+    "severity_from_score",
 ]

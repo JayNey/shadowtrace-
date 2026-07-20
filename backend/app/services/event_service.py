@@ -605,6 +605,70 @@ class EventService:
                 )
         return result
 
+    async def update_risk_fields(
+        self,
+        event_id: str,
+        *,
+        risk_score: int,
+        severity: Severity,
+        confidence: float,
+        operator: str | None = None,
+    ) -> SecurityEvent:
+        """Persist RiskAgent score fields onto ``security_event`` (ISSUE-035).
+
+        Does **not** write ``final_verdict`` — that remains ``set_final_verdict`` only.
+        """
+        score = max(0, min(100, int(risk_score)))
+        conf = max(0.0, min(1.0, float(confidence)))
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    orm.SecurityEvent,
+                    event_id,
+                    with_for_update=True,
+                )
+                if row is None:
+                    raise KeyError(f"security_event not found: {event_id}")
+                row.risk_score = score
+                row.severity = severity.value if isinstance(severity, Severity) else str(severity)
+                row.confidence = conf
+                row.row_version = int(row.row_version or 1) + 1
+                session.add(
+                    orm.EventAuditLog(
+                        event_id=event_id,
+                        from_status=row.status,
+                        to_status=row.status,
+                        operator=operator or "RiskAgent",
+                        reason=(
+                            f"risk_fields:score={score},"
+                            f"severity={row.severity},confidence={conf:.4f}"
+                        ),
+                    )
+                )
+                await session.flush()
+                await session.refresh(row)
+                result = _security_event_from_row(row)
+                summary = event_summary_from_security_event(row)
+
+        await self._sync_event_summary_after_mutation(
+            event_id,
+            committed_version=result.row_version,
+            summary=summary,
+        )
+        if self._bus is not None:
+            await self._bus.publish_event(
+                event_id,
+                "risk_assessment_updated",
+                {
+                    "risk_score": score,
+                    "severity": result.severity.value
+                    if hasattr(result.severity, "value")
+                    else str(result.severity),
+                    "confidence": conf,
+                },
+            )
+        return result
+
     async def transition_status(
         self,
         event_id: str,
