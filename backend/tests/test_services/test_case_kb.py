@@ -438,12 +438,16 @@ class TestArchiveEventAsCase:
                         (event_id, event_type, title, description, status, severity,
                          risk_score, confidence, final_verdict, entities,
                          creation_source_ref, source_reference_snapshots,
-                         raw_alert_ids, disposition_policy, closed_at)
+                         raw_alert_ids, disposition_policy,
+                         replan_count, degraded_flags, escalated,
+                         external_unsynced, row_version, closed_at)
                     VALUES
                         (:eid, 'data_exfiltration', 'Test archive event',
                          'Test description', 'closed', 'high', 75, 0.8,
                          'confirmed_threat', :entities, :ref, :ref,
-                         :raw_alert_ids, 'required', '2024-06-15T10:00:00Z')
+                         :raw_alert_ids, 'required',
+                         0, '[]', false,
+                         false, 1, '2024-06-15T10:00:00Z')
                     ON CONFLICT (event_id) DO UPDATE
                     SET status = 'closed',
                         final_verdict = 'confirmed_threat',
