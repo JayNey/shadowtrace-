@@ -16,6 +16,7 @@ dependencies = [
   "alembic>=1.14.0",
   "httpx>=0.28.0",
   "pgvector>=0.4.0",
+  "python-socketio[asyncio_client]>=5.12.0",
 ]
 
 [project.optional-dependencies]
