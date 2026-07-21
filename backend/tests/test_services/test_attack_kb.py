@@ -192,9 +192,7 @@ class TestSearchTechniques:
 
         results = await service.search_techniques("数据外泄", top_k=5)
         assert len(results) >= 1
-        assert any(
-            "Exfiltration" in (r.metadata.get("tactics") or []) for r in results
-        )
+        assert any("Exfiltration" in (r.metadata.get("tactics") or []) for r in results)
         assert any(r.retrieval_method in {"keyword", "hybrid"} for r in results)
 
     @pytest.mark.asyncio

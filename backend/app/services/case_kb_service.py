@@ -51,12 +51,16 @@ class CaseKBService:
     async def search_fp_cases(self, alert_text: str, top_k: int = 5) -> list[RetrievedChunk]:
         """Hybrid-search ``fp_case_kb`` for false-positive patterns matching *alert_text*."""
         keyword_query = _fp_keyword_query(alert_text)
-        return await self._kb.hybrid_search(
+        results = await self._kb.hybrid_search(
             FP_KB_NAME,
             alert_text,
             keyword_query=keyword_query,
             top_k=top_k,
         )
+        # Mock embeddings produce non-semantic vector scores; prefer keyword/hybrid hits.
+        if keyword_query != alert_text.strip():
+            results = _prefer_keyword_hybrid_ranking(results)
+        return results[:top_k]
 
     async def search_history_cases(
         self,
@@ -145,6 +149,18 @@ def _fp_keyword_query(alert_text: str) -> str:
         if needle in lowered:
             return expansion
     return alert_text.strip()
+
+
+def _prefer_keyword_hybrid_ranking(results: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    """Rank keyword/hybrid hits above mock-vector noise when aliases were applied."""
+    return sorted(
+        results,
+        key=lambda row: (
+            0 if row.retrieval_method in {"keyword", "hybrid"} else 1,
+            -row.score,
+            row.chunk_id,
+        ),
+    )
 
 
 def _format_entity_item(value: object) -> str:

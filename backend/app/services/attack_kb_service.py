@@ -107,9 +107,7 @@ class AttackKBService:
             row = result.fetchone()
             return dict(row.metadata) if row else None
 
-    async def search_techniques(
-        self, query_text: str, top_k: int = 5
-    ) -> list[RetrievedChunk]:
+    async def search_techniques(self, query_text: str, top_k: int = 5) -> list[RetrievedChunk]:
         """Hybrid vector + keyword search across ATT&CK technique descriptions."""
         stripped = query_text.strip()
         keyword_query = _KEYWORD_QUERY_ALIASES.get(stripped, stripped)
