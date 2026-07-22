@@ -48,6 +48,14 @@ def test_high_risk_confirmed_threat() -> None:
     assert resolver.resolve(_assessment(69)) is FinalVerdict.NONE
 
 
+def test_medium_fp_with_high_risk_is_possible_false_positive() -> None:
+    """Medium FP signal wins over confirmed-threat score (fixed priority order)."""
+    resolver = VerdictResolver()
+    rag = RAGOutput(fp_similarity=FpSimilarity(max_score=0.75, matched_case_id="c1"))
+    verdict = resolver.resolve(_assessment(85), rag_output=rag)
+    assert verdict is FinalVerdict.POSSIBLE_FALSE_POSITIVE
+
+
 def test_verdict_is_sole_logical_entry() -> None:
     """Resolver is the only place encoding verdict priority rules."""
     resolver = VerdictResolver()

@@ -1130,6 +1130,55 @@ async def test_noop_set_final_verdict_skips_bus_publish(
 
 
 @pytest.mark.asyncio
+async def test_update_risk_fields_publishes_risk_updated_payload(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bus = AsyncMock()
+    bus.publish_event = AsyncMock(return_value=None)
+    event_service._bus = bus  # noqa: SLF001
+
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-risk-{sfx}"),
+            title="risk-update",
+            source_type="mock_xdr",
+        )
+    )
+    assert created.event_id
+    bus.publish_event.reset_mock()
+
+    updated = await event_service.update_risk_fields(
+        created.event_id,
+        risk_score=82,
+        severity=Severity.HIGH,
+        confidence=0.88,
+        factor_names=["attack_stage", "threat_intel"],
+    )
+    assert updated.risk_score == 82
+    assert updated.severity is Severity.HIGH
+    assert abs(updated.confidence - 0.88) < 1e-9
+
+    bus.publish_event.assert_awaited_once()
+    call = bus.publish_event.await_args
+    assert call is not None
+    assert call.args[0] == created.event_id
+    assert call.args[1] == "risk_updated"
+    assert call.args[2] == {
+        "risk_score": 82,
+        "previous_score": 0,
+        "factors": ["attack_stage", "threat_intel"],
+    }
+
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, created.event_id)
+        assert row is not None
+        assert row.risk_score == 82
+        assert row.severity == Severity.HIGH.value
+
+
+@pytest.mark.asyncio
 async def test_transition_ignores_forged_disposition_only_intent(
     event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],

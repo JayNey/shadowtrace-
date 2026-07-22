@@ -613,13 +613,16 @@ class EventService:
         severity: Severity,
         confidence: float,
         operator: str | None = None,
+        factor_names: list[str] | None = None,
     ) -> SecurityEvent:
         """Persist RiskAgent score fields onto ``security_event`` (ISSUE-035).
 
         Does **not** write ``final_verdict`` — that remains ``set_final_verdict`` only.
+        Publishes ``risk_updated`` (locked Socket payload: ``RiskUpdatedPayload``).
         """
         score = max(0, min(100, int(risk_score)))
         conf = max(0.0, min(1.0, float(confidence)))
+        previous_score = 0
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(
@@ -629,6 +632,7 @@ class EventService:
                 )
                 if row is None:
                     raise KeyError(f"security_event not found: {event_id}")
+                previous_score = int(row.risk_score or 0)
                 row.risk_score = score
                 row.severity = severity.value if isinstance(severity, Severity) else str(severity)
                 row.confidence = conf
@@ -656,17 +660,12 @@ class EventService:
             summary=summary,
         )
         if self._bus is not None:
-            await self._bus.publish_event(
-                event_id,
-                "risk_assessment_updated",
-                {
-                    "risk_score": score,
-                    "severity": result.severity.value
-                    if hasattr(result.severity, "value")
-                    else str(result.severity),
-                    "confidence": conf,
-                },
-            )
+            payload: dict[str, Any] = {"risk_score": score}
+            if previous_score != score:
+                payload["previous_score"] = previous_score
+            if factor_names:
+                payload["factors"] = list(factor_names)
+            await self._bus.publish_event(event_id, "risk_updated", payload)
         return result
 
     async def transition_status(

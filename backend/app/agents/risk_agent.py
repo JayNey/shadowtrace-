@@ -295,6 +295,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                 risk_score=assessment.risk_score,
                 severity=assessment.severity,
                 confidence=assessment.confidence,
+                factor_names=[f.factor_name for f in assessment.risk_factors],
             )
         except Exception:
             logger.warning(
@@ -302,6 +303,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                 event_id,
                 exc_info=True,
             )
+            raise
 
     async def _persist_verdict(self, event_id: str, verdict: FinalVerdict) -> None:
         if self.event_service is None:
@@ -319,3 +321,5 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                 verdict.value,
                 exc_info=True,
             )
+            if verdict in {FinalVerdict.CONFIRMED_THREAT, FinalVerdict.FALSE_POSITIVE}:
+                raise

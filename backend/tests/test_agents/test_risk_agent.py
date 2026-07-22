@@ -64,6 +64,7 @@ class _FakeEventService:
         severity: Severity,
         confidence: float,
         operator: str | None = None,
+        factor_names: list[str] | None = None,
     ) -> None:
         self.risk_updates.append(
             {
@@ -72,6 +73,7 @@ class _FakeEventService:
                 "severity": severity,
                 "confidence": confidence,
                 "operator": operator,
+                "factor_names": factor_names,
             }
         )
 
