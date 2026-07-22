@@ -122,8 +122,10 @@ def time_range_around_occurred_at(
     hours_after: float = 1.0,
 ) -> dict[str, str]:
     """Build a symmetric investigation window around ``occurred_at``."""
-    anchor = occurred_at.astimezone(UTC) if occurred_at.tzinfo is not None else occurred_at.replace(
-        tzinfo=UTC
+    anchor = (
+        occurred_at.astimezone(UTC)
+        if occurred_at.tzinfo is not None
+        else occurred_at.replace(tzinfo=UTC)
     )
     start = anchor - timedelta(hours=hours_before)
     end = anchor + timedelta(hours=hours_after)
@@ -434,9 +436,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 ioc_list=list(input.triage_result.ioc_list),
             )
             if params is None:
-                outcome = self._skipped_missing_entity_outcome(
-                    tool_name, source, input.event_id
-                )
+                outcome = self._skipped_missing_entity_outcome(tool_name, source, input.event_id)
             else:
                 outcome = await self._run_one_query(
                     tool_name,
@@ -479,9 +479,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 ioc_list=list(input.triage_result.ioc_list),
             )
             if params is None:
-                outcome = self._skipped_missing_entity_outcome(
-                    tool_name, source, input.event_id
-                )
+                outcome = self._skipped_missing_entity_outcome(tool_name, source, input.event_id)
                 await self._merge_outcome(
                     outcome,
                     collected=collected,
@@ -512,11 +510,11 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 pending_tasks[task]: task for task in done if task in pending_tasks
             }
             for tool_name in EVIDENCE_QUERY_ORDER:
-                task = completed_by_tool.get(tool_name)
-                if task is None:
+                completed_task = completed_by_tool.get(tool_name)
+                if completed_task is None:
                     continue
                 try:
-                    outcome = task.result()
+                    outcome = completed_task.result()
                 except Exception as exc:
                     source = TOOL_SOURCE_MAP[tool_name]
                     outcome = {
@@ -625,18 +623,10 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             event_id,
             scope=scope,
         )
-        status_text = (
-            tool_result.status.value
-            if tool_result is not None
-            else f"error:{call_error}"
-        )
+        status_text = tool_result.status.value if tool_result is not None else f"error:{call_error}"
 
         if tool_result is None or tool_result.status not in _SUCCESS_STATUSES:
-            gap_reason = (
-                "missing_scope"
-                if call_error == _MISSING_SCOPE_ERROR
-                else "tool_failed"
-            )
+            gap_reason = "missing_scope" if call_error == _MISSING_SCOPE_ERROR else "tool_failed"
             return {
                 "tool_name": tool_name,
                 "source": source,
@@ -649,8 +639,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                     description=f"query {tool_name} did not succeed",
                     tool_name=tool_name,
                     execution_time_ms=timing_ms,
-                    error=call_error
-                    or (tool_result.error_detail if tool_result else None),
+                    error=call_error or (tool_result.error_detail if tool_result else None),
                     status=(tool_result.status.value if tool_result is not None else None),
                 ),
                 "failed": True,
@@ -856,8 +845,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         if self.working_memory is None or not event_id:
             return
         note = (
-            f"evidence_query tool={tool_name} status={status} "
-            f"execution_time_ms={execution_time_ms}"
+            f"evidence_query tool={tool_name} status={status} execution_time_ms={execution_time_ms}"
         )
         try:
             await self.working_memory.append_scratchpad(event_id, note)
