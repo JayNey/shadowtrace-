@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -439,7 +439,11 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         if self.event_service is None:
             return None
         try:
-            return await self.event_service.get_evidence_query_scope(event_id)
+            scope: EvidenceQueryScope = cast(
+                EvidenceQueryScope,
+                await self.event_service.get_evidence_query_scope(event_id),
+            )
+            return scope
         except Exception:
             logger.warning(
                 "failed to resolve evidence query scope for event=%s",
