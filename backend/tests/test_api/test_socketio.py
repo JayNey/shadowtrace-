@@ -25,13 +25,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import socket
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import jsonschema
 import pytest
 import pytest_asyncio
 import socketio
+import uvicorn
+from fastapi import FastAPI
 
 from app.core.event_bus import SOCKET_MESSAGE_TYPES, EventBus
 from app.core.redis_client import RedisClient
@@ -41,6 +46,7 @@ from app.core.socketio_events import (
     _event_room,
     register_handlers,
 )
+from app.core.socketio_manager import SocketIOManager
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -273,6 +279,7 @@ class TestEventHandlers:
         room = _event_room(event_id)
         assert room in ns_rooms
         assert sid in ns_rooms[room]
+        assert sid not in ns_rooms.get(GLOBAL_ROOM, {}), "subscribe must leave global room"
 
     @pytest.mark.asyncio
     async def test_subscribe_rejects_missing_event_id(self, sio: socketio.AsyncServer) -> None:
@@ -336,19 +343,49 @@ async def redis_required() -> RedisClient:
     return client
 
 
+@pytest_asyncio.fixture
+async def socketio_server() -> AsyncIterator[tuple[SocketIOManager, EventBus, str]]:
+    """Live ASGI server with Redis→Socket.IO bridge for client e2e tests."""
+    redis = RedisClient(url=REDIS_URL)
+    if not await redis.ping():
+        await redis.aclose()
+        pytest.skip("Redis not reachable; start Compose redis first")
+
+    manager = SocketIOManager(redis)
+    event_bus = EventBus(redis)
+    asgi_app = manager.mount(FastAPI())
+    await manager.start()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    config = uvicorn.Config(asgi_app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    serve_task = asyncio.create_task(server.serve())
+    for _ in range(100):
+        if server.started:
+            break
+        await asyncio.sleep(0.05)
+
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        yield manager, event_bus, base_url
+    finally:
+        server.should_exit = True
+        await serve_task
+        await manager.stop()
+        await redis.aclose()
+
+
 @pytest.mark.asyncio
-async def test_publish_event_broadcasts_to_global_room(
+async def test_eventbus_publish_reaches_redis_subscriber(
     bus: tuple[EventBus, RedisClient],
     redis_required: RedisClient,  # noqa: ARG001 — ensures Redis is alive
 ) -> None:
-    """Acceptance 1/3: subscribing client receives state_change within 1 second.
-
-    We test at the EventBus→Socket.IO bridge level by: publishing via
-    EventBus, then verifying the message arrives on the Redis Pub/Sub
-    channel.  The bridge layer's dispatch logic is tested separately below.
-    """
+    """EventBus publish/subscribe smoke test (ISSUE-013), not Socket.IO delivery."""
     event_bus, _redis = bus
-    event_id = f"evt-{_today_str()}-sockit01"
+    event_id = _event_id("bus00001")
     received: asyncio.Queue[dict] = asyncio.Queue()
 
     async def _reader() -> None:
@@ -360,7 +397,9 @@ async def test_publish_event_broadcasts_to_global_room(
     await asyncio.sleep(0.05)
 
     published = await event_bus.publish_event(
-        event_id, "state_change", {"from_status": "new", "to_status": "triaging"}
+        event_id,
+        "state_change",
+        _example_payload("state_change"),
     )
     assert published is True
 
@@ -369,8 +408,106 @@ async def test_publish_event_broadcasts_to_global_room(
 
     assert envelope["event_id"] == event_id
     assert envelope["message_type"] == "state_change"
-    assert envelope["payload"]["from_status"] == "new"
     assert envelope["payload"]["to_status"] == "triaging"
+
+
+@pytest.mark.asyncio
+async def test_socket_client_receives_state_change_within_one_second(
+    socketio_server: tuple[SocketIOManager, EventBus, str],
+) -> None:
+    """Acceptance #1: subscribed Socket.IO client receives state_change within 1s."""
+    _manager, event_bus, base_url = socketio_server
+    event_id = _event_id("sock0001")
+    received: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def _on_event(data: dict) -> None:
+        await received.put(data)
+
+    client = socketio.AsyncClient()
+    client.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
+    await client.connect(base_url, namespaces=[SOCKETIO_NAMESPACE], wait_timeout=5)
+    try:
+        await client.emit("subscribe", {"event_id": event_id}, namespace=SOCKETIO_NAMESPACE)
+        await asyncio.sleep(0.05)
+        ok = await event_bus.publish_event(
+            event_id,
+            "state_change",
+            _example_payload("state_change"),
+        )
+        assert ok is True
+        msg = await asyncio.wait_for(received.get(), timeout=1.0)
+    finally:
+        await client.disconnect()
+
+    assert msg["type"] == "state_change"
+    assert msg["event_id"] == event_id
+    assert msg["sequence"] >= 1
+    assert "timestamp" in msg
+    assert msg["payload"]["to_status"] == "triaging"
+    assert msg["payload"]["operator"] == "StateMachineService"
+
+
+@pytest.mark.asyncio
+async def test_subscribed_client_receives_event_once_not_twice(
+    socketio_server: tuple[SocketIOManager, EventBus, str],
+) -> None:
+    """Subscribed clients leave global so they do not receive duplicate emits."""
+    _manager, event_bus, base_url = socketio_server
+    event_id = _event_id("once0001")
+    received: list[dict] = []
+
+    async def _on_event(data: dict) -> None:
+        received.append(data)
+
+    client = socketio.AsyncClient()
+    client.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
+    await client.connect(base_url, namespaces=[SOCKETIO_NAMESPACE], wait_timeout=5)
+    try:
+        await client.emit("subscribe", {"event_id": event_id}, namespace=SOCKETIO_NAMESPACE)
+        await asyncio.sleep(0.05)
+        ok = await event_bus.publish_event(
+            event_id,
+            "state_change",
+            _example_payload("state_change"),
+        )
+        assert ok is True
+        await asyncio.sleep(0.3)
+    finally:
+        await client.disconnect()
+
+    assert len(received) == 1
+    assert received[0]["event_id"] == event_id
+
+
+@pytest.mark.asyncio
+async def test_global_only_client_receives_broadcast(
+    socketio_server: tuple[SocketIOManager, EventBus, str],
+) -> None:
+    """Dashboard clients that never subscribe still receive events via global room."""
+    _manager, event_bus, base_url = socketio_server
+    event_id = _event_id("glob0001")
+    received: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def _on_event(data: dict) -> None:
+        await received.put(data)
+
+    client = socketio.AsyncClient()
+    client.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
+    await client.connect(base_url, namespaces=[SOCKETIO_NAMESPACE], wait_timeout=5)
+    try:
+        await asyncio.sleep(0.05)
+        ok = await event_bus.publish_event(
+            event_id,
+            "state_change",
+            _example_payload("state_change"),
+        )
+        assert ok is True
+        msg = await asyncio.wait_for(received.get(), timeout=1.0)
+    finally:
+        await client.disconnect()
+
+    assert msg["event_id"] == event_id
+    assert msg["type"] == "state_change"
 
 
 @pytest.mark.asyncio
@@ -382,8 +519,8 @@ async def test_sequence_increments_per_event_id(
     try:
         from app.core.socketio_manager import _sequence_key
 
-        event_a = f"evt-{_today_str()}-seq000a"
-        event_b = f"evt-{_today_str()}-seq000b"
+        event_a = f"evt-{_today_str()}-{uuid.uuid4().hex[:8]}"
+        event_b = f"evt-{_today_str()}-{uuid.uuid4().hex[:8]}"
         r = client.get_client()
 
         # Cleanup old keys.
@@ -400,78 +537,183 @@ async def test_sequence_increments_per_event_id(
 
 
 @pytest.mark.asyncio
-async def test_bridge_dispatch_increments_sequence(redis_required: RedisClient) -> None:
-    """The PSUBSCRIBE→Socket.IO bridge decodes messages and increments the
-    per-event sequence counter.
-
-    This test exercises the dispatch logic directly (not via live PSUBSCRIBE
-    to avoid races) and verifies that ``_dispatch`` correctly parses the
-    channel name and calls Redis INCR.  Full end-to-end broadcast coverage
-    is in ``test_publish_event_broadcasts_to_global_room`` and
-    ``test_multiple_clients_receive_broadcast`` (Issue 6).
-    """
+async def test_bridge_dispatch_emits_valid_envelope(redis_required: RedisClient) -> None:
+    """``_dispatch`` builds a schema-valid Socket.IO envelope and increments sequence."""
     client = RedisClient(url=REDIS_URL)
     try:
-        from app.core.socketio_manager import SocketIOManager, _sequence_key
+        from app.core.socketio_manager import _sequence_key
 
         sio = socketio.AsyncServer(async_mode="asgi", logger=False)
         register_handlers(sio)
         manager = SocketIOManager(client)
-        # Replace the default sio with our instrumented one for test.
         manager._sio = sio  # type: ignore[assignment]
 
-        event_id = f"evt-{_today_str()}-bridge01"
+        event_id = _event_id("bridge01")
+        emitted: list[dict] = []
 
-        # Connect and subscribe a test client.
-        sid = _fake_sid()
-        _connect_session(sio, sid)
-        await sio.enter_room(sid, GLOBAL_ROOM, namespace=SOCKETIO_NAMESPACE)
-        await sio.enter_room(sid, _event_room(event_id), namespace=SOCKETIO_NAMESPACE)
+        async def _capture(
+            event: str,
+            data: dict,
+            room: str | None = None,
+            **kwargs: object,
+        ) -> None:
+            if event == "event":
+                emitted.append(data)
 
-        # Simulate the data that would come from Redis PSUBSCRIBE.
+        sio.emit = _capture  # type: ignore[method-assign, assignment]
+
         channel = f"shadowtrace:events:{event_id}".encode()
         payload = {
             "message_type": "state_change",
-            "payload": {"from_status": "triaging", "to_status": "planning_response"},
+            "timestamp": "2026-07-12T10:00:00Z",
+            "payload": _example_payload("state_change"),
         }
         payload_bytes = RedisClient.dumps(payload)
 
-        # Clean sequence key and call dispatch.
         await client.get_client().delete(_sequence_key(event_id))
         await manager._dispatch(channel, payload_bytes)
 
-        # Wait for the emit to be processed.
-        await asyncio.sleep(0.1)
-
-        # Verify sequence was incremented.
         seq = int(await client.get_client().get(_sequence_key(event_id)) or 0)
-        assert seq >= 1
+        assert seq == 1
+        assert len(emitted) == 2  # event room + global room emits
+        assert all(item["event_id"] == event_id for item in emitted)
+        assert all(item["type"] == "state_change" for item in emitted)
+        jsonschema.validate(
+            instance=emitted[0],
+            schema=json.loads(SCHEMA_PATH.read_text(encoding="utf-8")),
+        )
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_emit_when_sequence_incr_fails(
+    redis_required: RedisClient,  # noqa: ARG001
+) -> None:
+    """INCR failure must not emit with a stale sequence."""
+    client = RedisClient(url=REDIS_URL)
+    try:
+        manager = SocketIOManager(client)
+        emitted: list[dict] = []
+
+        async def _capture(event: str, data: dict, **kwargs: object) -> None:
+            if event == "event":
+                emitted.append(data)
+
+        manager._sio.emit = _capture  # type: ignore[method-assign, assignment]
+
+        event_id = _event_id("noincr1")
+        channel = f"shadowtrace:events:{event_id}".encode()
+        payload_bytes = RedisClient.dumps(
+            {
+                "message_type": "state_change",
+                "payload": _example_payload("state_change"),
+            }
+        )
+
+        with patch.object(
+            manager,
+            "_increment_sequence",
+            AsyncMock(return_value=None),
+        ):
+            await manager._dispatch(channel, payload_bytes)
+
+        assert emitted == []
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_redacts_secrets_before_emit(redis_required: RedisClient) -> None:
+    """Bridge re-sanitizes payload before Socket.IO emit."""
+    client = RedisClient(url=REDIS_URL)
+    try:
+        manager = SocketIOManager(client)
+        captured: list[dict] = []
+
+        async def _capture(event: str, data: dict, **kwargs: object) -> None:
+            if event == "event":
+                captured.append(data)
+
+        manager._sio.emit = _capture  # type: ignore[method-assign, assignment]
+
+        event_id = _event_id("redact01")
+        channel = f"shadowtrace:events:{event_id}".encode()
+        payload = _example_payload("state_change")
+        payload["reason"] = "Authorization: Bearer must-not-leak"
+        payload_bytes = RedisClient.dumps({"message_type": "state_change", "payload": payload})
+
+        await manager._dispatch(channel, payload_bytes)
+        assert captured
+        assert "must-not-leak" not in captured[0]["payload"]["reason"]
+        assert "[REDACTED]" in captured[0]["payload"]["reason"]
     finally:
         await client.aclose()
 
 
 @pytest.mark.asyncio
 async def test_all_event_types_publishable(bus: tuple[EventBus, RedisClient]) -> None:
-    """Each of the 16 event types can be published through the EventBus."""
+    """Each of the 16 event types can be published with schema-valid payloads."""
     event_bus, _redis = bus
-    event_id = f"evt-{_today_str()}-alltype1"
+    event_id = _event_id("alltype1")
 
     for msg_type in sorted(SOCKET_MESSAGE_TYPES):
         ok = await event_bus.publish_event(
             event_id,
             msg_type,
-            {"test": True, "type": msg_type},
+            _example_payload(msg_type),
         )
         assert ok is True, f"publish failed for type={msg_type}"
 
 
 @pytest.mark.asyncio
-async def test_multiple_clients_receive_broadcast(redis_required: RedisClient) -> None:
-    """Acceptance 3: two subscribers to the same channel both receive the message."""
+async def test_two_socket_clients_in_event_room_both_receive_broadcast(
+    socketio_server: tuple[SocketIOManager, EventBus, str],
+) -> None:
+    """Acceptance #3: two Socket.IO clients in the same event room both receive the event."""
+    _manager, event_bus, base_url = socketio_server
+    event_id = _event_id("multi001")
+    queue_a: asyncio.Queue[dict] = asyncio.Queue()
+    queue_b: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def _make_client(queue: asyncio.Queue[dict]) -> socketio.AsyncClient:
+        async def _on_event(data: dict) -> None:
+            await queue.put(data)
+
+        c = socketio.AsyncClient()
+        c.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
+        await c.connect(base_url, namespaces=[SOCKETIO_NAMESPACE], wait_timeout=5)
+        await c.emit("subscribe", {"event_id": event_id}, namespace=SOCKETIO_NAMESPACE)
+        return c
+
+    client_a = await _make_client(queue_a)
+    client_b = await _make_client(queue_b)
+    try:
+        await asyncio.sleep(0.05)
+        ok = await event_bus.publish_event(
+            event_id,
+            "state_change",
+            _example_payload("state_change"),
+        )
+        assert ok is True
+        msg_a = await asyncio.wait_for(queue_a.get(), timeout=2.0)
+        msg_b = await asyncio.wait_for(queue_b.get(), timeout=2.0)
+    finally:
+        await client_a.disconnect()
+        await client_b.disconnect()
+
+    assert msg_a["type"] == msg_b["type"] == "state_change"
+    assert msg_a["event_id"] == msg_b["event_id"] == event_id
+    assert msg_a["sequence"] == msg_b["sequence"]
+
+
+@pytest.mark.asyncio
+async def test_eventbus_multicast_to_two_redis_subscribers(redis_required: RedisClient) -> None:
+    """Two Redis subscribers on the same channel both receive the EventBus message."""
     client = RedisClient(url=REDIS_URL)
     try:
         event_bus = EventBus(client)
-        event_id = f"evt-{_today_str()}-multicast"
+        event_id = _event_id("redismc")
 
         queue_a: asyncio.Queue[dict] = asyncio.Queue()
         queue_b: asyncio.Queue[dict] = asyncio.Queue()
@@ -486,7 +728,9 @@ async def test_multiple_clients_receive_broadcast(redis_required: RedisClient) -
         await asyncio.sleep(0.05)
 
         ok = await event_bus.publish_event(
-            event_id, "state_change", {"from_status": "new", "to_status": "triaging"}
+            event_id,
+            "state_change",
+            _example_payload("state_change"),
         )
         assert ok is True
 
@@ -524,6 +768,12 @@ def _today_str() -> str:
     from datetime import UTC, datetime
 
     return datetime.now(UTC).strftime("%Y%m%d")
+
+
+def _event_id(label: str) -> str:
+    """Return a schema-valid event_id (evt-YYYYMMDD-<8 hex>)."""
+    suffix = uuid.uuid4().hex[:8]
+    return f"evt-{_today_str()}-{suffix}"
 
 
 _counter = 0

@@ -16,15 +16,18 @@ Naming (from spec)
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import UTC, datetime
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
+import jsonschema
 import socketio
 from fastapi import FastAPI
-from redis.asyncio import Redis
 
-from app.core.event_bus import SOCKET_MESSAGE_TYPES
+from app.core.event_bus import SOCKET_MESSAGE_TYPES, sanitize_payload
 from app.core.redis_client import RedisClient
 from app.core.socketio_events import (
     GLOBAL_ROOM,
@@ -42,13 +45,23 @@ logger = logging.getLogger(__name__)
 _EVENTS_CHANNEL_PATTERN = "shadowtrace:events:*"
 _EVENTS_CHANNEL_PREFIX = "shadowtrace:events:"
 _SEQUENCE_KEY_PREFIX = "shadowtrace:socketio:seq:"
+_SCHEMA_PATH = (
+    Path(__file__).resolve().parents[2].parent / "contracts" / "socketio" / "events.schema.json"
+)
 _RECONNECT_DELAY_S = 2.0
-_SEQUENCE_TTL_S = 60 * 60 * 24 * 30  # 30 days — Issue 1
-_MAX_CONSECUTIVE_FAILURES = 5  # Issue 5
+_RECOVERY_DELAY_S = 30.0
+_SEQUENCE_TTL_S = 60 * 60 * 24 * 30  # 30 days
+_MAX_CONSECUTIVE_FAILURES = 5
 
 
 def _sequence_key(event_id: str) -> str:
     return f"{_SEQUENCE_KEY_PREFIX}{event_id}"
+
+
+@lru_cache(maxsize=1)
+def _events_schema() -> dict[str, Any]:
+    """Load the Socket.IO envelope JSON Schema once per process."""
+    return json.loads(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +87,8 @@ class SocketIOManager:
         )
         self._listener_task: asyncio.Task[None] | None = None
         self._stopping = False
-        self._consecutive_failures = 0  # Issue 5
+        self._consecutive_failures = 0
+        self._bridge_degraded = False
 
         register_handlers(self._sio)
 
@@ -86,6 +100,16 @@ class SocketIOManager:
     def sio(self) -> socketio.AsyncServer:
         """The managed ``AsyncServer`` instance."""
         return self._sio
+
+    @property
+    def bridge_active(self) -> bool:
+        """True while the Redis→Socket.IO listener task is running."""
+        return self._listener_task is not None and not self._listener_task.done()
+
+    @property
+    def bridge_degraded(self) -> bool:
+        """True when the listener is in a prolonged recovery backoff."""
+        return self._bridge_degraded
 
     # ------------------------------------------------------------------ #
     # FastAPI integration
@@ -113,6 +137,7 @@ class SocketIOManager:
             return
         self._stopping = False
         self._consecutive_failures = 0
+        self._bridge_degraded = False
         self._listener_task = asyncio.create_task(self._listen())
         logger.info("SocketIOManager background listener started")
 
@@ -126,11 +151,11 @@ class SocketIOManager:
             except asyncio.CancelledError:
                 pass
             self._listener_task = None
-        # Disconnect all sessions managed by this server.
         try:
             await self._sio.disconnect()
         except Exception:
             logger.warning("SocketIOManager disconnect raised", exc_info=True)
+        self._bridge_degraded = False
         logger.info("SocketIOManager stopped")
 
     # ------------------------------------------------------------------ #
@@ -142,26 +167,30 @@ class SocketIOManager:
 
         On connection loss, retry with a fixed back-off.  After
         ``_MAX_CONSECUTIVE_FAILURES`` consecutive failures the listener
-        stops permanently and logs a CRITICAL — this guards against
-        infinite-retry loops on programming errors (Issue 5).
+        enters a longer recovery delay, then retries (frontend may poll REST).
         """
         while not self._stopping:
             try:
                 await self._run_subscriber()
-                self._consecutive_failures = 0  # reset on clean exit
+                self._consecutive_failures = 0
+                self._bridge_degraded = False
             except asyncio.CancelledError:
                 break
             except Exception:
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    self._bridge_degraded = True
                     logger.critical(
                         "SocketIOManager subscriber failed %d consecutive times — "
-                        "giving up.  Socket.IO push is now inactive until the "
-                        "process restarts.",
+                        "entering %.0fs recovery backoff before retry",
                         self._consecutive_failures,
+                        _RECOVERY_DELAY_S,
                         exc_info=True,
                     )
-                    break
+                    self._consecutive_failures = 0
+                    await asyncio.sleep(_RECOVERY_DELAY_S)
+                    self._bridge_degraded = False
+                    continue
                 logger.warning(
                     "SocketIOManager subscriber error — retrying in %.1fs (attempt %d/%d)",
                     _RECONNECT_DELAY_S,
@@ -173,7 +202,6 @@ class SocketIOManager:
 
     async def _run_subscriber(self) -> None:
         """Single PSUBSCRIBE session: decode envelopes and broadcast."""
-        client: Redis | None = None
         pubsub = None
         try:
             client = self._redis.get_client()
@@ -193,13 +221,9 @@ class SocketIOManager:
                 if not isinstance(channel_raw, (str, bytes)) or data_raw is None:
                     continue
 
-                # Normalise channel to bytes (Issue 7: skip redundant copy).
                 channel_bytes = (
-                    channel_raw.encode("utf-8")
-                    if isinstance(channel_raw, str)
-                    else channel_raw  # already bytes
+                    channel_raw.encode("utf-8") if isinstance(channel_raw, str) else channel_raw
                 )
-                # Issue 2: type-guard data_raw before passing to loads().
                 if not isinstance(data_raw, (bytes, str, memoryview)):
                     logger.warning(
                         "SocketIOManager unexpected data_raw type=%s — dropped",
@@ -225,13 +249,27 @@ class SocketIOManager:
                 except Exception:
                     pass
 
+    async def _increment_sequence(self, event_id: str) -> int | None:
+        """Return the next per-event sequence or None when Redis INCR fails."""
+        seq_key = _sequence_key(event_id)
+        try:
+            redis_client = self._redis.get_client()
+            seq = int(await redis_client.incr(seq_key))
+            await redis_client.expire(seq_key, _SEQUENCE_TTL_S)
+            return seq
+        except Exception:
+            logger.warning(
+                "SocketIOManager sequence INCR failed for event_id=%s — skipping emit",
+                event_id,
+                exc_info=True,
+            )
+            return None
+
     async def _dispatch(self, channel_raw: bytes, data_raw: bytes | str | memoryview) -> None:
         """Decode one Redis message and emit to the appropriate rooms."""
         if self._stopping:
             return
 
-        # Issue 4: decode channel with strict error handling — corrupted
-        # bytes should be skipped, not propagated with U+FFFD replacements.
         try:
             channel = channel_raw.decode("utf-8")
         except UnicodeDecodeError:
@@ -244,8 +282,6 @@ class SocketIOManager:
         if not event_id:
             return
 
-        # Decode the EventBus envelope — RedisClient.loads handles
-        # bytes / str / memoryview natively.
         try:
             envelope = RedisClient.loads(data_raw)
         except Exception:
@@ -259,8 +295,6 @@ class SocketIOManager:
         if not isinstance(envelope, dict):
             return
 
-        # The EventBus always includes message_type; a missing / non-string
-        # key signals a corrupt or non-EventBus payload.
         message_type = envelope.get("message_type")
         if not message_type or not isinstance(message_type, str):
             logger.warning(
@@ -269,8 +303,6 @@ class SocketIOManager:
             )
             return
 
-        # Issue 3: defence-in-depth — validate message_type against the
-        # canonical set even though EventBus already validates on publish.
         if message_type not in SOCKET_MESSAGE_TYPES:
             logger.warning(
                 "SocketIOManager unknown message_type=%s on %s — dropped",
@@ -279,32 +311,42 @@ class SocketIOManager:
             )
             return
 
-        # Increment per-event sequence.
-        seq: int = 1
-        seq_key = _sequence_key(event_id)
-        try:
-            redis_client = self._redis.get_client()
-            seq = int(await redis_client.incr(seq_key))
-            # Issue 1: set TTL on the sequence key so it eventually expires.
-            await redis_client.expire(seq_key, _SEQUENCE_TTL_S)
-        except Exception:
-            logger.warning(
-                "SocketIOManager sequence INCR failed for event_id=%s",
-                event_id,
-                exc_info=True,
-            )
+        seq = await self._increment_sequence(event_id)
+        if seq is None:
+            return
 
-        # Build unified Socket.IO envelope.
+        raw_payload = envelope.get("payload", {})
+        safe_payload = sanitize_payload(raw_payload if isinstance(raw_payload, dict) else {})
+        if not isinstance(safe_payload, dict):
+            safe_payload = {}
+
+        bus_timestamp = envelope.get("timestamp")
+        if isinstance(bus_timestamp, str):
+            timestamp = bus_timestamp
+        else:
+            timestamp = datetime.now(UTC).isoformat()
+
         socket_envelope: dict[str, Any] = {
             "type": message_type,
             "event_id": event_id,
             "sequence": seq,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "payload": envelope.get("payload", {}),
+            "timestamp": timestamp,
+            "payload": safe_payload,
         }
 
-        # Broadcast to both rooms concurrently.  Each emit is independent —
-        # one failing must not suppress the other.
+        try:
+            jsonschema.validate(instance=socket_envelope, schema=_events_schema())
+        except jsonschema.ValidationError:
+            logger.warning(
+                "SocketIOManager envelope failed schema validation event_id=%s type=%s — dropped",
+                event_id,
+                message_type,
+            )
+            return
+
+        # Subscribed detail clients leave ``global`` on subscribe, so they
+        # receive once via ``event:{event_id}``; dashboard clients stay in
+        # ``global`` only and receive once via the global emit.
         event_room = _event_room(event_id)
         results = await asyncio.gather(
             self._sio.emit(
@@ -333,4 +375,4 @@ class SocketIOManager:
                 )
 
 
-__all__ = ["SocketIOManager"]
+__all__ = ["SocketIOManager", "_events_schema", "_sequence_key"]

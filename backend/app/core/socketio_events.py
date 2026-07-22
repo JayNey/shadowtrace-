@@ -83,8 +83,11 @@ def register_handlers(sio: socketio.AsyncServer) -> None:
             return
 
         room = _event_room(event_id)
+        # Detail subscribers leave the global room so they receive each event
+        # once via the per-event room (dashboard clients remain global-only).
+        await sio.leave_room(sid, GLOBAL_ROOM, namespace=SOCKETIO_NAMESPACE)
         await sio.enter_room(sid, room, namespace=SOCKETIO_NAMESPACE)
-        logger.debug("socketio subscribe sid=%s → room=%s", sid, room)
+        logger.debug("socketio subscribe sid=%s → room=%s (left %s)", sid, room, GLOBAL_ROOM)
 
 
 __all__ = [
