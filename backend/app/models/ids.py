@@ -70,6 +70,10 @@ def new_evidence_id() -> str:
     return f"evd-{_rand_hex()}"
 
 
+def new_conflict_id() -> str:
+    return f"cft-{_rand_hex()}"
+
+
 def new_action_id() -> str:
     return f"act-{_rand_hex()}"
 

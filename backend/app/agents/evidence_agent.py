@@ -1,19 +1,25 @@
-"""EvidenceAgent: sequential 7-source evidence collection (ISSUE-033).
+"""EvidenceAgent: sequential/concurrent 7-source evidence collection (ISSUE-033/034).
 
-Concurrency upgrade is ISSUE-034. This module only implements the serial path.
+ISSUE-033 provides the serial path, scope/time-range/persist/trace behaviors.
+ISSUE-034 adds concurrent collection (asyncio.wait), ConflictDetector, and
+force conflict field sync.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
+from app.agents.conflict_detector import ConflictDetector
 from app.agents.evidence_parser import (
     TOOL_SOURCE_MAP,
     EvidenceParser,
@@ -23,8 +29,9 @@ from app.db import models as orm
 from app.models.agent_io import CollectionStatus, EvidenceAgentInput, EvidenceOutput
 from app.models.entities import EntitySet
 from app.models.enums import EvidenceSource
-from app.models.evidence import Evidence, EvidenceGap
+from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
 from app.models.tool_meta import ToolResult, ToolResultStatus
+from app.models.workflow import GLOBAL_EVIDENCE_TIMEOUT_S, SINGLE_SOURCE_TIMEOUT_S
 from app.services.evidence_projection import (
     EvidenceQueryScope,
     bind_evidence_query_scope,
@@ -65,6 +72,15 @@ _STATUS_PENALTY: dict[CollectionStatus, float] = {
 }
 
 _MISSING_SCOPE_ERROR = "missing_evidence_query_scope"
+
+
+def resolve_evidence_mode() -> str:
+    """Resolve ``EVIDENCE_MODE`` env (``concurrent`` | ``sequential``; default concurrent)."""
+    raw = (os.environ.get("EVIDENCE_MODE") or "concurrent").strip().lower()
+    if raw in {"concurrent", "sequential"}:
+        return raw
+    logger.warning("unknown EVIDENCE_MODE=%r; defaulting to concurrent", raw)
+    return "concurrent"
 
 
 def _format_time_range_value(value: datetime) -> str:
@@ -124,6 +140,8 @@ class EvidenceRepository(Protocol):
 
     async def list_by_event(self, event_id: str) -> list[Evidence]: ...
 
+    async def apply_conflict_updates(self, evidence_list: list[Evidence]) -> None: ...
+
 
 class InMemoryEvidenceRepository:
     """Test / degraded store: keep higher-confidence row on evidence_id conflict."""
@@ -139,6 +157,20 @@ class InMemoryEvidenceRepository:
 
     async def list_by_event(self, event_id: str) -> list[Evidence]:
         return [row for row in self._rows.values() if row.event_id == event_id]
+
+    async def apply_conflict_updates(self, evidence_list: list[Evidence]) -> None:
+        """Force-update confidence / is_conflicting (upsert will not lower confidence)."""
+        for item in evidence_list:
+            existing = self._rows.get(item.evidence_id)
+            if existing is None:
+                self._rows[item.evidence_id] = item
+                continue
+            self._rows[item.evidence_id] = existing.model_copy(
+                update={
+                    "confidence": item.confidence,
+                    "is_conflicting": item.is_conflicting,
+                }
+            )
 
 
 class SqlAlchemyEvidenceRepository:
@@ -195,6 +227,22 @@ class SqlAlchemyEvidenceRepository:
                     )
                     await session.execute(stmt)
 
+    async def apply_conflict_updates(self, evidence_list: list[Evidence]) -> None:
+        """Force-update confidence / is_conflicting after ConflictDetector penalties."""
+        if not evidence_list:
+            return
+        async with self._session_factory() as session:
+            async with session.begin():
+                for item in evidence_list:
+                    await session.execute(
+                        update(orm.Evidence)
+                        .where(orm.Evidence.evidence_id == item.evidence_id)
+                        .values(
+                            confidence=item.confidence,
+                            is_conflicting=item.is_conflicting,
+                        )
+                    )
+
     async def list_by_event(self, event_id: str) -> list[Evidence]:
         from sqlalchemy import select
 
@@ -238,7 +286,7 @@ class SqlAlchemyEvidenceRepository:
 
 
 class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
-    """Sequential EvidenceAgent — concurrency upgrade is ISSUE-034."""
+    """EvidenceAgent with sequential/concurrent modes and conflict detection."""
 
     agent_name = "evidence_agent"
 
@@ -257,10 +305,13 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         evidence_repository: EvidenceRepository | None = None,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         evidence_parser: EvidenceParser | None = None,
+        conflict_detector: ConflictDetector | None = None,
         default_time_range: dict[str, str] | None = None,
         window_hours_before: float = 1.0,
         window_hours_after: float = 1.0,
-        query_timeout_s: float = 10.0,
+        evidence_mode: str | None = None,
+        global_timeout_s: float | None = None,
+        query_timeout_s: float | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -280,13 +331,22 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         else:
             self.evidence_repository = InMemoryEvidenceRepository()
         self.parser = evidence_parser or EvidenceParser()
+        self.conflict_detector = conflict_detector or ConflictDetector()
         self.default_time_range = dict(default_time_range or DEFAULT_TIME_RANGE)
         self.window_hours_before = window_hours_before
         self.window_hours_after = window_hours_after
-        self.query_timeout_s = query_timeout_s
+        mode = (evidence_mode or resolve_evidence_mode()).strip().lower()
+        self.evidence_mode = mode if mode in {"concurrent", "sequential"} else "concurrent"
+        self.global_timeout_s = (
+            GLOBAL_EVIDENCE_TIMEOUT_S if global_timeout_s is None else global_timeout_s
+        )
+        self.query_timeout_s = (
+            SINGLE_SOURCE_TIMEOUT_S if query_timeout_s is None else query_timeout_s
+        )
         # Populated each run for agent_trace / acceptance checks.
         self.last_query_timings: list[dict[str, Any]] = []
         self.last_persist_error: str | None = None
+        self.last_collection_elapsed_s: float | None = None
 
     async def _run(self, input: EvidenceAgentInput) -> EvidenceOutput:
         if self.tool_executor is None:
@@ -294,11 +354,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
 
         self.last_query_timings = []
         self.last_persist_error = None
+        self.last_collection_elapsed_s = None
         time_range = await self._resolve_time_range(input)
-        collected: list[Evidence] = []
-        success_sources: list[str] = []
-        failed_sources: list[str] = []
-        gaps: list[EvidenceGap] = []
 
         scope = await self._resolve_scope(input.event_id)
         if scope is None and self.event_service is None:
@@ -307,123 +364,44 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "evidence queries require a trusted EventService scope"
             )
 
-        for tool_name in EVIDENCE_QUERY_ORDER:
-            source = TOOL_SOURCE_MAP[tool_name]
-            source_value = source.value
-            params = self._build_params(
-                tool_name,
-                input.triage_result.entities,
-                time_range,
-                ioc_list=list(input.triage_result.ioc_list),
-            )
-            if params is None:
-                failed_sources.append(source_value)
-                gaps.append(
-                    EvidenceGap(
-                        event_id=input.event_id,
-                        missing_source=source,
-                        reason="missing_entity",
-                        detail={"tool_name": tool_name},
-                    )
+        mode = self.evidence_mode
+        if mode == "concurrent":
+            try:
+                collected, success_sources, failed_sources, gaps = await self._collect_concurrent(
+                    input,
+                    time_range=time_range,
+                    scope=scope,
                 )
-                self.last_query_timings.append(
-                    {
-                        "tool_name": tool_name,
-                        "source": source_value,
-                        "status": "skipped_missing_entity",
-                        "execution_time_ms": 0,
-                    }
+            except Exception:
+                logger.warning(
+                    "concurrent evidence collection failed; falling back to sequential",
+                    exc_info=True,
                 )
-                await self._note_timing(
-                    input.event_id,
-                    tool_name,
-                    status="skipped_missing_entity",
-                    execution_time_ms=0,
+                self.last_query_timings = []
+                collected, success_sources, failed_sources, gaps = await self._collect_sequential(
+                    input,
+                    time_range=time_range,
+                    scope=scope,
                 )
-                continue
-
-            tool_result, timing_ms, call_error = await self._call_query(
-                tool_name,
-                params,
-                input.event_id,
+        else:
+            collected, success_sources, failed_sources, gaps = await self._collect_sequential(
+                input,
+                time_range=time_range,
                 scope=scope,
             )
-            status_text = (
-                tool_result.status.value
-                if tool_result is not None
-                else f"error:{call_error}"
-            )
-            self.last_query_timings.append(
-                {
-                    "tool_name": tool_name,
-                    "source": source_value,
-                    "status": status_text,
-                    "execution_time_ms": timing_ms,
-                }
-            )
-            await self._note_timing(
-                input.event_id,
-                tool_name,
-                status=status_text,
-                execution_time_ms=timing_ms,
-            )
-
-            if tool_result is None or tool_result.status not in _SUCCESS_STATUSES:
-                gap_reason = (
-                    "missing_scope"
-                    if call_error == _MISSING_SCOPE_ERROR
-                    else "tool_failed"
-                )
-                failed_sources.append(source_value)
-                gaps.append(
-                    EvidenceGap(
-                        event_id=input.event_id,
-                        missing_source=source,
-                        reason=gap_reason,
-                        detail={
-                            "tool_name": tool_name,
-                            "execution_time_ms": timing_ms,
-                            "error": call_error
-                            or (tool_result.error_detail if tool_result else None),
-                            "status": (
-                                tool_result.status.value if tool_result is not None else None
-                            ),
-                        },
-                    )
-                )
-                continue
-
-            parsed = self.parser.parse(
-                tool_name,
-                tool_result,
-                event_id=input.event_id,
-            )
-            if not parsed:
-                # Tool succeeded but produced no usable evidence → gap, not hard fail.
-                gaps.append(
-                    EvidenceGap(
-                        event_id=input.event_id,
-                        missing_source=source,
-                        reason="no_records",
-                        detail={
-                            "tool_name": tool_name,
-                            "execution_time_ms": timing_ms,
-                        },
-                    )
-                )
-                continue
-
-            collected.extend(parsed)
-            if source_value not in success_sources:
-                success_sources.append(source_value)
 
         evidence_list = self._dedup_and_sort(collected)
+        await self._persist_evidence(evidence_list)
+
+        evidence_list, conflicts = self.conflict_detector.detect_and_penalize(evidence_list)
+        await self._sync_conflict_updates(evidence_list, conflicts)
+
         collection_status = self._collection_status(len(success_sources))
         overall_confidence = self._overall_confidence(evidence_list, collection_status)
 
         output = EvidenceOutput(
             evidence_list=evidence_list,
-            conflicts=[],
+            conflicts=conflicts,
             gaps=gaps,
             success_sources=success_sources,
             failed_sources=failed_sources,
@@ -431,9 +409,386 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             collection_status=collection_status,
         )
 
-        await self._persist_evidence(evidence_list)
         await self._write_context(input.event_id, output)
         return output
+
+    async def _collect_sequential(
+        self,
+        input: EvidenceAgentInput,
+        *,
+        time_range: dict[str, str],
+        scope: EvidenceQueryScope | None,
+    ) -> tuple[list[Evidence], list[str], list[str], list[EvidenceGap]]:
+        collected: list[Evidence] = []
+        success_sources: list[str] = []
+        failed_sources: list[str] = []
+        gaps: list[EvidenceGap] = []
+        started = time.perf_counter()
+
+        for tool_name in EVIDENCE_QUERY_ORDER:
+            source = TOOL_SOURCE_MAP[tool_name]
+            params = self._build_params(
+                tool_name,
+                input.triage_result.entities,
+                time_range,
+                ioc_list=list(input.triage_result.ioc_list),
+            )
+            if params is None:
+                outcome = self._skipped_missing_entity_outcome(
+                    tool_name, source, input.event_id
+                )
+            else:
+                outcome = await self._run_one_query(
+                    tool_name,
+                    params,
+                    input.event_id,
+                    scope=scope,
+                )
+            await self._merge_outcome(
+                outcome,
+                collected=collected,
+                success_sources=success_sources,
+                failed_sources=failed_sources,
+                gaps=gaps,
+            )
+
+        self.last_collection_elapsed_s = time.perf_counter() - started
+        return collected, success_sources, failed_sources, gaps
+
+    async def _collect_concurrent(
+        self,
+        input: EvidenceAgentInput,
+        *,
+        time_range: dict[str, str],
+        scope: EvidenceQueryScope | None,
+    ) -> tuple[list[Evidence], list[str], list[str], list[EvidenceGap]]:
+        """Run queries concurrently; ``asyncio.wait`` keeps completed work on global timeout."""
+        collected: list[Evidence] = []
+        success_sources: list[str] = []
+        failed_sources: list[str] = []
+        gaps: list[EvidenceGap] = []
+        started = time.perf_counter()
+
+        pending_tasks: dict[asyncio.Task[dict[str, Any]], str] = {}
+        for tool_name in EVIDENCE_QUERY_ORDER:
+            source = TOOL_SOURCE_MAP[tool_name]
+            params = self._build_params(
+                tool_name,
+                input.triage_result.entities,
+                time_range,
+                ioc_list=list(input.triage_result.ioc_list),
+            )
+            if params is None:
+                outcome = self._skipped_missing_entity_outcome(
+                    tool_name, source, input.event_id
+                )
+                await self._merge_outcome(
+                    outcome,
+                    collected=collected,
+                    success_sources=success_sources,
+                    failed_sources=failed_sources,
+                    gaps=gaps,
+                )
+                continue
+            task = asyncio.create_task(
+                self._run_one_query(
+                    tool_name,
+                    params,
+                    input.event_id,
+                    scope=scope,
+                ),
+                name=f"evidence:{tool_name}",
+            )
+            pending_tasks[task] = tool_name
+
+        if pending_tasks:
+            done, pending = await asyncio.wait(
+                set(pending_tasks.keys()),
+                timeout=self.global_timeout_s,
+                return_when=asyncio.ALL_COMPLETED,
+            )
+
+            completed_by_tool = {
+                pending_tasks[task]: task for task in done if task in pending_tasks
+            }
+            for tool_name in EVIDENCE_QUERY_ORDER:
+                task = completed_by_tool.get(tool_name)
+                if task is None:
+                    continue
+                try:
+                    outcome = task.result()
+                except Exception as exc:
+                    source = TOOL_SOURCE_MAP[tool_name]
+                    outcome = {
+                        "tool_name": tool_name,
+                        "source": source,
+                        "parsed": [],
+                        "gap": self._gap(
+                            event_id=input.event_id,
+                            source=source,
+                            reason="tool_failed",
+                            impact="source_unavailable",
+                            description=f"concurrent task error for {tool_name}",
+                            tool_name=tool_name,
+                            error=str(exc),
+                        ),
+                        "failed": True,
+                        "success": False,
+                        "timing_ms": 0,
+                        "status_text": f"error:{exc}",
+                    }
+                await self._merge_outcome(
+                    outcome,
+                    collected=collected,
+                    success_sources=success_sources,
+                    failed_sources=failed_sources,
+                    gaps=gaps,
+                )
+
+            for task in pending:
+                tool_name = pending_tasks[task]
+                source = TOOL_SOURCE_MAP[tool_name]
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                await self._merge_outcome(
+                    {
+                        "tool_name": tool_name,
+                        "source": source,
+                        "parsed": [],
+                        "gap": self._gap(
+                            event_id=input.event_id,
+                            source=source,
+                            reason="global_timeout",
+                            impact="partial_collection",
+                            description=(
+                                f"global evidence timeout ({self.global_timeout_s}s) "
+                                f"before {tool_name} completed"
+                            ),
+                            tool_name=tool_name,
+                            timeout_s=self.global_timeout_s,
+                        ),
+                        "failed": True,
+                        "success": False,
+                        "timing_ms": int(self.global_timeout_s * 1000),
+                        "status_text": "global_timeout",
+                    },
+                    collected=collected,
+                    success_sources=success_sources,
+                    failed_sources=failed_sources,
+                    gaps=gaps,
+                )
+
+        self.last_collection_elapsed_s = time.perf_counter() - started
+        return collected, success_sources, failed_sources, gaps
+
+    def _skipped_missing_entity_outcome(
+        self,
+        tool_name: str,
+        source: EvidenceSource,
+        event_id: str,
+    ) -> dict[str, Any]:
+        return {
+            "tool_name": tool_name,
+            "source": source,
+            "parsed": [],
+            "gap": self._gap(
+                event_id=event_id,
+                source=source,
+                reason="missing_entity",
+                impact="source_skipped",
+                description=f"required entity missing for {tool_name}",
+                tool_name=tool_name,
+            ),
+            "failed": True,
+            "success": False,
+            "timing_ms": 0,
+            "status_text": "skipped_missing_entity",
+        }
+
+    async def _run_one_query(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        event_id: str,
+        *,
+        scope: EvidenceQueryScope | None,
+    ) -> dict[str, Any]:
+        source = TOOL_SOURCE_MAP[tool_name]
+        tool_result, timing_ms, call_error = await self._call_query(
+            tool_name,
+            params,
+            event_id,
+            scope=scope,
+        )
+        status_text = (
+            tool_result.status.value
+            if tool_result is not None
+            else f"error:{call_error}"
+        )
+
+        if tool_result is None or tool_result.status not in _SUCCESS_STATUSES:
+            gap_reason = (
+                "missing_scope"
+                if call_error == _MISSING_SCOPE_ERROR
+                else "tool_failed"
+            )
+            return {
+                "tool_name": tool_name,
+                "source": source,
+                "parsed": [],
+                "gap": self._gap(
+                    event_id=event_id,
+                    source=source,
+                    reason=gap_reason,
+                    impact="source_unavailable",
+                    description=f"query {tool_name} did not succeed",
+                    tool_name=tool_name,
+                    execution_time_ms=timing_ms,
+                    error=call_error
+                    or (tool_result.error_detail if tool_result else None),
+                    status=(tool_result.status.value if tool_result is not None else None),
+                ),
+                "failed": True,
+                "success": False,
+                "timing_ms": timing_ms,
+                "status_text": status_text,
+            }
+
+        parsed = self.parser.parse(
+            tool_name,
+            tool_result,
+            event_id=event_id,
+        )
+        if not parsed:
+            return {
+                "tool_name": tool_name,
+                "source": source,
+                "parsed": [],
+                "gap": self._gap(
+                    event_id=event_id,
+                    source=source,
+                    reason="no_records",
+                    impact="empty_result",
+                    description=f"query {tool_name} returned no usable evidence",
+                    tool_name=tool_name,
+                    execution_time_ms=timing_ms,
+                ),
+                "failed": False,
+                "success": False,
+                "timing_ms": timing_ms,
+                "status_text": status_text,
+            }
+
+        return {
+            "tool_name": tool_name,
+            "source": source,
+            "parsed": parsed,
+            "gap": None,
+            "failed": False,
+            "success": True,
+            "timing_ms": timing_ms,
+            "status_text": status_text,
+        }
+
+    async def _merge_outcome(
+        self,
+        outcome: dict[str, Any],
+        *,
+        collected: list[Evidence],
+        success_sources: list[str],
+        failed_sources: list[str],
+        gaps: list[EvidenceGap],
+    ) -> None:
+        tool_name = str(outcome["tool_name"])
+        source: EvidenceSource = outcome["source"]
+        source_value = source.value
+        timing_ms = int(outcome.get("timing_ms") or 0)
+        status_text = str(outcome.get("status_text") or "")
+
+        self.last_query_timings.append(
+            {
+                "tool_name": tool_name,
+                "source": source_value,
+                "status": status_text,
+                "execution_time_ms": timing_ms,
+            }
+        )
+        event_id = ""
+        if outcome.get("gap") is not None:
+            event_id = outcome["gap"].event_id
+        elif outcome.get("parsed"):
+            event_id = outcome["parsed"][0].event_id
+        await self._note_timing(
+            event_id,
+            tool_name,
+            status=status_text,
+            execution_time_ms=timing_ms,
+        )
+
+        gap = outcome.get("gap")
+        if gap is not None:
+            gaps.append(gap)
+        if outcome.get("failed"):
+            if source_value not in failed_sources:
+                failed_sources.append(source_value)
+        parsed: list[Evidence] = list(outcome.get("parsed") or [])
+        if parsed:
+            collected.extend(parsed)
+        if outcome.get("success") and source_value not in success_sources:
+            success_sources.append(source_value)
+
+    @staticmethod
+    def _gap(
+        *,
+        event_id: str,
+        source: EvidenceSource,
+        reason: str,
+        impact: str | None = None,
+        description: str | None = None,
+        **extra: Any,
+    ) -> EvidenceGap:
+        """Build EvidenceGap; map Issue prose source/impact/description into detail."""
+        detail: dict[str, Any] = {"source": source.value}
+        if impact is not None:
+            detail["impact"] = impact
+        if description is not None:
+            detail["description"] = description
+        detail.update(extra)
+        return EvidenceGap(
+            event_id=event_id,
+            missing_source=source,
+            reason=reason,
+            detail=detail,
+        )
+
+    async def _sync_conflict_updates(
+        self,
+        evidence_list: list[Evidence],
+        conflicts: list[EvidenceConflict],
+    ) -> None:
+        if self.evidence_repository is None or not evidence_list or not conflicts:
+            return
+        dirty = [item for item in evidence_list if item.is_conflicting]
+        if not dirty:
+            dirty = evidence_list
+        try:
+            await self.evidence_repository.apply_conflict_updates(dirty)
+        except Exception as exc:
+            logger.error(
+                "evidence conflict field sync failed: %s",
+                exc,
+                exc_info=True,
+            )
+            self.last_persist_error = (
+                f"{self.last_persist_error}; conflict_sync:{exc}"
+                if self.last_persist_error
+                else f"conflict_sync:{exc}"
+            )
 
     async def _resolve_scope(self, event_id: str) -> EvidenceQueryScope | None:
         if self.event_service is None:
@@ -477,7 +832,6 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 result if isinstance(result, ToolResult) else ToolResult.model_validate(result)
             )
             wall_ms = max(0, int((time.perf_counter() - started) * 1000))
-            # Prefer provider-reported duration when present; else wall clock.
             reported = int(tool_result.execution_time_ms or 0)
             timing = reported if reported > 0 else wall_ms
             return tool_result, timing, None
@@ -499,7 +853,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         status: str,
         execution_time_ms: int,
     ) -> None:
-        if self.working_memory is None:
+        if self.working_memory is None or not event_id:
             return
         note = (
             f"evidence_query tool={tool_name} status={status} "
@@ -522,7 +876,6 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "evidence upsert failed; EventContext kept but evidence table may be incomplete",
                 exc_info=True,
             )
-            # Visible in agent_trace query_timings + scratchpad without aborting collection.
             self.last_query_timings.append(
                 {
                     "tool_name": "evidence_upsert",
@@ -566,7 +919,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         completed_at: datetime | None,
         error_detail: str | None = None,
     ) -> None:
-        """Persist agent_trace including per-query timings (ISSUE-033 验收)."""
+        """Persist agent_trace including per-query timings (ISSUE-033 acceptance)."""
         if self.trace_service is None:
             return
         if output is not None:
@@ -716,7 +1069,6 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
 
     @staticmethod
     def _collection_status(success_count: int) -> CollectionStatus:
-        # 统一命名规则优先于「2 路失败」散文：按成功源数量判定。
         if success_count >= 5:
             return CollectionStatus.COMPLETED
         if success_count >= 3:
