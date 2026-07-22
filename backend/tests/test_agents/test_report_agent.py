@@ -149,6 +149,14 @@ class _FailingLLM:
         raise RuntimeError("llm unavailable")
 
 
+class _PartialLLM:
+    async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        return LLMResponse(
+            content='{"title":"partial","summary":"partial","sections":{"overview":"only one"}}',
+            model_name="partial",
+        )
+
+
 def _evd(
     *,
     source: EvidenceSource,
@@ -372,6 +380,7 @@ async def test_main_scenario_fifteen_sections_and_key_facts(
     assert agent.last_content_sha256
     assert agent.last_report_markdown
     assert "zhangsan" in agent.last_report_markdown
+    assert f"content_sha256={agent.last_content_sha256}" in agent.last_report_markdown
 
 
 @pytest.mark.asyncio
@@ -561,6 +570,53 @@ async def test_report_upsert_is_idempotent_by_report_id(
     assert event_service.reports[first.report_id].version == 2
     # generate_report Action fingerprint also idempotent
     assert len(event_service.actions) == 1
+
+
+class _FailingPersistEventService(_FakeEventService):
+    async def upsert_report(self, report: Any) -> Any:
+        raise RuntimeError("report db unavailable")
+
+
+@pytest.mark.asyncio
+async def test_report_persist_failure_propagates(wm: _FakeWorkingMemory) -> None:
+    event_id = f"evt-report-persist-fail-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    agent = ReportAgent(
+        llm_client=None,
+        working_memory=wm,
+        event_service=_FailingPersistEventService(),
+    )
+    with pytest.raises(RuntimeError, match="report db unavailable"):
+        await agent.execute(
+            ReportAgentInput(
+                event_id=event_id,
+                evidence_output=_main_evidence(event_id),
+                risk_assessment=_high_risk(),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_llm_incomplete_sections_falls_back_to_template(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-report-partial-llm-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    agent = ReportAgent(
+        llm_client=_PartialLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    report = await agent.execute(
+        ReportAgentInput(
+            event_id=event_id,
+            evidence_output=_main_evidence(event_id),
+            risk_assessment=_high_risk(),
+        )
+    )
+    assert report.generated_by == GENERATED_BY_TEMPLATE
+    assert len(report.sections) == 15
 
 
 def test_builder_preserves_section_order() -> None:

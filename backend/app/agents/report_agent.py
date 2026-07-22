@@ -136,14 +136,20 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 )
                 generated_by = GENERATED_BY_TEMPLATE
 
-        # Template path always re-validates ordering / keys via Jinja render.
-        markdown = self._render_markdown(title=title, summary=summary, sections=draft_sections)
-        content_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+        # Hash canonical body (pre-fingerprint); final markdown includes appendix sha line.
+        body_markdown = self._render_markdown(
+            title=title,
+            summary=summary,
+            sections=draft_sections,
+        )
+        content_sha256 = hashlib.sha256(body_markdown.encode("utf-8")).hexdigest()
         self.last_content_sha256 = content_sha256
-        self.last_report_markdown = markdown
-
-        # Stamp sha into appendix data after hash is known.
         sections = self._stamp_sha(draft_sections, content_sha256)
+        self.last_report_markdown = self._render_markdown(
+            title=title,
+            summary=summary,
+            sections=sections,
+        )
 
         now = datetime.now(UTC)
         report = InvestigationReport(
@@ -223,10 +229,10 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             text = str(value).strip()
             if text:
                 parsed[key] = text
-        if len(parsed) < 10:
+        if len(parsed) < len(SECTION_KEYS):
             raise LLMError(
                 "report_generate LLM returned too few sections",
-                details={"present": sorted(parsed)},
+                details={"present": sorted(parsed), "required": len(SECTION_KEYS)},
             )
         return title, summary, parsed
 
@@ -459,7 +465,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 report.report_id,
                 exc_info=True,
             )
-
+            raise
     async def _record_generate_report_action(self, input: ReportAgentInput) -> None:
         if self.event_service is None:
             return

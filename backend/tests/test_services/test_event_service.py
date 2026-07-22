@@ -37,6 +37,9 @@ from app.models.enums import (
     WritebackReadiness,
 )
 from app.models.source import SourceReference
+from app.models.report import InvestigationReport, ReportSection
+from app.models.ids import report_id_for_event
+from app.agents.report_section_builder import SECTION_SPECS
 from app.models.workflow import TransitionContext
 from app.services.context_service import EventContextStore, ctx_key
 from app.services.degraded_flag_service import DegradedFlagService
@@ -1176,6 +1179,68 @@ async def test_update_risk_fields_publishes_risk_updated_payload(
         assert row is not None
         assert row.risk_score == 82
         assert row.severity == Severity.HIGH.value
+
+
+def _sample_report(event_id: str) -> InvestigationReport:
+    sections = [
+        ReportSection(key=key, title=title, content=f"section-{key}")
+        for key, title in SECTION_SPECS
+    ]
+    return InvestigationReport(
+        report_id=report_id_for_event(event_id),
+        event_id=event_id,
+        title="integration report",
+        summary="summary",
+        sections=sections,
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        risk_score=80,
+        severity=Severity.HIGH,
+        generated_by="template",
+        generated_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_report_idempotent_by_report_id(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-report-{sfx}"),
+            title="report-upsert",
+            source_type="mock_xdr",
+        )
+    )
+    assert created.event_id
+    report = _sample_report(created.event_id)
+
+    first = await event_service.upsert_report(report)
+    assert first.report_id == report_id_for_event(created.event_id)
+    assert first.version == 1
+    assert len(first.sections) == 15
+
+    report.title = "integration report v2"
+    second = await event_service.upsert_report(report)
+    assert second.report_id == first.report_id
+    assert second.version == 2
+    assert second.title == "integration report v2"
+
+    by_id = await event_service.get_report(report_id=first.report_id)
+    assert by_id is not None
+    assert by_id.version == 2
+    by_event = await event_service.get_report(event_id=created.event_id)
+    assert by_event is not None
+    assert by_event.report_id == first.report_id
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(orm.Report).where(orm.Report.event_id == created.event_id)
+            )
+        ).scalars().all()
+        assert len(rows) == 1
 
 
 @pytest.mark.asyncio
