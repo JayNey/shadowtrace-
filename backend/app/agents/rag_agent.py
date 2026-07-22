@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
 from typing import Any
 
 from app.agents.base import BaseAgent
@@ -84,14 +83,14 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             await self._write_rag_output(input, output)
             return output
 
-        tasks: dict[str, asyncio.Task[RetrievalResult | None]] = {}
-        for kb_name in _KB_NAMES:
-            query = queries.get(kb_name, "")
-            tasks[kb_name] = asyncio.create_task(self._retrieve_safe(kb_name, query, top_k=_TOP_K))
-
-        results: dict[str, RetrievalResult | None] = {}
-        for kb_name in _KB_NAMES:
-            results[kb_name] = await tasks[kb_name]
+        retrieve_outcomes = await asyncio.gather(
+            *(
+                self._retrieve_safe(kb_name, queries.get(kb_name, ""), top_k=_TOP_K)
+                for kb_name in _KB_NAMES
+            ),
+            return_exceptions=False,
+        )
+        results = dict(zip(_KB_NAMES, retrieve_outcomes, strict=True))
 
         # Assemble output sections.
         attack_techniques = _build_attack_techniques(results.get("attack_kb"))
@@ -160,7 +159,6 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
                 exc_info=True,
             )
             output.degraded = True
-            await self._try_persist_degraded_flag(input.event_id)
         except ShadowTraceError as exc:
             if exc.retryable:
                 logger.warning(
@@ -170,29 +168,8 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
                     exc_info=True,
                 )
                 output.degraded = True
-                await self._try_persist_degraded_flag(input.event_id)
             else:
                 raise
-
-    async def _try_persist_degraded_flag(self, event_id: str) -> None:
-        wm = self.working_memory
-        if wm is None:
-            return
-        try:
-            await wm.write(
-                event_id,
-                "degraded_flags",
-                {
-                    "degraded": True,
-                    "reason": "rag_output persistence failed",
-                    "timestamp": datetime.now(UTC).isoformat(),
-                },
-            )
-        except ShadowTraceError:
-            logger.exception(
-                "Failed to persist degraded_flags for event=%s",
-                event_id,
-            )
 
 
 # --------------------------------------------------------------------------- #
@@ -220,11 +197,15 @@ def _build_attack_techniques(
             continue
         meta = chunk.metadata
         technique_id = meta.get("technique_id", "")
+        if not technique_id:
+            continue
         technique_name = meta.get("technique_name", "")
         tactics: list[str] = meta.get("tactics", [])
         if not isinstance(tactics, list):
             tactics = []
-        citation_id = citation_by_chunk.get(chunk.chunk_id, "")
+        citation_id = citation_by_chunk.get(chunk.chunk_id)
+        if not citation_id:
+            continue
         techniques.append(
             AttackTechniqueMatch(
                 technique_id=technique_id,

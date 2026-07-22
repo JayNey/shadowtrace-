@@ -546,6 +546,26 @@ class TestBuildAttackTechniques:
         assert len(techniques) == 1
         assert techniques[0].match_confidence == 0.9
 
+    def test_skips_chunks_without_technique_id(self):
+        chunks = [
+            _make_chunk(
+                "a-1",
+                "attack_kb",
+                "no id",
+                score=0.9,
+                metadata={"technique_name": "X", "tactics": ["exfil"]},
+            ),
+        ]
+        citations = [_make_knowledge_citation("cit-11111111", "a-1", "attack_kb", "x", 0.9)]
+        result = RetrievalResult(query="", chunks=chunks, citations=citations)
+        assert _build_attack_techniques(result) == []
+
+    def test_skips_chunks_without_citation_mapping(self):
+        meta = {"technique_id": "T1567", "technique_name": "X", "tactics": ["exfil"]}
+        chunks = [_make_chunk("a-1", "attack_kb", "T1567", score=0.9, metadata=meta)]
+        result = RetrievalResult(query="", chunks=chunks, citations=[])
+        assert _build_attack_techniques(result) == []
+
 
 class TestBuildFpSimilarity:
     def test_extracts_high_score_match(self):
@@ -777,6 +797,25 @@ class TestRAGAgentBasic:
         assert stored is not None
         assert isinstance(stored, dict)
         assert "attack_techniques" in stored
+
+    @pytest.mark.asyncio
+    async def test_run_issues_four_retrieve_calls(self):
+        """Each knowledge base is queried exactly once."""
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        pipeline = _MockPipeline(results=results)
+        agent = RAGAgent(working_memory=wm, pipeline=pipeline)
+
+        await agent._run(_make_input())
+
+        assert len(pipeline.calls) == 4
+        called_kbs = {call["kb_names"][0] for call in pipeline.calls}
+        assert called_kbs == {
+            "attack_kb",
+            "fp_case_kb",
+            "history_case_kb",
+            "playbook_kb",
+        }
 
 
 class TestRAGAgentDegraded:
