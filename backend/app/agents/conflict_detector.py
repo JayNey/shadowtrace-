@@ -205,15 +205,13 @@ class ConflictDetector:
         conflicts: list[EvidenceConflict] = []
         for asset in isolated_assets:
             host_keys = {value.lower() for value in self._host_keys(asset)}
+            if not host_keys:
+                continue
             matched_endpoint = [
                 item
                 for item in active_endpoint
                 if host_keys.intersection({value.lower() for value in self._host_keys(item)})
-                or not host_keys
             ]
-            if not matched_endpoint and host_keys:
-                # Fall back: same event host activity vs isolated asset when keys missing overlap.
-                matched_endpoint = active_endpoint
             if not matched_endpoint:
                 continue
             conflicts.append(
@@ -283,9 +281,6 @@ class ConflictDetector:
         if result in _ABSENT_LOGIN_RESULTS:
             return True
         if "no_record" in event_type or "absent" in event_type:
-            return True
-        if item.is_conflicting and result not in _SUCCESS_LOGIN_RESULTS:
-            # Fixture conflict seed for IAM absence.
             return True
         return False
 

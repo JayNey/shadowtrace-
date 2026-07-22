@@ -196,6 +196,7 @@ def _build_agent(
         event_service=event_service if event_service is not None else _EventScopeService(),
         trace_service=trace_service,
         default_time_range=dict(WINDOW),
+        evidence_mode="sequential",
     )
 
 

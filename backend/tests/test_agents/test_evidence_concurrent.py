@@ -242,6 +242,31 @@ async def test_concurrent_matches_sequential_results(
     assert set(seq_out.success_sources) == set(conc_out.success_sources)
     assert seq_out.collection_status == conc_out.collection_status
 
+    def conflict_fingerprint(
+        conflicts: list,
+        evidence_list: list[Evidence],
+    ) -> set[tuple[str, frozenset[tuple[str, str]]]]:
+        by_id = {item.evidence_id: item for item in evidence_list}
+        return {
+            (
+                str(conflict.detail.get("rule_name")),
+                frozenset(
+                    (
+                        by_id[eid].source.value,
+                        by_id[eid].evidence_type,
+                    )
+                    for eid in conflict.evidence_ids
+                    if eid in by_id
+                ),
+            )
+            for conflict in conflicts
+        }
+
+    assert conflict_fingerprint(seq_out.conflicts, seq_out.evidence_list) == conflict_fingerprint(
+        conc_out.conflicts,
+        conc_out.evidence_list,
+    )
+
 
 async def test_concurrent_wall_time_within_slowest_plus_two_seconds(
     tool_executor: Any,
@@ -461,3 +486,74 @@ async def test_evidence_table_conflict_fields_match_memory(
         mem = mem_by_id[row.evidence_id]
         assert row.is_conflicting is mem.is_conflicting
         assert abs(row.confidence - mem.confidence) < 1e-9
+
+
+class _BrokenConflictDetector(ConflictDetector):
+    def detect(self, evidence_list: list[Evidence]) -> list:
+        raise RuntimeError("conflict detector forced failure")
+
+
+async def test_conflict_detection_failure_does_not_block_collection(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+) -> None:
+    """冲突检测失败时不阻断采集，跳过惩罚。"""
+    event_id = f"evt-evd-detect-fail-{new_sfx()}"
+    agent, _, _ = _build_agent(
+        tool_executor=tool_executor,
+        evidence_mode="concurrent",
+    )
+    agent.conflict_detector = _BrokenConflictDetector()
+
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(
+                EvidenceAgentInput(
+                    event_id=event_id,
+                    triage_result=_main_scenario_triage(),
+                )
+            )
+
+    assert output.collection_status is not None
+    assert len(output.evidence_list) >= 5
+    assert output.conflicts == []
+    # Penalties skipped: endpoint confidence stays at parser level (~0.9), not * 0.7.
+    endpoint_rows = [
+        item for item in output.evidence_list if item.source == EvidenceSource.ENDPOINT
+    ]
+    assert endpoint_rows
+    assert all(item.confidence > 0.85 for item in endpoint_rows)
+
+
+async def test_asset_isolated_no_cross_host_false_positive() -> None:
+    """隔离主机 A 与 EDR 活动主机 B 无交集时不应误报 asset 冲突。"""
+    event_id = f"evt-asset-fp-{uuid4().hex[:8]}"
+    detector = ConflictDetector()
+    isolated = _evd(
+        source=EvidenceSource.ASSET,
+        evidence_type="asset_info",
+        confidence=0.80,
+        event_id=event_id,
+        raw_data={
+            "hostname": "PC-A",
+            "ip": "10.0.0.1",
+            "agent_status": "isolated",
+        },
+        related=["PC-A"],
+    )
+    edr_other_host = _evd(
+        source=EvidenceSource.ENDPOINT,
+        evidence_type="process_create",
+        confidence=0.90,
+        event_id=event_id,
+        raw_data={
+            "hostname": "PC-B",
+            "process": "cmd.exe",
+            "action": "process_create",
+        },
+        related=["PC-B"],
+    )
+
+    conflicts = detector.detect([isolated, edr_other_host])
+    rules = {c.detail.get("rule_name") for c in conflicts}
+    assert RULE_ASSET_ISOLATED_BUT_EDR_ACTIVE not in rules

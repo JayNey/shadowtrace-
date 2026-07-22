@@ -368,23 +368,11 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
 
         mode = self.evidence_mode
         if mode == "concurrent":
-            try:
-                collected, success_sources, failed_sources, gaps = await self._collect_concurrent(
-                    input,
-                    time_range=time_range,
-                    scope=scope,
-                )
-            except Exception:
-                logger.warning(
-                    "concurrent evidence collection failed; falling back to sequential",
-                    exc_info=True,
-                )
-                self.last_query_timings = []
-                collected, success_sources, failed_sources, gaps = await self._collect_sequential(
-                    input,
-                    time_range=time_range,
-                    scope=scope,
-                )
+            collected, success_sources, failed_sources, gaps = await self._collect_concurrent(
+                input,
+                time_range=time_range,
+                scope=scope,
+            )
         else:
             collected, success_sources, failed_sources, gaps = await self._collect_sequential(
                 input,
@@ -395,7 +383,15 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         evidence_list = self._dedup_and_sort(collected)
         await self._persist_evidence(evidence_list)
 
-        evidence_list, conflicts = self.conflict_detector.detect_and_penalize(evidence_list)
+        conflicts: list[EvidenceConflict] = []
+        try:
+            evidence_list, conflicts = self.conflict_detector.detect_and_penalize(evidence_list)
+        except Exception:
+            logger.warning(
+                "conflict detection failed; skipping penalties for event=%s",
+                input.event_id,
+                exc_info=True,
+            )
         await self._sync_conflict_updates(evidence_list, conflicts)
 
         collection_status = self._collection_status(len(success_sources))
@@ -764,7 +760,11 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             return
         dirty = [item for item in evidence_list if item.is_conflicting]
         if not dirty:
-            dirty = evidence_list
+            if conflicts:
+                logger.warning(
+                    "conflicts present but no penalized evidence rows; skipping DB sync"
+                )
+            return
         try:
             await self.evidence_repository.apply_conflict_updates(dirty)
         except Exception as exc:
