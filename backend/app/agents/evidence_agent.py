@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -63,6 +63,58 @@ _STATUS_PENALTY: dict[CollectionStatus, float] = {
     CollectionStatus.DEGRADED: 0.25,
     CollectionStatus.FAILED: 0.0,
 }
+
+_MISSING_SCOPE_ERROR = "missing_evidence_query_scope"
+
+
+def _format_time_range_value(value: datetime) -> str:
+    """Render a UTC timestamp for query tool ``time_range`` fields."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    else:
+        value = value.astimezone(UTC)
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _parse_occurred_at(event_blob: Any) -> datetime | None:
+    """Extract ``occurred_at`` from EventContext.event (dict or model-like)."""
+    if event_blob is None:
+        return None
+    raw = event_blob.get("occurred_at") if isinstance(event_blob, dict) else None
+    if raw is None and not isinstance(event_blob, dict):
+        raw = getattr(event_blob, "occurred_at", None)
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw.astimezone(UTC) if raw.tzinfo is not None else raw.replace(tzinfo=UTC)
+    text = str(raw).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def time_range_around_occurred_at(
+    occurred_at: datetime,
+    *,
+    hours_before: float = 1.0,
+    hours_after: float = 1.0,
+) -> dict[str, str]:
+    """Build a symmetric investigation window around ``occurred_at``."""
+    anchor = occurred_at.astimezone(UTC) if occurred_at.tzinfo is not None else occurred_at.replace(
+        tzinfo=UTC
+    )
+    start = anchor - timedelta(hours=hours_before)
+    end = anchor + timedelta(hours=hours_after)
+    return {
+        "start": _format_time_range_value(start),
+        "end": _format_time_range_value(end),
+    }
 
 
 class EvidenceRepository(Protocol):
@@ -206,6 +258,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         evidence_parser: EvidenceParser | None = None,
         default_time_range: dict[str, str] | None = None,
+        window_hours_before: float = 1.0,
+        window_hours_after: float = 1.0,
         query_timeout_s: float = 10.0,
     ) -> None:
         super().__init__(
@@ -227,6 +281,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             self.evidence_repository = InMemoryEvidenceRepository()
         self.parser = evidence_parser or EvidenceParser()
         self.default_time_range = dict(default_time_range or DEFAULT_TIME_RANGE)
+        self.window_hours_before = window_hours_before
+        self.window_hours_after = window_hours_after
         self.query_timeout_s = query_timeout_s
         # Populated each run for agent_trace / acceptance checks.
         self.last_query_timings: list[dict[str, Any]] = []
@@ -238,13 +294,18 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
 
         self.last_query_timings = []
         self.last_persist_error = None
-        time_range = self._resolve_time_range(input)
+        time_range = await self._resolve_time_range(input)
         collected: list[Evidence] = []
         success_sources: list[str] = []
         failed_sources: list[str] = []
         gaps: list[EvidenceGap] = []
 
         scope = await self._resolve_scope(input.event_id)
+        if scope is None and self.event_service is None:
+            logger.warning(
+                "EvidenceAgent event_service is not configured; "
+                "evidence queries require a trusted EventService scope"
+            )
 
         for tool_name in EVIDENCE_QUERY_ORDER:
             source = TOOL_SOURCE_MAP[tool_name]
@@ -308,12 +369,17 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             )
 
             if tool_result is None or tool_result.status not in _SUCCESS_STATUSES:
+                gap_reason = (
+                    "missing_scope"
+                    if call_error == _MISSING_SCOPE_ERROR
+                    else "tool_failed"
+                )
                 failed_sources.append(source_value)
                 gaps.append(
                     EvidenceGap(
                         event_id=input.event_id,
                         missing_source=source,
-                        reason="tool_failed",
+                        reason=gap_reason,
                         detail={
                             "tool_name": tool_name,
                             "execution_time_ms": timing_ms,
@@ -391,18 +457,11 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         scope: EvidenceQueryScope | None,
     ) -> tuple[ToolResult | None, int, str | None]:
         assert self.tool_executor is not None
+        if scope is None:
+            return None, 0, _MISSING_SCOPE_ERROR
         started = time.perf_counter()
         try:
-            if scope is not None:
-                with bind_evidence_query_scope(scope):
-                    result = await self.tool_executor.call(
-                        tool_name,
-                        params,
-                        event_id,
-                        timeout=self.query_timeout_s,
-                        agent_name=self.agent_name,
-                    )
-            else:
+            with bind_evidence_query_scope(scope):
                 result = await self.tool_executor.call(
                     tool_name,
                     params,
@@ -543,7 +602,24 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 exc_info=True,
             )
 
-    def _resolve_time_range(self, _input: EvidenceAgentInput) -> dict[str, str]:
+    async def _resolve_time_range(self, input: EvidenceAgentInput) -> dict[str, str]:
+        """Prefer EventContext.event.occurred_at; fall back to configured default."""
+        if self.working_memory is not None:
+            try:
+                event_blob = await self.working_memory.read(input.event_id, "event")
+                occurred_at = _parse_occurred_at(event_blob)
+                if occurred_at is not None:
+                    return time_range_around_occurred_at(
+                        occurred_at,
+                        hours_before=self.window_hours_before,
+                        hours_after=self.window_hours_after,
+                    )
+            except Exception:
+                logger.debug(
+                    "failed to derive time_range from EventContext.event for event=%s",
+                    input.event_id,
+                    exc_info=True,
+                )
         return dict(self.default_time_range)
 
     def _build_params(

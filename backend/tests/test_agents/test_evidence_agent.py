@@ -12,6 +12,8 @@ from app.agents.evidence_agent import (
     EVIDENCE_QUERY_ORDER,
     EvidenceAgent,
     InMemoryEvidenceRepository,
+    SqlAlchemyEvidenceRepository,
+    time_range_around_occurred_at,
 )
 from app.agents.evidence_parser import TOOL_SOURCE_MAP, EvidenceParser
 from app.models.agent_io import (
@@ -191,9 +193,26 @@ def _build_agent(
         tool_executor=tool_executor,
         working_memory=wm,
         evidence_repository=evidence_repo,
-        event_service=event_service or _EventScopeService(),
+        event_service=event_service if event_service is not None else _EventScopeService(),
         trace_service=trace_service,
         default_time_range=dict(WINDOW),
+    )
+
+
+async def _seed_event_context(
+    wm: _FakeWorkingMemory,
+    event_id: str,
+    *,
+    occurred_at: str = "2024-06-15T09:00:00Z",
+) -> None:
+    """Seed EventContext.event so EvidenceAgent derives the query window."""
+    await wm.write(
+        event_id,
+        "event",
+        {
+            "event_id": event_id,
+            "occurred_at": occurred_at,
+        },
     )
 
 
@@ -206,6 +225,7 @@ async def test_all_seven_sources_completed_timeline_and_persistence(
 ) -> None:
     """Main scenario: >=5 success sources, monotonic timeline, persist + WM."""
     event_id = f"evt-evd-all-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
     agent = _build_agent(
         tool_executor=tool_executor,
         wm=wm,
@@ -272,6 +292,7 @@ async def test_three_tool_failures_partial_done_penalty(
     partial_done. Force-fail 3 of 7 tools (leave 4 successful) to match the rule.
     """
     event_id = f"evt-evd-partial-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
     fail_tools = {
         "query_dns",
         "query_asset_info",
@@ -312,6 +333,7 @@ async def test_all_tools_failed_returns_failed_without_raise(
 ) -> None:
     """All failures: collection_status=failed, no exception."""
     event_id = f"evt-evd-fail-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
     flaky = _FlakyExecutor(tool_executor, set(EVIDENCE_QUERY_ORDER))
     agent = _build_agent(
         tool_executor=flaky,
@@ -414,6 +436,7 @@ async def test_evidence_table_count_matches_list_after_upsert(
 ) -> None:
     """Evidence repository row count matches evidence_list."""
     event_id = f"evt-evd-count-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
     agent = _build_agent(
         tool_executor=tool_executor,
         wm=wm,
@@ -446,6 +469,7 @@ async def test_agent_trace_payload_includes_query_timings(
 ) -> None:
     """Acceptance: agent_trace output_data carries per-query timings."""
     event_id = f"evt-evd-trace-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
     agent = _build_agent(
         tool_executor=tool_executor,
         wm=wm,
@@ -476,6 +500,7 @@ async def test_persist_failure_is_visible_in_trace_and_agent_state(
 ) -> None:
     """DB upsert failure must not be silent: last_persist_error + trace persist_ok=false."""
     event_id = f"evt-evd-persist-fail-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
     agent = _build_agent(
         tool_executor=tool_executor,
         wm=wm,
@@ -500,3 +525,231 @@ async def test_persist_failure_is_visible_in_trace_and_agent_state(
     assert any(row.get("status") == "persist_failed" for row in payload["query_timings"])
     notes = wm.scratchpad.get(event_id, [])
     assert any("persist_failed" in note for note in notes)
+
+
+async def test_time_range_derived_from_event_occurred_at(wm: _FakeWorkingMemory) -> None:
+    """Query window is centered on EventContext.event.occurred_at."""
+    event_id = f"evt-evd-window-{new_sfx()}"
+    await _seed_event_context(wm, event_id, occurred_at="2024-06-15T09:30:00Z")
+    agent = EvidenceAgent(working_memory=wm, tool_executor=object())
+    resolved = await agent._resolve_time_range(
+        EvidenceAgentInput(event_id=event_id, triage_result=_main_scenario_triage())
+    )
+    expected = time_range_around_occurred_at(datetime(2024, 6, 15, 9, 30, tzinfo=UTC))
+    assert resolved == expected
+    assert resolved != dict(WINDOW)
+
+
+async def test_five_tool_failures_degraded_penalty(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """Success sources 1–2 → degraded with 0.25 penalty."""
+    event_id = f"evt-evd-degraded-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    fail_tools = {
+        "query_file_access",
+        "query_network_flow",
+        "query_dns",
+        "query_asset_info",
+        "query_threat_intel",
+    }
+    flaky = _FlakyExecutor(tool_executor, fail_tools)
+    agent = _build_agent(tool_executor=flaky, wm=wm, evidence_repo=evidence_repo)
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(
+                EvidenceAgentInput(event_id=event_id, triage_result=_main_scenario_triage())
+            )
+
+    assert output.collection_status is CollectionStatus.DEGRADED
+    assert 1 <= len(output.success_sources) <= 2
+    unpenalized = EvidenceAgent._overall_confidence(
+        output.evidence_list,
+        CollectionStatus.COMPLETED,
+    )
+    expected = max(0.0, min(1.0, unpenalized - 0.25))
+    assert abs(output.overall_confidence - expected) < 1e-9
+
+
+async def test_missing_event_service_marks_missing_scope_gaps(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """Without event_service every query gap uses reason=missing_scope."""
+    event_id = f"evt-evd-noscope-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    agent = EvidenceAgent(
+        tool_executor=tool_executor,
+        working_memory=wm,
+        evidence_repository=evidence_repo,
+        event_service=None,
+        default_time_range=dict(WINDOW),
+    )
+    with bind_evidence_projection(evidence_projection):
+        output = await agent.execute(
+            EvidenceAgentInput(event_id=event_id, triage_result=_main_scenario_triage())
+        )
+
+    assert output.collection_status is CollectionStatus.FAILED
+    assert len(output.gaps) == len(EVIDENCE_QUERY_ORDER)
+    assert all(gap.reason == "missing_scope" for gap in output.gaps)
+    assert len(output.failed_sources) == len(EVIDENCE_QUERY_ORDER)
+
+
+class _EmptyDnsExecutor:
+    """Return SUCCESS with empty records for DNS to exercise no_records gaps."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    async def call(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        event_id: str,
+        **kwargs: Any,
+    ) -> ToolResult:
+        if tool_name == "query_dns":
+            return ToolResult(
+                call_id=f"call-empty-{new_sfx()}",
+                tool_name=tool_name,
+                provider_name="test",
+                status=ToolResultStatus.SUCCESS,
+                confidence=0.8,
+                data={"records": [], "source_references": []},
+                execution_time_ms=2,
+            )
+        return await self._inner.call(tool_name, params, event_id, **kwargs)
+
+
+async def test_empty_records_counts_as_gap_not_success_source(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """Tool SUCCESS with zero parsed rows is a no_records gap, not a success source."""
+    event_id = f"evt-evd-empty-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    executor = _EmptyDnsExecutor(tool_executor)
+    agent = _build_agent(tool_executor=executor, wm=wm, evidence_repo=evidence_repo)
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(
+                EvidenceAgentInput(event_id=event_id, triage_result=_main_scenario_triage())
+            )
+
+    dns = EvidenceSource.DNS.value
+    assert dns not in output.success_sources
+    assert dns not in output.failed_sources
+    dns_gaps = [gap for gap in output.gaps if gap.missing_source is EvidenceSource.DNS]
+    assert len(dns_gaps) == 1
+    assert dns_gaps[0].reason == "no_records"
+
+
+@pytest.mark.integration
+async def test_sqlalchemy_evidence_upsert_keeps_higher_confidence() -> None:
+    """Postgres upsert retains the higher-confidence row on evidence_id conflict."""
+    import os
+    from pathlib import Path
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy import delete, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from app.db import models as orm
+    from app.models.enums import (
+        DispositionPolicy,
+        EventStatus,
+        EventType,
+        FinalVerdict,
+        Severity,
+        SourceObjectKind,
+    )
+    from tests.test_services.test_state_machine_service import _ref
+
+    database_url = os.environ.get(
+        "DATABASE_URL",
+        "postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace",
+    )
+    backend_dir = Path(__file__).resolve().parents[2]
+    cfg = Config(str(backend_dir / "alembic.ini"))
+    cfg.set_main_option("script_location", str(backend_dir / "migrations"))
+
+    engine = create_async_engine(database_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+    except Exception:
+        await engine.dispose()
+        pytest.skip("PostgreSQL not reachable; start Compose postgres first")
+
+    command.upgrade(cfg, "head")
+    session_factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    repo = SqlAlchemyEvidenceRepository(session_factory)
+    event_id = f"evt-evd-sql-{new_sfx()}"
+    evidence_id = new_evidence_id()
+    now = datetime.now(UTC)
+    ref = _ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-{new_sfx()}")
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type=EventType.OTHER.value,
+                    title="evidence-upsert-test",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.LOW.value,
+                    risk_score=1,
+                    confidence=0.5,
+                    final_verdict=FinalVerdict.NONE.value,
+                    creation_source_ref=ref.model_dump(mode="json"),
+                    source_reference_snapshots=[ref.model_dump(mode="json")],
+                    disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+                    occurred_at=now,
+                )
+            )
+
+    low = Evidence(
+        evidence_id=evidence_id,
+        event_id=event_id,
+        source=EvidenceSource.IDENTITY,
+        evidence_type="login",
+        description="low confidence",
+        confidence=0.30,
+        timestamp=now,
+    )
+    high = Evidence(
+        evidence_id=evidence_id,
+        event_id=event_id,
+        source=EvidenceSource.IDENTITY,
+        evidence_type="login",
+        description="high confidence",
+        confidence=0.90,
+        timestamp=now,
+    )
+    try:
+        await repo.upsert_batch([low])
+        await repo.upsert_batch([high])
+        rows = await repo.list_by_event(event_id)
+        assert len(rows) == 1
+        assert rows[0].evidence_id == evidence_id
+        assert rows[0].confidence == 0.90
+        assert rows[0].description == "high confidence"
+    finally:
+        async with session_factory() as session:
+            async with session.begin():
+                await session.execute(delete(orm.Evidence).where(orm.Evidence.event_id == event_id))
+                await session.execute(
+                    delete(orm.SecurityEvent).where(orm.SecurityEvent.event_id == event_id)
+                )
+        await engine.dispose()
