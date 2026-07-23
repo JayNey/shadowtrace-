@@ -37,9 +37,13 @@ from app.models.enums import (
 from app.models.ids import report_id_for_event
 from app.models.report import InvestigationReport
 from app.models.security_event import EventSummary
-from app.models.workflow import FP_HIGH_THRESHOLD
+from app.models.workflow import FP_HIGH_THRESHOLD, FP_LOW_THRESHOLD
 from app.orchestration.workflow_graph import rag_node
-from app.services.analysis_only_pipeline import AnalysisOnlyPipeline, assert_analysis_only_mode
+from app.services.analysis_only_pipeline import (
+    AnalysisOnlyPipeline,
+    assert_analysis_only_mode,
+    run_rag_stage,
+)
 from tests.integration.rag_scenario_fixtures import (
     FakeEventService,
     FakeWorkingMemory,
@@ -153,6 +157,105 @@ def test_rag_boosts_rule_baseline_for_main_scenario() -> None:
     )
     assert with_rag >= baseline
     assert with_rag >= 70.0
+
+
+def test_rag_threat_intel_bonus_caps_at_ten() -> None:
+    engine = RiskScoringEngine()
+    empty = EvidenceOutput(
+        evidence_list=[],
+        overall_confidence=0.0,
+        collection_status=CollectionStatus.FAILED,
+    )
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=True,
+    )
+    techniques = [
+        AttackTechniqueMatch(
+            technique_id=f"T1567.00{i}",
+            technique_name=f"technique {i}",
+            tactics=["exfiltration"],
+            match_confidence=0.9,
+            citation_id=f"cit-{i}",
+        )
+        for i in range(4)
+    ]
+    scores = engine.score(
+        triage_result=triage,
+        evidence_output=empty,
+        rag_output=RAGOutput(attack_techniques=techniques),
+    )
+    assert scores["threat_intel"][0] == 70.0
+    assert "+10" in scores["threat_intel"][1]
+
+
+def test_rag_attack_stage_uses_deepest_tactic() -> None:
+    engine = RiskScoringEngine()
+    empty = EvidenceOutput(
+        evidence_list=[],
+        overall_confidence=0.0,
+        collection_status=CollectionStatus.FAILED,
+    )
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=True,
+    )
+    rag = RAGOutput(
+        attack_techniques=[
+            AttackTechniqueMatch(
+                technique_id="T1078",
+                technique_name="Valid Accounts",
+                tactics=["initial_access"],
+                match_confidence=0.7,
+                citation_id="cit-low",
+            ),
+            AttackTechniqueMatch(
+                technique_id="T1486",
+                technique_name="Data Encrypted for Impact",
+                tactics=["impact"],
+                match_confidence=0.85,
+                citation_id="cit-high",
+            ),
+        ]
+    )
+    scores = engine.score(triage_result=triage, evidence_output=empty, rag_output=rag)
+    assert scores["attack_stage"][0] >= 95.0
+
+
+def test_rag_medium_fp_similarity_possible_false_positive() -> None:
+    resolver = VerdictResolver()
+    medium_score = (FP_LOW_THRESHOLD + FP_HIGH_THRESHOLD) / 2
+    verdict = resolver.resolve(
+        RiskAssessment(
+            risk_score=55,
+            severity=Severity.MEDIUM,
+            confidence=0.6,
+            scoring_mode=ScoringMode.RULE_ONLY,
+        ),
+        rag_output=RAGOutput(
+            fp_similarity=FpSimilarity(max_score=medium_score, matched_case_id="fp-medium")
+        ),
+    )
+    assert verdict is FinalVerdict.POSSIBLE_FALSE_POSITIVE
+
+
+@pytest.mark.asyncio
+async def test_run_rag_stage_degrades_on_wrong_type() -> None:
+    class _WrongTypeRAG:
+        async def execute(self, input: Any) -> Any:
+            return {"unexpected": "payload"}
+
+    event_id = f"evt-rag-wrong-{uuid4().hex[:8]}"
+    output, degraded = await run_rag_stage(
+        _WrongTypeRAG(),
+        event_id=event_id,
+        triage_result=main_triage(),
+        evidence_output=main_evidence(event_id),
+    )
+    assert output is None
+    assert degraded is True
 
 
 @pytest.mark.asyncio
