@@ -61,7 +61,6 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TOOL_MODE", "mock")
     monkeypatch.setenv("SOURCE_MODE", "mock_xdr")
     monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
-    monkeypatch.setenv("SIMULATION_ENABLED", "true")
 
 
 async def _create_event(
@@ -71,15 +70,16 @@ async def _create_event(
     description: str = "Test event description",
     event_type: EventType = EventType.INSIDER_THREAT,
     severity: Severity = Severity.HIGH,
+    source_type: str = "manual",
 ) -> str:
-    """Create a minimal manual event and return its event_id."""
+    """Create a minimal event and return its event_id."""
     raw_alert: dict[str, Any] = {
         "title": title,
         "description": description,
     }
     event = await event_service.create_event(
         raw_alert,
-        source_type="manual",
+        source_type=source_type,
         title=title,
         event_type=event_type,
         severity=severity,
@@ -388,15 +388,16 @@ async def test_low_severity_short_circuit(
         ),
         event_type=EventType.ACCOUNT_ANOMALY,
         severity=Severity.LOW,
+        source_type="file",
     )
 
-    # Override disposition_policy to not_required.
-    async with session_factory() as session:
-        async with session.begin():
-            row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
-            assert row is not None
-            row.disposition_policy = DispositionPolicy.NOT_REQUIRED.value
-            await session.flush()
+    # Verify create_event defaults to not_required for manual-source events.
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert event.disposition_policy == DispositionPolicy.NOT_REQUIRED, (
+        f"expected NOT_REQUIRED disposition from create_event, "
+        f"got {event.disposition_policy}"
+    )
 
     pipeline = await _build_pipeline(
         event_service,
@@ -491,17 +492,21 @@ async def test_data_source_degradation_partial_done(
 
     # Verify evidence output reflects degraded collection.
     evidence_output = await context_store.get(event_id, "evidence_output")
-    if evidence_output is not None:
-        coll_status = (
-            evidence_output.get("collection_status")
-            if isinstance(evidence_output, dict)
-            else getattr(evidence_output, "collection_status", None)
-        )
-        if coll_status is not None:
-            assert coll_status in (
-                CollectionStatus.PARTIAL_DONE.value,
-                CollectionStatus.DEGRADED.value,
-            ), f"expected degraded collection status, got {coll_status}"
+    assert evidence_output is not None, (
+        "evidence_output must be persisted to context store"
+    )
+    coll_status = (
+        evidence_output.get("collection_status")
+        if isinstance(evidence_output, dict)
+        else getattr(evidence_output, "collection_status", None)
+    )
+    assert coll_status is not None, (
+        "collection_status must be set in evidence_output"
+    )
+    assert coll_status in (
+        CollectionStatus.PARTIAL_DONE.value,
+        CollectionStatus.DEGRADED.value,
+    ), f"expected degraded collection status, got {coll_status}"
 
     # Report still generated with 15 sections.
     report = await event_service.get_report(event_id=event_id)
@@ -585,6 +590,18 @@ async def test_llm_degradation_fallback(
 
     # Risk score must be meaningful (rule-only scoring path).
     assert event.risk_score >= 0
+
+    # Verify rule-only scoring mode was used (LLM degradation fallback).
+    risk_output = await context_store.get(event_id, "risk_assessment")
+    if risk_output is not None:
+        scoring_mode = (
+            risk_output.get("scoring_mode")
+            if isinstance(risk_output, dict)
+            else getattr(risk_output, "scoring_mode", None)
+        )
+        assert scoring_mode == "rule_only", (
+            f"expected rule_only scoring under LLM degradation, got {scoring_mode}"
+        )
 
     # Report must exist (template-based when LLM fails).
     report = await event_service.get_report(event_id=event_id)

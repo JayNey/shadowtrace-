@@ -10,6 +10,7 @@ from app.agents.report_agent import ReportAgent
 from app.agents.report_section_builder import ReportSectionBuilder
 from app.agents.response_agent import ResponseAgent
 from app.agents.risk_agent import RiskAgent
+from app.agents.triage_agent import TriageAgent
 from app.agents.risk_scoring_engine import RiskScoringEngine, severity_from_score
 from app.agents.verdict_resolver import VerdictResolver
 from app.models.agent_io import (
@@ -52,6 +53,7 @@ __all__ = [
     "RiskScoringEngine",
     "SuperAgentInput",
     "ToolAgentInput",
+    "TriageAgent",
     "TriageAgentInput",
     "VerdictResolver",
     "VerifyAgentInput",

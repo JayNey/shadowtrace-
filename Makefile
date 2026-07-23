@@ -24,7 +24,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down test lint fmt migrate migrate-down load-kb integration-test test-tools ci-lint ci-test ci-build
+.PHONY: up down test lint fmt migrate migrate-down load-kb integration-test test-tools test-e2e ci-lint ci-test ci-build
 
 up:
 	$(COMPOSE) up -d --build
@@ -69,6 +69,11 @@ test-tools:
 		tests/integration/test_tool_system.py -v -m "not integration" \
 		--cov=app.tools --cov=app.providers.tools \
 		--cov-report=term-missing --cov-fail-under=80
+
+# --- ISSUE-039 e2e basic loop integration tests ------------------------- #
+test-e2e:
+	cd backend && $(PYTHON) -m pytest tests/integration/test_e2e_basic_loop.py \
+		-m e2e_basic -v
 
 # --- ISSUE-017 data-foundation integration quality gate ------------------ #
 integration-test:
