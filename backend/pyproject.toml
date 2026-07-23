@@ -66,6 +66,7 @@ select = ["E", "F", "I", "UP", "B"]
 # FastAPI `Depends(...)` defaults are idiomatic; B008 is noisy inside route factories.
 [tool.ruff.lint.per-file-ignores]
 "app/mock_xdr/api.py" = ["B008"]
+"app/api/v1/events.py" = ["B008"]
 
 [tool.mypy]
 python_version = "3.11"

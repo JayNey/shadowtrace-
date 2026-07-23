@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -11,10 +13,22 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.api.v1 import schemas as s
+from app.api.v1.deps import get_event_service as _real_get_event_service
+from app.api.v1.deps import get_pipeline as _real_get_pipeline
+from app.api.v1.deps import get_state_machine as _real_get_state_machine
 from app.api.v1.errors import register_exception_handlers
 from app.core.errors import ValidationError as DomainValidationError
 from app.main import app
 from app.models.disposition import DispositionCommand
+from app.models.enums import (
+    DispositionPolicy,
+    EventStatus,
+    EventType,
+    FinalVerdict,
+    Severity,
+    SourceDisposition,
+    SourceObjectKind,
+)
 
 # (method, path) pairs for every core endpoint in intro §4.2.2.
 CORE_ENDPOINTS = {
@@ -70,11 +84,101 @@ def _dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def client() -> TestClient:
-    return TestClient(app)
+    """Return a TestClient with mock service overrides for contract tests."""
+    # Build a lightweight mock EventService that works without a database.
+    mock_es = _MockEventService()
+    app.dependency_overrides[_real_get_event_service] = lambda: mock_es
+    app.dependency_overrides[_real_get_state_machine] = lambda: _MockStateMachine()
+    yield TestClient(app)
+    app.dependency_overrides.clear()
 
 
 def _hdr(role: str = "analyst") -> dict[str, str]:
     return {"Authorization": f"Bearer {role}-token"}
+
+
+# --------------------------------------------------------------------------- #
+# Mock services for contract tests (no DB required)
+# --------------------------------------------------------------------------- #
+
+
+class _MockEventService:
+    """Minimal mock returning example data for contract validation."""
+
+    @staticmethod
+    def _example_event() -> Any:
+        evt = s.example_security_event(s.EXAMPLE_EVENT_ID)
+        evt.disposition_policy = DispositionPolicy.NOT_REQUIRED
+        return evt
+
+    async def get_event(self, event_id: str) -> Any:
+        if event_id == s.EXAMPLE_EVENT_ID:
+            return self._example_event()
+        if event_id == s.EXAMPLE_CLOSED_EVENT_ID:
+            evt = self._example_event()
+            evt.status = EventStatus.CLOSED
+            return evt
+        return None
+
+    async def list_events(self, **kwargs: Any) -> Any:
+        from dataclasses import dataclass
+
+        @dataclass
+        class _Result:
+            items: list
+            total: int
+            page: int
+            page_size: int
+
+        return _Result(
+            items=[self._example_event()],
+            total=1,
+            page=kwargs.get("page", 1),
+            page_size=kwargs.get("page_size", 20),
+        )
+
+    async def create_event(self, raw_alert: Any, source_type: str = "file", **kwargs: Any) -> Any:
+        return self._example_event()
+
+    async def get_report(self, *, report_id: str | None = None, event_id: str | None = None) -> Any:
+        if event_id == s.EXAMPLE_EVENT_ID:
+            return s.example_report(event_id)
+        return None
+
+    async def set_final_verdict(self, event_id: str, verdict: Any, **kwargs: Any) -> Any:
+        evt = self._example_event()
+        evt.final_verdict = verdict
+        return evt
+
+    async def transition_status(self, event_id: str, target: Any, **kwargs: Any) -> Any:
+        evt = self._example_event()
+        evt.status = target
+        return evt
+
+
+class _MockStateMachine:
+    """Minimal mock StateMachine for contract tests."""
+
+    async def transition(self, event_id: str, target: Any, **kwargs: Any) -> Any:
+        evt = s.example_security_event(s.EXAMPLE_EVENT_ID)
+        evt.status = target
+        return evt
+
+    async def get_current_status(self, event_id: str) -> Any:
+        if event_id == s.EXAMPLE_CLOSED_EVENT_ID:
+            return EventStatus.CLOSED
+        return EventStatus.NEW
+
+    async def force_close(self, event_id: str, principal: str, reason: str) -> Any:
+        evt = s.example_security_event(event_id)
+        evt.status = EventStatus.CLOSED
+        evt.external_unsynced = True
+        return evt
+
+
+# --------------------------------------------------------------------------- #
+# Tests
+# --------------------------------------------------------------------------- #
 
 
 def test_openapi_has_all_core_paths_and_methods() -> None:
