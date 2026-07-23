@@ -36,6 +36,7 @@ class CollectionStatus(StrEnum):
     PARTIAL_DONE = "partial_done"
     DEGRADED = "degraded"
     FAILED = "failed"
+    NOT_APPLICABLE = "not_applicable"
 
 
 class StorylineGeneratedBy(StrEnum):

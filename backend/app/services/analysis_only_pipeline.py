@@ -260,7 +260,6 @@ class AnalysisOnlyPipeline:
         """Generate and persist the investigation report."""
         report_input = ReportAgentInput(
             event_id=event_id,
-            triage_result=triage_result,
             evidence_output=evidence_output,
             risk_assessment=risk_assessment,
         )
@@ -325,10 +324,14 @@ class AnalysisOnlyPipeline:
         # Generate quick-close report first (satisfies CLOSED gate's report_exists),
         # then transition directly TRIAGING→CLOSED.
         # TRIAGING→REPORTING is an illegal edge in STATE_TRANSITIONS; going
-        # directly to CLOSED matches close_event's TRIAGING path (events.py:548-565)
-        # and ISSUE-038's "TRIAGING + not_required → quick close" spec.
+        # directly to CLOSED matches the TRIAGING→CLOSED gate validated at
+        # workflow.py:606-641 (disposition_policy=not_required + low/fp).
+        # Also matches ISSUE-038's "TRIAGING + not_required → quick close" spec.
 
         # Build placeholder evidence/risk for the quick-close report.
+        # Evidence collection is intentionally skipped for short-circuit events,
+        # so collection_status is NOT_APPLICABLE — this placeholder is never
+        # persisted to EventContext; it only feeds ReportAgent's template.
         placeholder_evidence = EvidenceOutput(
             evidence_list=[],
             conflicts=[],
@@ -336,7 +339,7 @@ class AnalysisOnlyPipeline:
             success_sources=[],
             failed_sources=[],
             overall_confidence=0.0,
-            collection_status=CollectionStatus.COMPLETED,
+            collection_status=CollectionStatus.NOT_APPLICABLE,
         )
         placeholder_risk = RiskAssessment(
             risk_score=0,

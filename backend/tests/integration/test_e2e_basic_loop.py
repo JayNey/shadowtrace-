@@ -328,6 +328,12 @@ async def test_golden_path_alert_to_report(
     assert len(report.sections) == 15, f"expected 15 sections, got {len(report.sections)}"
     assert report.final_verdict == FinalVerdict.CONFIRMED_THREAT
 
+    # EventContext.report must also exist (Redis layer).
+    ec_report = await context_store.get(event_id, "report")
+    assert ec_report is not None, "EventContext.report should exist after pipeline run"
+    assert isinstance(ec_report, dict)
+    assert len(ec_report.get("sections", [])) == 15
+
     # risk_score ≥ 70 for confirmed threat.
     assert event.risk_score >= 70, f"risk_score={event.risk_score} < 70"
 
@@ -432,6 +438,15 @@ async def test_low_severity_short_circuit(
     assert report is not None, "quick-close report should exist"
     assert len(report.sections) == 15, f"expected 15 sections, got {len(report.sections)}"
 
+    # EventContext.report must also exist (Redis layer); guards against
+    # ReportAgent._write_context silently failing when Redis is unavailable.
+    ec_report = await context_store.get(event_id, "report")
+    assert ec_report is not None, "EventContext.report should exist after quick-close"
+    assert isinstance(ec_report, dict)
+    assert len(ec_report.get("sections", [])) == 15, (
+        f"EventContext.report expected 15 sections, got {len(ec_report.get('sections', []))}"
+    )
+
     # Audit trail covers transitions.
     audit_count = await _count_audit_logs(session_factory, event_id)
     assert audit_count >= 2, f"expected ≥2 audit entries, got {audit_count}"
@@ -503,15 +518,23 @@ async def test_data_source_degradation_partial_done(
     assert coll_status is not None, (
         "collection_status must be set in evidence_output"
     )
-    assert coll_status in (
-        CollectionStatus.PARTIAL_DONE.value,
-        CollectionStatus.DEGRADED.value,
-    ), f"expected degraded collection status, got {coll_status}"
+    # 3/7 tools fail → 4 succeed → partial_done (threshold: <5 success = degraded).
+    # Issue requires partial_done specifically; DEGRADED would mask a
+    # success_count 1-2 bug.
+    assert coll_status == CollectionStatus.PARTIAL_DONE.value, (
+        f"expected partial_done (4/7 success), got {coll_status}"
+    )
 
     # Report still generated with 15 sections.
     report = await event_service.get_report(event_id=event_id)
     assert report is not None, "report should exist after degraded pipeline run"
     assert len(report.sections) == 15
+
+    # EventContext.report must also exist (Redis layer).
+    ec_report = await context_store.get(event_id, "report")
+    assert ec_report is not None, "EventContext.report should exist after degraded run"
+    assert isinstance(ec_report, dict)
+    assert len(ec_report.get("sections", [])) == 15
 
     # Trace and audit integrity.
     trace_count = await _count_traces(session_factory, event_id)
@@ -589,7 +612,11 @@ async def test_llm_degradation_fallback(
     ), f"regex triage failed — got {event.event_type}"
 
     # Risk score must be meaningful (rule-only scoring path).
-    assert event.risk_score >= 0
+    # risk_score is 0-100 by schema; >= 0 would be a no-op assertion.
+    # For a data_exfiltration event, rule-only scoring must yield > 0.
+    assert event.risk_score > 0, (
+        f"rule-only risk_score should be >0 for data exfiltration, got {event.risk_score}"
+    )
 
     # Verify rule-only scoring mode was used (LLM degradation fallback).
     risk_output = await context_store.get(event_id, "risk_assessment")
@@ -608,6 +635,12 @@ async def test_llm_degradation_fallback(
     assert report is not None, "template report should exist after LLM degradation"
     assert len(report.sections) == 15
 
+    # EventContext.report must also exist (Redis layer).
+    ec_report = await context_store.get(event_id, "report")
+    assert ec_report is not None, "EventContext.report should exist after LLM degradation"
+    assert isinstance(ec_report, dict)
+    assert len(ec_report.get("sections", [])) == 15
+
     # Verify traces exist for all agents.
     trace_count = await _count_traces(session_factory, event_id)
     assert trace_count >= 4, f"expected ≥4 agent traces, got {trace_count}"
@@ -622,3 +655,197 @@ async def test_llm_degradation_fallback(
         assert result["status"] == EventStatus.REPORTING.value, (
             "LLM-degraded required-disposition event must stay at REPORTING"
         )
+
+
+# --------------------------------------------------------------------------- #
+# Boundary / failure-path tests (ISSUE-039 review follow-up)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.asyncio
+async def test_pipeline_rejects_live_side_effects(
+    event_service: EventService,
+    state_machine: Any,
+    context_store: EventContextStore,
+    degraded_flags_service: DegradedFlagService,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tool_executor: Any,
+) -> None:
+    """AnalysisOnlyPipeline.run() raises ValidationError when ALLOW_LIVE_SIDE_EFFECTS=true."""
+    _env(monkeypatch)
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "true")
+
+    event_id = await _create_event(event_service)
+    pipeline = await _build_pipeline(
+        event_service, state_machine, context_store,
+        degraded_flags_service, session_factory, tool_executor=tool_executor,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        await pipeline.run(event_id)
+    assert "ALLOW_LIVE_SIDE_EFFECTS=false" in str(exc_info.value)
+
+
+@pytest.mark.timeout(30)
+@pytest.mark.asyncio
+async def test_pipeline_rejects_xdr_writeback(
+    event_service: EventService,
+    state_machine: Any,
+    context_store: EventContextStore,
+    degraded_flags_service: DegradedFlagService,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tool_executor: Any,
+) -> None:
+    """AnalysisOnlyPipeline.run() raises ValidationError when ALLOW_XDR_WRITEBACK=true."""
+    _env(monkeypatch)
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "true")
+
+    event_id = await _create_event(event_service)
+    pipeline = await _build_pipeline(
+        event_service, state_machine, context_store,
+        degraded_flags_service, session_factory, tool_executor=tool_executor,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        await pipeline.run(event_id)
+    assert "ALLOW_XDR_WRITEBACK=false" in str(exc_info.value)
+
+
+@pytest.mark.timeout(90)
+@pytest.mark.asyncio
+async def test_short_circuit_no_evidence_persisted(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+    state_machine: Any,
+    context_store: EventContextStore,
+    degraded_flags_service: DegradedFlagService,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_executor: Any,
+    redis_client: RedisClient,
+) -> None:
+    """Short-circuit path does NOT call EvidenceAgent and leaves no evidence_output.
+
+    A low-severity event with not_required disposition short-circuits at triage;
+    evidence_output should never appear in EventContext since EvidenceAgent is
+    never invoked.
+    """
+    _env(monkeypatch)
+
+    event_id = await _create_event(
+        event_service,
+        title="Benign failed login",
+        description="Single failed login from known IP, no other anomalies.",
+        event_type=EventType.ACCOUNT_ANOMALY,
+        severity=Severity.LOW,
+        source_type="file",
+    )
+
+    pipeline = await _build_pipeline(
+        event_service, state_machine, context_store,
+        degraded_flags_service, session_factory,
+        tool_executor=tool_executor, redis_client=redis_client,
+    )
+
+    result = await pipeline.run(event_id)
+    assert result["status"] == EventStatus.CLOSED.value
+    assert result.get("short_circuit") is True
+
+    # No evidence was collected.
+    evidence_output = await context_store.get(event_id, "evidence_output")
+    assert evidence_output is None, (
+        "evidence_output must NOT exist when EvidenceAgent was never called"
+    )
+
+
+@pytest.mark.timeout(90)
+@pytest.mark.asyncio
+async def test_llm_degradation_triage_degraded_flag(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+    state_machine: Any,
+    context_store: EventContextStore,
+    degraded_flags_service: DegradedFlagService,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_executor: Any,
+    redis_client: RedisClient,
+) -> None:
+    """LLM degradation sets TriageResult.degraded=True when LLM fails.
+
+    TriageAgent must still classify the event via regex fallback and signal
+    degraded=True so downstream systems are aware of the degradation.
+    """
+    _env(monkeypatch)
+
+    failing_llm = FailingLLMClient("simulated LLM failure for triage degraded test")
+
+    event_ids = await _ingest_scenario(event_service, session_factory)
+    assert len(event_ids) >= 1
+    event_id = event_ids[0]
+
+    pipeline = await _build_pipeline(
+        event_service, state_machine, context_store,
+        degraded_flags_service, session_factory,
+        tool_executor=tool_executor, triage_llm=failing_llm,
+    )
+
+    result = await pipeline.run(event_id)
+    assert result["status"] in (EventStatus.REPORTING.value, EventStatus.CLOSED.value)
+
+    # Verify triage degraded flag is set.
+    triage_output = await context_store.get(event_id, "triage_result")
+    assert triage_output is not None, "triage_result must be persisted to EventContext"
+    triage_degraded = (
+        triage_output.get("degraded")
+        if isinstance(triage_output, dict)
+        else getattr(triage_output, "degraded", None)
+    )
+    assert triage_degraded is True, (
+        f"TriageResult.degraded should be True under LLM failure, got {triage_degraded}"
+    )
+
+
+@pytest.mark.timeout(90)
+@pytest.mark.asyncio
+async def test_llm_degradation_report_template(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+    state_machine: Any,
+    context_store: EventContextStore,
+    degraded_flags_service: DegradedFlagService,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_executor: Any,
+    redis_client: RedisClient,
+) -> None:
+    """Report generated_by == 'template' when all LLM calls fail.
+
+    When LLM is unavailable, ReportAgent falls back to template-based generation.
+    The generated_by field on the report must reflect this.
+    """
+    _env(monkeypatch)
+
+    failing_llm = FailingLLMClient("simulated LLM failure for report template test")
+
+    event_ids = await _ingest_scenario(event_service, session_factory)
+    assert len(event_ids) >= 1
+    event_id = event_ids[0]
+
+    pipeline = await _build_pipeline(
+        event_service, state_machine, context_store,
+        degraded_flags_service, session_factory,
+        tool_executor=tool_executor,
+        triage_llm=failing_llm,
+        evidence_llm=failing_llm,
+        risk_llm=failing_llm,
+        report_llm=failing_llm,
+    )
+
+    await pipeline.run(event_id)
+
+    report = await event_service.get_report(event_id=event_id)
+    assert report is not None, "template report should exist"
+    assert report.generated_by == "template", (
+        f"expected generated_by='template' under LLM degradation, got {report.generated_by!r}"
+    )
