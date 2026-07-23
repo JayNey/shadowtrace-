@@ -1,4 +1,4 @@
-"""Real PostgreSQL/Redis fixtures for the ISSUE-017 quality gate."""
+"""Real PostgreSQL/Redis fixtures for the ISSUE-017 quality gate and ISSUE-039 e2e."""
 
 from __future__ import annotations
 
@@ -209,3 +209,92 @@ def degraded_flags_service(
 ) -> DegradedFlagService:
     """Standalone DegradedFlagService (for use alongside state_machine)."""
     return DegradedFlagService(context_store, session_factory)
+
+
+# --------------------------------------------------------------------------- #
+# ISSUE-039 fixtures
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def mock_llm_client() -> Any:
+    """Mock LLM client with golden responses (ISSUE-039 e2e_basic)."""
+    from app.core.llm.mock_client import MockLLMClient
+
+    return MockLLMClient()
+
+
+@pytest.fixture
+def failing_llm_client() -> Any:
+    """LLM client that raises on every call (ISSUE-039 scenario 4)."""
+
+    class _FailingLLMClient:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("llm unavailable")
+
+    return _FailingLLMClient()
+
+
+@pytest.fixture
+def working_memory(
+    context_store: EventContextStore,
+    redis_client: RedisClient,
+    degraded_flags_service: DegradedFlagService,
+) -> Any:
+    """Shared WorkingMemory for integration tests (ISSUE-039)."""
+    from app.services.working_memory import WorkingMemory
+
+    return WorkingMemory(
+        store=context_store,
+        redis=redis_client,
+        degraded_flags=degraded_flags_service,
+    )
+
+
+@pytest.fixture
+def mock_xdr_state_fp() -> MockXDRState:
+    """MockXDRState loaded with account_anomaly_fp scenario (ISSUE-039 scenario 2)."""
+    state = MockXDRState()
+    state.load_scenario(build_scenario("account_anomaly_fp", seed=42))
+    return state
+
+
+@pytest_asyncio.fixture
+async def mock_xdr_client_fp(
+    mock_xdr_state_fp: MockXDRState,
+) -> AsyncIterator[httpx.AsyncClient]:
+    """HTTP client pointed at the account_anomaly_fp mock XDR app (ISSUE-039)."""
+    transport = ASGITransport(app=create_app(state=mock_xdr_state_fp))
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://mock-xdr-fp",
+        timeout=30.0,
+    ) as client:
+        yield client
+
+
+@pytest.fixture
+def source_adapter_fp(
+    mock_xdr_client_fp: httpx.AsyncClient,
+) -> MockXDRSourceAdapter:
+    """MockXDRSourceAdapter for account_anomaly_fp scenario (ISSUE-039 scenario 2)."""
+    return MockXDRSourceAdapter(
+        base_url="http://mock-xdr-fp",
+        read_token="mock-read-token",
+        write_token="mock-write-token",
+        client=mock_xdr_client_fp,
+        max_retries=0,
+    )
+
+
+@pytest.fixture
+def source_ingester_fp(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> SourceIngester:
+    """SourceIngester for account_anomaly_fp scenario (ISSUE-039 scenario 2)."""
+    return SourceIngester(
+        event_service,
+        session_factory,
+        source_mode="mock_xdr",
+    )

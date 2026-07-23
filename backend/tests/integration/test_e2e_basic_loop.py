@@ -61,6 +61,10 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TOOL_MODE", "mock")
     monkeypatch.setenv("SOURCE_MODE", "mock_xdr")
     monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
+    # Clear the lru_cache on get_settings so monkeypatch takes effect.
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
 
 
 async def _create_event(
@@ -201,8 +205,8 @@ async def _build_pipeline(
     )
 
     return AnalysisOnlyPipeline(
-        event_service=event_service,
-        state_machine=state_machine,
+        event_service,
+        state_machine,
         triage_agent=triage,
         evidence_agent=evidence,
         risk_agent=risk,
@@ -366,8 +370,7 @@ async def test_golden_path_alert_to_report(
     # (report, sections, analysis_only_complete, triage_result, etc.).
     disposition_count = len(mock_xdr_state.disposition_by_id)
     assert disposition_count == 0, (
-        f"expected 0 disposition records in analysis-only pipeline, "
-        f"got {disposition_count}"
+        f"expected 0 disposition records in analysis-only pipeline, got {disposition_count}"
     )
 
 
@@ -414,8 +417,7 @@ async def test_low_severity_short_circuit(
     event = await event_service.get_event(event_id)
     assert event is not None
     assert event.disposition_policy == DispositionPolicy.NOT_REQUIRED, (
-        f"expected NOT_REQUIRED disposition from create_event, "
-        f"got {event.disposition_policy}"
+        f"expected NOT_REQUIRED disposition from create_event, got {event.disposition_policy}"
     )
 
     pipeline = await _build_pipeline(
@@ -520,17 +522,13 @@ async def test_data_source_degradation_partial_done(
 
     # Verify evidence output reflects degraded collection.
     evidence_output = await context_store.get(event_id, "evidence_output")
-    assert evidence_output is not None, (
-        "evidence_output must be persisted to context store"
-    )
+    assert evidence_output is not None, "evidence_output must be persisted to context store"
     coll_status = (
         evidence_output.get("collection_status")
         if isinstance(evidence_output, dict)
         else getattr(evidence_output, "collection_status", None)
     )
-    assert coll_status is not None, (
-        "collection_status must be set in evidence_output"
-    )
+    assert coll_status is not None, "collection_status must be set in evidence_output"
     # 3/7 tools fail → 4 succeed → partial_done (threshold: <5 success = degraded).
     # Issue requires partial_done specifically; DEGRADED would mask a
     # success_count 1-2 bug.
@@ -692,8 +690,12 @@ async def test_pipeline_rejects_live_side_effects(
 
     event_id = await _create_event(event_service)
     pipeline = await _build_pipeline(
-        event_service, state_machine, context_store,
-        degraded_flags_service, session_factory, tool_executor=tool_executor,
+        event_service,
+        state_machine,
+        context_store,
+        degraded_flags_service,
+        session_factory,
+        tool_executor=tool_executor,
     )
 
     with pytest.raises(ValidationError) as exc_info:
@@ -718,8 +720,12 @@ async def test_pipeline_rejects_xdr_writeback(
 
     event_id = await _create_event(event_service)
     pipeline = await _build_pipeline(
-        event_service, state_machine, context_store,
-        degraded_flags_service, session_factory, tool_executor=tool_executor,
+        event_service,
+        state_machine,
+        context_store,
+        degraded_flags_service,
+        session_factory,
+        tool_executor=tool_executor,
     )
 
     with pytest.raises(ValidationError) as exc_info:
@@ -757,9 +763,13 @@ async def test_short_circuit_no_evidence_persisted(
     )
 
     pipeline = await _build_pipeline(
-        event_service, state_machine, context_store,
-        degraded_flags_service, session_factory,
-        tool_executor=tool_executor, redis_client=redis_client,
+        event_service,
+        state_machine,
+        context_store,
+        degraded_flags_service,
+        session_factory,
+        tool_executor=tool_executor,
+        redis_client=redis_client,
     )
 
     result = await pipeline.run(event_id)
@@ -799,9 +809,13 @@ async def test_llm_degradation_triage_degraded_flag(
     event_id = event_ids[0]
 
     pipeline = await _build_pipeline(
-        event_service, state_machine, context_store,
-        degraded_flags_service, session_factory,
-        tool_executor=tool_executor, triage_llm=failing_llm,
+        event_service,
+        state_machine,
+        context_store,
+        degraded_flags_service,
+        session_factory,
+        tool_executor=tool_executor,
+        triage_llm=failing_llm,
     )
 
     result = await pipeline.run(event_id)
@@ -846,8 +860,11 @@ async def test_llm_degradation_report_template(
     event_id = event_ids[0]
 
     pipeline = await _build_pipeline(
-        event_service, state_machine, context_store,
-        degraded_flags_service, session_factory,
+        event_service,
+        state_machine,
+        context_store,
+        degraded_flags_service,
+        session_factory,
         tool_executor=tool_executor,
         triage_llm=failing_llm,
         evidence_llm=failing_llm,
