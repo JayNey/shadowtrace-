@@ -53,6 +53,8 @@ class AnalysisOnlyPipeline:
     Only runs in dev/offline mode (ALLOW_LIVE_SIDE_EFFECTS=false,
     ALLOW_XDR_WRITEBACK=false). High-risk required-disposition events
     stay at REPORTING — they never auto-close.
+
+    Requires event in NEW status; call exactly once per event.
     """
 
     def __init__(

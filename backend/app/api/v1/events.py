@@ -21,6 +21,9 @@ from app.api.v1.errors import (
     EventNotFoundError,
     InvalidStateTransitionError,
     WritebackConflictError,
+    WritebackFailedError,
+    WritebackPendingError,
+    WritebackUnsupportedError,
 )
 from app.core.auth import (
     ROLE_ADMIN,
@@ -69,10 +72,19 @@ def _try_get_session_factory() -> async_sessionmaker[AsyncSession] | None:
         from app.api.v1.deps import _get_session_factory
 
         sf = _get_session_factory()
-        # Verify the factory works by trying to create a connection.
         return sf
+    except (ImportError, ModuleNotFoundError):
+        logger.warning(
+            "Database session factory unavailable (missing configuration) — "
+            "returning empty results"
+        )
+        return None
     except Exception:
-        logger.warning("Database session factory unavailable — returning empty results")
+        logger.warning(
+            "Database session factory unavailable (runtime error) — "
+            "returning empty results",
+            exc_info=True,
+        )
         return None
 
 
@@ -125,7 +137,12 @@ async def _build_writeback_info(
                 orm.DispositionOutbox.event_id == event_id,
                 orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
                 orm.DispositionOutbox.latest_writeback_status.in_(
-                    ("pending", "sending", "accepted", "unknown")
+                    (
+                        WritebackStatus.PENDING.value,
+                        WritebackStatus.SENDING.value,
+                        WritebackStatus.ACCEPTED.value,
+                        WritebackStatus.UNKNOWN.value,
+                    )
                 ),
             )
         )
@@ -139,14 +156,14 @@ async def _build_writeback_info(
                 select(func.count(orm.DispositionOutbox.outbox_id)).where(
                     orm.DispositionOutbox.event_id == event_id,
                     orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
-                    orm.DispositionOutbox.latest_writeback_status == "failed",
+                    orm.DispositionOutbox.latest_writeback_status == WritebackStatus.FAILED.value,
                 )
             )
             conflict = await session.scalar(
                 select(func.count(orm.DispositionOutbox.outbox_id)).where(
                     orm.DispositionOutbox.event_id == event_id,
                     orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
-                    orm.DispositionOutbox.latest_writeback_status == "conflict",
+                    orm.DispositionOutbox.latest_writeback_status == WritebackStatus.CONFLICT.value,
                 )
             )
             if int(failed or 0) > 0:
@@ -220,6 +237,15 @@ async def list_events(
     )
     items: list[s.EventListItem] = []
     for event in result.items:
+        wb_required = _writeback_required(event.disposition_policy)
+        # ISSUE-038: list view does not resolve per-event writeback info for
+        # performance reasons. When writeback is required, signal capability
+        # is unknown rather than misleading NOT_CONFIGURED.
+        wb_readiness = (
+            WritebackReadiness.CAPABILITY_UNKNOWN
+            if wb_required
+            else WritebackReadiness.NOT_REQUIRED
+        )
         items.append(
             s.EventListItem(
                 event_id=event.event_id,
@@ -229,8 +255,8 @@ async def list_events(
                 severity=event.severity,
                 risk_score=event.risk_score,
                 final_verdict=event.final_verdict,
-                writeback_required=_writeback_required(event.disposition_policy),
-                writeback_readiness=WritebackReadiness.NOT_CONFIGURED,
+                writeback_required=wb_required,
+                writeback_readiness=wb_readiness,
                 writeback_overall_status=None,
                 pending_writeback_count=0,
                 created_at=event.created_at,
@@ -304,10 +330,12 @@ async def investigate_event(
     if event is None:
         raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
 
-    if event.status == EventStatus.CLOSED:
+    if event.status != EventStatus.NEW:
         raise InvalidStateTransitionError(
-            "cannot investigate a CLOSED event",
-            details={"event_id": event_id, "status": EventStatus.CLOSED.value},
+            f"event must be in NEW status to start investigation, current: {event.status.value}",
+            current=event.status,
+            target=EventStatus.TRIAGING,
+            details={"event_id": event_id},
         )
 
     # Enqueue the pipeline as a background task.
@@ -321,6 +349,15 @@ async def investigate_event(
                 event_id,
                 exc,
             )
+            try:
+                await state_machine.transition(
+                    event_id,
+                    EventStatus.FAILED,
+                    operator="AnalysisOnlyPipeline",
+                    reason=f"pipeline_failed: {exc}",
+                )
+            except Exception:
+                logger.exception("Failed to mark event as FAILED: %s", event_id)
 
     background.add_task(_run_pipeline)
 
@@ -371,10 +408,9 @@ async def close_event(
     # TRIAGING+not_required low/fp→CLOSED.
     if current_status == EventStatus.TRIAGING:
         if event.disposition_policy != DispositionPolicy.NOT_REQUIRED:
-            raise InvalidStateTransitionError(
-                "TRIAGING→CLOSED requires disposition_policy=not_required",
-                current=current_status,
-                target=EventStatus.CLOSED,
+            raise WritebackUnsupportedError(
+                "TRIAGING→CLOSED requires disposition_policy=not_required; "
+                "required-disposition events must go through the disposition-only orchestration chain",
                 details={
                     "event_id": event_id,
                     "disposition_policy": event.disposition_policy.value,
@@ -397,6 +433,39 @@ async def close_event(
             reason=body.reason,
         )
     elif current_status == EventStatus.REPORTING:
+        # ISSUE-038 step 2: writeback gate pre-check.
+        if event.disposition_policy == DispositionPolicy.REQUIRED:
+            from app.api.v1.deps import _get_session_factory
+
+            readiness, wb_status, _pending = await _build_writeback_info(
+                event_id, event.disposition_policy, _get_session_factory()
+            )
+            if readiness == WritebackReadiness.NOT_CONFIGURED:
+                raise WritebackUnsupportedError(
+                    "required disposition_policy but no disposition Action configured",
+                    details={"event_id": event_id},
+                )
+            if readiness not in (WritebackReadiness.READY, WritebackReadiness.NOT_REQUIRED):
+                raise WritebackUnsupportedError(
+                    f"writeback readiness is {readiness.value}",
+                    details={"event_id": event_id, "readiness": readiness.value},
+                )
+            if wb_status in (WritebackStatus.PENDING, WritebackStatus.UNKNOWN):
+                raise WritebackPendingError(
+                    f"writeback is {wb_status.value}",
+                    details={"event_id": event_id, "writeback_status": wb_status.value},
+                )
+            if wb_status == WritebackStatus.FAILED:
+                raise WritebackFailedError(
+                    "writeback failed",
+                    details={"event_id": event_id},
+                )
+            if wb_status == WritebackStatus.CONFLICT:
+                raise WritebackConflictError(
+                    "writeback conflict",
+                    details={"event_id": event_id},
+                )
+
         # Handle final_verdict change before closing.
         if body.final_verdict is not None and body.final_verdict != event.final_verdict:
             await event_service.set_final_verdict(
@@ -485,6 +554,13 @@ async def _db_read(
                 )
             ).all()
         return list(rows), total
+    except (ImportError, ModuleNotFoundError):
+        logger.warning(
+            "DB read skipped for table=%s event=%s (session factory unavailable)",
+            getattr(table, "__tablename__", table),
+            event_id,
+        )
+        return [], 0
     except Exception:
         logger.warning(
             "DB read failed for table=%s event=%s",
