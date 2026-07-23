@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.agents.prompts.storyline_prompt import build_storyline_messages
+from app.core.errors import ShadowTraceError
 
 # LLMError / LLMProviderError are runtime-importable from app.core.llm.base
 # even though only LLMProviderError is listed in __all__.  Catch Exception
@@ -113,6 +114,7 @@ class StorylineService:
             self._bound_wm = working_memory.for_writer("StorylineService")
         else:
             self._bound_wm = None
+        self.last_degraded_reason: str | None = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -237,7 +239,7 @@ class StorylineService:
                     continue
                 evidence_id = str(re_entry.get("evidence_id", ""))
                 # Remove entries whose evidence_id doesn't exist in input (spec: 剔除)
-                if evidence_id and evidence_id not in valid_evidence_ids:
+                if not evidence_id or evidence_id not in valid_evidence_ids:
                     continue
                 entries.append(
                     TimelineEntry(
@@ -294,6 +296,26 @@ class StorylineService:
             evidence_list,
             key=lambda e: _parse_ts(e.get("timestamp")) or _TS_MIN,
         )
+
+        if not sorted_evidence:
+            return AttackStoryline(
+                storyline_id=new_storyline_id(),
+                event_id=event_id,
+                narrative_summary="无足够证据构建攻击链。",
+                phases=[],
+                generated_by=StorylineGeneratedBy.RULE,
+            )
+
+        if len(sorted_evidence) < 3:
+            phases = _build_scarce_single_phase(sorted_evidence)
+            _backfill_technique_ids(phases, technique_matches)
+            return AttackStoryline(
+                storyline_id=new_storyline_id(),
+                event_id=event_id,
+                narrative_summary=_summary_for_phases(phases),
+                phases=phases,
+                generated_by=StorylineGeneratedBy.RULE,
+            )
 
         # Bucket evidence into phases
         phase_buckets: dict[StorylinePhaseName, list[dict[str, Any]]] = defaultdict(list)
@@ -367,8 +389,33 @@ class StorylineService:
                 "storyline",
                 storyline.model_dump(mode="json"),
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("StorylineService WM write failed event=%s", event_id, exc_info=True)
+            await self._mark_degraded(
+                event_id,
+                reason=f"storyline_write_failed: {exc}",
+            )
+
+    async def _mark_degraded(self, event_id: str, *, reason: str) -> None:
+        """Best-effort degraded marker when storyline WM write fails."""
+        self.last_degraded_reason = reason
+        if self._bound_wm is None:
+            return
+        try:
+            await self._bound_wm.write(
+                event_id,
+                "storyline_degraded",
+                {
+                    "degraded": True,
+                    "reason": reason,
+                    "timestamp": datetime.now(UTC).isoformat(),
+                },
+            )
+        except ShadowTraceError:
+            logger.exception(
+                "Failed to persist storyline_degraded flag for event=%s",
+                event_id,
+            )
 
 
 # ====================================================================== #
@@ -445,6 +492,28 @@ def _build_evidence_entries(
 # ====================================================================== #
 # Rule helpers
 # ====================================================================== #
+
+
+def _build_scarce_single_phase(
+    sorted_evidence: list[dict[str, Any]],
+) -> list[StorylinePhase]:
+    """Merge fewer than three evidence records into a single phase timeline."""
+    entries = [
+        TimelineEntry(
+            timestamp=_parse_ts(e.get("timestamp")) or _TS_MIN,
+            description=str(e.get("description", ""))[:500],
+            evidence_id=str(e.get("evidence_id", "")),
+        )
+        for e in sorted_evidence
+    ]
+    return [
+        StorylinePhase(
+            phase_order=1,
+            phase_name=StorylinePhaseName.POST_ACTION,
+            narrative="证据数量有限，以下活动合并为单阶段时间线。",
+            entries=entries,
+        )
+    ]
 
 
 def _bucket_evidence(evidence: dict[str, Any]) -> StorylinePhaseName:

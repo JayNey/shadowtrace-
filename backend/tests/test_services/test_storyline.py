@@ -8,6 +8,8 @@ evidence-scarce events.
 
 from __future__ import annotations
 
+import json
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
@@ -27,6 +29,7 @@ from app.models.ids import new_evidence_id
 from app.services.storyline_service import (
     StorylineService,
     _bucket_evidence,
+    _parse_ts,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -161,18 +164,75 @@ class _FakeWorkingMemory:
         pass
 
 
+class _FailingStorylineWorkingMemory(_FakeWorkingMemory):
+    async def write(self, event_id: str, key: str, value: Any) -> None:
+        if key == "storyline":
+            raise RuntimeError("wm unavailable")
+        await super().write(event_id, key, value)
+
+
+def _extract_evidence_from_messages(messages: list[LLMMessage]) -> list[dict[str, Any]]:
+    for msg in messages:
+        if msg.role != "user":
+            continue
+        marker = "Context:\n"
+        if marker not in msg.content:
+            continue
+        payload = json.loads(msg.content.split(marker, 1)[1])
+        evidence = payload.get("evidence")
+        if isinstance(evidence, list):
+            return [e for e in evidence if isinstance(e, dict)]
+    return []
+
+
+def _inject_golden_evidence_ids(
+    content: dict[str, Any],
+    evidence_list: list[dict[str, Any]],
+) -> None:
+    """Assign input evidence_ids to golden entries by closest timestamp."""
+    if not evidence_list:
+        return
+    used: set[str] = set()
+    for phase in content.get("phases") or []:
+        if not isinstance(phase, dict):
+            continue
+        for entry in phase.get("entries") or []:
+            if not isinstance(entry, dict):
+                continue
+            entry_ts = _parse_ts(entry.get("timestamp"))
+            if entry_ts is None:
+                continue
+            best_id = ""
+            best_delta: float | None = None
+            for ev in evidence_list:
+                eid = str(ev.get("evidence_id", ""))
+                if not eid or eid in used:
+                    continue
+                ev_ts = _parse_ts(ev.get("timestamp"))
+                if ev_ts is None:
+                    continue
+                delta = abs((ev_ts - entry_ts).total_seconds())
+                if best_delta is None or delta < best_delta:
+                    best_delta = delta
+                    best_id = eid
+            if best_id:
+                entry["evidence_id"] = best_id
+                used.add(best_id)
+
+
 class _GoldenLLMClient:
     """Returns the storyline_generate golden response."""
 
     async def chat(self, messages: list[LLMMessage], **kwargs: Any) -> LLMResponse:
-        import json
-
         prompt_key = kwargs.get("prompt_key", "")
         if prompt_key != "storyline_generate":
             raise LLMProviderError("unknown prompt_key")
         with open("app/core/llm/golden/storyline_generate/default.json", encoding="utf-8") as fh:
             data = json.loads(fh.read())
         content = data["content"]
+        if isinstance(content, dict):
+            evidence_list = _extract_evidence_from_messages(messages)
+            _inject_golden_evidence_ids(content, evidence_list)
         content_str = json.dumps(content) if isinstance(content, dict) else str(content)
         return LLMResponse(
             content=content_str,
@@ -208,6 +268,7 @@ async def test_rule_path_five_phases_complete() -> None:
     assert storyline.generated_by == StorylineGeneratedBy.RULE
     assert len(storyline.phases) >= 4
     assert len(storyline.narrative_summary) > 0
+    assert any("zhangsan" in phase.narrative for phase in storyline.phases)
 
     # Time monotonic: within each phase, entries sorted by timestamp
     for phase in storyline.phases:
@@ -251,6 +312,30 @@ async def test_rule_path_technique_backfill() -> None:
             if entry.technique_id:
                 technique_ids.add(entry.technique_id)
     assert "T1078" in technique_ids, f"Expected T1078 backfill, got {technique_ids}"
+
+
+async def test_rule_path_two_classified_evidence_single_phase() -> None:
+    """< 3 evidence items always collapse to a single phase."""
+    evidence_list = [
+        _make_evidence(
+            source="identity",
+            evidence_type="login",
+            description="账号 alice 登录",
+            timestamp=datetime(2024, 6, 15, 9, 0, 0, tzinfo=UTC),
+        ),
+        _make_evidence(
+            source="network_flow",
+            evidence_type="outbound",
+            description="向外连接 203.0.113.50",
+            timestamp=datetime(2024, 6, 15, 9, 5, 0, tzinfo=UTC),
+        ),
+    ]
+    ctx = _make_event_context(evidence_list=evidence_list)
+    svc = StorylineService(working_memory=_FakeWorkingMemory())
+    storyline = await svc.generate(ctx)
+
+    assert len(storyline.phases) == 1
+    assert len(storyline.phases[0].entries) == 2
 
 
 async def test_rule_path_evidence_scarce_single_phase() -> None:
@@ -299,10 +384,36 @@ async def test_rule_path_wm_write() -> None:
     svc = StorylineService(working_memory=wm)
     await svc.generate(ctx)
 
+    assert wm._for_writer_calls == ["StorylineService"]
     stored = await wm.read("evt-wm-001", "storyline")
     assert stored is not None
     assert stored["event_id"] == "evt-wm-001"
     assert stored["generated_by"] == StorylineGeneratedBy.RULE.value
+
+
+async def test_wm_write_failure_sets_storyline_degraded() -> None:
+    """WM storyline write failure records storyline_degraded."""
+    wm = _FailingStorylineWorkingMemory()
+    ctx = _make_event_context(
+        event_id="evt-wm-fail-001",
+        evidence_list=_main_scenario_evidence(),
+    )
+    svc = StorylineService(working_memory=wm)
+    storyline = await svc.generate(ctx)
+
+    assert storyline.generated_by == StorylineGeneratedBy.RULE
+    assert svc.last_degraded_reason is not None
+    assert svc.last_degraded_reason.startswith("storyline_write_failed:")
+    degraded = await wm.read("evt-wm-fail-001", "storyline_degraded")
+    assert degraded is not None
+    assert degraded["degraded"] is True
+
+
+async def test_storyline_id_format() -> None:
+    ctx = _make_event_context(evidence_list=_main_scenario_evidence())
+    svc = StorylineService(working_memory=_FakeWorkingMemory())
+    storyline = await svc.generate(ctx)
+    assert re.fullmatch(r"sty-[0-9a-f]{8}", storyline.storyline_id)
 
 
 # ====================================================================== #
@@ -328,6 +439,26 @@ async def test_llm_path_golden_response() -> None:
     assert len(storyline.phases) >= 4
     assert len(storyline.narrative_summary) > 0
     assert "zhangsan" in storyline.narrative_summary.lower()
+
+
+async def test_llm_path_evidence_backlinks() -> None:
+    """LLM path: every TimelineEntry.evidence_id references input evidence."""
+    evidence_list = _main_scenario_evidence()
+    valid_ids = {e["evidence_id"] for e in evidence_list}
+    ctx = _make_event_context(
+        evidence_list=evidence_list,
+        techniques=_main_techniques(),
+        graph_paths=[["node-a", "node-b", "node-c"]],
+        central_entities=["zhangsan", "PC-FIN-023"],
+    )
+
+    svc = StorylineService(llm_client=_GoldenLLMClient(), working_memory=_FakeWorkingMemory())
+    storyline = await svc.generate(ctx)
+
+    assert storyline.generated_by == StorylineGeneratedBy.LLM
+    for phase in storyline.phases:
+        for entry in phase.entries:
+            assert entry.evidence_id in valid_ids, f"evidence_id {entry.evidence_id} not in input"
 
 
 async def test_llm_path_falls_back_to_rule() -> None:

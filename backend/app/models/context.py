@@ -82,3 +82,4 @@ class EventContext(BaseModel):
     degraded_flags: list[str] = Field(default_factory=list)
     triage_degraded: dict[str, Any] | None = None
     graph_degraded: dict[str, Any] | None = None
+    storyline_degraded: dict[str, Any] | None = None
