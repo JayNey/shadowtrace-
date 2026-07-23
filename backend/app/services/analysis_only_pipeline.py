@@ -325,7 +325,8 @@ class AnalysisOnlyPipeline:
         # then transition directly TRIAGING→CLOSED.
         # TRIAGING→REPORTING is an illegal edge in STATE_TRANSITIONS; going
         # directly to CLOSED matches the TRIAGING→CLOSED gate validated at
-        # workflow.py:606-641 (disposition_policy=not_required + low/fp).
+        # STATE_TRANSITIONS["TRIAGING"]["CLOSED"] gate validated in
+        # StateMachineService.validate_closed_gate (disposition_policy=not_required + low/fp).
         # Also matches ISSUE-038's "TRIAGING + not_required → quick close" spec.
 
         # Build placeholder evidence/risk for the quick-close report.

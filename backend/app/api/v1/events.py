@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status
 from sqlalchemy import exc as sa_exc
@@ -152,7 +152,7 @@ async def _generate_quick_close_report(
         success_sources=[],
         failed_sources=[],
         overall_confidence=0.0,
-        collection_status=CollectionStatus.COMPLETED,
+        collection_status=CollectionStatus.NOT_APPLICABLE,
     )
     placeholder_risk = RiskAssessment(
         risk_score=risk_score,
@@ -397,8 +397,6 @@ async def list_events(
     keyword: str | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
-    sort_by: str | None = None,
-    sort_order: Literal["asc", "desc"] | None = None,
     event_service: EventService = Depends(get_event_service),
 ) -> s.EventListResponse:
     result = await event_service.list_events(
@@ -411,8 +409,6 @@ async def list_events(
         occurred_before=end_time,
         page=page,
         page_size=page_size,
-        sort_by=sort_by,
-        sort_order=sort_order,
     )
     items: list[s.EventListItem] = []
     for event in result.items:

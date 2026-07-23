@@ -23,7 +23,7 @@ from app.agents.evidence_agent import EvidenceAgent
 from app.agents.report_agent import ReportAgent
 from app.agents.risk_agent import RiskAgent
 from app.agents.triage_agent import TriageAgent
-from app.core.errors import LLMError
+from app.core.errors import LLMError, ValidationError
 from app.core.redis_client import RedisClient
 from app.db import models as orm
 from app.models.agent_io import CollectionStatus
@@ -276,6 +276,7 @@ async def test_golden_path_alert_to_report(
     monkeypatch: pytest.MonkeyPatch,
     tool_executor: Any,
     redis_client: RedisClient,
+    mock_xdr_state: Any,
 ) -> None:
     """Full analysis pipeline: NEW → … → REPORTING, risk_score ≥ 70, report exists.
 
@@ -356,6 +357,18 @@ async def test_golden_path_alert_to_report(
     # Working memory check: analysis_only_complete exists and is true.
     wm_check = await context_store.get(event_id, "analysis_only_complete")
     assert wm_check is True
+
+    # Defense-in-depth: no analysis content should leak via disposition.
+    # ISSUE-039 does not execute disposition (analysis-only pipeline stops at
+    # REPORTING); therefore zero disposition records should exist. This assertion
+    # will be upgraded in ISSUE-064 when disposition execution is added — at
+    # that point the payload itself should be audited for forbidden fields
+    # (report, sections, analysis_only_complete, triage_result, etc.).
+    disposition_count = len(mock_xdr_state.disposition_by_id)
+    assert disposition_count == 0, (
+        f"expected 0 disposition records in analysis-only pipeline, "
+        f"got {disposition_count}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -683,7 +696,7 @@ async def test_pipeline_rejects_live_side_effects(
         degraded_flags_service, session_factory, tool_executor=tool_executor,
     )
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(ValidationError) as exc_info:
         await pipeline.run(event_id)
     assert "ALLOW_LIVE_SIDE_EFFECTS=false" in str(exc_info.value)
 
@@ -709,7 +722,7 @@ async def test_pipeline_rejects_xdr_writeback(
         degraded_flags_service, session_factory, tool_executor=tool_executor,
     )
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(ValidationError) as exc_info:
         await pipeline.run(event_id)
     assert "ALLOW_XDR_WRITEBACK=false" in str(exc_info.value)
 
