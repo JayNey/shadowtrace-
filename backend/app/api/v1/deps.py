@@ -31,6 +31,7 @@ _degraded_flags: Any = None  # DegradedFlagService
 _audit_log: Any = None  # EventAuditLogService
 _event_service: Any = None  # EventService
 _state_machine: Any = None  # StateMachineService
+_event_bus: Any = None  # EventBus
 _pipeline: Any = None  # AnalysisOnlyPipeline
 
 
@@ -78,6 +79,15 @@ def _get_audit_log() -> Any:
     return _audit_log
 
 
+def _get_event_bus() -> Any:
+    global _event_bus
+    if _event_bus is None:
+        from app.core.event_bus import EventBus
+
+        _event_bus = EventBus(_get_redis())
+    return _event_bus
+
+
 async def get_event_service() -> Any:
     global _event_service
     if _event_service is None:
@@ -89,6 +99,7 @@ async def get_event_service() -> Any:
             _get_context_store(),
             degraded_flags=_get_degraded_flags(),
             state_machine=state_machine,
+            event_bus=_get_event_bus(),
         )
     return _event_service
 
@@ -155,6 +166,7 @@ async def get_pipeline() -> Any:
             llm_client=None,
             working_memory=wm.for_writer("ReportAgent"),
             event_service=event_service,
+            event_bus=_get_event_bus(),
         )
 
         _pipeline = AnalysisOnlyPipeline(
@@ -174,7 +186,7 @@ async def get_pipeline() -> Any:
 def reset_deps() -> None:
     """Reset all lazy singletons (for tests)."""
     global _session_factory, _redis_client, _context_store, _degraded_flags
-    global _audit_log, _event_service, _state_machine, _pipeline
+    global _audit_log, _event_service, _state_machine, _event_bus, _pipeline
     _session_factory = None
     _redis_client = None
     _context_store = None
@@ -182,4 +194,5 @@ def reset_deps() -> None:
     _audit_log = None
     _event_service = None
     _state_machine = None
+    _event_bus = None
     _pipeline = None

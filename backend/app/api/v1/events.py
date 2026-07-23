@@ -109,6 +109,80 @@ def _writeback_required(policy: DispositionPolicy) -> bool:
     return policy == DispositionPolicy.REQUIRED
 
 
+async def _sync_report_context_and_bus(
+    event_id: str,
+    report: Any,
+    event_service: EventService,
+) -> None:
+    """Write report to EventContext and publish report_generated when bus is available."""
+    from app.api.v1.deps import _get_context_store
+
+    try:
+        await _get_context_store().set(event_id, "report", report.model_dump(mode="json"))
+    except Exception:
+        logger.warning(
+            "Failed to write report to EventContext for event=%s",
+            event_id,
+            exc_info=True,
+        )
+
+    bus = getattr(event_service, "_bus", None)
+    if bus is not None:
+        try:
+            payload: dict[str, Any] = {
+                "report_id": report.report_id,
+                "sections": len(report.sections),
+            }
+            if report.generated_at is not None:
+                payload["generated_at"] = report.generated_at.isoformat()
+            await bus.publish_event(event_id, "report_generated", payload)
+        except Exception:
+            logger.warning(
+                "event_bus report_generated failed for event=%s",
+                event_id,
+                exc_info=True,
+            )
+
+
+async def _regenerate_report_after_verdict_change(
+    event_id: str,
+    *,
+    event_title: str,
+    final_verdict: FinalVerdict,
+    risk_score: int,
+    severity: Severity,
+    operator: str,
+    event_service: EventService,
+) -> None:
+    """Refresh report after verdict change without destroying full investigation content."""
+    existing = await event_service.get_report(event_id=event_id)
+    if existing is not None and existing.generated_by != "quick_close":
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC)
+        updated = existing.model_copy(
+            update={
+                "final_verdict": final_verdict,
+                "version": int(existing.version or 1) + 1,
+                "updated_at": now,
+            }
+        )
+        await event_service.upsert_report(updated)
+        await _sync_report_context_and_bus(event_id, updated, event_service)
+        return
+
+    await _generate_quick_close_report(
+        event_id=event_id,
+        event_title=event_title,
+        final_verdict=final_verdict,
+        risk_score=risk_score,
+        severity=severity,
+        operator=operator,
+        event_service=event_service,
+        force_regenerate=existing is not None,
+    )
+
+
 async def _generate_quick_close_report(
     event_id: str,
     event_title: str,
@@ -205,34 +279,7 @@ async def _generate_quick_close_report(
         updated_at=now,
     )
     await event_service.upsert_report(report)
-
-    from app.api.v1.deps import _get_context_store
-
-    try:
-        await _get_context_store().set(event_id, "report", report.model_dump(mode="json"))
-    except Exception:
-        logger.warning(
-            "Failed to write quick-close report to EventContext for event=%s",
-            event_id,
-            exc_info=True,
-        )
-
-    bus = getattr(event_service, "_bus", None)
-    if bus is not None:
-        try:
-            payload: dict[str, Any] = {
-                "report_id": report.report_id,
-                "sections": len(report.sections),
-            }
-            if report.generated_at is not None:
-                payload["generated_at"] = report.generated_at.isoformat()
-            await bus.publish_event(event_id, "report_generated", payload)
-        except Exception:
-            logger.warning(
-                "event_bus report_generated failed for quick-close event=%s",
-                event_id,
-                exc_info=True,
-            )
+    await _sync_report_context_and_bus(event_id, report, event_service)
 
     # Record the system action for audit trail.
     # Only catch IntegrityError (idempotent re-entry race); let other
@@ -636,10 +683,24 @@ async def close_event(
             )
         # TRIAGING shortcut: generate report so validate_closed_gate can pass,
         # then transition directly to CLOSED (TRIAGING→REPORTING is illegal).
+        close_verdict = event.final_verdict
+        if body.final_verdict is not None and body.final_verdict != event.final_verdict:
+            await event_service.set_final_verdict(
+                event_id,
+                body.final_verdict,
+                operator=f"principal:{principal.subject}",
+            )
+            event = await event_service.get_event(event_id)
+            if event is None:
+                raise EventNotFoundError(
+                    f"event {event_id} not found after verdict update",
+                    details={"event_id": event_id},
+                )
+            close_verdict = body.final_verdict
         await _generate_quick_close_report(
             event_id=event_id,
             event_title=event.title,
-            final_verdict=event.final_verdict,
+            final_verdict=close_verdict,
             risk_score=event.risk_score,
             severity=event.severity,
             operator=f"principal:{principal.subject}",
@@ -666,16 +727,19 @@ async def close_event(
                 operator=f"principal:{principal.subject}",
             )
             event = await event_service.get_event(event_id)
-            assert event is not None
-            await _generate_quick_close_report(
-                event_id=event_id,
+            if event is None:
+                raise EventNotFoundError(
+                    f"event {event_id} not found after verdict update",
+                    details={"event_id": event_id},
+                )
+            await _regenerate_report_after_verdict_change(
+                event_id,
                 event_title=event.title,
                 final_verdict=body.final_verdict,
                 risk_score=event.risk_score,
                 severity=event.severity,
                 operator=f"principal:{principal.subject}",
                 event_service=event_service,
-                force_regenerate=True,
             )
         await event_service.transition_status(
             event_id,
@@ -712,16 +776,19 @@ async def close_event(
                 operator=f"principal:{principal.subject}",
             )
             event = await event_service.get_event(event_id)
-            assert event is not None
-            await _generate_quick_close_report(
-                event_id=event_id,
+            if event is None:
+                raise EventNotFoundError(
+                    f"event {event_id} not found after verdict update",
+                    details={"event_id": event_id},
+                )
+            await _regenerate_report_after_verdict_change(
+                event_id,
                 event_title=event.title,
                 final_verdict=body.final_verdict,
                 risk_score=event.risk_score,
                 severity=event.severity,
                 operator=f"principal:{principal.subject}",
                 event_service=event_service,
-                force_regenerate=True,
             )
         await event_service.transition_status(
             event_id,

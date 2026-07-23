@@ -234,6 +234,44 @@ async def _seed_report_with_event(
             await session.flush()
 
 
+async def _seed_investigation_report(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    *,
+    final_verdict: FinalVerdict = FinalVerdict.CONFIRMED_THREAT,
+) -> list[dict[str, str]]:
+    """Insert a full investigation-style report (not quick_close)."""
+    from datetime import UTC, datetime
+
+    from app.models.ids import report_id_for_event
+
+    sections = [
+        {"key": "overview", "title": "Overview", "content": "Detailed investigation overview."},
+        {"key": "evidence", "title": "Evidence", "content": "Collected DNS and asset evidence."},
+    ]
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Report(
+                    report_id=report_id_for_event(event_id),
+                    event_id=event_id,
+                    title="Investigation Report",
+                    summary="Full analysis report fixture",
+                    sections=sections,
+                    final_verdict=final_verdict.value,
+                    risk_score=85,
+                    severity=Severity.HIGH.value,
+                    version=1,
+                    generated_by="template",
+                    generated_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.flush()
+    return sections
+
+
 # --------------------------------------------------------------------------- #
 # Tests: POST /events
 # --------------------------------------------------------------------------- #
@@ -754,14 +792,109 @@ async def test_close_reporting_writeback_unsupported_readiness_rejected(
 
 
 @pytest.mark.asyncio
-async def test_investigate_http_flow_polls_to_completion(
+async def test_close_reporting_writeback_unknown_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.UNKNOWN,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "writeback unknown test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_code"] == "writeback_pending"
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_verdict_change_preserves_report_sections(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+) -> None:
+    """Changing verdict on a full report must not replace sections with quick-close placeholders."""
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.CONFIRMED,
+    )
+    original_sections = await _seed_investigation_report(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={
+            "reason": "verdict change test",
+            "final_verdict": "false_positive",
+        },
+        headers=_hdr(),
+    )
+    assert resp.status_code == 200, resp.text
+
+    report = await event_service.get_report(event_id=event_id)
+    assert report is not None
+    assert report.final_verdict == FinalVerdict.FALSE_POSITIVE
+    assert report.generated_by == "template"
+    assert len(report.sections) == len(original_sections)
+    assert report.sections[0].content == original_sections[0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_close_triaging_applies_requested_final_verdict(
+    client: TestClient,
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _create_test_event(
+        event_service,
+        title="TRIAGING verdict test",
+        severity=Severity.LOW,
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            assert row is not None
+            row.status = EventStatus.TRIAGING.value
+            row.row_version = int(row.row_version or 1) + 1
+            session.add(
+                orm.EventAuditLog(
+                    event_id=event_id,
+                    from_status="new",
+                    to_status="triaging",
+                    operator="test",
+                    reason="test_setup:triaging",
+                )
+            )
+            await session.flush()
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={
+            "reason": "triaging fp close",
+            "final_verdict": "false_positive",
+        },
+        headers=_hdr(),
+    )
+    assert resp.status_code == 200, resp.text
+
+    report = await event_service.get_report(event_id=event_id)
+    assert report is not None
+    assert report.final_verdict == FinalVerdict.FALSE_POSITIVE
+
+
+@pytest.mark.asyncio
+async def test_investigate_http_low_risk_polls_to_closed(
     client: TestClient,
     event_service: EventService,
 ) -> None:
-    """POST investigate (202) runs the background pipeline and leaves event CLOSED."""
+    """POST investigate (202) on a low-risk event completes at CLOSED via HTTP."""
     event_id = await _create_test_event(
         event_service,
-        title="Investigate HTTP flow",
+        title="Investigate HTTP low risk",
         severity=Severity.LOW,
     )
 
@@ -773,11 +906,64 @@ async def test_investigate_http_flow_polls_to_completion(
 
     detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
     assert detail.status_code == 200
-    data = detail.json()["event"]
-    assert data["status"] in ("closed", "reporting", "failed")
+    assert detail.json()["event"]["status"] == "closed"
 
     report_resp = client.get(f"/api/v1/events/{event_id}/report", headers=_hdr())
     assert report_resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_investigate_high_risk_http_polls_to_reporting(
+    client: TestClient,
+    event_service: EventService,
+) -> None:
+    """High-risk required events stay at REPORTING when started via HTTP investigate."""
+    from app.models.enums import SourceDisposition, SourceObjectKind
+    from app.models.source import SourceReference
+    from app.services.event_service import IngestableSource
+
+    ref = SourceReference(
+        source_kind=SourceObjectKind.INCIDENT,
+        source_product="mock_xdr",
+        source_tenant_id="t1",
+        connector_id="conn-mock-http-high",
+        source_object_id="INC-HTTP-HIGH-001",
+        source_status_raw="open",
+        source_disposition=SourceDisposition.PENDING,
+        schema_version=1,
+    )
+    ingest = IngestableSource(
+        reference=ref,
+        title="HTTP high risk incident",
+        description="Serious incident for HTTP investigate test",
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+    )
+    result = await event_service.ingest_source_object(ingest)
+    assert result.event_id is not None
+    event_id = result.event_id
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, resp.text
+
+    detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert detail.status_code == 200
+    assert detail.json()["event"]["status"] == "reporting"
+
+    report_resp = client.get(f"/api/v1/events/{event_id}/report", headers=_hdr())
+    assert report_resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_investigate_http_flow_polls_to_completion(
+    client: TestClient,
+    event_service: EventService,
+) -> None:
+    """Backward-compatible alias for the low-risk HTTP investigate path."""
+    await test_investigate_http_low_risk_polls_to_closed(client, event_service)
 
 
 # --------------------------------------------------------------------------- #
