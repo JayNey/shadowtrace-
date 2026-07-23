@@ -123,6 +123,7 @@ async def get_pipeline() -> Any:
     global _pipeline
     if _pipeline is None:
         from app.agents.evidence_agent import EvidenceAgent
+        from app.agents.rag_agent import RAGAgent
         from app.agents.report_agent import ReportAgent
         from app.agents.risk_agent import RiskAgent
         from app.agents.triage_agent import TriageAgent
@@ -141,6 +142,10 @@ async def get_pipeline() -> Any:
             tool_executor=None,
             working_memory=wm.for_writer("EvidenceAgent"),
         )
+        rag = RAGAgent(
+            working_memory=wm.for_writer("RAGAgent"),
+            pipeline=None,
+        )
         risk = RiskAgent(
             llm_client=None,
             working_memory=wm.for_writer("RiskAgent"),
@@ -157,6 +162,7 @@ async def get_pipeline() -> Any:
             state_machine=state_machine,
             triage_agent=triage,
             evidence_agent=evidence,
+            rag_agent=rag,
             risk_agent=risk,
             report_agent=report,
             context_store=_get_context_store(),

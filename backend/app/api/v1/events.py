@@ -117,6 +117,8 @@ async def _generate_quick_close_report(
     severity: Severity,
     operator: str,
     event_service: EventService,
+    *,
+    force_regenerate: bool = False,
 ) -> None:
     """Generate a standard 15-section quick-close report so the CLOSED gate can pass.
 
@@ -139,9 +141,9 @@ async def _generate_quick_close_report(
     from app.models.ids import report_id_for_event
     from app.models.report import InvestigationReport
 
-    # Skip if report already exists.
+    # Skip if report already exists unless caller needs a verdict refresh.
     existing = await event_service.get_report(event_id=event_id)
-    if existing is not None:
+    if existing is not None and not force_regenerate:
         return
 
     # Build placeholder evidence / risk matching _short_circuit_close semantics.
@@ -184,6 +186,10 @@ async def _generate_quick_close_report(
     )
 
     now = datetime.now(UTC)
+    report_version = 1
+    if existing is not None:
+        report_version = int(existing.version or 1) + 1
+
     report = InvestigationReport(
         report_id=report_id_for_event(event_id),
         event_id=event_id,
@@ -193,12 +199,40 @@ async def _generate_quick_close_report(
         final_verdict=final_verdict,
         risk_score=risk_score,
         severity=severity,
-        version=1,
+        version=report_version,
         generated_by="quick_close",
         generated_at=now,
         updated_at=now,
     )
     await event_service.upsert_report(report)
+
+    from app.api.v1.deps import _get_context_store
+
+    try:
+        await _get_context_store().set(event_id, "report", report.model_dump(mode="json"))
+    except Exception:
+        logger.warning(
+            "Failed to write quick-close report to EventContext for event=%s",
+            event_id,
+            exc_info=True,
+        )
+
+    bus = getattr(event_service, "_bus", None)
+    if bus is not None:
+        try:
+            payload: dict[str, Any] = {
+                "report_id": report.report_id,
+                "sections": len(report.sections),
+            }
+            if report.generated_at is not None:
+                payload["generated_at"] = report.generated_at.isoformat()
+            await bus.publish_event(event_id, "report_generated", payload)
+        except Exception:
+            logger.warning(
+                "event_bus report_generated failed for quick-close event=%s",
+                event_id,
+                exc_info=True,
+            )
 
     # Record the system action for audit trail.
     # Only catch IntegrityError (idempotent re-entry race); let other
@@ -624,12 +658,24 @@ async def close_event(
         # ISSUE-038 step 2: writeback gate pre-check.
         await _validate_writeback_gate(event_id, event)
 
-        # Handle final_verdict change before closing.
+        # Handle final_verdict change before closing — regenerate report first.
         if body.final_verdict is not None and body.final_verdict != event.final_verdict:
             await event_service.set_final_verdict(
                 event_id,
                 body.final_verdict,
                 operator=f"principal:{principal.subject}",
+            )
+            event = await event_service.get_event(event_id)
+            assert event is not None
+            await _generate_quick_close_report(
+                event_id=event_id,
+                event_title=event.title,
+                final_verdict=body.final_verdict,
+                risk_score=event.risk_score,
+                severity=event.severity,
+                operator=f"principal:{principal.subject}",
+                event_service=event_service,
+                force_regenerate=True,
             )
         await event_service.transition_status(
             event_id,
@@ -664,6 +710,18 @@ async def close_event(
                 event_id,
                 body.final_verdict,
                 operator=f"principal:{principal.subject}",
+            )
+            event = await event_service.get_event(event_id)
+            assert event is not None
+            await _generate_quick_close_report(
+                event_id=event_id,
+                event_title=event.title,
+                final_verdict=body.final_verdict,
+                risk_score=event.risk_score,
+                severity=event.severity,
+                operator=f"principal:{principal.subject}",
+                event_service=event_service,
+                force_regenerate=True,
             )
         await event_service.transition_status(
             event_id,

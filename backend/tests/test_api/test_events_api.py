@@ -15,9 +15,13 @@ from app.api.v1.deps import reset_deps
 from app.db import models as orm
 from app.main import app
 from app.models.enums import (
+    DispositionPolicy,
     EventStatus,
     EventType,
+    FinalVerdict,
     Severity,
+    WritebackReadiness,
+    WritebackStatus,
 )
 from app.services.event_service import EventService
 
@@ -68,10 +72,12 @@ def client(
 ) -> TestClient:
     """Inject test services into the app via dependency overrides."""
 
+    from app.api.v1.deps import get_event_service
+
     async def _override_event_service() -> EventService:
         return event_service
 
-    app.dependency_overrides[event_service] = _override_event_service
+    app.dependency_overrides[get_event_service] = _override_event_service
     return TestClient(app)
 
 
@@ -95,6 +101,137 @@ async def _create_test_event(
         severity=severity,
     )
     return event.event_id
+
+
+async def _seed_reporting_required_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    title: str = "Reporting required event",
+    writeback_readiness: WritebackReadiness = WritebackReadiness.READY,
+    outbox_status: WritebackStatus | None = None,
+    include_action: bool = True,
+) -> str:
+    """Insert a REPORTING event with optional writeback action/outbox rows."""
+    import hashlib
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from app.models.enums import DispositionIntentKind
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title=title,
+                    description="Writeback gate test fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=85,
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "incident",
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "t1",
+                        "connector_id": f"conn-{sfx}",
+                        "source_object_id": f"INC-{sfx}",
+                        "raw_payload_hash": hashlib.sha256(b"wb").hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=event_id,
+                    from_status="new",
+                    to_status=EventStatus.REPORTING.value,
+                    operator="test",
+                    reason="test_setup:reporting",
+                )
+            )
+            if include_action:
+                session.add(
+                    orm.Action(
+                        action_id=f"act-{sfx}",
+                        event_id=event_id,
+                        plan_revision=1,
+                        action_fingerprint=f"fp-{sfx}",
+                        action_category="response",
+                        action_name="block ip",
+                        tool_name="block_ip",
+                        action_level="l2",
+                        execution_owner="direct_tool",
+                        writeback_required=True,
+                        writeback_applicable=True,
+                        writeback_readiness=writeback_readiness.value,
+                    )
+                )
+                await session.flush()
+                if outbox_status is not None:
+                    session.add(
+                        orm.DispositionOutbox(
+                            outbox_id=f"obx-{sfx}",
+                            writeback_id=f"wbk-{sfx}",
+                            disposition_id=f"disp-{sfx}",
+                            action_id=f"act-{sfx}",
+                            event_id=event_id,
+                            closure_cycle=1,
+                            source_record_id=f"src-{sfx}",
+                            source_locator_hash="h" * 64,
+                            source_sequence=1,
+                            intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                            logical_slot="slot-1",
+                            idempotency_key=f"idem-{sfx}",
+                            command_payload={},
+                            command_payload_sha256="a" * 64,
+                            delivery_status="delivered",
+                            latest_writeback_status=outbox_status.value,
+                        )
+                    )
+            await session.flush()
+    return event_id
+
+
+async def _seed_report_with_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> None:
+    """Insert a minimal report row so REPORTING events can close when gate passes."""
+    from datetime import UTC, datetime
+
+    from app.models.ids import report_id_for_event
+
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Report(
+                    report_id=report_id_for_event(event_id),
+                    event_id=event_id,
+                    title="Gate test report",
+                    summary="fixture",
+                    sections=[],
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=85,
+                    severity=Severity.HIGH.value,
+                    version=1,
+                    generated_by="test",
+                    generated_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.flush()
 
 
 # --------------------------------------------------------------------------- #
@@ -514,6 +651,135 @@ async def test_close_failed_succeeds_with_report(
     assert report_resp.status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_close_reporting_writeback_not_configured_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """REPORTING + required policy without disposition actions is blocked."""
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        include_action=False,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "writeback gate test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_code"] == "writeback_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_writeback_pending_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.PENDING,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "writeback pending test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_code"] == "writeback_pending"
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_writeback_failed_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.FAILED,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "writeback failed test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_code"] == "writeback_failed"
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_writeback_conflict_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.CONFLICT,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "writeback conflict test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_code"] == "writeback_conflict"
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_writeback_unsupported_readiness_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        writeback_readiness=WritebackReadiness.CAPABILITY_UNKNOWN,
+        outbox_status=WritebackStatus.PENDING,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "writeback unsupported test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 400
+    assert resp.json()["error_code"] == "writeback_unsupported"
+
+
+@pytest.mark.asyncio
+async def test_investigate_http_flow_polls_to_completion(
+    client: TestClient,
+    event_service: EventService,
+) -> None:
+    """POST investigate (202) runs the background pipeline and leaves event CLOSED."""
+    event_id = await _create_test_event(
+        event_service,
+        title="Investigate HTTP flow",
+        severity=Severity.LOW,
+    )
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, resp.text
+
+    detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert detail.status_code == 200
+    data = detail.json()["event"]
+    assert data["status"] in ("closed", "reporting", "failed")
+
+    report_resp = client.get(f"/api/v1/events/{event_id}/report", headers=_hdr())
+    assert report_resp.status_code == 200
+
+
 # --------------------------------------------------------------------------- #
 # Tests: POST /events/{id}/investigate
 # --------------------------------------------------------------------------- #
@@ -636,6 +902,7 @@ async def test_full_analysis_pipeline_happy_path(
     For a not_required event, the pipeline should complete with the event CLOSED.
     """
     from app.agents.evidence_agent import EvidenceAgent
+    from app.agents.rag_agent import RAGAgent
     from app.agents.report_agent import ReportAgent
     from app.agents.risk_agent import RiskAgent
     from app.agents.triage_agent import TriageAgent
@@ -663,6 +930,10 @@ async def test_full_analysis_pipeline_happy_path(
         tool_executor=None,
         working_memory=wm.for_writer("EvidenceAgent"),
     )
+    rag = RAGAgent(
+        working_memory=wm.for_writer("RAGAgent"),
+        pipeline=None,
+    )
     risk = RiskAgent(
         llm_client=None,
         working_memory=wm.for_writer("RiskAgent"),
@@ -679,6 +950,7 @@ async def test_full_analysis_pipeline_happy_path(
         state_machine=state_machine_service,
         triage_agent=triage,
         evidence_agent=evidence,
+        rag_agent=rag,
         risk_agent=risk,
         report_agent=report,
         context_store=store,
@@ -698,8 +970,8 @@ async def test_full_analysis_pipeline_happy_path(
     # Run the pipeline directly (bypassing BackgroundTasks).
     result = await pipeline.run(event_id)
 
-    assert result["event_id"] == event_id
-    assert result["analysis_only_complete"] is True
+    assert result.event_id == event_id
+    assert result.analysis_only_complete is True
 
     # After pipeline: should be CLOSED (not_required + low severity = short-circuit close).
     event = await event_service.get_event(event_id)
@@ -716,6 +988,7 @@ async def test_high_risk_event_stays_reporting(
 ) -> None:
     """High-risk required events stay at REPORTING after analysis."""
     from app.agents.evidence_agent import EvidenceAgent
+    from app.agents.rag_agent import RAGAgent
     from app.agents.report_agent import ReportAgent
     from app.agents.risk_agent import RiskAgent
     from app.agents.triage_agent import TriageAgent
@@ -742,6 +1015,10 @@ async def test_high_risk_event_stays_reporting(
         tool_executor=None,
         working_memory=wm.for_writer("EvidenceAgent"),
     )
+    rag = RAGAgent(
+        working_memory=wm.for_writer("RAGAgent"),
+        pipeline=None,
+    )
     risk = RiskAgent(
         llm_client=None,
         working_memory=wm.for_writer("RiskAgent"),
@@ -758,6 +1035,7 @@ async def test_high_risk_event_stays_reporting(
         state_machine=state_machine_service,
         triage_agent=triage,
         evidence_agent=evidence,
+        rag_agent=rag,
         risk_agent=risk,
         report_agent=report,
         context_store=store,
@@ -796,8 +1074,8 @@ async def test_high_risk_event_stays_reporting(
     # Only run pipeline on NEW events.
     if event.status == EventStatus.NEW:
         pipeline_result = await pipeline.run(event_id)
-        assert pipeline_result["disposition_policy"] == "required"
-        assert pipeline_result["analysis_only_complete"] is True
+        assert pipeline_result.disposition_policy == "required"
+        assert pipeline_result.analysis_only_complete is True
 
         event = await event_service.get_event(event_id)
         assert event is not None
@@ -813,6 +1091,7 @@ async def test_analysis_only_complete_persisted_in_context(
 ) -> None:
     """analysis_only_complete is persisted to EventContextStore after pipeline runs."""
     from app.agents.evidence_agent import EvidenceAgent
+    from app.agents.rag_agent import RAGAgent
     from app.agents.report_agent import ReportAgent
     from app.agents.risk_agent import RiskAgent
     from app.agents.triage_agent import TriageAgent
@@ -839,6 +1118,10 @@ async def test_analysis_only_complete_persisted_in_context(
         tool_executor=None,
         working_memory=wm.for_writer("EvidenceAgent"),
     )
+    rag = RAGAgent(
+        working_memory=wm.for_writer("RAGAgent"),
+        pipeline=None,
+    )
     risk = RiskAgent(
         llm_client=None,
         working_memory=wm.for_writer("RiskAgent"),
@@ -855,6 +1138,7 @@ async def test_analysis_only_complete_persisted_in_context(
         state_machine=state_machine_service,
         triage_agent=triage,
         evidence_agent=evidence,
+        rag_agent=rag,
         risk_agent=risk,
         report_agent=report,
         context_store=store,
@@ -872,7 +1156,7 @@ async def test_analysis_only_complete_persisted_in_context(
 
     # Run the pipeline.
     result = await pipeline.run(event_id)
-    assert result["analysis_only_complete"] is True
+    assert result.analysis_only_complete is True
 
     # Verify persistence via EventContextStore.
     stored_value = await store.get(event_id, "analysis_only_complete")
