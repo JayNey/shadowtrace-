@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -180,3 +181,31 @@ def source_ingester(
         session_factory,
         source_mode="mock_xdr",
     )
+
+
+@pytest.fixture
+def state_machine(
+    context_store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    degraded_flags_service: DegradedFlagService,
+) -> Any:
+    """StateMachineService with audit log persistence (ISSUE-039)."""
+    from app.services.event_audit_log_service import EventAuditLogService
+    from app.services.state_machine_service import StateMachineService
+
+    audit_log = EventAuditLogService(session_factory)
+    return StateMachineService(
+        session_factory,
+        context_store,
+        audit_log=audit_log,
+        degraded_flags=degraded_flags_service,
+    )
+
+
+@pytest.fixture
+def degraded_flags_service(
+    context_store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> DegradedFlagService:
+    """Standalone DegradedFlagService (for use alongside state_machine)."""
+    return DegradedFlagService(context_store, session_factory)
