@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.e2e_basic,
-    pytest.mark.usefixtures("clean_state"),
+    pytest.mark.usefixtures("clean_state", "_e2e_env"),
 ]
 
 
@@ -53,8 +53,9 @@ pytestmark = [
 # --------------------------------------------------------------------------- #
 
 
-def _env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Set environment variables required by the pipeline."""
+@pytest.fixture
+def _e2e_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set environment variables required by the pipeline and restore after test."""
     monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
     monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
     monkeypatch.setenv("LLM_MODE", "mock")
@@ -64,6 +65,8 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Clear the lru_cache on get_settings so monkeypatch takes effect.
     from app.core.config import get_settings
 
+    get_settings.cache_clear()
+    yield
     get_settings.cache_clear()
 
 
@@ -277,7 +280,6 @@ async def test_golden_path_alert_to_report(
     state_machine: Any,
     context_store: EventContextStore,
     degraded_flags_service: DegradedFlagService,
-    monkeypatch: pytest.MonkeyPatch,
     tool_executor: Any,
     redis_client: RedisClient,
     mock_xdr_state: Any,
@@ -287,8 +289,6 @@ async def test_golden_path_alert_to_report(
     Ingests the insider_data_exfiltration scenario so the event has proper
     source references for evidence query scope resolution.
     """
-    _env(monkeypatch)
-
     # Ingest scenario → event with disposition_policy=required.
     event_ids = await _ingest_scenario(event_service, session_factory)
     assert len(event_ids) >= 1, "expected at least one ingested event"
@@ -312,7 +312,9 @@ async def test_golden_path_alert_to_report(
 
     # Status: stays at REPORTING because disposition_policy=required.
     assert result["status"] == EventStatus.REPORTING.value
-    assert result["analysis_only_complete"] is True
+    assert result["analysis_only_complete"] is True, (
+        f"got {result['analysis_only_complete']!r}"
+    )
     assert result.get("disposition_policy") == "required"
 
     event = await event_service.get_event(event_id)
@@ -326,6 +328,30 @@ async def test_golden_path_alert_to_report(
     # Audit log entries cover the full chain.
     audit_count = await _count_audit_logs(session_factory, event_id)
     assert audit_count >= 5, f"expected ≥5 audit log entries, got {audit_count}"
+
+    # ISSUE-039 step 1: explicitly assert state transition sequence
+    # NEW → TRIAGING → COLLECTING_EVIDENCE → ANALYZING → SCORING → REPORTING
+    expected_transitions = [
+        (None, EventStatus.NEW.value),
+        (EventStatus.NEW.value, EventStatus.TRIAGING.value),
+        (EventStatus.TRIAGING.value, EventStatus.COLLECTING_EVIDENCE.value),
+        (EventStatus.COLLECTING_EVIDENCE.value, EventStatus.ANALYZING.value),
+        (EventStatus.ANALYZING.value, EventStatus.SCORING.value),
+        (EventStatus.SCORING.value, EventStatus.REPORTING.value),
+    ]
+    async with session_factory() as session:
+        audit_rows = (
+            await session.scalars(
+                select(orm.EventAuditLog)
+                .where(orm.EventAuditLog.event_id == event_id)
+                .order_by(orm.EventAuditLog.id.asc())
+            )
+        ).all()
+    transitions = [(r.from_status, r.to_status) for r in audit_rows]
+    for expected in expected_transitions:
+        assert expected in transitions, (
+            f"missing expected transition {expected} in {transitions}"
+        )
 
     # Report must exist with 15 sections.
     report = await event_service.get_report(event_id=event_id)
@@ -387,7 +413,6 @@ async def test_low_severity_short_circuit(
     state_machine: Any,
     context_store: EventContextStore,
     degraded_flags_service: DegradedFlagService,
-    monkeypatch: pytest.MonkeyPatch,
     tool_executor: Any,
     redis_client: RedisClient,
 ) -> None:
@@ -397,8 +422,6 @@ async def test_low_severity_short_circuit(
     with disposition_policy=not_required. Pipeline short-circuits at triage and
     generates a quick-close 15-section report before transitioning to CLOSED.
     """
-    _env(monkeypatch)
-
     # Build event with account_anomaly type — triage rules assign LOW severity.
     event_id = await _create_event(
         event_service,
@@ -484,7 +507,6 @@ async def test_data_source_degradation_partial_done(
     state_machine: Any,
     context_store: EventContextStore,
     degraded_flags_service: DegradedFlagService,
-    monkeypatch: pytest.MonkeyPatch,
     tool_executor: Any,
     redis_client: RedisClient,
 ) -> None:
@@ -494,8 +516,6 @@ async def test_data_source_degradation_partial_done(
     With 4/7 tools succeeding → partial_done (success count 4, threshold: <5).
     Pipeline must still generate a valid 15-section report.
     """
-    _env(monkeypatch)
-
     failing_tools = {"query_edr_process", "query_network_flow", "query_dns"}
     wrapped_executor = SelectiveFailExecutor(tool_executor, failing_tools)
 
@@ -568,7 +588,6 @@ async def test_llm_degradation_fallback(
     state_machine: Any,
     context_store: EventContextStore,
     degraded_flags_service: DegradedFlagService,
-    monkeypatch: pytest.MonkeyPatch,
     tool_executor: Any,
     redis_client: RedisClient,
 ) -> None:
@@ -579,8 +598,6 @@ async def test_llm_degradation_fallback(
     report uses template text. Pipeline completes without crashing;
     disposition gate is not bypassed.
     """
-    _env(monkeypatch)
-
     failing_llm = FailingLLMClient("simulated LLM failure for degradation test")
 
     # Use ingested event so evidence queries work (they don't depend on LLM).
@@ -685,7 +702,6 @@ async def test_pipeline_rejects_live_side_effects(
     tool_executor: Any,
 ) -> None:
     """AnalysisOnlyPipeline.run() raises ValidationError when ALLOW_LIVE_SIDE_EFFECTS=true."""
-    _env(monkeypatch)
     monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "true")
 
     event_id = await _create_event(event_service)
@@ -715,7 +731,6 @@ async def test_pipeline_rejects_xdr_writeback(
     tool_executor: Any,
 ) -> None:
     """AnalysisOnlyPipeline.run() raises ValidationError when ALLOW_XDR_WRITEBACK=true."""
-    _env(monkeypatch)
     monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "true")
 
     event_id = await _create_event(event_service)
@@ -741,7 +756,6 @@ async def test_short_circuit_no_evidence_persisted(
     state_machine: Any,
     context_store: EventContextStore,
     degraded_flags_service: DegradedFlagService,
-    monkeypatch: pytest.MonkeyPatch,
     tool_executor: Any,
     redis_client: RedisClient,
 ) -> None:
@@ -751,8 +765,6 @@ async def test_short_circuit_no_evidence_persisted(
     evidence_output should never appear in EventContext since EvidenceAgent is
     never invoked.
     """
-    _env(monkeypatch)
-
     event_id = await _create_event(
         event_service,
         title="Benign failed login",
@@ -791,7 +803,6 @@ async def test_llm_degradation_triage_degraded_flag(
     state_machine: Any,
     context_store: EventContextStore,
     degraded_flags_service: DegradedFlagService,
-    monkeypatch: pytest.MonkeyPatch,
     tool_executor: Any,
     redis_client: RedisClient,
 ) -> None:
@@ -800,8 +811,6 @@ async def test_llm_degradation_triage_degraded_flag(
     TriageAgent must still classify the event via regex fallback and signal
     degraded=True so downstream systems are aware of the degradation.
     """
-    _env(monkeypatch)
-
     failing_llm = FailingLLMClient("simulated LLM failure for triage degraded test")
 
     event_ids = await _ingest_scenario(event_service, session_factory)
@@ -842,7 +851,6 @@ async def test_llm_degradation_report_template(
     state_machine: Any,
     context_store: EventContextStore,
     degraded_flags_service: DegradedFlagService,
-    monkeypatch: pytest.MonkeyPatch,
     tool_executor: Any,
     redis_client: RedisClient,
 ) -> None:
@@ -851,8 +859,6 @@ async def test_llm_degradation_report_template(
     When LLM is unavailable, ReportAgent falls back to template-based generation.
     The generated_by field on the report must reflect this.
     """
-    _env(monkeypatch)
-
     failing_llm = FailingLLMClient("simulated LLM failure for report template test")
 
     event_ids = await _ingest_scenario(event_service, session_factory)

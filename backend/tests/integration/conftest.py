@@ -226,11 +226,22 @@ def mock_llm_client() -> Any:
 
 @pytest.fixture
 def failing_llm_client() -> Any:
-    """LLM client that raises on every call (ISSUE-039 scenario 4)."""
+    """LLM client that raises LLMError on every call (ISSUE-039 scenario 4).
+
+    Uses LLMError (not RuntimeError) so Agent except LLMError handlers
+    correctly trigger the degradation path.
+    """
+    from app.core.errors import LLMError
 
     class _FailingLLMClient:
+        primary_model = "failing-mock"
+
         async def chat(self, *args: Any, **kwargs: Any) -> Any:
-            raise RuntimeError("llm unavailable")
+            raise LLMError(
+                "llm unavailable",
+                error_code="llm_provider_error",
+                retryable=False,
+            )
 
     return _FailingLLMClient()
 
@@ -253,7 +264,12 @@ def working_memory(
 
 @pytest.fixture
 def mock_xdr_state_fp() -> MockXDRState:
-    """MockXDRState loaded with account_anomaly_fp scenario (ISSUE-039 scenario 2)."""
+    """MockXDRState loaded with account_anomaly_fp scenario.
+
+    DEPRECATED: Not referenced by any current test. Scenario 2 uses
+    _create_event directly rather than the fp ingestion path. Kept for
+    future adopter scenarios that need a false-positive mock XDR state.
+    """
     state = MockXDRState()
     state.load_scenario(build_scenario("account_anomaly_fp", seed=42))
     return state
@@ -263,7 +279,10 @@ def mock_xdr_state_fp() -> MockXDRState:
 async def mock_xdr_client_fp(
     mock_xdr_state_fp: MockXDRState,
 ) -> AsyncIterator[httpx.AsyncClient]:
-    """HTTP client pointed at the account_anomaly_fp mock XDR app (ISSUE-039)."""
+    """HTTP client pointed at the account_anomaly_fp mock XDR app.
+
+    DEPRECATED: Not referenced by any current test. See mock_xdr_state_fp.
+    """
     transport = ASGITransport(app=create_app(state=mock_xdr_state_fp))
     async with httpx.AsyncClient(
         transport=transport,
@@ -277,7 +296,10 @@ async def mock_xdr_client_fp(
 def source_adapter_fp(
     mock_xdr_client_fp: httpx.AsyncClient,
 ) -> MockXDRSourceAdapter:
-    """MockXDRSourceAdapter for account_anomaly_fp scenario (ISSUE-039 scenario 2)."""
+    """MockXDRSourceAdapter for account_anomaly_fp scenario.
+
+    DEPRECATED: Not referenced by any current test. See mock_xdr_state_fp.
+    """
     return MockXDRSourceAdapter(
         base_url="http://mock-xdr-fp",
         read_token="mock-read-token",
@@ -292,7 +314,10 @@ def source_ingester_fp(
     event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> SourceIngester:
-    """SourceIngester for account_anomaly_fp scenario (ISSUE-039 scenario 2)."""
+    """SourceIngester for account_anomaly_fp scenario.
+
+    DEPRECATED: Not referenced by any current test. See mock_xdr_state_fp.
+    """
     return SourceIngester(
         event_service,
         session_factory,

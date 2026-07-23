@@ -56,6 +56,19 @@ from app.services.source_policy_resolver import (
 
 logger = logging.getLogger(__name__)
 
+# Allowed sort columns for GET /events list endpoint.
+# Maps public query-param names to SecurityEvent ORM columns.
+_SORT_COLUMN_MAP: dict[str, Any] = {
+    "created_at": orm.SecurityEvent.created_at,
+    "updated_at": orm.SecurityEvent.updated_at,
+    "occurred_at": orm.SecurityEvent.occurred_at,
+    "risk_score": orm.SecurityEvent.risk_score,
+    "severity": orm.SecurityEvent.severity,
+    "status": orm.SecurityEvent.status,
+    "event_type": orm.SecurityEvent.event_type,
+    "title": orm.SecurityEvent.title,
+}
+
 FILE_DEDUP_WINDOW = timedelta(hours=1)
 LINK_ROLE_PRIMARY = "primary"
 LINK_ROLE_RELATED = "related"
@@ -492,6 +505,8 @@ class EventService:
         keyword: str | None = None,
         occurred_after: datetime | None = None,
         occurred_before: datetime | None = None,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> EventListResult:
@@ -535,11 +550,18 @@ class EventService:
         if occurred_before is not None:
             filters.append(orm.SecurityEvent.occurred_at <= occurred_before)
 
+        # Resolve sort column (default: created_at).
+        order_column: Any = _SORT_COLUMN_MAP.get(
+            sort_by if sort_by else "created_at",
+            orm.SecurityEvent.created_at,
+        )
+        # Resolve sort direction (default: desc).
+        descending = (sort_order or "desc").strip().lower() != "asc"
+        order_clause = order_column.desc() if descending else order_column.asc()
+
         async with self._session_factory() as session:
             count_stmt = select(func.count()).select_from(orm.SecurityEvent)
-            list_stmt = select(orm.SecurityEvent).order_by(
-                orm.SecurityEvent.created_at.desc()
-            )
+            list_stmt = select(orm.SecurityEvent).order_by(order_clause)
             if filters:
                 count_stmt = count_stmt.where(and_(*filters))
                 list_stmt = list_stmt.where(and_(*filters))

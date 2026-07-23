@@ -397,6 +397,8 @@ async def list_events(
     keyword: str | None = None,
     start_time: datetime | None = None,
     end_time: datetime | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
     event_service: EventService = Depends(get_event_service),
 ) -> s.EventListResponse:
     result = await event_service.list_events(
@@ -407,6 +409,8 @@ async def list_events(
         keyword=keyword,
         occurred_after=start_time,
         occurred_before=end_time,
+        sort_by=sort_by,
+        sort_order=sort_order,
         page=page,
         page_size=page_size,
     )
