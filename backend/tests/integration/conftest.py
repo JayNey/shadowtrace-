@@ -1,10 +1,11 @@
-"""Real PostgreSQL/Redis fixtures for the ISSUE-017 quality gate."""
+"""Real PostgreSQL/Redis fixtures for integration and ISSUE-039 e2e_basic tests."""
 
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -17,15 +18,33 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.adapters.mock_xdr import MockXDRSourceAdapter
+from app.agents.evidence_agent import EVIDENCE_QUERY_ORDER, EvidenceAgent
+from app.agents.rag_agent import RAGAgent
+from app.agents.report_agent import ReportAgent
+from app.agents.risk_agent import RiskAgent
+from app.agents.triage_agent import TriageAgent
+from app.core.config import Settings, get_settings
+from app.core.guardrails import OutputGuard, WorkingMemoryGuardViolationWriter
+from app.core.llm.base import InMemoryLLMCallAuditRecorder
+from app.core.llm.mock_client import MockLLMClient
 from app.core.redis_client import RedisClient
 from app.data_generators.scenarios import build_scenario, write_scenario_artifacts
 from app.db.base import Base
 from app.ingestion.source_ingester import SourceIngester
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
+from app.models.tool_meta import ToolResult, ToolResultStatus
+from app.services.agent_trace_service import AgentTraceService
+from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
+from app.services.budget_service import BudgetService, WorkingMemoryBudgetUsageWriter
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService
+from app.services.event_audit_log_service import EventAuditLogService
 from app.services.event_service import EventService
+from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
+from app.services.state_machine_service import StateMachineService
+from app.services.working_memory import WorkingMemory
+from tests.test_tools.tool_system_fixtures import new_sfx
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -158,15 +177,47 @@ def context_store(
 
 
 @pytest.fixture
+def degraded_flags(
+    context_store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> DegradedFlagService:
+    return DegradedFlagService(context_store, session_factory)
+
+
+@pytest.fixture
+def audit_log(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> EventAuditLogService:
+    return EventAuditLogService(session_factory)
+
+
+@pytest.fixture
+def state_machine_service(
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    audit_log: EventAuditLogService,
+    degraded_flags: DegradedFlagService,
+) -> StateMachineService:
+    return StateMachineService(
+        session_factory,
+        context_store,
+        audit_log=audit_log,
+        degraded_flags=degraded_flags,
+    )
+
+
+@pytest.fixture
 def event_service(
     context_store: EventContextStore,
     session_factory: async_sessionmaker[AsyncSession],
+    degraded_flags: DegradedFlagService,
+    state_machine_service: StateMachineService,
 ) -> EventService:
-    degraded = DegradedFlagService(context_store, session_factory)
     return EventService(
         session_factory,
         context_store,
-        degraded_flags=degraded,
+        degraded_flags=degraded_flags,
+        state_machine=state_machine_service,
     )
 
 
@@ -180,3 +231,229 @@ def source_ingester(
         session_factory,
         source_mode="mock_xdr",
     )
+
+
+@pytest.fixture
+def e2e_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
+    """Mock/offline settings required by AnalysisOnlyPipeline."""
+    monkeypatch.setenv("SOURCE_MODE", "mock_xdr")
+    monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
+    monkeypatch.setenv("LLM_MODE", "mock")
+    monkeypatch.setenv("BUDGET_ENABLED", "true")
+    get_settings.cache_clear()
+    settings = Settings(
+        SOURCE_MODE="mock_xdr",
+        DISPOSITION_MODE="mock_xdr",
+        ALLOW_LIVE_SIDE_EFFECTS=False,
+        ALLOW_XDR_WRITEBACK=False,
+        LLM_MODE="mock",
+        BUDGET_ENABLED=True,
+    )
+    yield settings
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def working_memory(
+    context_store: EventContextStore,
+    redis_client: RedisClient,
+    degraded_flags: DegradedFlagService,
+) -> WorkingMemory:
+    return WorkingMemory(store=context_store, redis=redis_client, degraded_flags=degraded_flags)
+
+
+@pytest.fixture
+def mock_llm_client(budget_service: BudgetService) -> MockLLMClient:
+    return MockLLMClient(
+        audit_recorder=InMemoryLLMCallAuditRecorder(),
+        budget_service=budget_service,
+    )
+
+
+@pytest.fixture
+def agent_trace_service(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AgentTraceService:
+    return AgentTraceService(session_factory)
+
+
+@pytest.fixture
+def budget_service(
+    redis_client: RedisClient,
+    working_memory: WorkingMemory,
+    e2e_settings: Settings,
+) -> BudgetService:
+    writer = WorkingMemoryBudgetUsageWriter(working_memory)
+    return BudgetService(redis=redis_client, usage_writer=writer, settings=e2e_settings)
+
+
+@pytest.fixture
+def output_guard(working_memory: WorkingMemory) -> OutputGuard:
+    return OutputGuard(
+        violation_writer=WorkingMemoryGuardViolationWriter(working_memory),
+    )
+
+
+class FlakyToolExecutor:
+    """Force selected query tools to fail while delegating others."""
+
+    def __init__(self, inner: Any, fail_tools: set[str]) -> None:
+        self._inner = inner
+        self._fail_tools = fail_tools
+
+    async def call(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        event_id: str,
+        **kwargs: Any,
+    ) -> ToolResult:
+        if tool_name in self._fail_tools:
+            return ToolResult(
+                call_id=f"call-fail-{new_sfx()}",
+                tool_name=tool_name,
+                provider_name="test",
+                status=ToolResultStatus.FAILED,
+                error_detail=f"forced failure for {tool_name}",
+                execution_time_ms=3,
+            )
+        return await self._inner.call(tool_name, params, event_id, **kwargs)
+
+
+class FailingLLMClient:
+    """Always-fail LLM stub for degradation scenarios."""
+
+    async def chat(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("llm unavailable")
+
+
+@pytest.fixture
+def e2e_tool_executor(tool_executor: Any, budget_service: BudgetService) -> Any:
+    tool_executor.budget_service = budget_service
+    return tool_executor
+
+
+@pytest.fixture
+def build_analysis_pipeline(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+    state_machine_service: StateMachineService,
+    context_store: EventContextStore,
+    degraded_flags: DegradedFlagService,
+    working_memory: WorkingMemory,
+    mock_llm_client: MockLLMClient,
+    budget_service: BudgetService,
+    output_guard: OutputGuard,
+    agent_trace_service: AgentTraceService,
+    e2e_settings: Settings,
+    e2e_tool_executor: Any,
+) -> Callable[..., tuple[AnalysisOnlyPipeline, EvidenceProjection]]:
+    """Factory for ISSUE-039 analysis-only pipelines."""
+
+    def _build(
+        *,
+        llm_client: Any | None = None,
+        fail_tools: set[str] | None = None,
+        scenario_id: str | None = "insider_data_exfiltration",
+        evidence_mode: str = "sequential",
+    ) -> tuple[AnalysisOnlyPipeline, EvidenceProjection]:
+        effective_llm = mock_llm_client if llm_client is None else llm_client
+        effective_executor = e2e_tool_executor
+        if fail_tools:
+            effective_executor = FlakyToolExecutor(e2e_tool_executor, fail_tools)
+
+        triage = TriageAgent(
+            llm_client=effective_llm,
+            working_memory=working_memory.for_writer("TriageAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=agent_trace_service,
+        )
+        evidence = EvidenceAgent(
+            llm_client=effective_llm,
+            tool_executor=effective_executor,
+            working_memory=working_memory.for_writer("EvidenceAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=agent_trace_service,
+            event_service=event_service,
+            session_factory=session_factory,
+            evidence_mode=evidence_mode,
+        )
+        rag = RAGAgent(
+            working_memory=working_memory.for_writer("RAGAgent"),
+            pipeline=None,
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=agent_trace_service,
+        )
+        risk = RiskAgent(
+            llm_client=effective_llm,
+            working_memory=working_memory.for_writer("RiskAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=agent_trace_service,
+            event_service=event_service,
+            scenario_id=scenario_id,
+        )
+        report = ReportAgent(
+            llm_client=effective_llm,
+            working_memory=working_memory.for_writer("ReportAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=agent_trace_service,
+            event_service=event_service,
+            scenario_id=scenario_id,
+        )
+        pipeline = AnalysisOnlyPipeline(
+            event_service=event_service,
+            state_machine=state_machine_service,
+            triage_agent=triage,
+            evidence_agent=evidence,
+            rag_agent=rag,
+            risk_agent=risk,
+            report_agent=report,
+            context_store=context_store,
+            degraded_flags=degraded_flags,
+            settings=e2e_settings,
+        )
+        projection = EvidenceProjection(session_factory)
+        return pipeline, projection
+
+    return _build
+
+
+@pytest.fixture
+def run_analysis_pipeline(
+    build_analysis_pipeline: Callable[..., tuple[AnalysisOnlyPipeline, EvidenceProjection]],
+) -> Callable[..., Any]:
+    """Run the pipeline with the PG-backed evidence projection bound."""
+
+    async def _run(
+        event_id: str,
+        *,
+        llm_client: Any | None = None,
+        fail_tools: set[str] | None = None,
+        scenario_id: str | None = "insider_data_exfiltration",
+    ) -> Any:
+        pipeline, projection = build_analysis_pipeline(
+            llm_client=llm_client,
+            fail_tools=fail_tools,
+            scenario_id=scenario_id,
+        )
+        with bind_evidence_projection(projection):
+            return await pipeline.run(event_id)
+
+    return _run
+
+
+DEFAULT_PARTIAL_FAIL_TOOLS = frozenset(
+    {
+        "query_dns",
+        "query_asset_info",
+        "query_threat_intel",
+    }
+)
+assert DEFAULT_PARTIAL_FAIL_TOOLS.issubset(set(EVIDENCE_QUERY_ORDER))
