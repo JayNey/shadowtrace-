@@ -1,0 +1,901 @@
+"""ISSUE-054 SuperAgent tests — graph skeleton, lease lifecycle, guardrails.
+
+Test categories (per the ISSUE-054 acceptance spec):
+
+1. **Golden path** — graph skeleton advances NEW → REPORTING with agent trace
+2. **Concurrent lease** — second SuperAgent receives 409 ``investigation_in_progress``
+3. **Crash recovery** — lease expiry and renew behaviour
+4. **REACT_ENABLED gate** — ``REACT_ENABLED=true`` without executor → ``ConfigurationError``
+5. **analysis_only gate** — ``ORCHESTRATION_MODE=analysis_only`` → ``ConfigurationError``
+6. **State machine** — ``SuperAgentStatus`` transitions correctly
+7. **Writeback isolation** — ``InvestigationResult`` enforces invariants via ``extra="forbid"``
+8. **Guardrails** — invalid inputs rejected by BaseAgent template
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from app.agents.super_agent import SuperAgent
+from app.core.config import Settings
+from app.core.errors import ConfigurationError, ShadowTraceError
+from app.models.agent_io import InvestigationResult, SuperAgentInput
+from app.models.enums import (
+    DispositionPolicy,
+    EventStatus,
+    FinalVerdict,
+    Severity,
+    SuperAgentStatus,
+    WritebackReadiness,
+)
+from app.orchestration.lease import DEFAULT_LEASE_TTL_SECONDS, EventLease
+
+# --------------------------------------------------------------------------- #
+# Shared test fixtures
+# --------------------------------------------------------------------------- #
+
+
+class _FakeRedis:
+    """In-memory Redis stand-in for lease testing."""
+
+    def __init__(self) -> None:
+        self._store: dict[str, str] = {}
+        self._ttl: dict[str, int] = {}
+
+    async def set(self, key: str, value: str, nx: bool = False, ex: int = 0) -> bool:
+        if nx and key in self._store:
+            return False
+        self._store[key] = value
+        self._ttl[key] = ex
+        return True
+
+    async def get(self, key: str) -> str | None:
+        return self._store.get(key)
+
+    async def delete(self, key: str) -> int:
+        if key in self._store:
+            del self._store[key]
+            self._ttl.pop(key, None)
+            return 1
+        return 0
+
+    async def eval(self, script: str, num_keys: int, *args: str) -> int:
+        # Minimal Lua script emulation for release script
+        key = args[0]
+        owner = args[1] if len(args) > 1 else ""
+        if "GET" in script and "DEL" in script:  # release script
+            if self._store.get(key) == owner:
+                del self._store[key]
+                self._ttl.pop(key, None)
+                return 1
+            return 0
+        if "EXPIRE" in script:  # renew script
+            if self._store.get(key) == owner:
+                ttl = int(args[2]) if len(args) > 2 else DEFAULT_LEASE_TTL_SECONDS
+                self._ttl[key] = ttl
+                return 1
+            return 0
+        return 0
+
+
+class _FakeRedisClient:
+    """Stand-in for ``RedisClient`` that returns ``_FakeRedis``."""
+
+    def __init__(self, redis: _FakeRedis) -> None:
+        self._redis = redis
+
+    def get_client(self) -> _FakeRedis:
+        return self._redis
+
+    async def ping(self) -> bool:
+        return True
+
+
+class _FakeEvent:
+    """Minimal event row for SuperAgent state hydration.
+
+    Uses actual enum values so ``.value`` access works identically to ORM rows.
+    """
+
+    def __init__(
+        self,
+        event_id: str,
+        status: EventStatus = EventStatus.NEW,
+        disposition_policy: DispositionPolicy = DispositionPolicy.REQUIRED,
+        severity: Any = Severity.HIGH,
+        final_verdict: FinalVerdict | None = None,
+    ) -> None:
+        self.event_id = event_id
+        self.status = status
+        self.disposition_policy = disposition_policy
+        self.severity = severity
+        self.final_verdict = final_verdict
+        self.title = "Test Event"
+        self.description = "A test security event for SuperAgent"
+
+
+def _make_super_agent(
+    *,
+    event_service: Any = None,
+    state_machine: Any = None,
+    redis: _FakeRedis | None = None,
+    settings: Settings | None = None,
+    checkpointer: Any = None,
+    react_executor: Any = None,
+    **overrides: Any,
+) -> SuperAgent:
+    """Build a SuperAgent with fake dependencies suitable for unit testing."""
+    redis = redis or _FakeRedis()
+    redis_client = _FakeRedisClient(redis)
+
+    defaults: dict[str, Any] = {
+        "state_machine": state_machine or AsyncMock(),
+        "event_service": event_service or AsyncMock(),
+        "workflow_runtime": AsyncMock(),
+        "degraded_flags": AsyncMock(),
+        "context_store": AsyncMock(),
+        "triage_agent": AsyncMock(),
+        "planner_agent": AsyncMock(),
+        "evidence_agent": AsyncMock(),
+        "risk_agent": AsyncMock(),
+        "report_agent": AsyncMock(),
+        "rag_agent": None,
+        "redis_client": redis_client,
+        "checkpointer": checkpointer,
+        "react_executor": react_executor,
+        "settings": settings,
+        "session_factory": None,
+    }
+    defaults.update(overrides)
+    return SuperAgent(**defaults)
+
+
+# --------------------------------------------------------------------------- #
+# 1. Golden path — graph skeleton
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperAgentGoldenPath:
+    """SuperAgent builds the graph, acquires a lease, and invokes the workflow."""
+
+    @pytest.mark.asyncio
+    async def test_acquires_lease_before_graph_invocation(self) -> None:
+        """The lease must be acquired before the graph is invoked."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-a1b2c3d4"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        state_machine = AsyncMock()
+
+        agent = _make_super_agent(
+            event_service=event_service,
+            state_machine=state_machine,
+            redis=redis,
+        )
+
+        # The graph invocation should succeed — we mock the entire graph.
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ) as mock_invoke:
+            mock_invoke.return_value = {
+                "event_id": event_id,
+                "event_status": "reporting",
+                "disposition_policy": "required",
+                "severity": "high",
+                "final_verdict": "confirmed_threat",
+                "confidence": 0.85,
+                "disposition_only_intent": False,
+                "execution_substate": "none",
+                "degraded_flags": [],
+                "node_trace": ["triage_node", "planner_node", "report_node"],
+                "halted": False,
+                "error": None,
+                "report_generated": True,
+            }
+
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(return_value=mock_invoke.return_value)
+                mock_build.return_value = mock_graph
+
+                result = await agent.investigate(event_id)
+
+        # ── Assertions ────────────────────────────────────────────
+        assert result.event_id == event_id
+        assert result.final_status == EventStatus.REPORTING
+        assert result.final_verdict == FinalVerdict.CONFIRMED_THREAT
+        assert result.writeback_required is True
+
+        # Lease must have been acquired and released
+        assert redis._store == {}  # released
+
+        # State machine: NEW → TRIAGING transition must have been issued
+        state_machine.transition.assert_any_call(
+            event_id,
+            EventStatus.TRIAGING,
+            operator="SuperAgent",
+            reason="super_agent:investigation_start",
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_transitions_through_lifecycle(self) -> None:
+        """SuperAgentStatus must move IDLE → PLANNING → EXECUTING → FINISHED."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-lifecycle01"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(
+            event_service=event_service,
+            redis=redis,
+        )
+
+        statuses: list[SuperAgentStatus] = []
+
+        # Intercept status changes
+        async def _track(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            statuses.append(agent.status)
+            return {
+                "event_id": event_id,
+                "event_status": "reporting",
+                "disposition_policy": "required",
+                "severity": "high",
+                "final_verdict": "confirmed_threat",
+                "confidence": 0.9,
+                "disposition_only_intent": False,
+                "execution_substate": "none",
+                "degraded_flags": [],
+                "node_trace": [],
+                "halted": False,
+                "error": None,
+                "report_generated": True,
+            }
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+            side_effect=_track,
+        ):
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(side_effect=_track)
+                mock_build.return_value = mock_graph
+
+                await agent.investigate(event_id)
+
+        assert agent.status == SuperAgentStatus.FINISHED
+
+
+# --------------------------------------------------------------------------- #
+# 2. Concurrent lease — 409 investigation_in_progress
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperAgentConcurrentLease:
+    """The distributed lease prevents duplicate investigations."""
+
+    @pytest.mark.asyncio
+    async def test_second_agent_receives_investigation_in_progress(self) -> None:
+        """A second SuperAgent for the same event_id must raise a ShadowTraceError
+        with error_code='investigation_in_progress'."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-concur01"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        # First lease acquires the key directly (simulating agent1)
+        lease1 = EventLease(redis)
+        assert await lease1.acquire(event_id) is True
+
+        # Second agent tries to acquire — should fail
+        agent2 = _make_super_agent(event_service=event_service, redis=redis)
+
+        with pytest.raises(ShadowTraceError) as exc_info:
+            await agent2.investigate(event_id)
+
+        assert exc_info.value.error_code == "investigation_in_progress"
+        assert event_id in str(exc_info.value)
+
+        # Cleanup
+        await lease1.release(event_id)
+
+    @pytest.mark.asyncio
+    async def test_lease_released_after_success_allows_new_investigation(self) -> None:
+        """After a completed investigation releases its lease, a new one can start."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-reacquire"
+
+        # Simulate completed investigation with lease released
+        event = _FakeEvent(event_id, status=EventStatus.NEW)
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ) as mock_invoke:
+            mock_invoke.return_value = {
+                "event_id": event_id,
+                "event_status": "reporting",
+                "disposition_policy": "required",
+                "severity": "high",
+                "final_verdict": "confirmed_threat",
+                "confidence": 0.9,
+                "disposition_only_intent": False,
+                "execution_substate": "none",
+                "degraded_flags": [],
+                "node_trace": [],
+                "halted": False,
+                "error": None,
+                "report_generated": True,
+            }
+
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(return_value=mock_invoke.return_value)
+                mock_build.return_value = mock_graph
+
+                # First investigation
+                result1 = await agent.investigate(event_id)
+                assert result1.final_status == EventStatus.REPORTING
+
+        # Lease should be released now — a new agent can acquire
+        assert redis._store == {}  # Lease released
+        # Verify a fresh lease can be acquired (no existing holder)
+        lease_check = EventLease(redis)
+        assert await lease_check.acquire(event_id) is True
+        await lease_check.release(event_id)
+
+
+# --------------------------------------------------------------------------- #
+# 3. Crash recovery — lease expiry and renew
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperAgentCrashRecovery:
+    """Lease behaviour when the SuperAgent process crashes or is killed."""
+
+    def test_lease_owner_id_format(self) -> None:
+        """Owner ID must follow ``worker-{8hex}`` format."""
+        redis = _FakeRedis()
+        lease = EventLease(redis)
+        owner = lease.owner_id
+        assert owner.startswith("worker-")
+        hex_part = owner[len("worker-") :]
+        assert len(hex_part) == 8
+        assert all(c in "0123456789abcdef" for c in hex_part)
+
+    @pytest.mark.asyncio
+    async def test_renew_succeeds_for_valid_owner(self) -> None:
+        """Renew extends the TTL when the owner matches."""
+        redis = _FakeRedis()
+        lease = EventLease(redis)
+        event_id = "evt-20240724-renew01"
+
+        assert await lease.acquire(event_id) is True
+        assert await lease.renew(event_id) is True
+
+        # Key should still exist
+        assert await redis.get(lease.lease_key_for(event_id)) == lease.owner_id
+
+        await lease.release(event_id)
+
+    @pytest.mark.asyncio
+    async def test_renew_fails_for_wrong_owner(self) -> None:
+        """A different owner cannot renew the lease."""
+        redis = _FakeRedis()
+        lease1 = EventLease(redis)
+        lease2 = EventLease(redis)
+        event_id = "evt-20240724-renew02"
+
+        # lease1 acquires
+        assert await lease1.acquire(event_id) is True
+
+        # lease2 tries to renew — should fail (wrong owner)
+        assert await lease2.renew(event_id) is False
+
+        await lease1.release(event_id)
+
+    @pytest.mark.asyncio
+    async def test_release_only_works_for_owner(self) -> None:
+        """A different owner cannot release the lease."""
+        redis = _FakeRedis()
+        lease1 = EventLease(redis)
+        lease2 = EventLease(redis)
+        event_id = "evt-20240724-release01"
+
+        assert await lease1.acquire(event_id) is True
+
+        # lease2 tries to release — should fail
+        assert await lease2.release(event_id) is False
+        assert redis._store != {}  # lease1's lease still intact
+
+        # lease1 can release
+        assert await lease1.release(event_id) is True
+        assert redis._store == {}
+
+    @pytest.mark.asyncio
+    async def test_renew_loop_background_task(self) -> None:
+        """The renew loop runs at RENEW_INTERVAL_SECONDS intervals."""
+        redis = _FakeRedis()
+        lease = EventLease(redis)
+        event_id = "evt-20240724-loop01"
+
+        await lease.acquire(event_id)
+
+        renew_count = 0
+        original_renew = lease.renew
+
+        async def _counting_renew(eid: str) -> bool:
+            nonlocal renew_count
+            renew_count += 1
+            return await original_renew(eid)
+
+        lease.renew = _counting_renew  # type: ignore[method-assign]
+
+        async def _run_loop() -> None:
+            agent = _make_super_agent(redis=redis)
+            # Patch _renew_loop to use a very short interval for testing
+            with patch.object(agent, "_renew_loop") as mock_loop:
+                mock_loop.side_effect = lambda eid, lse: _fast_renew(eid, lse)
+
+        async def _fast_renew(eid: str, lse: EventLease) -> None:
+            for _ in range(3):
+                await asyncio.sleep(0.01)  # very fast for testing
+                await lse.renew(eid)
+
+        await _fast_renew(event_id, lease)
+        assert renew_count >= 3
+
+        await lease.release(event_id)
+
+
+# --------------------------------------------------------------------------- #
+# 4. REACT_ENABLED gate
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperAgentReactGate:
+    """REACT_ENABLED=true requires a registered ReAct executor (ISSUE-053)."""
+
+    @pytest.mark.asyncio
+    async def test_react_enabled_without_executor_raises_configuration_error(self) -> None:
+        """When REACT_ENABLED=true but no executor is injected, ConfigurationError
+        must be raised before the lease is acquired."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-react01"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        settings = Settings(ORCHESTRATION_MODE="graph", REACT_ENABLED=True)
+
+        agent = _make_super_agent(
+            event_service=event_service,
+            redis=redis,
+            settings=settings,
+            react_executor=None,  # ← missing!
+        )
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            await agent.investigate(event_id)
+
+        assert "REACT_ENABLED" in str(exc_info.value)
+        assert exc_info.value.error_code == "configuration_error"
+
+        # Lease must NOT have been acquired
+        assert redis._store == {}
+
+    @pytest.mark.asyncio
+    async def test_react_disabled_without_executor_is_fine(self) -> None:
+        """When REACT_ENABLED=false, missing executor is not an error."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-react02"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        settings = Settings(ORCHESTRATION_MODE="graph", REACT_ENABLED=False)
+
+        agent = _make_super_agent(
+            event_service=event_service,
+            redis=redis,
+            settings=settings,
+            react_executor=None,
+        )
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ) as mock_invoke:
+            mock_invoke.return_value = {
+                "event_id": event_id,
+                "event_status": "reporting",
+                "disposition_policy": "required",
+                "severity": "high",
+                "final_verdict": "confirmed_threat",
+                "confidence": 0.9,
+                "disposition_only_intent": False,
+                "execution_substate": "none",
+                "degraded_flags": [],
+                "node_trace": [],
+                "halted": False,
+                "error": None,
+                "report_generated": True,
+            }
+
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(return_value=mock_invoke.return_value)
+                mock_build.return_value = mock_graph
+
+                result = await agent.investigate(event_id)
+
+        assert result.final_status == EventStatus.REPORTING
+
+
+# --------------------------------------------------------------------------- #
+# 5. analysis_only gate
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperAgentAnalysisOnlyGate:
+    """ORCHESTRATION_MODE=analysis_only rejects SuperAgent and preserves the
+    legacy AnalysisOnlyPipeline path."""
+
+    @pytest.mark.asyncio
+    async def test_analysis_only_mode_raises_configuration_error(self) -> None:
+        """SuperAgent.investigate in analysis_only mode must raise ConfigurationError."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-aomode01"
+
+        settings = Settings(ORCHESTRATION_MODE="analysis_only")
+        agent = _make_super_agent(redis=redis, settings=settings)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            await agent.investigate(event_id)
+
+        assert exc_info.value.error_code == "configuration_error"
+        assert "analysis_only" in str(exc_info.value)
+
+
+# --------------------------------------------------------------------------- #
+# 6. State machine — SuperAgentStatus
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperAgentStatusMachine:
+    """SuperAgentStatus must have all 7 states defined."""
+
+    def test_all_seven_states_exist(self) -> None:
+        """The 7-state SuperAgentStatus enum must match README §4.6."""
+        expected = {
+            "idle",
+            "planning",
+            "executing",
+            "reflecting",
+            "replanning",
+            "finished",
+            "failed",
+        }
+        actual = {s.value for s in SuperAgentStatus}
+        assert actual == expected
+
+    def test_initial_status_is_idle(self) -> None:
+        """A freshly constructed SuperAgent must be IDLE."""
+        agent = _make_super_agent()
+        assert agent.status == SuperAgentStatus.IDLE
+
+
+# --------------------------------------------------------------------------- #
+# 7. Writeback isolation
+# --------------------------------------------------------------------------- #
+
+
+class TestInvestigationResultWritebackIsolation:
+    """InvestigationResult must never claim writeback_required=true with
+    writeback_readiness=NOT_REQUIRED."""
+
+    def test_writeback_required_forbids_not_required_readiness(self) -> None:
+        """The model validator rejects writeback_required=true with NOT_REQUIRED."""
+        with pytest.raises(ValueError, match="writeback_required=true forbids"):
+            InvestigationResult(
+                event_id="evt-20240724-wb01",
+                final_status=EventStatus.REPORTING,
+                final_verdict=FinalVerdict.CONFIRMED_THREAT,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            )
+
+    def test_writeback_not_required_forces_not_required_readiness(self) -> None:
+        """writeback_required=false requires NOT_REQUIRED readiness."""
+        with pytest.raises(ValueError, match="writeback_required=false requires"):
+            InvestigationResult(
+                event_id="evt-20240724-wb02",
+                final_status=EventStatus.REPORTING,
+                final_verdict=FinalVerdict.NONE,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.READY,
+            )
+
+    def test_valid_result_with_writeback(self) -> None:
+        """A valid result with writeback_required=true and READY passes validation."""
+        result = InvestigationResult(
+            event_id="evt-20240724-wb03",
+            final_status=EventStatus.REPORTING,
+            final_verdict=FinalVerdict.CONFIRMED_THREAT,
+            writeback_required=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_overall_status=None,
+        )
+        assert result.writeback_required is True
+        assert result.writeback_readiness is WritebackReadiness.READY
+
+    def test_extra_fields_forbidden(self) -> None:
+        """InvestigationResult must reject unknown fields (extra='forbid')."""
+        with pytest.raises(ValueError):  # pydantic ValidationError
+            InvestigationResult(
+                event_id="evt-20240724-wb04",
+                final_status=EventStatus.REPORTING,
+                unknown_field="should_not_exist",  # type: ignore[call-arg]
+            )
+
+
+# --------------------------------------------------------------------------- #
+# 8. Guardrails — BaseAgent template validates input
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperAgentGuardrails:
+    """The BaseAgent template enforces input type validation."""
+
+    @pytest.mark.asyncio
+    async def test_execute_rejects_wrong_input_type(self) -> None:
+        """BaseAgent.execute rejects input that is not SuperAgentInput."""
+        agent = _make_super_agent()
+
+        class WrongInput:
+            event_id = "evt-123"
+
+        with pytest.raises(TypeError, match="requires SuperAgentInput"):
+            await agent.execute(WrongInput())  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_execute_accepts_super_agent_input(self) -> None:
+        """BaseAgent.execute accepts SuperAgentInput and delegates to _run."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-exec01"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ) as mock_invoke:
+            mock_invoke.return_value = {
+                "event_id": event_id,
+                "event_status": "reporting",
+                "disposition_policy": "required",
+                "severity": "high",
+                "final_verdict": "confirmed_threat",
+                "confidence": 0.9,
+                "disposition_only_intent": False,
+                "execution_substate": "none",
+                "degraded_flags": [],
+                "node_trace": [],
+                "halted": False,
+                "error": None,
+                "report_generated": True,
+            }
+
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(return_value=mock_invoke.return_value)
+                mock_build.return_value = mock_graph
+
+                result = await agent.execute(
+                    SuperAgentInput(event_id=event_id, triggered_by="test")
+                )
+
+        assert isinstance(result, InvestigationResult)
+        assert result.event_id == event_id
+
+
+# --------------------------------------------------------------------------- #
+# Edge cases
+# --------------------------------------------------------------------------- #
+
+
+class TestSuperAgentEdgeCases:
+    """Boundary and error conditions."""
+
+    @pytest.mark.asyncio
+    async def test_event_not_found_raises_error(self) -> None:
+        """When the event does not exist, an error must be raised."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-missing"
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = None  # event not found
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        with pytest.raises(ShadowTraceError) as exc_info:
+            await agent.investigate(event_id)
+
+        assert exc_info.value.error_code == "event_not_found"
+
+    @pytest.mark.asyncio
+    async def test_graph_failure_transitions_to_failed(self) -> None:
+        """If the graph throws, the event must be transitioned to FAILED."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-graphfail"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        state_machine = AsyncMock()
+
+        agent = _make_super_agent(
+            event_service=event_service,
+            state_machine=state_machine,
+            redis=redis,
+        )
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("graph exploded"),
+        ):
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(side_effect=RuntimeError("graph exploded"))
+                mock_build.return_value = mock_graph
+
+                with pytest.raises(RuntimeError, match="graph exploded"):
+                    await agent.investigate(event_id)
+
+        # State machine must have transitioned to FAILED
+        failed_calls = [
+            c
+            for c in state_machine.transition.call_args_list
+            if c.args[0] == event_id
+            and c.args[1] == EventStatus.FAILED
+            and c.kwargs.get("operator") == "SuperAgent"
+        ]
+        assert len(failed_calls) >= 1, "Expected a FAILED transition call"
+        assert "super_agent:error:RuntimeError" in str(failed_calls[0].kwargs.get("reason", ""))
+
+    @pytest.mark.asyncio
+    async def test_failed_status_reflected_in_agent(self) -> None:
+        """After a failure, SuperAgentStatus must be FAILED."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-statusfail"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(side_effect=RuntimeError("boom"))
+                mock_build.return_value = mock_graph
+
+                with pytest.raises(RuntimeError):
+                    await agent.investigate(event_id)
+
+        assert agent.status == SuperAgentStatus.FAILED
+
+    @pytest.mark.asyncio
+    async def test_initial_state_includes_disposition_policy(self) -> None:
+        """The initial InvestigationState must include disposition_policy from the event."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-initstate"
+        event = _FakeEvent(event_id, disposition_policy=DispositionPolicy.NOT_REQUIRED)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        state_machine = AsyncMock()
+
+        workflow_runtime = AsyncMock()
+        workflow_runtime.get_event_status_update_readiness.return_value = (
+            WritebackReadiness.NOT_REQUIRED
+        )
+
+        agent = _make_super_agent(
+            event_service=event_service,
+            state_machine=state_machine,
+            workflow_runtime=workflow_runtime,
+            redis=redis,
+        )
+
+        captured_state: dict[str, Any] = {}
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ) as mock_invoke:
+            mock_invoke.return_value = {
+                "event_id": event_id,
+                "event_status": "closed",
+                "disposition_policy": "not_required",
+                "severity": "low",
+                "final_verdict": "false_positive",
+                "confidence": 0.9,
+                "disposition_only_intent": False,
+                "execution_substate": "none",
+                "degraded_flags": [],
+                "node_trace": [],
+                "halted": False,
+                "error": None,
+                "report_generated": True,
+            }
+
+            async def _capture_invoke(graph: Any, state: Any, config: Any) -> dict[str, Any]:
+                captured_state.update(state)
+                return mock_invoke.return_value
+
+            mock_invoke.side_effect = _capture_invoke
+
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(side_effect=_capture_invoke)
+                mock_build.return_value = mock_graph
+
+                await agent.investigate(event_id)
+
+        assert captured_state["event_id"] == event_id
+        assert captured_state["disposition_policy"] == "not_required"

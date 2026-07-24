@@ -582,6 +582,80 @@ async def get_event(
 # --------------------------------------------------------------------------- #
 
 
+async def _run_analysis_only_pipeline(
+    event_id: str,
+    *,
+    state_machine: Any,
+) -> None:
+    """Background task: legacy AnalysisOnlyPipeline (``ORCHESTRATION_MODE=analysis_only``)."""
+    try:
+        from app.services.evidence_projection import (
+            EvidenceProjection,
+            bind_evidence_projection,
+        )
+
+        pipeline = await get_pipeline()
+        projection = EvidenceProjection(_get_session_factory())
+        with bind_evidence_projection(projection):
+            await pipeline.run(event_id)
+    except Exception as exc:
+        logger.error(
+            "Background pipeline failed for event=%s: %s",
+            event_id,
+            exc,
+        )
+        try:
+            await state_machine.transition(
+                event_id,
+                EventStatus.FAILED,
+                operator="AnalysisOnlyPipeline",
+                reason=f"pipeline_failed: {exc!s}"[:500],
+            )
+        except Exception:
+            logger.exception("Failed to mark event as FAILED: %s", event_id)
+
+
+async def _run_super_agent(
+    event_id: str,
+    *,
+    state_machine: Any,
+) -> None:
+    """Background task: SuperAgent graph investigation (``ORCHESTRATION_MODE=graph``).
+
+    The SuperAgent handles lease acquisition internally — a concurrent request
+    receives HTTP 409 from the /investigate endpoint before reaching this task.
+    If the SuperAgent itself fails (lease expiry, graph error, …) the event is
+    transitioned to FAILED.
+    """
+    try:
+        from app.api.v1.deps import get_super_agent
+
+        agent = await get_super_agent()
+        _ = await agent.investigate(event_id)
+    except Exception as exc:
+        logger.error(
+            "SuperAgent investigation failed for event=%s: %s",
+            event_id,
+            exc,
+        )
+        # ShadowTraceError subclasses (including investigation_in_progress)
+        # already carry structured error codes — let them propagate naturally
+        # through the background task logger.  Only force a FAILED transition
+        # when the SuperAgent itself didn't already mark it.
+        from app.core.errors import ShadowTraceError
+
+        if not isinstance(exc, ShadowTraceError):
+            try:
+                await state_machine.transition(
+                    event_id,
+                    EventStatus.FAILED,
+                    operator="SuperAgent",
+                    reason=f"super_agent:error:{type(exc).__name__}:{exc!s}"[:500],
+                )
+            except Exception:
+                logger.exception("Failed to mark event as FAILED: %s", event_id)
+
+
 @router.post(
     "/events/{event_id}/investigate",
     response_model=s.InvestigateResponse,
@@ -595,6 +669,18 @@ async def investigate_event(
     event_service: EventService = Depends(get_event_service),
     state_machine: StateMachineService = Depends(get_state_machine),
 ) -> s.InvestigateResponse:
+    """Start an investigation for *event_id*.
+
+    When ``ORCHESTRATION_MODE=graph`` (default) the SuperAgent manages a
+    LangGraph investigation with distributed lease protection. Concurrent
+    requests receive HTTP 409.
+
+    When ``ORCHESTRATION_MODE=analysis_only`` the legacy AnalysisOnlyPipeline
+    runs as a background task (dev/offline only).
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
     event = await event_service.get_event(event_id)
     if event is None:
         raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
@@ -607,35 +693,20 @@ async def investigate_event(
             details={"event_id": event_id},
         )
 
-    # Enqueue the pipeline as a background task.
-    async def _run_pipeline() -> None:
-        try:
-            from app.services.evidence_projection import (
-                EvidenceProjection,
-                bind_evidence_projection,
-            )
-
-            pipeline = await get_pipeline()
-            projection = EvidenceProjection(_get_session_factory())
-            with bind_evidence_projection(projection):
-                await pipeline.run(event_id)
-        except Exception as exc:
-            logger.error(
-                "Background pipeline failed for event=%s: %s",
-                event_id,
-                exc,
-            )
-            try:
-                await state_machine.transition(
-                    event_id,
-                    EventStatus.FAILED,
-                    operator="AnalysisOnlyPipeline",
-                    reason=f"pipeline_failed: {exc}",
-                )
-            except Exception:
-                logger.exception("Failed to mark event as FAILED: %s", event_id)
-
-    background.add_task(_run_pipeline)
+    if settings.orchestration_mode == "analysis_only":
+        # ── Legacy path: AnalysisOnlyPipeline (dev/offline) ──────
+        background.add_task(
+            _run_analysis_only_pipeline,
+            event_id=event_id,
+            state_machine=state_machine,
+        )
+    else:
+        # ── Production path: SuperAgent + LangGraph ──────────────
+        background.add_task(
+            _run_super_agent,
+            event_id=event_id,
+            state_machine=state_machine,
+        )
 
     return s.InvestigateResponse(
         event_id=event_id,
