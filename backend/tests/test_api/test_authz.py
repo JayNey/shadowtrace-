@@ -36,59 +36,14 @@ def _dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def client() -> TestClient:
-    class _MockEventService:
-        @staticmethod
-        def _example_event() -> Any:
-            evt = s.example_security_event(s.EXAMPLE_EVENT_ID)
-            evt.disposition_policy = DispositionPolicy.NOT_REQUIRED
-            return evt
-
-        async def get_event(self, event_id: str) -> Any:
-            if event_id == s.EXAMPLE_EVENT_ID:
-                return self._example_event()
-            return None
-
-        async def list_events(self, **kwargs: Any) -> Any:
-            @dataclass
-            class _Result:
-                items: list[Any]
-                total: int
-                page: int
-                page_size: int
-
-            return _Result(items=[], total=0, page=1, page_size=20)
-
-        async def close_event(self, event_id: str, **kwargs: Any) -> Any:
-            if event_id != s.EXAMPLE_EVENT_ID:
-                raise EventNotFoundError(
-                    "event not found",
-                    details={"event_id": event_id},
-                )
-            evt = self._example_event()
-            evt.status = EventStatus.CLOSED
-            evt.external_unsynced = bool(kwargs.get("force_local_close"))
-            return evt
-
-        async def set_final_verdict(self, *args: object, **kwargs: object) -> None:
-            return None
-
-        async def transition_status(self, *args: object, **kwargs: object) -> None:
-            return None
-
-    class _MockStateMachine:
-        async def transition(self, *args: object, **kwargs: object) -> None:
-            return None
-
-        async def force_close(
-            self,
-            event_id: str,
-            *,
-            principal: str,
-            reason: str,
-        ) -> Any:
-            from types import SimpleNamespace
-
-            return SimpleNamespace(final_verdict=FinalVerdict.NONE)
+    from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
+    from app.api.v1.deps import get_event_service as _real_get_event_service
+    from app.api.v1.deps import get_state_machine as _real_get_state_machine
+    from tests.test_api.test_contracts import (
+        _MockDispositionSyncService,
+        _MockEventService,
+        _MockStateMachine,
+    )
 
     class _StubApprovalEngine:
         async def approve(self, *args: object, **kwargs: object) -> None:
@@ -109,13 +64,18 @@ def client() -> TestClient:
     async def _stub_engine() -> _StubApprovalEngine:
         return _StubApprovalEngine()
 
+    async def _mock_disposition_sync() -> _MockDispositionSyncService:
+        return _MockDispositionSyncService()
+
     app.dependency_overrides[get_approval_engine] = _stub_engine
-    app.dependency_overrides[get_event_service] = _mock_event_service
-    app.dependency_overrides[get_state_machine] = _mock_state_machine
+    app.dependency_overrides[_real_get_event_service] = _mock_event_service
+    app.dependency_overrides[_real_get_state_machine] = _mock_state_machine
+    app.dependency_overrides[_real_get_disposition_sync] = _mock_disposition_sync
     yield TestClient(app)
     app.dependency_overrides.pop(get_approval_engine, None)
-    app.dependency_overrides.pop(get_event_service, None)
-    app.dependency_overrides.pop(get_state_machine, None)
+    app.dependency_overrides.pop(_real_get_event_service, None)
+    app.dependency_overrides.pop(_real_get_state_machine, None)
+    app.dependency_overrides.pop(_real_get_disposition_sync, None)
 
 
 def _hdr(role: str) -> dict[str, str]:
@@ -163,7 +123,11 @@ def test_retry_requires_disposition_operator(client: TestClient) -> None:
 
 
 def test_resolve_writeback_requires_admin(client: TestClient) -> None:
-    body = {"resolution": "manual_confirmed", "comment": "verified"}
+    body = {
+        "resolution": "manual_confirmed",
+        "comment": "verified",
+        "evidence_ref": "evidence://verified",
+    }
     forbidden = client.post(
         "/api/v1/writebacks/wbk-0a1b2c3d/resolve", headers=_hdr("operator"), json=body
     )
