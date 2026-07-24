@@ -762,7 +762,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             evidence = EvidenceOutput.model_validate(evidence_data)
             rag_out: RAGOutput | None = await rag_node(
                 ec,
-                self.rag_agent,  # type: ignore[arg-type]
+                self.rag_agent,
                 triage_result=triage,
                 evidence_output=evidence,
             )
