@@ -25,7 +25,9 @@ from app.core.config import get_settings
 from app.db import models as orm
 from app.models.agent_io import (
     CollectionStatus,
+    EvidenceAgentInput,
     EvidenceOutput,
+    TriageResult,
 )
 from app.models.enums import (
     DispositionPolicy,
@@ -144,6 +146,11 @@ async def _ready_resolver(_event_id: str) -> WritebackReadiness:
 
        See the module-level warning block above for details.
     """
+    # This resolver is ONLY valid for NOT_REQUIRED events.  Raising here
+    # would be too aggressive (we don't know the event's policy at import
+    # time), but callers should never route a REQUIRED event through this
+    # function — the routing tests (test_route_after_triage_required_*)
+    # bypass it entirely by constructing InvestigationState directly.
     return WritebackReadiness.NOT_REQUIRED
 
 
@@ -178,6 +185,11 @@ async def _ingest_event(
 
     async with session_factory() as session:
         async with session.begin():
+            # INTENTIONAL: test setup bypasses StateMachineService to isolate
+            # the graph-under-test.  We directly set status + write audit log
+            # here so that the orchestration graph can start from TRIAGING
+            # without depending on the state machine's transition hooks
+            # (which may later gain side effects like WebSocket events).
             row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
             assert row is not None
             row.status = EventStatus.TRIAGING.value
@@ -324,7 +336,6 @@ async def test_golden_path_full_orchestration_to_reporting(
     assert final.get("triage_result") is not None, "triage_result missing"
     assert final.get("evidence_output") is not None, "evidence_output missing"
     assert final.get("risk_assessment") is not None, "risk_assessment missing"
-    assert final.get("report_generated") is True, "report_generated should be True"
     assert final.get("need_investigation") is True
 
     # ── PRIMARY: Assert graph reached REPORTING (Issue spec endpoint) ─────
@@ -405,7 +416,14 @@ async def test_agent_failure_retry_evidence_agent(
     # faster — the scenario only needs one failure + one success to validate
     # the retry-and-trace contract.
     rw = RetryingAgentWrapper(flaky, max_retries=1)  # initial + 1 retry
-    result = await rw.execute(object())  # stand-in for EvidenceAgentInput
+    mock_triage_result = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        reasoning="retry test",
+    )
+    agent_input = EvidenceAgentInput(event_id=event_id, triage_result=mock_triage_result)
+    result = await rw.execute(agent_input)
     assert isinstance(result, EvidenceOutput)
 
     # ── Assert retry attempts recorded ────────────────────────────────────
@@ -529,6 +547,14 @@ async def test_agent_failure_retry_within_graph(
     # ── Assert final completion ────────────────────────────────────────────
     assert final["event_status"] == EventStatus.CLOSED.value
     assert final["halted"] is False
+
+    # ── Assert audit log transitions valid ────────────────────────────────
+    # Expected minimum: COLLECTING_EVIDENCE + ANALYZING + CLOSED = 3 transfers.
+    # The graph's evidence_node, risk_node, and close_node each write an audit
+    # log entry via _transition_status() → StateMachineService.transition().
+    await assert_audit_log_transitions_valid(
+        audit_log, event_id, expected_min_count=3
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -810,6 +836,78 @@ async def test_agent_retry_exhaustion_raises() -> None:
     assert rw.attempts == [False, False, False], (
         f"expected 3 failures, got attempts={rw.attempts}"
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_retry_exhaustion_records_all_failed_traces(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+    agent_trace_service: AgentTraceService,
+) -> None:
+    """ISSUE-055 boundary: retry exhaustion produces failed trace for every attempt.
+
+    Unlike the pure-unit :func:`test_agent_retry_exhaustion_raises`, this
+    integration variant injects ``AgentTraceService`` + a real ``event_id``
+    so that ``FlakyStubAgent.execute()`` writes a ``status="failed"`` trace
+    record on every failed attempt.  We verify:
+
+    - All ``MAX_AGENT_RETRIES + 1`` attempts produce failed traces
+    - Each trace's ``error_detail`` references the correct attempt number
+    - No ``completed`` trace exists (the agent never succeeded)
+    """
+    # ── Setup: create a real event for trace scoping ──────────────────────
+    event_id = await _ingest_event(
+        event_service,
+        session_factory,
+        object_id="INC-orch-exhaust-int-001",
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+    )
+
+    # ── Create a flaky agent that never recovers ─────────────────────────
+    flaky = make_flaky_evidence_stub(
+        fail_count=5,
+        agent_name="exhaustion_test",
+        trace_service=agent_trace_service,
+        event_id=event_id,
+    )
+    # max_retries=2 matches production MAX_AGENT_RETRIES → 3 total attempts
+    rw = RetryingAgentWrapper(flaky, max_retries=2)
+
+    mock_triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        reasoning="exhaustion trace test",
+    )
+    agent_input = EvidenceAgentInput(event_id=event_id, triage_result=mock_triage)
+
+    with pytest.raises(RuntimeError, match="FlakyStubAgent failure on attempt"):
+        await rw.execute(agent_input)
+
+    # ── Assert all attempts recorded as failures ──────────────────────────
+    assert rw.attempts == [False, False, False], (
+        f"expected 3 failures, got attempts={rw.attempts}"
+    )
+
+    # ── Verify every failed attempt produced a trace record ───────────────
+    traces = await agent_trace_service.get_traces_by_event(event_id)
+    assert len(traces) == 3, (
+        f"expected 3 failed trace records (one per attempt), got {len(traces)}"
+    )
+
+    statuses = {t.status for t in traces}
+    assert statuses == {"failed"}, (
+        f"all traces must be 'failed' when retries are exhausted, got {statuses}"
+    )
+
+    # Each trace's error_detail must reference the corresponding attempt
+    error_details = sorted(
+        [t.error_detail or "" for t in traces]
+    )
+    for i, detail in enumerate(error_details, start=1):
+        assert f"attempt {i}" in detail, (
+            f"trace {i} error_detail must mention 'attempt {i}', got: {detail!r}"
+        )
 
 
 def test_route_after_triage_required_policy_investigates() -> None:

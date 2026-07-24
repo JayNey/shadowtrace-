@@ -306,6 +306,29 @@ def make_event_summary(
     severity: Severity = Severity.HIGH,
     status: EventStatus = EventStatus.NEW,
 ) -> EventSummary:
+    """Build an EventSummary for test context initialization.
+
+    .. warning::
+       The writeback_required / writeback_readiness derivation below is
+       correct ONLY for ``DispositionPolicy.NOT_REQUIRED``.  It does not
+       replicate the full logic in ``context_service.event_summary_from_*
+       ()``, which additionally inspects ``disposition_source_ref`` to
+       decide between ``SOURCE_UNRESOLVED`` and ``CAPABILITY_UNKNOWN`` for
+       REQUIRED-policy events.
+
+       When writing tests for REQUIRED-policy events (ISSUE-062), either
+       call ``event_summary_from_security_event`` / ``event_summary_from_domain``
+       directly, or extend this helper to accept a ``disposition_source_ref``
+       parameter.
+    """
+    # Guard: this helper is only used for NOT_REQUIRED events in the current
+    # test suite.  If someone passes REQUIRED, fail early rather than silently
+    # producing an incorrect CAPABILITY_UNKNOWN readiness.
+    assert disposition_policy == DispositionPolicy.NOT_REQUIRED, (
+        "make_event_summary writeback derivation is only correct for "
+        "NOT_REQUIRED.  For REQUIRED events, use "
+        "event_summary_from_security_event() or extend this helper."
+    )
     return EventSummary(
         event_id=event_id,
         event_type=EventType.DATA_EXFILTRATION,
