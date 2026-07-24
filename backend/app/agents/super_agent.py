@@ -341,46 +341,25 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
             raise
 
         except ShadowTraceError as exc:
-            self._status = SuperAgentStatus.FAILED
             logger.exception(
                 "SuperAgent investigation failed event=%s: ShadowTraceError=%s",
                 event_id,
                 type(exc).__name__,
             )
-            try:
-                await self._state_machine.transition(
-                    event_id,
-                    EventStatus.FAILED,
-                    operator=SuperAgent._OPERATOR,
-                    # DB column limit — truncate to 500 chars
-                    reason=f"super_agent:error:{type(exc).__name__}:{exc!s}"[:500],
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to mark event=%s as FAILED after ShadowTraceError",
-                    event_id,
-                )
+            await self._transition_to_failed(
+                event_id, f"super_agent:error:{type(exc).__name__}:{exc!s}"
+            )
             raise
 
         except Exception as exc:
-            self._status = SuperAgentStatus.FAILED
             logger.exception(
                 "SuperAgent investigation failed event=%s: %s",
                 event_id,
                 exc,
             )
-            try:
-                await self._state_machine.transition(
-                    event_id,
-                    EventStatus.FAILED,
-                    operator=SuperAgent._OPERATOR,
-                    reason=f"super_agent:error:{type(exc).__name__}:{exc!s}"[:500],
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to mark event=%s as FAILED after SuperAgent error",
-                    event_id,
-                )
+            await self._transition_to_failed(
+                event_id, f"super_agent:error:{type(exc).__name__}:{exc!s}"
+            )
             raise
 
         finally:
@@ -414,6 +393,28 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
+
+    async def _transition_to_failed(self, event_id: str, reason_suffix: str) -> None:
+        """Best-effort FAILED state-machine transition for investigation failures.
+
+        Sets the agent status to FAILED and attempts a state machine transition.
+        The transition is idempotent — if the event was already marked FAILED,
+        re-marking is a safe no-op.  Failures here are logged but not re-raised
+        because the outer handler will re-raise the original exception regardless.
+        """
+        self._status = SuperAgentStatus.FAILED
+        try:
+            await self._state_machine.transition(
+                event_id,
+                EventStatus.FAILED,
+                operator=SuperAgent._OPERATOR,
+                reason=reason_suffix[:500],
+            )
+        except Exception:
+            logger.exception(
+                "Failed to mark event=%s as FAILED after SuperAgent error",
+                event_id,
+            )
 
     async def _try_snapshot_op(
         self,

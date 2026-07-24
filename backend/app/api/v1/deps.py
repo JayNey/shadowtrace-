@@ -210,14 +210,15 @@ async def get_pipeline() -> Any:
             output_guard=output_guard,
             trace_service=trace_service,
             event_service=event_service,
-            # TODO(ISSUE-054 → follow-up): derive scenario_id from event_type.
+            # TODO(ISSUE-058): derive scenario_id from event_type.
             # SCENARIO_REGISTRY currently has insider_data_exfiltration,
             # suspicious_domain_access, and account_anomaly_fp.  "default"
             # penetrates the LLM prompt fallback path — functional but may
-            # degrade risk/report prompt quality in analysis_only mode.
-            # Create a small follow-up Issue to implement:
+            # degrade risk/report prompt quality.  ISSUE-058 will implement:
             #   scenario_id = derive_scenario_from_event_type(event.event_type)
-            scenario_id="default"
+            # Until then, at least use "insider_data_exfiltration" as the
+            # best-matching default for the primary use case (per ISSUE-038).
+            scenario_id="insider_data_exfiltration"
         )
         report = ReportAgent(
             llm_client=llm_client,
@@ -227,14 +228,15 @@ async def get_pipeline() -> Any:
             trace_service=trace_service,
             event_service=event_service,
             event_bus=_get_event_bus(),
-            # TODO(ISSUE-054 → follow-up): derive scenario_id from event_type.
+            # TODO(ISSUE-058): derive scenario_id from event_type.
             # SCENARIO_REGISTRY currently has insider_data_exfiltration,
             # suspicious_domain_access, and account_anomaly_fp.  "default"
             # penetrates the LLM prompt fallback path — functional but may
-            # degrade risk/report prompt quality in analysis_only mode.
-            # Create a small follow-up Issue to implement:
+            # degrade risk/report prompt quality.  ISSUE-058 will implement:
             #   scenario_id = derive_scenario_from_event_type(event.event_type)
-            scenario_id="default"
+            # Until then, at least use "insider_data_exfiltration" as the
+            # best-matching default for the primary use case (per ISSUE-038).
+            scenario_id="insider_data_exfiltration"
         )
 
         _pipeline = AnalysisOnlyPipeline(
@@ -322,14 +324,15 @@ async def get_super_agent() -> Any:
             output_guard=output_guard,
             trace_service=trace_service,
             event_service=event_service,
-            # TODO(ISSUE-054 → follow-up): derive scenario_id from event_type.
+            # TODO(ISSUE-058): derive scenario_id from event_type.
             # SCENARIO_REGISTRY currently has insider_data_exfiltration,
             # suspicious_domain_access, and account_anomaly_fp.  "default"
             # penetrates the LLM prompt fallback path — functional but may
-            # degrade risk/report prompt quality in analysis_only mode.
-            # Create a small follow-up Issue to implement:
+            # degrade risk/report prompt quality.  ISSUE-058 will implement:
             #   scenario_id = derive_scenario_from_event_type(event.event_type)
-            scenario_id="default"
+            # Until then, at least use "insider_data_exfiltration" as the
+            # best-matching default for the primary use case (per ISSUE-038).
+            scenario_id="insider_data_exfiltration"
         )
         report = ReportAgent(
             llm_client=llm_client,
@@ -339,14 +342,15 @@ async def get_super_agent() -> Any:
             trace_service=trace_service,
             event_service=event_service,
             event_bus=_get_event_bus(),
-            # TODO(ISSUE-054 → follow-up): derive scenario_id from event_type.
+            # TODO(ISSUE-058): derive scenario_id from event_type.
             # SCENARIO_REGISTRY currently has insider_data_exfiltration,
             # suspicious_domain_access, and account_anomaly_fp.  "default"
             # penetrates the LLM prompt fallback path — functional but may
-            # degrade risk/report prompt quality in analysis_only mode.
-            # Create a small follow-up Issue to implement:
+            # degrade risk/report prompt quality.  ISSUE-058 will implement:
             #   scenario_id = derive_scenario_from_event_type(event.event_type)
-            scenario_id="default"
+            # Until then, at least use "insider_data_exfiltration" as the
+            # best-matching default for the primary use case (per ISSUE-038).
+            scenario_id="insider_data_exfiltration"
         )
 
         # ── Workflow runtime ─────────────────────────────────────

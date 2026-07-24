@@ -57,7 +57,8 @@ class EventLease:
     internally (``worker-{8hex}``) and stores it as instance state. This is a
     deliberate design choice — the caller never needs to supply an owner identity
     because the lease *is* the owner. Methods therefore omit the *owner_id*
-    parameter; the spec will be updated to reflect the cleaner design.
+    parameter.  Tracked as TODO(ISSUE-058): update the ShadowTrace 工程实施拆解方案
+    ISSUE-054 chapter to reflect the actual ``acquire(event_id, ttl_s)`` signature.
 
     Usage::
 

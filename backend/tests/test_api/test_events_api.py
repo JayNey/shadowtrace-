@@ -1604,3 +1604,95 @@ async def test_api_investigate_rejects_analysis_only_with_xdr_writeback(
     assert "xdr writeback" in body["message"].lower(), (
         f"Message must mention XDR writeback, got: {body['message']}"
     )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Should-Fix #1: analysis_only idempotency on TRIAGING
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_idempotent_on_triaging(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """analysis_only mode: TRIAGING event → 202 Accepted (idempotent skip).
+
+    When ORCHESTRATION_MODE=analysis_only and the pipeline has already
+    transitioned the event from NEW to TRIAGING, a subsequent investigate
+    request must return 202 rather than spawning a duplicate pipeline task
+    or returning an invalid state transition error (Should-Fix #1).
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
+    reset_deps()
+
+    now = datetime.now(UTC)
+    eid = "evt-20260724-analysis-only-triaging"
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=eid,
+                    event_type="insider_threat",
+                    title="Analysis-only idempotency test",
+                    description="Event left in TRIAGING after analysis_only pipeline ran",
+                    status="triaging",
+                    severity="high",
+                    final_verdict="none",
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "alert",
+                        "source_product": "file",
+                        "source_tenant_id": "local",
+                        "connector_id": "file-local",
+                        "source_object_id": "file-analysis-only-triaging",
+                        "raw_payload_hash": hashlib.sha256(
+                            b"analysis-only-triaging"
+                        ).hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy="required",
+                    source_type="manual",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=eid,
+                    from_status=None,
+                    to_status="new",
+                    operator="test",
+                    reason="test_setup",
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=eid,
+                    from_status="new",
+                    to_status="triaging",
+                    operator="AnalysisOnlyPipeline",
+                    reason="pipeline:investigation_started",
+                )
+            )
+            await session.flush()
+
+    resp = client.post(
+        f"/api/v1/events/{eid}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, (
+        f"analysis_only mode must return 202 for TRIAGING event "
+        f"(idempotent skip), got {resp.status_code}: {resp.text}"
+    )
+    data = resp.json()
+    assert data["event_id"] == eid
+    assert data["status"] == "triaging"

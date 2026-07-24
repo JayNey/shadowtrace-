@@ -610,7 +610,7 @@ async def _run_analysis_only_pipeline(
                 event_id,
                 EventStatus.FAILED,
                 operator="AnalysisOnlyPipeline",
-                reason=f"pipeline_failed: {exc!s}"[:500],
+                reason=f"pipeline:error:{type(exc).__name__}:{exc!s}"[:500],
             )
         except Exception:
             logger.exception("Failed to mark event as FAILED: %s", event_id)
@@ -733,6 +733,17 @@ async def investigate_event(
                     "allow_xdr_writeback": settings.allow_xdr_writeback,
                     "event_id": event_id,
                 },
+            )
+        # ── Idempotency: if analysis_only already transitioned the ──
+        # event to TRIAGING (normal progression from NEW), a re-request
+        # is a no-op.  Return 202 to signal "already in progress"
+        # rather than spawning a duplicate pipeline task or returning
+        # an invalid_state_transition error (Should-Fix #1).
+        if event.status == EventStatus.TRIAGING:
+            return s.InvestigateResponse(
+                event_id=event_id,
+                task_id=event_id,  # TODO(ISSUE-056): Celery task_id
+                status=event.status,
             )
         # ── Legacy path: AnalysisOnlyPipeline (dev/offline) ──────
         background.add_task(
