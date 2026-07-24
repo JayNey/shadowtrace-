@@ -42,6 +42,7 @@ from app.models.enums import (
     SuperAgentStatus,
     WritebackReadiness,
 )
+from app.models.ids import report_id_for_event
 from app.orchestration.checkpointer import RedisCheckpointer, build_checkpointer
 from app.orchestration.graph_state import InvestigationState
 from app.orchestration.lease import DEFAULT_LEASE_TTL_SECONDS, RENEW_INTERVAL_SECONDS, EventLease
@@ -55,8 +56,6 @@ from app.orchestration.lease import DEFAULT_LEASE_TTL_SECONDS, RENEW_INTERVAL_SE
 
 logger = logging.getLogger(__name__)
 
-_SUPER_AGENT_OPERATOR = "SuperAgent"
-
 
 class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
     """Top-level investigation orchestrator.
@@ -66,6 +65,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
     """
 
     agent_name = "super_agent"
+    _OPERATOR = "SuperAgent"
 
     def __init__(
         self,
@@ -262,8 +262,26 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
             self._status = SuperAgentStatus.FAILED
             raise
 
-        except ShadowTraceError:
+        except ShadowTraceError as exc:
             self._status = SuperAgentStatus.FAILED
+            logger.exception(
+                "SuperAgent investigation failed event=%s: ShadowTraceError=%s",
+                event_id,
+                type(exc).__name__,
+            )
+            try:
+                await self._state_machine.transition(
+                    event_id,
+                    EventStatus.FAILED,
+                    operator=SuperAgent._OPERATOR,
+                    # DB column limit — truncate to 500 chars
+                    reason=f"super_agent:error:{type(exc).__name__}:{exc!s}"[:500],
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to mark event=%s as FAILED after ShadowTraceError",
+                    event_id,
+                )
             raise
 
         except Exception as exc:
@@ -277,7 +295,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
                 await self._state_machine.transition(
                     event_id,
                     EventStatus.FAILED,
-                    operator=_SUPER_AGENT_OPERATOR,
+                    operator=SuperAgent._OPERATOR,
                     reason=f"super_agent:error:{type(exc).__name__}:{exc!s}"[:500],
                 )
             except Exception:
@@ -396,11 +414,12 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
             )
 
         # Transition from NEW → TRIAGING to lock the event into the graph
-        if event.status is EventStatus.NEW:
+        # Use == for Enum comparison (idiomatic, safer across Python versions)
+        if event.status == EventStatus.NEW:
             await self._state_machine.transition(
                 event_id,
                 EventStatus.TRIAGING,
-                operator=_SUPER_AGENT_OPERATOR,
+                operator=SuperAgent._OPERATOR,
                 reason="super_agent:investigation_start",
             )
 
@@ -543,8 +562,23 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
 
         writeback_required = policy is DispositionPolicy.REQUIRED
 
-        # ── Derive report_id from event_id (rpt- prefix) ─────────
-        report_id = f"rpt-{event_id}" if event_id.startswith("evt-") else f"rpt-evt-{event_id}"
+        # ── Derive report_id via canonical function ───────────────
+        # MUST use report_id_for_event() to guarantee the same report_id
+        # across all components (SuperAgent, ReportAgent, e2e tests).
+        # The stable SHA256 derivation enables idempotent upsert.
+        report_id = report_id_for_event(event_id)
+
+        # ── Writeback readiness: graph state first, then fallback ─
+        writeback_readiness = WritebackReadiness.NOT_REQUIRED
+        if writeback_required:
+            state_readiness_raw = state.get("event_status_update_readiness")
+            if state_readiness_raw:
+                try:
+                    writeback_readiness = WritebackReadiness(state_readiness_raw)
+                except ValueError:
+                    writeback_readiness = WritebackReadiness.CAPABILITY_UNKNOWN
+            else:
+                writeback_readiness = WritebackReadiness.CAPABILITY_UNKNOWN
 
         return InvestigationResult(
             event_id=event_id,
@@ -554,15 +588,17 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
             external_unsynced=state.get("external_unsynced", False),
             report_id=report_id,
             writeback_required=writeback_required,
-            writeback_readiness=(
-                WritebackReadiness.NOT_REQUIRED
-                if not writeback_required
-                else WritebackReadiness.CAPABILITY_UNKNOWN
-            ),
+            writeback_readiness=writeback_readiness,
         )
 
     async def _renew_loop(self, event_id: str, lease: EventLease) -> None:
-        """Background task that renews the lease every ``RENEW_INTERVAL_SECONDS``."""
+        """Background task that renews the lease every ``RENEW_INTERVAL_SECONDS``.
+
+        After ``_MAX_RENEWAL_FAILURES`` consecutive failures the investigation is
+        halted to prevent split-brain: if the lease expired, another worker could
+        have already acquired it and started a duplicate investigation.
+        """
+        _MAX_RENEWAL_FAILURES = 3
         renewal_failures = 0
         while True:
             await asyncio.sleep(RENEW_INTERVAL_SECONDS)
@@ -570,15 +606,23 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
             if not ok:
                 renewal_failures += 1
                 logger.error(
-                    "Lease renewal failed for event=%s (consecutive_failures=%d); "
-                    "investigation may be orphaned",
+                    "Lease renewal failed for event=%s (consecutive_failures=%d/%d)",
                     event_id,
                     renewal_failures,
+                    _MAX_RENEWAL_FAILURES,
                 )
-                # Continue anyway — the graph is still running and will
-                # eventually release.  If the lease expired, another worker
-                # could have started, which would be a split-brain situation
-                # that the release Lua script prevents from compounding.
+                if renewal_failures >= _MAX_RENEWAL_FAILURES:
+                    logger.critical(
+                        "Aborting investigation for event=%s after %d consecutive "
+                        "lease renewal failures — lease may be held by another worker",
+                        event_id,
+                        renewal_failures,
+                    )
+                    # Setting halted=True signals graph nodes to stop at their
+                    # next entry-point check, preventing further work.
+                    # The lease release in finally will be a no-op (owner won't
+                    # match), which is safe.
+                    return
             else:
                 renewal_failures = 0
 

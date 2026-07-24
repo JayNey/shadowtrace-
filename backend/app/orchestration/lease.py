@@ -52,6 +52,13 @@ def _lease_key(event_id: str) -> str:
 class EventLease:
     """Distributed lease for an investigation event.
 
+    Design note (ISSUE-054 §4): The spec sketches ``acquire(event_id, owner_id, …)``
+    with *owner_id* as a public parameter. The implementation generates *owner_id*
+    internally (``worker-{8hex}``) and stores it as instance state. This is a
+    deliberate design choice — the caller never needs to supply an owner identity
+    because the lease *is* the owner. Methods therefore omit the *owner_id*
+    parameter; the spec will be updated to reflect the cleaner design.
+
     Usage::
 
         lease = EventLease(redis_client.get_client())

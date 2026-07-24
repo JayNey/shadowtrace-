@@ -899,3 +899,376 @@ class TestSuperAgentEdgeCases:
 
         assert captured_state["event_id"] == event_id
         assert captured_state["disposition_policy"] == "not_required"
+
+
+# --------------------------------------------------------------------------- #
+# 9. Recommended tests from ISSUE-054 review
+# --------------------------------------------------------------------------- #
+
+
+class TestReportIdCanonicalDerivation:
+    """_build_result must use the canonical report_id_for_event() function."""
+
+    @pytest.mark.asyncio
+    async def test_report_id_uses_canonical_derivation(self) -> None:
+        """_build_result's report_id must match report_id_for_event()."""
+        from app.models.ids import report_id_for_event
+
+        redis = _FakeRedis()
+        event_id = "evt-20240724-rpt01"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        state: dict[str, Any] = {
+            "event_id": event_id,
+            "event_status": "reporting",
+            "disposition_policy": "required",
+            "severity": "high",
+            "final_verdict": "confirmed_threat",
+            "confidence": 0.9,
+            "disposition_only_intent": False,
+            "execution_substate": "none",
+            "degraded_flags": [],
+            "node_trace": [],
+            "halted": False,
+            "error": None,
+            "report_generated": True,
+            "escalated": False,
+            "external_unsynced": False,
+            "event_status_update_readiness": "capability_unknown",
+        }
+
+        result = await agent._build_result(event_id, state)
+
+        expected = report_id_for_event(event_id)
+        assert result.report_id == expected
+        assert result.report_id.startswith("rpt-")
+        # Must NOT be a bare rpt-evt-{event_id} string
+        assert result.report_id != f"rpt-{event_id}"
+        assert result.report_id != f"rpt-evt-{event_id}"
+
+
+class TestWritebackReadinessFromState:
+    """_build_result must read writeback_readiness from graph state."""
+
+    @pytest.mark.asyncio
+    async def test_result_reflects_graph_readiness_ready(self) -> None:
+        """When state says READY, result must say READY."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-wbr01"
+        event = _FakeEvent(event_id, disposition_policy=DispositionPolicy.REQUIRED)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        state: dict[str, Any] = {
+            "event_id": event_id,
+            "event_status": "reporting",
+            "disposition_policy": "required",
+            "severity": "high",
+            "final_verdict": "confirmed_threat",
+            "confidence": 0.9,
+            "disposition_only_intent": False,
+            "execution_substate": "none",
+            "degraded_flags": [],
+            "node_trace": [],
+            "halted": False,
+            "error": None,
+            "report_generated": True,
+            "escalated": False,
+            "external_unsynced": False,
+            "event_status_update_readiness": "ready",
+        }
+
+        result = await agent._build_result(event_id, state)
+
+        assert result.writeback_required is True
+        assert result.writeback_readiness == WritebackReadiness.READY
+
+    @pytest.mark.asyncio
+    async def test_result_falls_back_to_capability_unknown(self) -> None:
+        """When state has no readiness field, result defaults to CAPABILITY_UNKNOWN."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-wbr02"
+        event = _FakeEvent(event_id, disposition_policy=DispositionPolicy.REQUIRED)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        state: dict[str, Any] = {
+            "event_id": event_id,
+            "event_status": "reporting",
+            "disposition_policy": "required",
+            "severity": "high",
+            "final_verdict": "confirmed_threat",
+            "confidence": 0.9,
+            "disposition_only_intent": False,
+            "execution_substate": "none",
+            "degraded_flags": [],
+            "node_trace": [],
+            "halted": False,
+            "error": None,
+            "report_generated": True,
+            "escalated": False,
+            "external_unsynced": False,
+            # event_status_update_readiness is NOT set
+        }
+
+        result = await agent._build_result(event_id, state)
+
+        assert result.writeback_required is True
+        assert result.writeback_readiness == WritebackReadiness.CAPABILITY_UNKNOWN
+
+    @pytest.mark.asyncio
+    async def test_not_required_policy_defaults_to_not_required_readiness(self) -> None:
+        """When disposition is NOT_REQUIRED, readiness is always NOT_REQUIRED."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-wbr03"
+        event = _FakeEvent(event_id, disposition_policy=DispositionPolicy.NOT_REQUIRED)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        state: dict[str, Any] = {
+            "event_id": event_id,
+            "event_status": "reporting",
+            "disposition_policy": "not_required",
+            "severity": "low",
+            "final_verdict": "false_positive",
+            "confidence": 0.9,
+            "disposition_only_intent": False,
+            "execution_substate": "none",
+            "degraded_flags": [],
+            "node_trace": [],
+            "halted": False,
+            "error": None,
+            "report_generated": True,
+            "escalated": False,
+            "external_unsynced": False,
+            "event_status_update_readiness": "ready",  # should be ignored
+        }
+
+        result = await agent._build_result(event_id, state)
+
+        assert result.writeback_required is False
+        assert result.writeback_readiness == WritebackReadiness.NOT_REQUIRED
+
+
+class TestShadowTraceErrorFailedTransition:
+    """ShadowTraceError during graph execution must trigger event FAILED transition."""
+
+    @pytest.mark.asyncio
+    async def test_shadowtrace_error_transitions_event_to_failed(self) -> None:
+        """When the graph raises a ShadowTraceError, the event must be FAILED."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-sterr01"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        state_machine = AsyncMock()
+
+        agent = _make_super_agent(
+            event_service=event_service,
+            state_machine=state_machine,
+            redis=redis,
+        )
+
+        from app.core.errors import BudgetExceededError
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+            side_effect=BudgetExceededError("budget hit"),
+        ):
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(
+                    side_effect=BudgetExceededError("budget hit")
+                )
+                mock_build.return_value = mock_graph
+
+                with pytest.raises(BudgetExceededError):
+                    await agent.investigate(event_id)
+
+        # State machine must have been called with FAILED for ShadowTraceError
+        failed_calls = [
+            c
+            for c in state_machine.transition.call_args_list
+            if c.args[0] == event_id
+            and c.args[1] == EventStatus.FAILED
+            and c.kwargs.get("operator") == "SuperAgent"
+        ]
+        assert len(failed_calls) >= 1, (
+            "Expected a FAILED transition call for ShadowTraceError, "
+            f"got {state_machine.transition.call_args_list}"
+        )
+        assert "BudgetExceededError" in str(
+            failed_calls[0].kwargs.get("reason", "")
+        )
+
+    @pytest.mark.asyncio
+    async def test_shadowtrace_error_sets_agent_status_failed(self) -> None:
+        """ShadowTraceError must set SuperAgentStatus.FAILED."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-sterr02"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        from app.core.errors import ToolExecutionError
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+            side_effect=ToolExecutionError("tool failed"),
+        ):
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(
+                    side_effect=ToolExecutionError("tool failed")
+                )
+                mock_build.return_value = mock_graph
+
+                with pytest.raises(ToolExecutionError):
+                    await agent.investigate(event_id)
+
+        assert agent.status == SuperAgentStatus.FAILED
+
+
+class TestRenewalLoopAbort:
+    """The lease renewal loop must abort investigation after consecutive failures."""
+
+    @pytest.mark.asyncio
+    async def test_renew_loop_aborts_after_consecutive_failures(self) -> None:
+        """After _MAX_RENEWAL_FAILURES consecutive failures, the loop returns."""
+        redis = _FakeRedis()
+        lease = EventLease(redis)
+        event_id = "evt-20240724-abort01"
+
+        await lease.acquire(event_id)
+
+        # Force renew to always fail by releasing first
+        await lease.release(event_id)
+
+        agent = _make_super_agent(redis=redis)
+        # Patch RENEW_INTERVAL_SECONDS to speed up the test
+        with patch(
+            "app.agents.super_agent.RENEW_INTERVAL_SECONDS", 0.01
+        ):
+            await agent._renew_loop(event_id, lease)
+
+        # The loop should return (not hang forever) after 3 failures
+        # If we got here without timeout, the abort logic works
+
+
+class TestRedisUnavailable:
+    """SuperAgent must handle Redis unavailability gracefully."""
+
+    @pytest.mark.asyncio
+    async def test_redis_unavailable_raises_dependency_unavailable(self) -> None:
+        """When Redis client is None, _get_lease raises DependencyUnavailableError."""
+        from app.core.errors import DependencyUnavailableError
+
+        agent = _make_super_agent(redis_client=None)
+
+        with pytest.raises(DependencyUnavailableError) as exc_info:
+            await agent._get_lease()
+
+        assert "Redis" in str(exc_info.value)
+        assert exc_info.value.error_code == "dependency_unavailable"
+
+
+class TestGraphEdgeCases:
+    """Edge cases for graph execution."""
+
+    @pytest.mark.asyncio
+    async def test_graph_proceeds_with_none_snapshot(self) -> None:
+        """When source_snapshot is None (freeze not implemented), graph runs fine."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-nosnap"
+        event = _FakeEvent(event_id)
+
+        event_service = AsyncMock()
+        event_service.get_event.return_value = event
+        # freeze_source_snapshot raises AttributeError (not implemented)
+        event_service.freeze_source_snapshot = AsyncMock(
+            side_effect=AttributeError("not implemented")
+        )
+
+        agent = _make_super_agent(event_service=event_service, redis=redis)
+
+        with patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ) as mock_invoke:
+            mock_invoke.return_value = {
+                "event_id": event_id,
+                "event_status": "reporting",
+                "disposition_policy": "required",
+                "severity": "high",
+                "final_verdict": "confirmed_threat",
+                "confidence": 0.85,
+                "disposition_only_intent": False,
+                "execution_substate": "none",
+                "degraded_flags": [],
+                "node_trace": [],
+                "halted": False,
+                "error": None,
+                "report_generated": True,
+            }
+
+            with patch(
+                "app.orchestration.workflow_graph.build_investigation_graph",
+                new_callable=MagicMock,
+            ) as mock_build:
+                mock_graph = MagicMock()
+                mock_graph.ainvoke = AsyncMock(
+                    return_value=mock_invoke.return_value
+                )
+                mock_build.return_value = mock_graph
+
+                result = await agent.investigate(event_id)
+
+        assert result.event_id == event_id
+        assert result.final_status == EventStatus.REPORTING
+
+    @pytest.mark.asyncio
+    async def test_analysis_only_with_live_side_effects_rejected(self) -> None:
+        """When analysis_only + ALLOW_LIVE_SIDE_EFFECTS=true, must raise ConfigurationError."""
+        redis = _FakeRedis()
+        event_id = "evt-20240724-live01"
+
+        settings = Settings(
+            ORCHESTRATION_MODE="analysis_only",
+            allow_live_side_effects=True,
+        )
+        agent = _make_super_agent(redis=redis, settings=settings)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            await agent.investigate(event_id)
+
+        assert exc_info.value.error_code == "configuration_error"
+        assert "analysis_only" in str(exc_info.value)
+        # The gate must fire regardless of ALLOW_LIVE_SIDE_EFFECTS —
+        # analysis_only mode always rejects SuperAgent.

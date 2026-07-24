@@ -634,7 +634,16 @@ async def _run_super_agent(
         from app.api.v1.deps import get_super_agent
 
         agent = await get_super_agent()
-        _ = await agent.investigate(event_id, lease=lease)
+        result = await agent.investigate(event_id, lease=lease)
+        logger.info(
+            "SuperAgent investigation complete event=%s status=%s verdict=%s "
+            "escalated=%s external_unsynced=%s",
+            event_id,
+            result.final_status.value,
+            result.final_verdict.value,
+            result.escalated,
+            result.external_unsynced,
+        )
     except Exception as exc:
         logger.error(
             "SuperAgent investigation failed for event=%s: %s",
@@ -741,7 +750,7 @@ async def investigate_event(
             raise HTTPException(
                 status_code=409,
                 detail=exc.to_response(),
-            )
+            ) from exc
         background.add_task(
             _run_super_agent,
             event_id=event_id,
