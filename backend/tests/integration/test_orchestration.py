@@ -74,6 +74,24 @@ pytestmark = [
     pytest.mark.usefixtures("clean_state"),
 ]
 
+
+# ── live-side-effect guard (ISSUE-055 review: Should-Fix #2) ─────────────
+
+@pytest.fixture(autouse=True)
+def _lock_mock_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure no test in this module can accidentally trigger real XDR writes.
+
+    Even though the current tests use stub agents, this guard is required by
+    the project's security review rules: ALLOW_LIVE_SIDE_EFFECTS and
+    ALLOW_XDR_WRITEBACK must be explicitly ``"false"`` in every test module
+    that exercises the orchestration graph, so that a future switch from stub
+    to real agent cannot silently introduce outbound side effects.
+    """
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
+    monkeypatch.setenv("SOURCE_MODE", "mock_xdr")
+    monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
+
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -82,8 +100,12 @@ def _utc_now() -> datetime:
 
 
 async def _ready_resolver(_event_id: str) -> WritebackReadiness:
-    """Always-READY resolver for NOT_REQUIRED policy tests."""
-    return WritebackReadiness.READY
+    """Return NOT_REQUIRED — semantically honest for NOT_REQUIRED policy events.
+
+    ``route_after_triage`` skips readiness checks for NOT_REQUIRED +
+    need_investigation=True, so this value does not affect control flow.
+    """
+    return WritebackReadiness.NOT_REQUIRED
 
 
 async def _ingest_event(
@@ -189,14 +211,19 @@ async def test_golden_path_full_orchestration_to_reporting(
     redis_client: Any,
     audit_log: EventAuditLogService,
 ) -> None:
-    """ISSUE-055 Scenario 1: SuperAgent golden path reaches REPORTING.
+    """ISSUE-055 Scenario 1: SuperAgent golden path completes through to CLOSED.
 
     For NOT_REQUIRED disposition, the full P0 investigation chain executes
     through triage → planner → evidence → risk → response → approval →
-    execute → verify → report → close. We assert:
+    execute → verify → report → close, ending at CLOSED (not REPORTING).
+    NOTE: REQUIRED writeback paths should be tested separately once
+    ISSUE-062 (XDR writeback integration) lands.
+
+    We assert:
     - node_trace matches P0_NODE_SEQUENCE
     - P0 analysis fields populated (triage_result, evidence_output,
       risk_assessment, report_generated)
+    - Final status is CLOSED (NOT_REQUIRED policy completes the full chain)
     - All audit log transitions are valid state machine edges
     - Total wall clock under 90 seconds (mock mode)
     """
@@ -280,66 +307,50 @@ async def test_golden_path_full_orchestration_to_reporting(
 
 @pytest.mark.asyncio
 async def test_agent_failure_retry_evidence_agent(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
     agent_trace_service: AgentTraceService,
 ) -> None:
     """ISSUE-055 Scenario 2: EvidenceAgent fails once, retries, succeeds.
 
-    The EvidenceAgent is wrapped so the first call raises and the second
-    succeeds. The RetryingAgentWrapper simulates MAX_AGENT_RETRIES=2
-    retry logic (the SuperAgent-level orchestration pattern).
+    Uses ``FlakyStubAgent`` wired to ``AgentTraceService`` so that trace
+    records are produced by the real ``execute()`` path — not by manual
+    ``log_trace()`` calls.  The ``RetryingAgentWrapper`` simulates the
+    SuperAgent-level MAX_AGENT_RETRIES=1 pattern (initial attempt + 1 retry).
 
     Assertions:
     - Retry count = 1 (failed once, succeeded on second attempt)
-    - agent_trace contains both a ``failed`` and a ``completed`` record
+    - agent_trace contains both a ``failed`` and a ``completed`` record,
+      both written by ``FlakyStubAgent.execute()``
+    - The failed trace carries the correct error detail
     """
-    event_id = "evt-orch-retry-001"
+    # ── Setup: create a real event so trace records are scoped correctly ──
+    event_id = await _ingest_event(
+        event_service,
+        session_factory,
+        object_id="INC-orch-retry-001",
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+    )
 
-    # ── Create a flaky evidence stub that fails once ──────────────────────
-    flaky_evidence = make_flaky_evidence_stub(fail_count=1)
+    # ── Create a flaky evidence stub that records traces on every execute ─
+    flaky = make_flaky_evidence_stub(
+        fail_count=1,
+        agent_name="evidence_agent",
+        trace_service=agent_trace_service,
+        event_id=event_id,
+    )
 
-    # ── Wrap with retry logic ─────────────────────────────────────────────
-    retrying = RetryingAgentWrapper(flaky_evidence, max_retries=2)
-
-    # ── Simulate two execute calls (first fails, second succeeds) ─────────
-    # First attempt — raises
-    with pytest.raises(RuntimeError, match="failure on attempt 1"):
-        await flaky_evidence.execute(object())  # object as stand-in for EvidenceAgentInput
-
-    # Second attempt — succeeds
-    result = await flaky_evidence.execute(object())
+    # ── Wrap with retry logic; RetryingAgentWrapper calls execute() ───────
+    rw = RetryingAgentWrapper(flaky, max_retries=1)  # initial + 1 retry
+    result = await rw.execute(object())  # stand-in for EvidenceAgentInput
     assert isinstance(result, EvidenceOutput)
 
-    # ── RetryingWrapper records two attempts (fail + success) ─────────────
-    assert retrying.attempts == [], "wrapper was not exercised in this flow"
-    # For the trace test: run the retry wrapper itself
-    flaky2 = make_flaky_evidence_stub(fail_count=1)
-    rw = RetryingAgentWrapper(flaky2, max_retries=1)  # initial + 1 retry
-    result2 = await rw.execute(object())
-    assert isinstance(result2, EvidenceOutput)
-    assert rw.attempts == [False, True], f"expected [fail, success] attempts, got {rw.attempts}"
-
-    # ── Verify agent_trace records both when using BaseAgent ──────────────
-    # Record two manual trace entries to simulate the pattern
-    await agent_trace_service.log_trace(
-        event_id=event_id,
-        agent_name="evidence_agent",
-        input_data={"event_id": event_id, "call": "attempt-1"},
-        output_data=None,
-        status="failed",
-        started_at=_utc_now(),
-        completed_at=_utc_now(),
-        error_detail="forced failure on attempt 1",
-    )
-    await agent_trace_service.log_trace(
-        event_id=event_id,
-        agent_name="evidence_agent",
-        input_data={"event_id": event_id, "call": "attempt-2"},
-        output_data=EvidenceOutput(collection_status=CollectionStatus.COMPLETED),
-        status="completed",
-        started_at=_utc_now(),
-        completed_at=_utc_now(),
+    # ── Assert retry attempts recorded ────────────────────────────────────
+    assert rw.attempts == [False, True], (
+        f"expected [fail, success] attempts, got {rw.attempts}"
     )
 
+    # ── Verify agent_trace records produced BY the execute() path ─────────
     traces = await agent_trace_service.get_traces_by_event(event_id)
     assert len(traces) == 2, f"expected 2 traces, got {len(traces)}"
     statuses = {t.status for t in traces}
@@ -465,6 +476,10 @@ async def test_checkpoint_recovery_resumes_without_duplicate_execution(
     await assert_audit_log_transitions_valid(
         audit_log, event_id, expected_min_count=len(trace_final)
     )
+
+    # ── Cleanup: release checkpoint state in Redis and in-memory saver ────
+    await checkpointer.adelete_thread(event_id)
+    await checkpointer_p2.adelete_thread(event_id)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

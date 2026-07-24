@@ -58,8 +58,7 @@ def make_investigation_state(**overrides: Any) -> InvestigationState:
         "needs_approval_wait": False,
     }
     base.update(overrides)
-    # TypedDict requires per-key assignment; dict unpacking satisfies mypy.
-    return {**base}  # type: ignore[typeddict-item]
+    return cast(InvestigationState, {**base})
 
 
 # --------------------------------------------------------------------------- #
@@ -85,19 +84,62 @@ class FlakyStubAgent:
     Each call to ``execute`` increments an internal counter. Calls where
     ``counter <= fail_count`` raise ``RuntimeError``; subsequent calls
     return ``result``.
+
+    When *trace_service* and *event_id* are both provided, the agent
+    records a trace entry on every execute call (failed and successful),
+    mirroring the production ``BaseAgent._record_trace`` contract.  This
+    allows Scenario 2 to validate that agent traces originate from the
+    real ``execute()`` path rather than manual ``log_trace()`` calls.
     """
 
-    def __init__(self, result: Any, fail_count: int = 1) -> None:
+    def __init__(
+        self,
+        result: Any,
+        fail_count: int = 1,
+        *,
+        agent_name: str = "flaky_stub",
+        trace_service: Any = None,
+        event_id: str | None = None,
+    ) -> None:
         self.result = result
         self.fail_count = fail_count
         self.calls: list[Any] = []
         self.attempt = 0
+        self.agent_name = agent_name
+        self._trace_service = trace_service
+        self._event_id = event_id
 
     async def execute(self, input: Any) -> Any:
         self.calls.append(input)
         self.attempt += 1
+        started_at = datetime.now(UTC)
+
         if self.attempt <= self.fail_count:
+            # Record failed trace before raising
+            if self._trace_service is not None and self._event_id is not None:
+                await self._trace_service.log_trace(
+                    event_id=self._event_id,
+                    agent_name=self.agent_name,
+                    input_data={"event_id": self._event_id, "call": f"attempt-{self.attempt}"},
+                    output_data=None,
+                    status="failed",
+                    started_at=started_at,
+                    completed_at=datetime.now(UTC),
+                    error_detail=f"FlakyStubAgent failure on attempt {self.attempt}",
+                )
             raise RuntimeError(f"FlakyStubAgent failure on attempt {self.attempt}")
+
+        # Record successful trace
+        if self._trace_service is not None and self._event_id is not None:
+            await self._trace_service.log_trace(
+                event_id=self._event_id,
+                agent_name=self.agent_name,
+                input_data={"event_id": self._event_id, "call": f"attempt-{self.attempt}"},
+                output_data=self.result,
+                status="completed",
+                started_at=started_at,
+                completed_at=datetime.now(UTC),
+            )
         return self.result
 
 
@@ -237,6 +279,9 @@ def make_flaky_evidence_stub(
     *,
     fail_count: int = 1,
     confidence: float = 0.85,
+    agent_name: str = "evidence_agent",
+    trace_service: Any = None,
+    event_id: str | None = None,
 ) -> FlakyStubAgent:
     return FlakyStubAgent(
         EvidenceOutput(
@@ -244,6 +289,9 @@ def make_flaky_evidence_stub(
             overall_confidence=confidence,
         ),
         fail_count=fail_count,
+        agent_name=agent_name,
+        trace_service=trace_service,
+        event_id=event_id,
     )
 
 
