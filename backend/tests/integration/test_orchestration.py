@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,6 +21,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.planner_agent import PlannerAgent
+from app.core.config import get_settings
 from app.db import models as orm
 from app.models.agent_io import (
     CollectionStatus,
@@ -42,9 +44,12 @@ from app.orchestration.checkpointer import (
 from app.orchestration.workflow_graph import (
     NODE_CLOSE,
     NODE_EVIDENCE,
+    NODE_PLANNER,
     NODE_RISK,
     P0_NODE_SEQUENCE,
+    ROUTE_INVESTIGATE,
     build_investigation_graph,
+    route_after_triage,
 )
 from app.orchestration.workflow_runtime import WorkflowRuntimeService
 from app.services.agent_trace_service import AgentTraceService
@@ -91,6 +96,7 @@ def _lock_mock_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
     monkeypatch.setenv("SOURCE_MODE", "mock_xdr")
     monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
+    get_settings.cache_clear()
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -103,7 +109,10 @@ async def _ready_resolver(_event_id: str) -> WritebackReadiness:
     """Return NOT_REQUIRED — semantically honest for NOT_REQUIRED policy events.
 
     ``route_after_triage`` skips readiness checks for NOT_REQUIRED +
-    need_investigation=True, so this value does not affect control flow.
+    need_investigation=True, so this value does not affect routing.
+    Note: ``triage_graph_node`` (workflow_graph.py:370-372) always calls
+    ``runtime.get_event_status_update_readiness()`` and writes it to
+    ``event_status_update_readiness`` in graph state regardless of routing.
     """
     return WritebackReadiness.NOT_REQUIRED
 
@@ -315,8 +324,9 @@ async def test_agent_failure_retry_evidence_agent(
 
     Uses ``FlakyStubAgent`` wired to ``AgentTraceService`` so that trace
     records are produced by the real ``execute()`` path — not by manual
-    ``log_trace()`` calls.  The ``RetryingAgentWrapper`` simulates the
-    SuperAgent-level MAX_AGENT_RETRIES=1 pattern (initial attempt + 1 retry).
+    ``log_trace()`` calls.  The ``RetryingAgentWrapper`` simulates
+    ``max_retries=1`` (initial attempt + 1 retry = 2 total attempts;
+    ``MAX_AGENT_RETRIES=2`` in production allows up to 3 attempts).
 
     Assertions:
     - Retry count = 1 (failed once, succeeded on second attempt)
@@ -461,8 +471,6 @@ async def test_checkpoint_recovery_resumes_without_duplicate_execution(
 
     # ── Assert no duplicate execution ────────────────────────────────────
     # Count each node — no node should appear more than once in the full trace
-    from collections import Counter
-
     node_counts = Counter(trace_final)
     duplicates = {node: count for node, count in node_counts.items() if count > 1}
     assert not duplicates, f"duplicate node executions detected after resume: {duplicates}"
@@ -637,3 +645,54 @@ async def test_version_conflict_retry_on_concurrent_same_field_write(
     stored = full_ctx.triage_result
     assert isinstance(stored, dict)
     assert stored.get("reasoning") == "write iteration 4"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Boundary / failure-path tests (ISSUE-055 review: Should-Fix #3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_agent_retry_exhaustion_raises() -> None:
+    """ISSUE-055 boundary: RetryingAgentWrapper exhausts all retries.
+
+    ``FlakyStubAgent(fail_count=5)`` + ``RetryingAgentWrapper(max_retries=2)``
+    (matching production ``MAX_AGENT_RETRIES=2`` → 3 total attempts).  All
+    three attempts fail, so the wrapper must re-raise the final exception
+    after recording three failed attempts.
+
+    This guards against the wrapper silently swallowing errors when the
+    agent never recovers.
+    """
+    flaky = make_flaky_evidence_stub(fail_count=5, agent_name="exhaustion_test")
+    rw = RetryingAgentWrapper(flaky, max_retries=2)  # 1 initial + 2 retries = 3 total
+
+    with pytest.raises(RuntimeError, match="FlakyStubAgent failure on attempt"):
+        await rw.execute(object())
+
+    # All three attempts must have been recorded as failures
+    assert rw.attempts == [False, False, False], (
+        f"expected 3 failures, got attempts={rw.attempts}"
+    )
+
+
+def test_route_after_triage_required_policy_investigates() -> None:
+    """ISSUE-055 boundary: REQUIRED + need_investigation=True → INVESTIGATE.
+
+    For ``DispositionPolicy.REQUIRED`` events that still need investigation
+    (and are not false-positive matches), the graph must route into the
+    full investigation path (planner → evidence → …), not short-circuit to
+    CLOSED or DISPOSITION_ONLY.
+
+    This is a direct routing-function test; the full REQUIRED writeback
+    path through the graph is deferred to ISSUE-062.
+    """
+    state = make_investigation_state(
+        event_id="evt-orch-req-001",
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        need_investigation=True,
+    )
+    assert route_after_triage(state) == ROUTE_INVESTIGATE, (
+        f"REQUIRED + need_investigation=True must route to INVESTIGATE, "
+        f"got {route_after_triage(state)}"
+    )
