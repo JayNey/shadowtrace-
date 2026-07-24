@@ -1142,6 +1142,173 @@ async def test_investigate_closed_rejected(
 
 
 @pytest.mark.asyncio
+async def test_investigate_triaging_after_crash_returns_202(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """TRIAGING event with no active lease (crash recovery) → 202 Accepted.
+
+    When SuperAgent crashes after transitioning the event to TRIAGING, the
+    distributed lease expires.  A subsequent POST /events/{id}/investigate
+    must accept the event and resume investigation — the API must NOT reject
+    TRIAGING status outright because SuperAgent._build_initial_state already
+    supports both NEW and TRIAGING as valid graph entry points.
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    eid = "evt-20260101-triag-crash"
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=eid,
+                    event_type="insider_threat",
+                    title="Crash recovery test",
+                    description="Event left in TRIAGING after SuperAgent crash",
+                    status="triaging",
+                    severity="high",
+                    final_verdict="none",
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "alert",
+                        "source_product": "file",
+                        "source_tenant_id": "local",
+                        "connector_id": "file-local",
+                        "source_object_id": "file-triag-crash",
+                        "raw_payload_hash": hashlib.sha256(b"triag-crash").hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy="required",
+                    source_type="manual",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=eid,
+                    from_status=None,
+                    to_status="new",
+                    operator="test",
+                    reason="test_setup",
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=eid,
+                    from_status="new",
+                    to_status="triaging",
+                    operator="super_agent",
+                    reason="super_agent:investigation_started",
+                )
+            )
+            await session.flush()
+
+    resp = client.post(
+        f"/api/v1/events/{eid}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, (
+        f"TRIAGING event with expired lease should return 202 (crash recovery), "
+        f"got {resp.status_code}: {resp.text}"
+    )
+    data = resp.json()
+    assert data["event_id"] == eid
+
+
+@pytest.mark.asyncio
+async def test_investigate_triaging_with_active_lease_returns_409(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """TRIAGING event WITH an active lease → 409 Conflict.
+
+    This is the normal case: another investigation IS running (lease held).
+    The TRIAGING status allowance must not open a backdoor for concurrent
+    execution — the lease acquisition is still the final gate.
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    now = datetime.now(UTC)
+    eid = "evt-20260101-triag-active"
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=eid,
+                    event_type="insider_threat",
+                    title="Active lease test",
+                    description="Event in TRIAGING with active lease",
+                    status="triaging",
+                    severity="high",
+                    final_verdict="none",
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "alert",
+                        "source_product": "file",
+                        "source_tenant_id": "local",
+                        "connector_id": "file-local",
+                        "source_object_id": "file-triag-active",
+                        "raw_payload_hash": hashlib.sha256(b"triag-active").hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy="required",
+                    source_type="manual",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=eid,
+                    from_status=None,
+                    to_status="new",
+                    operator="test",
+                    reason="test_setup",
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=eid,
+                    from_status="new",
+                    to_status="triaging",
+                    operator="super_agent",
+                    reason="super_agent:investigation_started",
+                )
+            )
+            await session.flush()
+
+    # First call: acquires the lease → 202
+    first = client.post(
+        f"/api/v1/events/{eid}/investigate",
+        headers=_hdr(),
+    )
+    assert first.status_code == 202, (
+        f"First investigate (lease acquisition) should return 202, "
+        f"got {first.status_code}: {first.text}"
+    )
+
+    # Second call: lease still held → 409
+    second = client.post(
+        f"/api/v1/events/{eid}/investigate",
+        headers=_hdr(),
+    )
+    assert second.status_code == 409, (
+        f"Second investigate (lease already held) should return 409, "
+        f"got {second.status_code}: {second.text}"
+    )
+    data = second.json()
+    assert data["error_code"] == "investigation_in_progress"
+
+
+@pytest.mark.asyncio
 async def test_investigate_returns_202(
     client: TestClient,
     event_service: EventService,
@@ -1366,3 +1533,166 @@ async def test_analysis_only_complete_persisted_in_context(
     assert stored_value is True, (
         f"Expected analysis_only_complete=True in context, got {stored_value!r}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# ISSUE-054 Should-Fix #3: API-layer analysis_only + live side effects gate
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_api_investigate_rejects_analysis_only_with_live_side_effects(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /events/{id}/investigate must return 500 when
+    ORCHESTRATION_MODE=analysis_only + ALLOW_LIVE_SIDE_EFFECTS=true.
+
+    This is the API-layer gate that prevents the analysis_only pipeline from
+    producing real XDR side effects when misconfigured.  The SuperAgent-level
+    gate is a separate defense-in-depth check.
+    """
+    # Force analysis_only mode with live side effects enabled.
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "true")
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
+    reset_deps()
+
+    event_id = await _create_test_event(event_service)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 500, (
+        f"Expected 500, got {resp.status_code}: {resp.text}"
+    )
+    body = resp.json()
+    assert body["error_code"] == "configuration_error", (
+        f"Expected configuration_error, got {body}"
+    )
+    assert "live side effects" in body["message"].lower(), (
+        f"Message must mention live side effects, got: {body['message']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_investigate_rejects_analysis_only_with_xdr_writeback(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /events/{id}/investigate must return 500 when
+    ORCHESTRATION_MODE=analysis_only + ALLOW_XDR_WRITEBACK=true."""
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "true")
+    reset_deps()
+
+    event_id = await _create_test_event(event_service)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 500, (
+        f"Expected 500, got {resp.status_code}: {resp.text}"
+    )
+    body = resp.json()
+    assert body["error_code"] == "configuration_error"
+    assert "xdr writeback" in body["message"].lower(), (
+        f"Message must mention XDR writeback, got: {body['message']}"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Should-Fix #1: analysis_only idempotency on TRIAGING
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_idempotent_on_triaging(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """analysis_only mode: TRIAGING event → 202 Accepted (idempotent skip).
+
+    When ORCHESTRATION_MODE=analysis_only and the pipeline has already
+    transitioned the event from NEW to TRIAGING, a subsequent investigate
+    request must return 202 rather than spawning a duplicate pipeline task
+    or returning an invalid state transition error (Should-Fix #1).
+    """
+    import hashlib
+    from datetime import UTC, datetime
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
+    reset_deps()
+
+    now = datetime.now(UTC)
+    eid = "evt-20260724-analysis-only-triaging"
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=eid,
+                    event_type="insider_threat",
+                    title="Analysis-only idempotency test",
+                    description="Event left in TRIAGING after analysis_only pipeline ran",
+                    status="triaging",
+                    severity="high",
+                    final_verdict="none",
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "alert",
+                        "source_product": "file",
+                        "source_tenant_id": "local",
+                        "connector_id": "file-local",
+                        "source_object_id": "file-analysis-only-triaging",
+                        "raw_payload_hash": hashlib.sha256(
+                            b"analysis-only-triaging"
+                        ).hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy="required",
+                    source_type="manual",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=eid,
+                    from_status=None,
+                    to_status="new",
+                    operator="test",
+                    reason="test_setup",
+                )
+            )
+            session.add(
+                orm.EventAuditLog(
+                    event_id=eid,
+                    from_status="new",
+                    to_status="triaging",
+                    operator="AnalysisOnlyPipeline",
+                    reason="pipeline:investigation_started",
+                )
+            )
+            await session.flush()
+
+    resp = client.post(
+        f"/api/v1/events/{eid}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, (
+        f"analysis_only mode must return 202 for TRIAGING event "
+        f"(idempotent skip), got {resp.status_code}: {resp.text}"
+    )
+    data = resp.json()
+    assert data["event_id"] == eid
+    assert data["status"] == "triaging"

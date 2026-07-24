@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status
+from fastapi.exceptions import HTTPException
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -582,6 +583,90 @@ async def get_event(
 # --------------------------------------------------------------------------- #
 
 
+async def _run_analysis_only_pipeline(
+    event_id: str,
+    *,
+    state_machine: Any,
+) -> None:
+    """Background task: legacy AnalysisOnlyPipeline (``ORCHESTRATION_MODE=analysis_only``)."""
+    try:
+        from app.services.evidence_projection import (
+            EvidenceProjection,
+            bind_evidence_projection,
+        )
+
+        pipeline = await get_pipeline()
+        projection = EvidenceProjection(_get_session_factory())
+        with bind_evidence_projection(projection):
+            await pipeline.run(event_id)
+    except Exception as exc:
+        logger.error(
+            "Background pipeline failed for event=%s: %s",
+            event_id,
+            exc,
+        )
+        try:
+            await state_machine.transition(
+                event_id,
+                EventStatus.FAILED,
+                operator="AnalysisOnlyPipeline",
+                reason=f"pipeline:error:{type(exc).__name__}:{exc!s}"[:500],
+            )
+        except Exception:
+            logger.exception("Failed to mark event as FAILED: %s", event_id)
+
+
+async def _run_super_agent(
+    event_id: str,
+    *,
+    state_machine: Any,
+    lease: Any = None,
+) -> None:
+    """Background task: SuperAgent graph investigation (``ORCHESTRATION_MODE=graph``).
+
+    When *lease* is provided (pre-acquired by the API endpoint for HTTP 409
+    protection), the SuperAgent skips lease acquisition and uses the passed-in
+    lease directly. This ensures the API caller receives a synchronous 409 if
+    the lease cannot be acquired, rather than silently failing in the
+    background.
+    """
+    try:
+        from app.api.v1.deps import get_super_agent
+
+        agent = await get_super_agent()
+        result = await agent.investigate(event_id, lease=lease)
+        logger.info(
+            "SuperAgent investigation complete event=%s status=%s verdict=%s "
+            "escalated=%s external_unsynced=%s",
+            event_id,
+            result.final_status.value,
+            result.final_verdict.value,
+            result.escalated,
+            result.external_unsynced,
+        )
+    except Exception as exc:
+        logger.error(
+            "SuperAgent investigation failed for event=%s: %s",
+            event_id,
+            exc,
+        )
+        # ISSUE-054 Should-Fix #2: Always attempt a FAILED transition in the
+        # background task wrapper.  The exception may have occurred in
+        # get_super_agent() (before SuperAgent itself could handle it), or
+        # SuperAgent's own FAILED transition may have itself failed.  The
+        # StateMachineService transition is idempotent — if SuperAgent already
+        # marked the event as FAILED, re-marking is a safe no-op.
+        try:
+            await state_machine.transition(
+                event_id,
+                EventStatus.FAILED,
+                operator="SuperAgent",
+                reason=f"super_agent:error:{type(exc).__name__}:{exc!s}"[:500],
+            )
+        except Exception:
+            logger.exception("Failed to mark event as FAILED: %s", event_id)
+
+
 @router.post(
     "/events/{event_id}/investigate",
     response_model=s.InvestigateResponse,
@@ -595,51 +680,112 @@ async def investigate_event(
     event_service: EventService = Depends(get_event_service),
     state_machine: StateMachineService = Depends(get_state_machine),
 ) -> s.InvestigateResponse:
+    """Start an investigation for *event_id*.
+
+    When ``ORCHESTRATION_MODE=graph`` (default) the SuperAgent manages a
+    LangGraph investigation with distributed lease protection. Concurrent
+    requests receive HTTP 409.
+
+    When ``ORCHESTRATION_MODE=analysis_only`` the legacy AnalysisOnlyPipeline
+    runs as a background task (dev/offline only).
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
     event = await event_service.get_event(event_id)
     if event is None:
         raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
 
-    if event.status != EventStatus.NEW:
+    # ISSUE-054: graph investigation accepts NEW (fresh event) or TRIAGING
+    # (crash recovery — SuperAgent died after transitioning to TRIAGING but
+    # before completing; the lease has since expired).  The synchronous lease
+    # acquisition below is the final gate: if a lease is still held (active
+    # investigation), the caller receives HTTP 409; if the lease expired
+    # (genuine crash), the acquisition succeeds and investigation resumes.
+    # This aligns with SuperAgent._build_initial_state which also accepts
+    # both NEW and TRIAGING as valid graph entry points.
+    if event.status not in (EventStatus.NEW, EventStatus.TRIAGING):
         raise InvalidStateTransitionError(
-            f"event must be in NEW status to start investigation, current: {event.status.value}",
+            f"event must be in NEW or TRIAGING status to start investigation, "
+            f"current: {event.status.value}",
             current=event.status,
             target=EventStatus.TRIAGING,
             details={"event_id": event_id},
         )
 
-    # Enqueue the pipeline as a background task.
-    async def _run_pipeline() -> None:
+    if settings.orchestration_mode == "analysis_only":
+        # ── Gate: analysis_only forbids live side effects ─────────
+        # ISSUE-054 §4: ORCHESTRATION_MODE=analysis_only is dev/offline only.
+        # If live side-effect or XDR writeback switches are enabled, the
+        # configuration is inconsistent — analysis_only must not produce real
+        # XDR side effects.
+        if settings.allow_live_side_effects or settings.allow_xdr_writeback:
+            from app.core.errors import ConfigurationError
+
+            raise ConfigurationError(
+                "analysis_only orchestration mode forbids live side effects "
+                "or XDR writeback — disable ALLOW_LIVE_SIDE_EFFECTS and "
+                "ALLOW_XDR_WRITEBACK, or switch to ORCHESTRATION_MODE=graph",
+                error_code="configuration_error",
+                details={
+                    "orchestration_mode": "analysis_only",
+                    "allow_live_side_effects": settings.allow_live_side_effects,
+                    "allow_xdr_writeback": settings.allow_xdr_writeback,
+                    "event_id": event_id,
+                },
+            )
+        # ── Idempotency: if analysis_only already transitioned the ──
+        # event to TRIAGING (normal progression from NEW), a re-request
+        # is a no-op.  Return 202 to signal "already in progress"
+        # rather than spawning a duplicate pipeline task or returning
+        # an invalid_state_transition error (Should-Fix #1).
+        if event.status == EventStatus.TRIAGING:
+            return s.InvestigateResponse(
+                event_id=event_id,
+                task_id=event_id,  # TODO(ISSUE-056): Celery task_id
+                status=event.status,
+            )
+        # ── Legacy path: AnalysisOnlyPipeline (dev/offline) ──────
+        background.add_task(
+            _run_analysis_only_pipeline,
+            event_id=event_id,
+            state_machine=state_machine,
+        )
+    else:
+        # ── Production path: SuperAgent + LangGraph ──────────────
+        # Synchronously acquire the lease so the caller receives a
+        # synchronous HTTP 409 if another investigation is already in
+        # progress (ISSUE-054 §4).  Without this synchronous check the
+        # lease failure only surfaces as a background log line and the
+        # caller receives HTTP 202 — misleading them into believing the
+        # investigation started when it silently did not.
+        from app.api.v1.deps import get_super_agent
+        from app.core.errors import ShadowTraceError
+
+        agent = await get_super_agent()
         try:
-            from app.services.evidence_projection import (
-                EvidenceProjection,
-                bind_evidence_projection,
+            acquired_lease = await agent.acquire_lease_or_raise(event_id)
+        except ShadowTraceError as exc:
+            # ISSUE-054 Should-Fix #1: distinguish investigation_in_progress (409)
+            # from dependency_unavailable (503) so monitoring/alerting rules
+            # based on status codes are not misled.
+            http_status = (
+                503 if exc.error_code == "dependency_unavailable" else 409
             )
-
-            pipeline = await get_pipeline()
-            projection = EvidenceProjection(_get_session_factory())
-            with bind_evidence_projection(projection):
-                await pipeline.run(event_id)
-        except Exception as exc:
-            logger.error(
-                "Background pipeline failed for event=%s: %s",
-                event_id,
-                exc,
-            )
-            try:
-                await state_machine.transition(
-                    event_id,
-                    EventStatus.FAILED,
-                    operator="AnalysisOnlyPipeline",
-                    reason=f"pipeline_failed: {exc}",
-                )
-            except Exception:
-                logger.exception("Failed to mark event as FAILED: %s", event_id)
-
-    background.add_task(_run_pipeline)
+            raise HTTPException(
+                status_code=http_status,
+                detail=exc.to_response(),
+            ) from exc
+        background.add_task(
+            _run_super_agent,
+            event_id=event_id,
+            state_machine=state_machine,
+            lease=acquired_lease,
+        )
 
     return s.InvestigateResponse(
         event_id=event_id,
-        task_id=event_id,
+        task_id=event_id,  # TODO(ISSUE-056): replace with Celery task_id once Celery worker integration lands
         status=event.status,
     )
 

@@ -34,6 +34,7 @@ _event_service: Any = None  # EventService
 _state_machine: Any = None  # StateMachineService
 _event_bus: Any = None  # EventBus
 _pipeline: Any = None  # AnalysisOnlyPipeline
+_super_agent: Any = None  # SuperAgent
 _approval_engine: Any = None  # ApprovalEngine
 
 
@@ -209,7 +210,15 @@ async def get_pipeline() -> Any:
             output_guard=output_guard,
             trace_service=trace_service,
             event_service=event_service,
-            scenario_id="insider_data_exfiltration",
+            # TODO(ISSUE-058): derive scenario_id from event_type.
+            # SCENARIO_REGISTRY currently has insider_data_exfiltration,
+            # suspicious_domain_access, and account_anomaly_fp.  "default"
+            # penetrates the LLM prompt fallback path — functional but may
+            # degrade risk/report prompt quality.  ISSUE-058 will implement:
+            #   scenario_id = derive_scenario_from_event_type(event.event_type)
+            # Until then, at least use "insider_data_exfiltration" as the
+            # best-matching default for the primary use case (per ISSUE-038).
+            scenario_id="insider_data_exfiltration"
         )
         report = ReportAgent(
             llm_client=llm_client,
@@ -219,7 +228,15 @@ async def get_pipeline() -> Any:
             trace_service=trace_service,
             event_service=event_service,
             event_bus=_get_event_bus(),
-            scenario_id="insider_data_exfiltration",
+            # TODO(ISSUE-058): derive scenario_id from event_type.
+            # SCENARIO_REGISTRY currently has insider_data_exfiltration,
+            # suspicious_domain_access, and account_anomaly_fp.  "default"
+            # penetrates the LLM prompt fallback path — functional but may
+            # degrade risk/report prompt quality.  ISSUE-058 will implement:
+            #   scenario_id = derive_scenario_from_event_type(event.event_type)
+            # Until then, at least use "insider_data_exfiltration" as the
+            # best-matching default for the primary use case (per ISSUE-038).
+            scenario_id="insider_data_exfiltration"
         )
 
         _pipeline = AnalysisOnlyPipeline(
@@ -237,10 +254,145 @@ async def get_pipeline() -> Any:
     return _pipeline
 
 
+async def get_super_agent() -> Any:
+    """Return SuperAgent for graph-mode investigation (ISSUE-054)."""
+    global _super_agent
+    if _super_agent is None:
+        from app.agents.evidence_agent import EvidenceAgent
+        from app.agents.planner_agent import PlannerAgent
+        from app.agents.rag_agent import RAGAgent
+        from app.agents.report_agent import ReportAgent
+        from app.agents.risk_agent import RiskAgent
+        from app.agents.super_agent import SuperAgent
+        from app.agents.triage_agent import TriageAgent
+        from app.core.guardrails import OutputGuard
+        from app.core.llm.factory import get_llm_client
+        from app.orchestration.workflow_runtime import WorkflowRuntimeService
+        from app.services.agent_trace_service import AgentTraceService
+        from app.services.budget_service import BudgetService
+
+        settings = get_settings()
+        event_service = await get_event_service()
+        state_machine = await get_state_machine()
+        wm = await _get_wm()
+        session_factory = _get_session_factory()
+        redis_client = _get_redis()
+        budget_service = BudgetService(redis=_get_redis(), settings=settings)
+        output_guard = OutputGuard()
+        trace_service = AgentTraceService(session_factory)
+        llm_client = get_llm_client(settings=settings, budget_service=budget_service)
+        tool_executor = None  # SuperAgent does not execute tools directly
+        context_store = _get_context_store()
+        degraded_flags = _get_degraded_flags()
+
+        # ── Sub-agents ───────────────────────────────────────────
+        triage = TriageAgent(
+            llm_client=llm_client,
+            working_memory=wm.for_writer("TriageAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=trace_service,
+        )
+        planner = PlannerAgent(
+            llm_client=llm_client,
+            working_memory=wm.for_writer("PlannerAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=trace_service,
+        )
+        evidence = EvidenceAgent(
+            llm_client=llm_client,
+            tool_executor=tool_executor,
+            working_memory=wm.for_writer("EvidenceAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=trace_service,
+            event_service=event_service,
+            session_factory=session_factory,
+        )
+        rag = RAGAgent(
+            working_memory=wm.for_writer("RAGAgent"),
+            pipeline=None,
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=trace_service,
+        )
+        risk = RiskAgent(
+            llm_client=llm_client,
+            working_memory=wm.for_writer("RiskAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=trace_service,
+            event_service=event_service,
+            # TODO(ISSUE-058): derive scenario_id from event_type.
+            # SCENARIO_REGISTRY currently has insider_data_exfiltration,
+            # suspicious_domain_access, and account_anomaly_fp.  "default"
+            # penetrates the LLM prompt fallback path — functional but may
+            # degrade risk/report prompt quality.  ISSUE-058 will implement:
+            #   scenario_id = derive_scenario_from_event_type(event.event_type)
+            # Until then, at least use "insider_data_exfiltration" as the
+            # best-matching default for the primary use case (per ISSUE-038).
+            scenario_id="insider_data_exfiltration"
+        )
+        report = ReportAgent(
+            llm_client=llm_client,
+            working_memory=wm.for_writer("ReportAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=trace_service,
+            event_service=event_service,
+            event_bus=_get_event_bus(),
+            # TODO(ISSUE-058): derive scenario_id from event_type.
+            # SCENARIO_REGISTRY currently has insider_data_exfiltration,
+            # suspicious_domain_access, and account_anomaly_fp.  "default"
+            # penetrates the LLM prompt fallback path — functional but may
+            # degrade risk/report prompt quality.  ISSUE-058 will implement:
+            #   scenario_id = derive_scenario_from_event_type(event.event_type)
+            # Until then, at least use "insider_data_exfiltration" as the
+            # best-matching default for the primary use case (per ISSUE-038).
+            scenario_id="insider_data_exfiltration"
+        )
+
+        # ── Workflow runtime ─────────────────────────────────────
+        workflow_runtime = WorkflowRuntimeService(session_factory, event_service=event_service)
+
+        # ── SuperAgent (the orchestrator) ────────────────────────
+        _super_agent = SuperAgent(
+            state_machine=state_machine,
+            event_service=event_service,
+            workflow_runtime=workflow_runtime,
+            degraded_flags=degraded_flags,
+            context_store=context_store,
+            triage_agent=triage,
+            planner_agent=planner,
+            evidence_agent=evidence,
+            rag_agent=rag,
+            risk_agent=risk,
+            report_agent=report,
+            redis_client=redis_client,
+            session_factory=session_factory,
+            settings=settings,
+            llm_client=llm_client,
+            working_memory=wm.for_writer("SuperAgent"),
+            budget_service=budget_service,
+            output_guard=output_guard,
+            trace_service=trace_service,
+            event_bus=_get_event_bus(),
+        )
+    return _super_agent
+
+
 def reset_deps() -> None:
     """Reset all lazy singletons (for tests)."""
     global _session_factory, _redis_client, _context_store, _degraded_flags
-    global _audit_log, _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
+    global \
+        _audit_log, \
+        _event_service, \
+        _state_machine, \
+        _event_bus, \
+        _pipeline, \
+        _super_agent, \
+        _approval_engine
     _session_factory = None
     _redis_client = None
     _context_store = None
@@ -250,4 +402,5 @@ def reset_deps() -> None:
     _state_machine = None
     _event_bus = None
     _pipeline = None
+    _super_agent = None
     _approval_engine = None

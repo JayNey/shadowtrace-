@@ -47,3 +47,5 @@ class InvestigationState(TypedDict, total=False):
     risk_assessment: dict[str, Any] | None
     report_generated: bool
     needs_approval_wait: bool
+    escalated: bool
+    external_unsynced: bool
