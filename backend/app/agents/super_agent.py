@@ -58,18 +58,6 @@ logger = logging.getLogger(__name__)
 _SUPER_AGENT_OPERATOR = "SuperAgent"
 
 
-class _Sentinel:
-    """Unique sentinel for unset optional values."""
-
-
-_UNSET = _Sentinel()
-
-
-async def _noop_renew(event_id: str) -> bool:
-    """No-op renew when lease is not active (e.g. memory-fallback mode)."""
-    return True
-
-
 class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
     """Top-level investigation orchestrator.
 
@@ -145,11 +133,52 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
     def status(self) -> SuperAgentStatus:
         return self._status
 
-    async def investigate(self, event_id: str) -> InvestigationResult:
+    async def acquire_lease_or_raise(self, event_id: str) -> EventLease:
+        """Synchronously acquire the distributed lease for *event_id*.
+
+        This is the API-layer hook for HTTP 409 protection: the endpoint calls
+        this synchronously so it can return ``investigation_in_progress`` (409)
+        to the caller before dispatching the background graph task.
+
+        Returns the acquired lease (already stored on ``self._lease``).
+        Raises ``ShadowTraceError`` with ``investigation_in_progress`` if the
+        lease is already held by another worker.
+        """
+        lease = await self._get_lease()
+        if not await lease.acquire(event_id):
+            raise ShadowTraceError(
+                f"Investigation already in progress for event {event_id}",
+                error_code="investigation_in_progress",
+                details={"event_id": event_id},
+            )
+        logger.info(
+            "SuperAgent lease acquired event=%s owner=%s",
+            event_id,
+            lease.owner_id,
+        )
+        return lease
+
+    async def investigate(
+        self,
+        event_id: str,
+        *,
+        lease: EventLease | None = None,
+    ) -> InvestigationResult:
         """Run the full investigation graph for *event_id*.
 
         This is the canonical entry point called by the API layer. It manages
         the lease lifecycle, graph construction, execution, and error handling.
+
+        If *lease* is provided (pre-acquired via ``acquire_lease_or_raise``),
+        the lease acquisition step is skipped and the passed-in lease is used.
+        This is the production path that enables HTTP 409 responses at the API
+        layer before the background task is dispatched.
+
+        NOTE: The return type ``InvestigationResult`` intentionally deviates
+        from the original spec signature ``-> None`` (ISSUE-054 §4). Returning
+        the structured result is a deliberate improvement — it lets callers
+        inspect the investigation outcome without an extra DB round-trip.
+        The spec will be updated to reflect this change.
         """
         self._status = SuperAgentStatus.IDLE
 
@@ -173,14 +202,18 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
                 details={"react_enabled": True, "event_id": event_id},
             )
 
-        # ── 1. Acquire distributed lease ───────────────────────────
-        lease = await self._get_lease()
-        if not await lease.acquire(event_id):
-            raise ShadowTraceError(
-                f"Investigation already in progress for event {event_id}",
-                error_code="investigation_in_progress",
-                details={"event_id": event_id},
-            )
+        # ── 1. Acquire distributed lease (or use pre-acquired) ─────
+        if lease is not None:
+            # Pre-acquired by the API layer for HTTP 409 protection.
+            self._lease = lease
+        else:
+            lease = await self._get_lease()
+            if not await lease.acquire(event_id):
+                raise ShadowTraceError(
+                    f"Investigation already in progress for event {event_id}",
+                    error_code="investigation_in_progress",
+                    details={"event_id": event_id},
+                )
 
         self._status = SuperAgentStatus.PLANNING
         logger.info(
@@ -262,6 +295,21 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
                     await renew_task
                 except asyncio.CancelledError:
                     pass
+            # ── Refresh source snapshot (ISSUE-054 §4) ────────────
+            try:
+                await self._event_service.refresh_snapshot(event_id)
+            except AttributeError:
+                # TODO(ISSUE-029): refresh_snapshot API not yet implemented.
+                logger.debug(
+                    "source_snapshot refresh skipped for event=%s — "
+                    "refresh_snapshot not available (pending ISSUE-029)",
+                    event_id,
+                )
+            except Exception:
+                logger.exception(
+                    "source_snapshot refresh failed for event=%s",
+                    event_id,
+                )
             await lease.release(event_id)
             logger.debug("SuperAgent cleanup complete event=%s", event_id)
 
@@ -308,7 +356,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
 
     def _build_graph(
         self,
-        checkpointer: RedisCheckpointer | None,
+        checkpointer: RedisCheckpointer,
     ) -> CompiledInvestigationGraph:
         """Construct the LangGraph investigation graph."""
         from app.orchestration.workflow_graph import build_investigation_graph
@@ -360,9 +408,19 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
         try:
             readiness = await self._workflow_runtime.get_event_status_update_readiness(event_id)
         except Exception:
-            logger.debug(
-                "event_status_update_readiness lookup failed event=%s, defaulting to NOT_REQUIRED",
+            # When the disposition policy is REQUIRED, a transient readiness
+            # lookup failure must default to CAPABILITY_UNKNOWN — not
+            # NOT_REQUIRED — to avoid skipping the writeback readiness gate
+            # silently (ISSUE-054 Should-Fix #4).
+            policy = getattr(event, "disposition_policy", None)
+            if policy is DispositionPolicy.REQUIRED:
+                readiness = WritebackReadiness.CAPABILITY_UNKNOWN
+            logger.warning(
+                "event_status_update_readiness lookup failed event=%s "
+                "policy=%s, defaulting to %s",
                 event_id,
+                policy.value if hasattr(policy, "value") else str(policy),
+                readiness.value,
                 exc_info=True,
             )
 
@@ -408,7 +466,33 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
             "risk_assessment": None,
             "report_generated": False,
             "needs_approval_wait": False,
+            "escalated": False,
+            "external_unsynced": False,
         }
+
+        # ── Freeze source snapshot for this investigation ──────────
+        # ISSUE-054 §4 requires the source_snapshot to be frozen before graph
+        # execution so all downstream agents see a consistent event image.
+        try:
+            frozen = await self._event_service.freeze_source_snapshot(event_id)
+            if frozen is not None:
+                state["source_snapshot"] = frozen
+        except AttributeError:
+            # TODO(ISSUE-029): freeze_source_snapshot API not yet implemented.
+            # Once ISSUE-029 lands, remove this except clause — the snapshot
+            # MUST be frozen for data consistency.
+            logger.warning(
+                "source_snapshot freeze skipped for event=%s — "
+                "freeze_source_snapshot not available (pending ISSUE-029)",
+                event_id,
+            )
+        except Exception:
+            logger.exception(
+                "source_snapshot freeze failed for event=%s — "
+                "continuing with None snapshot",
+                event_id,
+            )
+
         return state
 
     async def _build_result(
@@ -459,13 +543,16 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
 
         writeback_required = policy is DispositionPolicy.REQUIRED
 
+        # ── Derive report_id from event_id (rpt- prefix) ─────────
+        report_id = f"rpt-{event_id}" if event_id.startswith("evt-") else f"rpt-evt-{event_id}"
+
         return InvestigationResult(
             event_id=event_id,
             final_status=final_status,
             final_verdict=final_verdict,
-            escalated=False,
-            external_unsynced=False,
-            report_id=None,
+            escalated=state.get("escalated", False),
+            external_unsynced=state.get("external_unsynced", False),
+            report_id=report_id,
             writeback_required=writeback_required,
             writeback_readiness=(
                 WritebackReadiness.NOT_REQUIRED
@@ -476,18 +563,24 @@ class SuperAgent(BaseAgent[SuperAgentInput, InvestigationResult]):
 
     async def _renew_loop(self, event_id: str, lease: EventLease) -> None:
         """Background task that renews the lease every ``RENEW_INTERVAL_SECONDS``."""
+        renewal_failures = 0
         while True:
             await asyncio.sleep(RENEW_INTERVAL_SECONDS)
             ok = await lease.renew(event_id)
             if not ok:
+                renewal_failures += 1
                 logger.error(
-                    "Lease renewal failed for event=%s; investigation may be orphaned",
+                    "Lease renewal failed for event=%s (consecutive_failures=%d); "
+                    "investigation may be orphaned",
                     event_id,
+                    renewal_failures,
                 )
                 # Continue anyway — the graph is still running and will
                 # eventually release.  If the lease expired, another worker
                 # could have started, which would be a split-brain situation
                 # that the release Lua script prevents from compounding.
+            else:
+                renewal_failures = 0
 
 
 __all__ = ["SuperAgent"]

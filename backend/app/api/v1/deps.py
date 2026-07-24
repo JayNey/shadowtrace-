@@ -210,7 +210,7 @@ async def get_pipeline() -> Any:
             output_guard=output_guard,
             trace_service=trace_service,
             event_service=event_service,
-            scenario_id="insider_data_exfiltration",
+            scenario_id="insider_data_exfiltration",  # TODO(ISSUE-XXX): derive scenario_id from event context
         )
         report = ReportAgent(
             llm_client=llm_client,
@@ -220,7 +220,7 @@ async def get_pipeline() -> Any:
             trace_service=trace_service,
             event_service=event_service,
             event_bus=_get_event_bus(),
-            scenario_id="insider_data_exfiltration",
+            scenario_id="insider_data_exfiltration",  # TODO(ISSUE-XXX): derive scenario_id from event context
         )
 
         _pipeline = AnalysisOnlyPipeline(
@@ -308,7 +308,7 @@ async def get_super_agent() -> Any:
             output_guard=output_guard,
             trace_service=trace_service,
             event_service=event_service,
-            scenario_id="insider_data_exfiltration",
+            scenario_id="insider_data_exfiltration",  # TODO(ISSUE-XXX): derive scenario_id from event context
         )
         report = ReportAgent(
             llm_client=llm_client,
@@ -318,7 +318,7 @@ async def get_super_agent() -> Any:
             trace_service=trace_service,
             event_service=event_service,
             event_bus=_get_event_bus(),
-            scenario_id="insider_data_exfiltration",
+            scenario_id="insider_data_exfiltration",  # TODO(ISSUE-XXX): derive scenario_id from event context
         )
 
         # ── Workflow runtime ─────────────────────────────────────

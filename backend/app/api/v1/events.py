@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status
+from fastapi.exceptions import HTTPException
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -619,19 +620,21 @@ async def _run_super_agent(
     event_id: str,
     *,
     state_machine: Any,
+    lease: Any = None,
 ) -> None:
     """Background task: SuperAgent graph investigation (``ORCHESTRATION_MODE=graph``).
 
-    The SuperAgent handles lease acquisition internally — a concurrent request
-    receives HTTP 409 from the /investigate endpoint before reaching this task.
-    If the SuperAgent itself fails (lease expiry, graph error, …) the event is
-    transitioned to FAILED.
+    When *lease* is provided (pre-acquired by the API endpoint for HTTP 409
+    protection), the SuperAgent skips lease acquisition and uses the passed-in
+    lease directly. This ensures the API caller receives a synchronous 409 if
+    the lease cannot be acquired, rather than silently failing in the
+    background.
     """
     try:
         from app.api.v1.deps import get_super_agent
 
         agent = await get_super_agent()
-        _ = await agent.investigate(event_id)
+        _ = await agent.investigate(event_id, lease=lease)
     except Exception as exc:
         logger.error(
             "SuperAgent investigation failed for event=%s: %s",
@@ -694,6 +697,26 @@ async def investigate_event(
         )
 
     if settings.orchestration_mode == "analysis_only":
+        # ── Gate: analysis_only forbids live side effects ─────────
+        # ISSUE-054 §4: ORCHESTRATION_MODE=analysis_only is dev/offline only.
+        # If live side-effect or XDR writeback switches are enabled, the
+        # configuration is inconsistent — analysis_only must not produce real
+        # XDR side effects.
+        if settings.allow_live_side_effects or settings.allow_xdr_writeback:
+            from app.core.errors import ConfigurationError
+
+            raise ConfigurationError(
+                "analysis_only orchestration mode forbids live side effects "
+                "or XDR writeback — disable ALLOW_LIVE_SIDE_EFFECTS and "
+                "ALLOW_XDR_WRITEBACK, or switch to ORCHESTRATION_MODE=graph",
+                error_code="configuration_error",
+                details={
+                    "orchestration_mode": "analysis_only",
+                    "allow_live_side_effects": settings.allow_live_side_effects,
+                    "allow_xdr_writeback": settings.allow_xdr_writeback,
+                    "event_id": event_id,
+                },
+            )
         # ── Legacy path: AnalysisOnlyPipeline (dev/offline) ──────
         background.add_task(
             _run_analysis_only_pipeline,
@@ -702,10 +725,28 @@ async def investigate_event(
         )
     else:
         # ── Production path: SuperAgent + LangGraph ──────────────
+        # Synchronously acquire the lease so the caller receives a
+        # synchronous HTTP 409 if another investigation is already in
+        # progress (ISSUE-054 §4).  Without this synchronous check the
+        # lease failure only surfaces as a background log line and the
+        # caller receives HTTP 202 — misleading them into believing the
+        # investigation started when it silently did not.
+        from app.api.v1.deps import get_super_agent
+        from app.core.errors import ShadowTraceError
+
+        agent = await get_super_agent()
+        try:
+            acquired_lease = await agent.acquire_lease_or_raise(event_id)
+        except ShadowTraceError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=exc.to_response(),
+            )
         background.add_task(
             _run_super_agent,
             event_id=event_id,
             state_machine=state_machine,
+            lease=acquired_lease,
         )
 
     return s.InvestigateResponse(
