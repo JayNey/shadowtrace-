@@ -70,8 +70,16 @@ def new_evidence_id() -> str:
     return f"evd-{_rand_hex()}"
 
 
+def new_conflict_id() -> str:
+    return f"cft-{_rand_hex()}"
+
+
 def new_action_id() -> str:
     return f"act-{_rand_hex()}"
+
+
+def new_approval_id() -> str:
+    return f"apv-{_rand_hex()}"
 
 
 def new_job_id() -> str:
@@ -107,3 +115,8 @@ def report_id_for_event(event_id: str) -> str:
 def new_report_id(event_id: str) -> str:
     """Alias for :func:`report_id_for_event`; requires event_id (never random)."""
     return report_id_for_event(event_id)
+
+
+def new_storyline_id() -> str:
+    """Return a random storyline id: ``sty-{8hex}``."""
+    return f"sty-{_rand_hex()}"

@@ -17,11 +17,13 @@ from fastapi.responses import JSONResponse
 from app.core.auth import AuthenticationError, AuthorizationError
 from app.core.errors import (
     APIError,
+    ApprovalDecisionConflictError,
     ApprovalRequiredError,
     DispositionPermissionDenied,
     EventNotFoundError,
     InvalidStateTransitionError,
     InvalidVerdictStatusCombinationError,
+    InvestigationInProgressError,
     ResourceNotFoundError,
     ShadowTraceError,
     WritebackConflictError,
@@ -39,11 +41,13 @@ __all__ = [
     "InvalidStateTransitionError",
     "InvalidVerdictStatusCombinationError",
     "ApprovalRequiredError",
+    "ApprovalDecisionConflictError",
     "WritebackPendingError",
     "WritebackFailedError",
     "WritebackConflictError",
     "WritebackUnsupportedError",
     "DispositionPermissionDenied",
+    "InvestigationInProgressError",
     "ResourceNotFoundError",
     "register_exception_handlers",
 ]

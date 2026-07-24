@@ -71,6 +71,7 @@ class EventContext(BaseModel):
     writeback_summary: WritebackSummary | None = None
 
     # --- orchestration bookkeeping ---
+    analysis_only_complete: bool = False
     state_history: list[dict[str, Any]] = Field(default_factory=list)
     replan_count: int = 0
     budget_usage: dict[str, Any] = Field(default_factory=dict)
@@ -80,3 +81,5 @@ class EventContext(BaseModel):
     scratchpad: list[dict[str, Any]] = Field(default_factory=list)
     degraded_flags: list[str] = Field(default_factory=list)
     triage_degraded: dict[str, Any] | None = None
+    graph_degraded: dict[str, Any] | None = None
+    storyline_degraded: dict[str, Any] | None = None

@@ -1,0 +1,380 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shadowtrace.local/socketio/events.schema.json",
+  "title": "ShadowTrace Socket.IO Event Envelope Schema (ISSUE-040)",
+  "description": "Unified envelope and 16 event-type payloads for the /events namespace.",
+  "definitions": {
+    "SocketEventEnvelope": {
+      "type": "object",
+      "required": ["type", "event_id", "sequence", "timestamp", "payload"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "event_created",
+            "state_change",
+            "agent_progress",
+            "agent_completed",
+            "agent_failed",
+            "tool_call_started",
+            "tool_call_completed",
+            "approval_required",
+            "approval_updated",
+            "action_executed",
+            "action_verified",
+            "risk_updated",
+            "report_generated",
+            "final_verdict_updated",
+            "disposition_submitted",
+            "writeback_updated"
+          ]
+        },
+        "event_id": {
+          "type": "string",
+          "pattern": "^evt-[0-9]{8}-[0-9a-f]{8}$",
+          "description": "Canonical event identifier (§4.7.1)."
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Monotonically increasing per event_id, maintained via Redis INCR."
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 UTC timestamp of the event."
+        },
+        "payload": {
+          "type": "object",
+          "description": "Type-specific payload; shape determined by the event type."
+        }
+      }
+    },
+
+    "EventCreatedPayload": {
+      "type": "object",
+      "required": ["event_id"],
+      "properties": {
+        "event_id": { "$ref": "#/definitions/SocketEventEnvelope/properties/event_id" },
+        "severity": { "type": "string" },
+        "event_type": { "type": "string" },
+        "source_product": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+
+    "StateChangePayload": {
+      "type": "object",
+      "required": ["from_status", "to_status", "operator"],
+      "properties": {
+        "from_status": { "type": "string" },
+        "to_status": { "type": "string" },
+        "operator": { "type": "string" },
+        "external_unsynced": { "type": "boolean" },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "AgentProgressPayload": {
+      "type": "object",
+      "required": ["agent_name", "phase", "message"],
+      "properties": {
+        "agent_name": { "type": "string" },
+        "phase": { "type": "string" },
+        "message": { "type": "string" },
+        "progress_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "step_index": { "type": "integer", "minimum": 0 },
+        "total_steps": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+
+    "AgentCompletedPayload": {
+      "type": "object",
+      "required": ["agent_name", "output_summary"],
+      "properties": {
+        "agent_name": { "type": "string" },
+        "output_summary": { "type": "string" },
+        "duration_ms": { "type": "number" },
+        "degraded": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+
+    "AgentFailedPayload": {
+      "type": "object",
+      "required": ["agent_name", "error"],
+      "properties": {
+        "agent_name": { "type": "string" },
+        "error": { "type": "string" },
+        "error_code": { "type": "string" },
+        "retryable": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+
+    "ToolCallStartedPayload": {
+      "type": "object",
+      "required": ["call_id", "tool_name", "agent_name"],
+      "properties": {
+        "call_id": { "type": "string", "pattern": "^call-[0-9a-f]{8}$" },
+        "tool_name": { "type": "string" },
+        "agent_name": { "type": "string" },
+        "provider_code": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "ToolCallCompletedPayload": {
+      "type": "object",
+      "required": ["call_id", "tool_name", "status"],
+      "properties": {
+        "call_id": { "type": "string", "pattern": "^call-[0-9a-f]{8}$" },
+        "tool_name": { "type": "string" },
+        "status": { "type": "string", "enum": ["success", "partial_success", "failed"] },
+        "duration_ms": { "type": "number" }
+      },
+      "additionalProperties": false
+    },
+
+    "ApprovalRequiredPayload": {
+      "type": "object",
+      "required": ["action_id", "action_name"],
+      "properties": {
+        "action_id": { "type": "string", "pattern": "^act-[0-9a-f]{8}$" },
+        "action_name": { "type": "string" },
+        "summary": { "type": "string" },
+        "target_count": { "type": "integer", "minimum": 0 },
+        "deadline": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+
+    "ApprovalUpdatedPayload": {
+      "type": "object",
+      "required": ["action_id", "decision"],
+      "properties": {
+        "action_id": { "type": "string", "pattern": "^act-[0-9a-f]{8}$" },
+        "decision": { "type": "string", "enum": ["approved", "rejected"] },
+        "approver": { "type": "string" },
+        "comment": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "ActionExecutedPayload": {
+      "type": "object",
+      "required": ["action_id", "action_name", "execution_owner"],
+      "properties": {
+        "action_id": { "type": "string", "pattern": "^act-[0-9a-f]{8}$" },
+        "action_name": { "type": "string" },
+        "execution_owner": { "type": "string", "enum": ["XDR_MANAGED", "DIRECT_TOOL"] },
+        "job_id": { "type": "string", "pattern": "^job-[0-9a-f]{8}$" },
+        "target_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+
+    "ActionVerifiedPayload": {
+      "type": "object",
+      "required": ["action_id", "verification_result"],
+      "properties": {
+        "action_id": { "type": "string", "pattern": "^act-[0-9a-f]{8}$" },
+        "verification_result": { "type": "string", "enum": ["verified", "failed", "partial", "pending"] },
+        "verdict": { "type": "string" },
+        "conflict_count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+
+    "RiskUpdatedPayload": {
+      "type": "object",
+      "required": ["risk_score"],
+      "properties": {
+        "risk_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "previous_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "factors": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+
+    "ReportGeneratedPayload": {
+      "type": "object",
+      "required": ["report_id"],
+      "properties": {
+        "report_id": { "type": "string", "pattern": "^rpt-[0-9a-f]{8}$" },
+        "sections": { "type": "integer", "minimum": 0 },
+        "generated_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false
+    },
+
+    "FinalVerdictUpdatedPayload": {
+      "type": "object",
+      "required": ["verdict"],
+      "properties": {
+        "verdict": { "type": "string", "enum": ["true_positive", "false_positive", "uncertain", "inconclusive"] },
+        "previous_verdict": { "type": "string" },
+        "matched_case_id": { "type": "string", "pattern": "^case-[0-9a-f]{8}$" }
+      },
+      "additionalProperties": false
+    },
+
+    "DispositionSubmittedPayload": {
+      "type": "object",
+      "required": ["disposition_id", "intent_kind"],
+      "properties": {
+        "disposition_id": { "type": "string", "pattern": "^disp-[0-9a-f]{8}$" },
+        "intent_kind": {
+          "type": "string",
+          "enum": ["ENTITY_ACTION_SUBMIT", "EXECUTION_RESULT_RECORD", "COMPENSATION_RECORD", "EVENT_STATUS_UPDATE"]
+        },
+        "action_id": { "type": "string", "pattern": "^act-[0-9a-f]{8}$" },
+        "target_count": { "type": "integer", "minimum": 0 },
+        "provider_code": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+
+    "WritebackUpdatedPayload": {
+      "description": "Restricted payload — MUST NOT carry raw_result, credentials, or unsanitized vendor blobs (intro §4.2.4, ISSUE-040 §3).",
+      "type": "object",
+      "required": ["disposition_id", "writeback_id", "status"],
+      "properties": {
+        "disposition_id": { "type": "string", "pattern": "^disp-[0-9a-f]{8}$" },
+        "writeback_id": { "type": "string", "pattern": "^wbk-[0-9a-f]{8}$" },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "ACCEPTED", "CONFIRMED", "FAILED", "CONFLICT", "UNKNOWN"]
+        },
+        "provider_code": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "additionalProperties": false,
+      "not": {
+        "required": ["raw_result"]
+      }
+    }
+  },
+
+  "oneOf": [
+    {
+      "description": "event_created",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "event_created" }, "payload": { "$ref": "#/definitions/EventCreatedPayload" } } }
+      ]
+    },
+    {
+      "description": "state_change",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "state_change" }, "payload": { "$ref": "#/definitions/StateChangePayload" } } }
+      ]
+    },
+    {
+      "description": "agent_progress",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "agent_progress" }, "payload": { "$ref": "#/definitions/AgentProgressPayload" } } }
+      ]
+    },
+    {
+      "description": "agent_completed",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "agent_completed" }, "payload": { "$ref": "#/definitions/AgentCompletedPayload" } } }
+      ]
+    },
+    {
+      "description": "agent_failed",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "agent_failed" }, "payload": { "$ref": "#/definitions/AgentFailedPayload" } } }
+      ]
+    },
+    {
+      "description": "tool_call_started",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "tool_call_started" }, "payload": { "$ref": "#/definitions/ToolCallStartedPayload" } } }
+      ]
+    },
+    {
+      "description": "tool_call_completed",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "tool_call_completed" }, "payload": { "$ref": "#/definitions/ToolCallCompletedPayload" } } }
+      ]
+    },
+    {
+      "description": "approval_required",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "approval_required" }, "payload": { "$ref": "#/definitions/ApprovalRequiredPayload" } } }
+      ]
+    },
+    {
+      "description": "approval_updated",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "approval_updated" }, "payload": { "$ref": "#/definitions/ApprovalUpdatedPayload" } } }
+      ]
+    },
+    {
+      "description": "action_executed",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "action_executed" }, "payload": { "$ref": "#/definitions/ActionExecutedPayload" } } }
+      ]
+    },
+    {
+      "description": "action_verified",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "action_verified" }, "payload": { "$ref": "#/definitions/ActionVerifiedPayload" } } }
+      ]
+    },
+    {
+      "description": "risk_updated",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "risk_updated" }, "payload": { "$ref": "#/definitions/RiskUpdatedPayload" } } }
+      ]
+    },
+    {
+      "description": "report_generated",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "report_generated" }, "payload": { "$ref": "#/definitions/ReportGeneratedPayload" } } }
+      ]
+    },
+    {
+      "description": "final_verdict_updated",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "final_verdict_updated" }, "payload": { "$ref": "#/definitions/FinalVerdictUpdatedPayload" } } }
+      ]
+    },
+    {
+      "description": "disposition_submitted",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "disposition_submitted" }, "payload": { "$ref": "#/definitions/DispositionSubmittedPayload" } } }
+      ]
+    },
+    {
+      "description": "writeback_updated — restricted payload, no raw_result",
+      "allOf": [
+        { "$ref": "#/definitions/SocketEventEnvelope" },
+        { "properties": { "type": { "const": "writeback_updated" }, "payload": { "$ref": "#/definitions/WritebackUpdatedPayload" } } }
+      ]
+    }
+  ]
+}

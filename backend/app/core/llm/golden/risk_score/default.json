@@ -1,0 +1,35 @@
+{
+  "content": {
+    "factors": {
+      "asset_impact": {
+        "score": 80,
+        "reason": "Finance endpoint PC-FIN-023 is a high-value workstation"
+      },
+      "behavior_anomaly": {
+        "score": 88,
+        "reason": "PowerShell archive and upload chain indicates abnormal exfil behavior"
+      },
+      "evidence_confidence": {
+        "score": 82,
+        "reason": "Multi-source evidence collection completed with strong overall confidence"
+      },
+      "attack_stage": {
+        "score": 92,
+        "reason": "Activity reaches data staging and external upload / exfiltration stage"
+      },
+      "data_sensitivity": {
+        "score": 78,
+        "reason": "Finance report archive suggests confidential business data exposure"
+      },
+      "threat_intel": {
+        "score": 85,
+        "reason": "External IP/domain tagged as unknown infrastructure used for exfiltration"
+      }
+    },
+    "raw_confidence": 0.88
+  },
+  "model_name": "mock-model",
+  "prompt_tokens": 220,
+  "completion_tokens": 160,
+  "total_tokens": 380
+}

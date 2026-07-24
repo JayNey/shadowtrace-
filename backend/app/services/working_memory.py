@@ -27,6 +27,7 @@ WRITE_CAS_MAX_ATTEMPTS = 3
 # --------------------------------------------------------------------------- #
 
 FIELD_OWNERSHIP: dict[str, str] = {
+    "analysis_only_complete": "AnalysisOnlyPipeline",
     "event": "EventService",
     "source_snapshot": "EventService",
     "source_sync_state": "SourceIngester",
@@ -61,6 +62,8 @@ FIELD_OWNERSHIP: dict[str, str] = {
     "scratchpad": "WorkingMemory",
     "degraded_flags": "DegradedFlagService",
     "triage_degraded": "TriageAgent",
+    "graph_degraded": "GraphAgent",
+    "storyline_degraded": "StorylineService",
 }
 
 # P0 RuleBasedFalsePositiveHook shares the FalsePositiveMatcher writer identity.

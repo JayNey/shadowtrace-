@@ -70,6 +70,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "event_not_found": ErrorCategory.USER_INPUT,
     "not_found": ErrorCategory.USER_INPUT,
     "approval_required": ErrorCategory.PERMANENT,
+    "approval_decision_conflict": ErrorCategory.PERMANENT,
     "validation_error": ErrorCategory.USER_INPUT,
     "unauthorized": ErrorCategory.USER_INPUT,
     "forbidden": ErrorCategory.USER_INPUT,
@@ -329,6 +330,15 @@ class ApprovalRequiredError(ShadowTraceError):
     default_retryable = False
 
 
+class ApprovalDecisionConflictError(ShadowTraceError):
+    """Another approver already decided or decision_id reused (ISSUE-058)."""
+
+    status_code = 409
+    default_error_code = "approval_decision_conflict"
+    default_category = ErrorCategory.PERMANENT
+    default_retryable = False
+
+
 # Writeback / disposition HTTP domain errors (ISSUE-004 codes; registered above).
 
 
@@ -384,6 +394,15 @@ class AdapterNotFoundError(ShadowTraceError):
     status_code = 404
     default_error_code = "adapter_not_found"
     default_category = ErrorCategory.USER_INPUT
+    default_retryable = False
+
+
+class InvestigationInProgressError(ShadowTraceError):
+    """Another orchestration is already running for this event (ISSUE-054)."""
+
+    status_code = 409
+    default_error_code = "investigation_in_progress"
+    default_category = ErrorCategory.PERMANENT
     default_retryable = False
 
 

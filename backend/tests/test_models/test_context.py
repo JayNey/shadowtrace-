@@ -52,6 +52,9 @@ EXPECTED_CONTEXT_FIELDS = {
     "scratchpad",
     "degraded_flags",
     "triage_degraded",
+    "graph_degraded",
+    "storyline_degraded",
+    "analysis_only_complete",
 }
 
 

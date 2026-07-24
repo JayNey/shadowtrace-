@@ -1,0 +1,48 @@
+{
+  "content": {
+    "plan_id": "pln-prev0001",
+    "event_id": "evt-test-revise",
+    "steps": [
+      {
+        "step_order": 1,
+        "step_goal": "[revised] Expanded threat intel and DNS",
+        "assigned_agent": "evidence_agent",
+        "required_tools": ["query_threat_intel", "query_dns", "query_asset_info"],
+        "success_criteria": "expanded IOC data"
+      },
+      {
+        "step_order": 2,
+        "step_goal": "[revised] Process and network evidence",
+        "assigned_agent": "evidence_agent",
+        "required_tools": ["query_edr_process", "query_network_flow"],
+        "success_criteria": "full endpoint data"
+      },
+      {
+        "step_order": 3,
+        "step_goal": "Risk scoring",
+        "assigned_agent": "risk_agent",
+        "required_tools": [],
+        "success_criteria": "score computed"
+      },
+      {
+        "step_order": 4,
+        "step_goal": "Response plan",
+        "assigned_agent": "response_agent",
+        "required_tools": [],
+        "success_criteria": "actions generated"
+      }
+    ],
+    "budget": {
+      "max_tool_calls": 30,
+      "max_llm_calls": 20,
+      "max_duration_s": 300
+    },
+    "revision": 1,
+    "revise_reason": "Insufficient threat intel in previous round",
+    "degraded": false
+  },
+  "model_name": "mock-model",
+  "prompt_tokens": 150,
+  "completion_tokens": 250,
+  "total_tokens": 400
+}

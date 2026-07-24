@@ -24,6 +24,8 @@ from app.core.config import get_settings
 from app.core.errors import DependencyUnavailableError, EventNotFoundError, ValidationError
 from app.core.event_bus import EventBus
 from app.db import models as orm
+from app.models.action import Action
+from app.models.agent_io import ResponsePlan
 from app.models.disposition import SourceObjectLocator
 from app.models.entities import EntitySet
 from app.models.enums import (
@@ -34,12 +36,17 @@ from app.models.enums import (
     Severity,
     SourceObjectKind,
 )
-from app.models.ids import canonical_source_identity, new_event_id
+from app.models.ids import canonical_source_identity, new_action_id, new_event_id
+from app.models.report import InvestigationReport
 from app.models.security_event import SecurityEvent
 from app.models.source import SourceReference
 from app.models.tool_meta import TERMINAL_DISPOSITION_TOOL
 from app.models.workflow import TransitionContext, validate_verdict_status
-from app.services.context_service import EventContextStore, event_summary_from_security_event
+from app.services.context_service import (
+    EventContextStore,
+    append_context_journal_in_session,
+    event_summary_from_security_event,
+)
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.evidence_projection import EvidenceQueryScope
 from app.services.source_policy_resolver import (
@@ -55,6 +62,13 @@ LINK_ROLE_RELATED = "related"
 LINK_ROLE_PROVISIONAL = "provisional"
 PROMOTION_NONE = "none"
 PROMOTION_PROMOTED = "promoted"
+
+_SOCKET_VERDICT: dict[FinalVerdict, str] = {
+    FinalVerdict.NONE: "inconclusive",
+    FinalVerdict.POSSIBLE_FALSE_POSITIVE: "uncertain",
+    FinalVerdict.FALSE_POSITIVE: "false_positive",
+    FinalVerdict.CONFIRMED_THREAT: "true_positive",
+}
 
 
 def should_apply_source_update(
@@ -169,9 +183,80 @@ def _ref_dump(ref: SourceReference) -> dict[str, Any]:
     return ref.model_dump(mode="json")
 
 
+def _entities_from_normalized(normalized: dict[str, Any]) -> dict[str, Any]:
+    """Build EntitySet JSON from adapter-normalized metadata for evidence queries."""
+    if not normalized:
+        return {}
+    accounts: list[dict[str, Any]] = []
+    hosts: list[dict[str, Any]] = []
+    ips: list[dict[str, Any]] = []
+    domains: list[dict[str, Any]] = []
+
+    account = normalized.get("account")
+    if account:
+        accounts.append(
+            {
+                "entity_id": "acct-1",
+                "entity_type": "account",
+                "username": str(account),
+            }
+        )
+    hostname = normalized.get("hostname")
+    host_ip = normalized.get("ip")
+    if hostname or host_ip:
+        host: dict[str, Any] = {"entity_id": "host-1", "entity_type": "host"}
+        if hostname:
+            host["hostname"] = str(hostname)
+        if host_ip:
+            host["ip"] = str(host_ip)
+        hosts.append(host)
+
+    for key in ("src_ip", "ip"):
+        val = normalized.get(key)
+        if val:
+            ips.append(
+                {
+                    "entity_id": f"ip-{key}",
+                    "entity_type": "ip",
+                    "address": str(val),
+                    "scope": "internal",
+                }
+            )
+    dst_ip = normalized.get("dst_ip")
+    if dst_ip:
+        ips.append(
+            {
+                "entity_id": "ip-dst",
+                "entity_type": "ip",
+                "address": str(dst_ip),
+                "scope": "external",
+            }
+        )
+    domain = normalized.get("domain")
+    if domain:
+        domains.append(
+            {
+                "entity_id": "dom-1",
+                "entity_type": "domain",
+                "fqdn": str(domain),
+            }
+        )
+
+    if not any((accounts, hosts, ips, domains)):
+        return {}
+    return EntitySet.model_validate(
+        {
+            "accounts": accounts,
+            "hosts": hosts,
+            "ips": ips,
+            "domains": domains,
+        }
+    ).model_dump(mode="json")
+
+
 def _source_snapshot_from_row(row: orm.SecurityEvent) -> dict[str, Any]:
     """Return immutable source evidence only; never include mutable current_* state."""
-    return {
+    snapshot: dict[str, Any] = {
         "creation_source_ref": dict(row.creation_source_ref),
         "source_reference_snapshots": [
             dict(item) for item in (row.source_reference_snapshots or [])
@@ -180,6 +265,9 @@ def _source_snapshot_from_row(row: orm.SecurityEvent) -> dict[str, Any]:
             dict(row.raw_alert_snapshot) if row.raw_alert_snapshot is not None else None
         ),
     }
+    if row.event_type:
+        snapshot["alert_type"] = row.event_type
+    return snapshot
 
 
 def _security_event_from_row(row: orm.SecurityEvent) -> SecurityEvent:
@@ -475,6 +563,17 @@ class EventService:
             connector_ids=connector_ids,
         )
 
+    # Whitelist of columns allowed for sort_by in list_events.
+    _SORT_COLUMN_MAP: dict[str, Any] = {
+        "created_at": orm.SecurityEvent.created_at,
+        "updated_at": orm.SecurityEvent.updated_at,
+        "occurred_at": orm.SecurityEvent.occurred_at,
+        "severity": orm.SecurityEvent.severity,
+        "risk_score": orm.SecurityEvent.risk_score,
+        "status": orm.SecurityEvent.status,
+        "event_type": orm.SecurityEvent.event_type,
+    }
+
     async def list_events(
         self,
         *,
@@ -487,6 +586,8 @@ class EventService:
         occurred_before: datetime | None = None,
         page: int = 1,
         page_size: int = 20,
+        sort_by: str | None = None,
+        sort_order: str | None = None,
     ) -> EventListResult:
         page = max(1, page)
         page_size = min(max(1, page_size), 200)
@@ -528,9 +629,15 @@ class EventService:
         if occurred_before is not None:
             filters.append(orm.SecurityEvent.occurred_at <= occurred_before)
 
+        # Resolve sort column (whitelist only; default to created_at).
+        sort_col = self._SORT_COLUMN_MAP.get(sort_by or "created_at", orm.SecurityEvent.created_at)
+        descending = (sort_order or "desc") != "asc"
+
         async with self._session_factory() as session:
             count_stmt = select(func.count()).select_from(orm.SecurityEvent)
-            list_stmt = select(orm.SecurityEvent).order_by(orm.SecurityEvent.created_at.desc())
+            list_stmt = select(orm.SecurityEvent).order_by(
+                sort_col.desc() if descending else sort_col.asc()
+            )
             if filters:
                 count_stmt = count_stmt.where(and_(*filters))
                 list_stmt = list_stmt.where(and_(*filters))
@@ -557,7 +664,128 @@ class EventService:
         # ``context`` remains in the public signature for compatibility, but trusted
         # gate projections are always rebuilt below from PostgreSQL.
         _ = context
-        changed = False
+        async with self._session_factory() as session:
+            async with session.begin():
+                changed, result, summary = await self.apply_final_verdict_in_session(
+                    session,
+                    event_id,
+                    verdict,
+                    operator=operator,
+                )
+
+        if changed:
+            await self.publish_final_verdict_mutation(
+                event_id,
+                verdict,
+                result=result,
+                summary=summary,
+            )
+        return result
+
+    async def apply_final_verdict_in_session(
+        self,
+        session: AsyncSession,
+        event_id: str,
+        verdict: FinalVerdict,
+        *,
+        operator: str | None = None,
+    ) -> tuple[bool, SecurityEvent, EventSummary]:
+        """Apply a verdict inside the caller's transaction.
+
+        WorkflowRuntimeService uses this API so the verdict, confidence floor,
+        and trusted disposition-only intent commit atomically. After the caller
+        commits, you must still invoke one of:
+
+        - ``publish_final_verdict_mutation`` when ``changed`` is True
+        - ``sync_event_summary_mutation`` when only non-verdict fields changed
+        """
+        row = await session.get(
+            orm.SecurityEvent,
+            event_id,
+            with_for_update=True,
+        )
+        if row is None:
+            raise KeyError(f"security_event not found: {event_id}")
+
+        ctx = await self._authoritative_verdict_context(session, event_id)
+        validate_verdict_status(verdict, EventStatus(row.status), ctx)
+
+        previous = row.final_verdict
+        changed = previous != verdict.value
+        if changed:
+            row.final_verdict = verdict.value
+            row.row_version = int(row.row_version or 1) + 1
+            session.add(
+                orm.EventAuditLog(
+                    event_id=event_id,
+                    from_status=row.status,
+                    to_status=row.status,
+                    operator=operator or "EventService",
+                    reason=f"final_verdict:{previous}->{verdict.value}",
+                )
+            )
+            await session.flush()
+            await session.refresh(row)
+
+        return (
+            changed,
+            _security_event_from_row(row),
+            event_summary_from_security_event(row),
+        )
+
+    async def publish_final_verdict_mutation(
+        self,
+        event_id: str,
+        verdict: FinalVerdict,
+        *,
+        result: SecurityEvent,
+        summary: EventSummary,
+    ) -> None:
+        """Publish mirrors for a verdict mutation after its transaction commits."""
+        await self.sync_event_summary_mutation(
+            event_id,
+            result=result,
+            summary=summary,
+        )
+        if self._bus is not None:
+            await self._bus.publish_event(
+                event_id,
+                "final_verdict_updated",
+                {"verdict": _SOCKET_VERDICT[verdict]},
+            )
+
+    async def sync_event_summary_mutation(
+        self,
+        event_id: str,
+        *,
+        result: SecurityEvent,
+        summary: EventSummary,
+    ) -> None:
+        """Synchronize EventContext after a committed event-row mutation."""
+        await self._sync_event_summary_after_mutation(
+            event_id,
+            committed_version=result.row_version,
+            summary=summary,
+        )
+
+    async def update_risk_fields(
+        self,
+        event_id: str,
+        *,
+        risk_score: int,
+        severity: Severity,
+        confidence: float,
+        operator: str | None = None,
+        factor_names: list[str] | None = None,
+    ) -> SecurityEvent:
+        """Persist RiskAgent score fields onto ``security_event`` (ISSUE-035).
+
+        Does **not** write ``final_verdict`` — that remains ``set_final_verdict`` only.
+        Publishes ``risk_updated`` (locked Socket payload: ``RiskUpdatedPayload``).
+        """
+        score = max(0, min(100, int(risk_score)))
+        conf = max(0.0, min(1.0, float(confidence)))
+        previous_score = 0
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(
@@ -567,43 +795,249 @@ class EventService:
                 )
                 if row is None:
                     raise KeyError(f"security_event not found: {event_id}")
-
-                ctx = await self._authoritative_verdict_context(session, event_id)
-
-                validate_verdict_status(verdict, EventStatus(row.status), ctx)
-
-                previous = row.final_verdict
-                if previous != verdict.value:
-                    changed = True
-                    row.final_verdict = verdict.value
-                    row.row_version = int(row.row_version or 1) + 1
-                    session.add(
-                        orm.EventAuditLog(
-                            event_id=event_id,
-                            from_status=row.status,
-                            to_status=row.status,
-                            operator=operator or "EventService",
-                            reason=f"final_verdict:{previous}->{verdict.value}",
-                        )
+                previous_score = int(row.risk_score or 0)
+                row.risk_score = score
+                row.severity = severity.value if isinstance(severity, Severity) else str(severity)
+                row.confidence = conf
+                row.row_version = int(row.row_version or 1) + 1
+                session.add(
+                    orm.EventAuditLog(
+                        event_id=event_id,
+                        from_status=row.status,
+                        to_status=row.status,
+                        operator=operator or "RiskAgent",
+                        reason=(
+                            f"risk_fields:score={score},"
+                            f"severity={row.severity},confidence={conf:.4f}"
+                        ),
                     )
-                    await session.flush()
-                    await session.refresh(row)
+                )
+                await session.flush()
+                await session.refresh(row)
                 result = _security_event_from_row(row)
                 summary = event_summary_from_security_event(row)
 
-        if changed:
-            await self._sync_event_summary_after_mutation(
-                event_id,
-                committed_version=result.row_version,
-                summary=summary,
-            )
-            if self._bus is not None:
-                await self._bus.publish_event(
-                    event_id,
-                    "final_verdict_updated",
-                    {"final_verdict": verdict.value, "operator": operator},
-                )
+        await self._sync_event_summary_after_mutation(
+            event_id,
+            committed_version=result.row_version,
+            summary=summary,
+        )
+        if self._bus is not None:
+            payload: dict[str, Any] = {"risk_score": score}
+            if previous_score != score:
+                payload["previous_score"] = previous_score
+            if factor_names:
+                payload["factors"] = list(factor_names)
+            await self._bus.publish_event(event_id, "risk_updated", payload)
         return result
+
+    async def upsert_report(self, report: InvestigationReport) -> InvestigationReport:
+        """Idempotent upsert of InvestigationReport by stable ``report_id`` (ISSUE-036)."""
+        now = datetime.now(UTC)
+        sections_payload = [section.model_dump(mode="json") for section in report.sections]
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    orm.Report,
+                    report.report_id,
+                    with_for_update=True,
+                )
+                if row is None:
+                    row = orm.Report(
+                        report_id=report.report_id,
+                        event_id=report.event_id,
+                        title=report.title,
+                        summary=report.summary,
+                        sections=sections_payload,
+                        final_verdict=report.final_verdict.value,
+                        risk_score=int(report.risk_score),
+                        severity=report.severity.value,
+                        version=1,
+                        generated_by=report.generated_by,
+                        generated_at=report.generated_at or now,
+                        updated_at=now,
+                    )
+                    session.add(row)
+                else:
+                    if row.event_id != report.event_id:
+                        raise ValidationError(
+                            "report_id already bound to a different event_id",
+                            details={
+                                "report_id": report.report_id,
+                                "existing_event_id": row.event_id,
+                                "incoming_event_id": report.event_id,
+                            },
+                        )
+                    row.title = report.title
+                    row.summary = report.summary
+                    row.sections = sections_payload
+                    row.final_verdict = report.final_verdict.value
+                    row.risk_score = int(report.risk_score)
+                    row.severity = report.severity.value
+                    row.version = int(row.version or 1) + 1
+                    row.generated_by = report.generated_by
+                    if report.generated_at is not None:
+                        row.generated_at = report.generated_at
+                    row.updated_at = now
+                await session.flush()
+                await session.refresh(row)
+                return InvestigationReport(
+                    report_id=row.report_id,
+                    event_id=row.event_id,
+                    title=row.title,
+                    summary=row.summary,
+                    sections=report.sections,
+                    final_verdict=FinalVerdict(row.final_verdict),
+                    risk_score=int(row.risk_score),
+                    severity=Severity(row.severity),
+                    version=int(row.version),
+                    generated_by=row.generated_by,
+                    generated_at=row.generated_at,
+                    updated_at=row.updated_at,
+                )
+
+    async def get_report(
+        self,
+        *,
+        report_id: str | None = None,
+        event_id: str | None = None,
+    ) -> InvestigationReport | None:
+        """Load a persisted report by ``report_id`` or ``event_id``."""
+        if report_id is None and event_id is None:
+            raise ValidationError("get_report requires report_id or event_id")
+        async with self._session_factory() as session:
+            row: orm.Report | None = None
+            if report_id is not None:
+                row = await session.get(orm.Report, report_id)
+            elif event_id is not None:
+                row = await session.scalar(
+                    select(orm.Report)
+                    .where(orm.Report.event_id == event_id)
+                    .order_by(orm.Report.updated_at.desc())
+                    .limit(1)
+                )
+            if row is None:
+                return None
+            from app.models.report import ReportSection
+
+            sections = [ReportSection.model_validate(item) for item in (row.sections or [])]
+            return InvestigationReport(
+                report_id=row.report_id,
+                event_id=row.event_id,
+                title=row.title,
+                summary=row.summary,
+                sections=sections,
+                final_verdict=FinalVerdict(row.final_verdict),
+                risk_score=int(row.risk_score),
+                severity=Severity(row.severity),
+                version=int(row.version),
+                generated_by=row.generated_by,
+                generated_at=row.generated_at,
+                updated_at=row.updated_at,
+            )
+
+    async def upsert_generate_report_action(
+        self,
+        event_id: str,
+        *,
+        plan_revision: int = 1,
+    ) -> str:
+        """Idempotent system Action for local report generation (ISSUE-036)."""
+        now = datetime.now(UTC)
+        material = f"{event_id}|{int(plan_revision)}|generate_report|system|system||immediate|"
+        fingerprint = hashlib.sha256(material.encode("utf-8")).hexdigest()
+        async with self._session_factory() as session:
+            async with session.begin():
+                existing = await session.scalar(
+                    select(orm.Action).where(orm.Action.action_fingerprint == fingerprint)
+                )
+                if existing is not None:
+                    existing.status = "success"
+                    existing.executed_at = now
+                    existing.updated_at = now
+                    existing.reason = "报告自动生成"
+                    await session.flush()
+                    return existing.action_id
+
+                action_id = new_action_id()
+                session.add(
+                    orm.Action(
+                        action_id=action_id,
+                        event_id=event_id,
+                        plan_revision=int(plan_revision),
+                        action_fingerprint=fingerprint,
+                        action_category="system",
+                        action_name="generate_report",
+                        tool_name="generate_report",
+                        action_level="l0",
+                        target_type="system",
+                        target="system",
+                        parameters={},
+                        status="success",
+                        auto_execute=True,
+                        reason="报告自动生成",
+                        impact_assessment=None,
+                        execution_owner=None,
+                        writeback_required=False,
+                        writeback_applicable=False,
+                        writeback_readiness="not_required",
+                        writeback_status=None,
+                        executed_at=now,
+                        source_action_id=None,
+                    )
+                )
+                await session.flush()
+                return action_id
+
+    async def upsert_response_plan_actions(
+        self,
+        event_id: str,
+        *,
+        plan_revision: int,
+        actions: list[Action],
+        response_plan: ResponsePlan | None = None,
+    ) -> list[Action]:
+        """Idempotent upsert of ResponsePlan actions by ``action_fingerprint`` (ISSUE-057)."""
+        from app.agents.response_agent import _upsert_action_row
+
+        persisted: list[Action] = []
+        async with self._session_factory() as session:
+            async with session.begin():
+                for action in actions:
+                    if action.event_id != event_id:
+                        raise ValidationError(
+                            "action.event_id mismatch",
+                            details={"expected": event_id, "actual": action.event_id},
+                        )
+                    action_id = await _upsert_action_row(session, action)
+                    persisted.append(action.model_copy(update={"action_id": action_id}))
+                if response_plan is not None:
+                    await append_context_journal_in_session(
+                        session,
+                        event_id,
+                        "response_plan",
+                        response_plan.model_dump(mode="json"),
+                    )
+        return persisted
+
+    async def supersede_undeployed_deferred(
+        self,
+        event_id: str,
+        *,
+        old_revision: int,
+        new_revision: int,
+    ) -> int:
+        """Mark undeployed deferred actions SUPERSEDED when replanning (ISSUE-057)."""
+        from app.agents.response_agent import _supersede_undeployed_deferred
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                return await _supersede_undeployed_deferred(
+                    session,
+                    event_id=event_id,
+                    old_revision=int(old_revision),
+                    new_revision=int(new_revision),
+                )
 
     async def transition_status(
         self,
@@ -1168,7 +1602,7 @@ class EventService:
             status=EventStatus.NEW.value,
             severity=severity.value,
             final_verdict=FinalVerdict.NONE.value,
-            entities={},
+            entities=_entities_from_normalized(source.normalized or {}),
             creation_source_ref=_ref_dump(ref),
             source_reference_snapshots=[_ref_dump(ref)],
             current_primary_source_record_id=source_record_id,

@@ -19,6 +19,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.agents.report_section_builder import SECTION_SPECS
 from app.core.errors import (
     InvalidStateTransitionError,
     InvalidVerdictStatusCombinationError,
@@ -28,14 +29,21 @@ from app.core.event_bus import EventBus
 from app.core.redis_client import RedisClient
 from app.db import models as orm
 from app.models.enums import (
+    ActionCategory,
+    ActionExecutionPhase,
+    ActionLevel,
+    ActionStatus,
     DispositionPolicy,
     EventStatus,
     EventType,
+    ExecutionOwner,
     FinalVerdict,
     Severity,
     SourceObjectKind,
     WritebackReadiness,
 )
+from app.models.ids import report_id_for_event
+from app.models.report import InvestigationReport, ReportSection
 from app.models.source import SourceReference
 from app.models.workflow import TransitionContext
 from app.services.context_service import EventContextStore, ctx_key
@@ -1127,6 +1135,243 @@ async def test_noop_set_final_verdict_skips_bus_publish(
     bus.publish_event.reset_mock()
     await event_service.set_final_verdict(created.event_id, FinalVerdict.NONE, operator="test")
     assert bus.publish_event.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_set_final_verdict_publishes_locked_socket_payload(
+    event_service: EventService,
+) -> None:
+    bus = AsyncMock()
+    bus.publish_event = AsyncMock(return_value=None)
+    event_service._bus = bus  # noqa: SLF001
+
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.ALERT, object_id=f"AL-verdict-{sfx}"),
+            title="socket-verdict",
+            source_type="mock_xdr",
+        )
+    )
+    bus.publish_event.reset_mock()
+
+    await event_service.set_final_verdict(
+        created.event_id,
+        FinalVerdict.FALSE_POSITIVE,
+        operator="test",
+    )
+
+    bus.publish_event.assert_awaited_once_with(
+        created.event_id,
+        "final_verdict_updated",
+        {"verdict": "false_positive"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_risk_fields_publishes_risk_updated_payload(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    bus = AsyncMock()
+    bus.publish_event = AsyncMock(return_value=None)
+    event_service._bus = bus  # noqa: SLF001
+
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-risk-{sfx}"),
+            title="risk-update",
+            source_type="mock_xdr",
+        )
+    )
+    assert created.event_id
+    bus.publish_event.reset_mock()
+
+    updated = await event_service.update_risk_fields(
+        created.event_id,
+        risk_score=82,
+        severity=Severity.HIGH,
+        confidence=0.88,
+        factor_names=["attack_stage", "threat_intel"],
+    )
+    assert updated.risk_score == 82
+    assert updated.severity is Severity.HIGH
+    assert abs(updated.confidence - 0.88) < 1e-9
+
+    bus.publish_event.assert_awaited_once()
+    call = bus.publish_event.await_args
+    assert call is not None
+    assert call.args[0] == created.event_id
+    assert call.args[1] == "risk_updated"
+    assert call.args[2] == {
+        "risk_score": 82,
+        "previous_score": 0,
+        "factors": ["attack_stage", "threat_intel"],
+    }
+
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, created.event_id)
+        assert row is not None
+        assert row.risk_score == 82
+        assert row.severity == Severity.HIGH.value
+
+
+def _sample_report(event_id: str) -> InvestigationReport:
+    sections = [
+        ReportSection(key=key, title=title, content=f"section-{key}")
+        for key, title in SECTION_SPECS
+    ]
+    return InvestigationReport(
+        report_id=report_id_for_event(event_id),
+        event_id=event_id,
+        title="integration report",
+        summary="summary",
+        sections=sections,
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        risk_score=80,
+        severity=Severity.HIGH,
+        generated_by="template",
+        generated_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_report_idempotent_by_report_id(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-report-{sfx}"),
+            title="report-upsert",
+            source_type="mock_xdr",
+        )
+    )
+    assert created.event_id
+    report = _sample_report(created.event_id)
+
+    first = await event_service.upsert_report(report)
+    assert first.report_id == report_id_for_event(created.event_id)
+    assert first.version == 1
+    assert len(first.sections) == 15
+
+    report.title = "integration report v2"
+    second = await event_service.upsert_report(report)
+    assert second.report_id == first.report_id
+    assert second.version == 2
+    assert second.title == "integration report v2"
+
+    by_id = await event_service.get_report(report_id=first.report_id)
+    assert by_id is not None
+    assert by_id.version == 2
+    by_event = await event_service.get_report(event_id=created.event_id)
+    assert by_event is not None
+    assert by_event.report_id == first.report_id
+
+    async with session_factory() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(orm.Report).where(orm.Report.event_id == created.event_id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_upsert_response_plan_actions_idempotent_by_fingerprint(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.agents.response_agent import (
+        compute_action_fingerprint,
+        derive_stable_action_id,
+        generate_response_plan_id,
+    )
+    from app.models.action import Action
+    from app.models.agent_io import ResponsePlan, ResponsePlanGeneratedBy
+
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-rsp-{sfx}"),
+            title="response-plan-upsert",
+            source_type="mock_xdr",
+        )
+    )
+    assert created.event_id
+    event_id = created.event_id
+    fingerprint = compute_action_fingerprint(
+        event_id=event_id,
+        plan_revision=1,
+        tool_name="create_ticket",
+        target_type="ticket",
+        canonical_target="ticket",
+        normalized_params_hash="abc123",
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        source_locator_hash="loc",
+        execution_phase=ActionExecutionPhase.IMMEDIATE,
+        approved_template_hash="",
+    )
+    action = Action(
+        action_id=derive_stable_action_id(fingerprint),
+        event_id=event_id,
+        plan_revision=1,
+        action_fingerprint=fingerprint,
+        action_category=ActionCategory.RESPONSE,
+        action_name="Create ticket",
+        tool_name="create_ticket",
+        action_level=ActionLevel.L1,
+        execution_phase=ActionExecutionPhase.IMMEDIATE,
+        target_type="ticket",
+        target="ticket",
+        parameters={"title": "t", "description": "d"},
+        status=ActionStatus.PENDING,
+        provider_name="mock_xdr",
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+    )
+    plan = ResponsePlan(
+        plan_id=generate_response_plan_id(event_id, 1),
+        actions=[action],
+        strategy_summary="integration",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+
+    first = await event_service.upsert_response_plan_actions(
+        event_id,
+        plan_revision=1,
+        actions=[action],
+        response_plan=plan,
+    )
+    second = await event_service.upsert_response_plan_actions(
+        event_id,
+        plan_revision=1,
+        actions=[action],
+        response_plan=plan,
+    )
+    assert first[0].action_id == second[0].action_id
+
+    async with session_factory() as session:
+        rows = (
+            (await session.execute(select(orm.Action).where(orm.Action.event_id == event_id)))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        journal = await session.scalar(
+            select(func.count())
+            .select_from(orm.EventContextJournal)
+            .where(
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == "response_plan",
+            )
+        )
+        assert int(journal or 0) >= 1
 
 
 @pytest.mark.asyncio
