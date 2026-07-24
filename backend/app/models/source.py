@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.enums import (
     CapabilityState,
@@ -48,6 +48,13 @@ class SourceReference(BaseModel):
     schema_version: str = "1"
     ingested_at: datetime | None = None
     raw_payload_hash: str | None = None
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _coerce_schema_version(cls, value: object) -> object:
+        if isinstance(value, int):
+            return str(value)
+        return value
 
     @property
     def identity(self) -> tuple[str, str, str, str, str]:

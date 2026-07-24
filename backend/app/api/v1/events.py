@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1 import schemas as s
-from app.api.v1.deps import get_event_service, get_pipeline, get_state_machine
+from app.api.v1.deps import _get_session_factory, get_event_service, get_pipeline, get_state_machine
 from app.api.v1.errors import (
     DispositionPermissionDenied,
     EventNotFoundError,
@@ -47,6 +47,7 @@ from app.models.enums import (
     EventType,
     FinalVerdict,
     Severity,
+    SourceObjectKind,
     WritebackReadiness,
     WritebackStatus,
 )
@@ -456,9 +457,9 @@ async def create_event(
         event_type=body.event_type,
         severity=body.severity,
     )
-    from app.services.context_service import event_summary_from_security_event
+    from app.services.context_service import event_summary_from_domain
 
-    return event_summary_from_security_event(event)
+    return event_summary_from_domain(event)
 
 
 # --------------------------------------------------------------------------- #
@@ -605,8 +606,15 @@ async def investigate_event(
     # Enqueue the pipeline as a background task.
     async def _run_pipeline() -> None:
         try:
+            from app.services.evidence_projection import (
+                EvidenceProjection,
+                bind_evidence_projection,
+            )
+
             pipeline = await get_pipeline()
-            await pipeline.run(event_id)
+            projection = EvidenceProjection(_get_session_factory())
+            with bind_evidence_projection(projection):
+                await pipeline.run(event_id)
         except Exception as exc:
             logger.error(
                 "Background pipeline failed for event=%s: %s",
@@ -1281,7 +1289,7 @@ async def select_disposition_source(
                     source_product=source_obj.source_product,
                     source_tenant_id=source_obj.source_tenant_id,
                     connector_id=source_obj.connector_id,
-                    source_kind=source_obj.source_kind,
+                    source_kind=SourceObjectKind(source_obj.source_kind),
                     source_object_id=source_obj.source_object_id,
                 )
                 return s.DispositionSourceSelectResponse(
