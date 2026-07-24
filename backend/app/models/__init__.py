@@ -52,6 +52,7 @@ from app.models.agent_io import (
     VerifyAgentInput,
 )
 from app.models.context import EventContext
+from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
 from app.models.disposition import (
     DispositionCommand,
     DispositionOutboxRecord,
@@ -193,6 +194,10 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "ProviderToolBinding": ProviderToolBinding,
     "CapabilityBindingEntry": CapabilityBindingEntry,
     "CapabilityManifest": CapabilityManifest,
+    # decision trace (ISSUE-063)
+    "DecisionTraceEntry": DecisionTraceEntry,
+    "DecisionTraceSummary": DecisionTraceSummary,
+    "DecisionTrace": DecisionTrace,
 }
 
 __all__ = ["MODEL_REGISTRY", *sorted(MODEL_REGISTRY.keys())]

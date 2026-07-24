@@ -316,6 +316,17 @@ class QualityVerdict(StrEnum):
     FAIL = "fail"
 
 
+class DecisionTraceEntryType(StrEnum):
+    AGENT_EXECUTION = "agent_execution"
+    TOOL_CALL = "tool_call"
+    LLM_CALL = "llm_call"
+    STATE_TRANSITION = "state_transition"
+    APPROVAL = "approval"
+    ACTION_EXECUTION = "action_execution"
+    DISPOSITION = "disposition"
+    WRITEBACK = "writeback"
+
+
 # Terminal external dispositions that may satisfy the event-disposition gate.
 # pending / processing / unknown can NEVER satisfy it (intro §4.6.18).
 TERMINAL_SOURCE_DISPOSITIONS: frozenset[SourceDisposition] = frozenset(
@@ -365,4 +376,5 @@ DECLARED_ENUMS: dict[str, type[Enum]] = {
     "GuardRailDimension": GuardRailDimension,
     "BudgetScope": BudgetScope,
     "QualityVerdict": QualityVerdict,
+    "DecisionTraceEntryType": DecisionTraceEntryType,
 }

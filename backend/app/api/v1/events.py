@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Query, status
 
 from app.api.v1 import schemas as s
 from app.api.v1.errors import (
@@ -22,6 +22,7 @@ from app.core.auth import (
     Principal,
     require_roles,
 )
+from app.db.session import async_session_factory
 from app.models.disposition import SourceObjectLocator
 from app.models.enums import (
     ActionStatus,
@@ -32,6 +33,7 @@ from app.models.enums import (
     Severity,
     WritebackReadiness,
 )
+from app.services.decision_trace_service import DecisionTraceService
 
 router = APIRouter(tags=["events"])
 
@@ -190,9 +192,52 @@ async def get_graph(event_id: str, principal: CurrentPrincipal) -> s.GraphRespon
 
 
 @router.get("/events/{event_id}/decision-trace", response_model=s.DecisionTraceResponse)
-async def get_decision_trace(event_id: str, principal: CurrentPrincipal) -> s.DecisionTraceResponse:
+async def get_decision_trace(
+    event_id: str,
+    principal: CurrentPrincipal,
+    entry_type: Annotated[list[str] | None, Query()] = None,
+    page: int = 1,
+    page_size: int = 50,
+) -> s.DecisionTraceResponse:
+    """Aggregated decision trace aggregating agent, tool, LLM, state,
+    approval, action, disposition, and writeback entries into a single
+    timestamp-ordered timeline (ISSUE-063)."""
+    import logging
+
     _require_event(event_id)
-    return s.DecisionTraceResponse(event_id=event_id, steps=[])
+    try:
+        service = DecisionTraceService(async_session_factory)
+        trace = await service.get_decision_trace(event_id)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Decision trace unavailable for %s", event_id, exc_info=True
+        )
+        return s.DecisionTraceResponse(
+            event_id=event_id,
+            missing_sources=["all (database unavailable)"],
+        )
+
+    # Filter by entry_type(s) when requested.
+    entries = trace.entries
+    if entry_type:
+        allowed = set(entry_type)
+        entries = [e for e in entries if e.entry_type.value in allowed]
+
+    total = len(entries)
+
+    # Paginate
+    start = (page - 1) * page_size
+    page_entries = entries[start : start + page_size]
+
+    return s.DecisionTraceResponse(
+        event_id=trace.event_id,
+        entries=[e.model_dump(mode="json") for e in page_entries],
+        summary=trace.summary.model_dump(),
+        missing_sources=trace.missing_sources,
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
 
 
 @router.get("/events/{event_id}/actions", response_model=s.ActionListResponse)
