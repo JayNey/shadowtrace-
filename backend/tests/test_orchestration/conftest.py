@@ -171,8 +171,7 @@ class RetryingAgentWrapper:
                 self.attempts.append(False)
                 if attempt > self._max_retries:
                     raise
-        assert last_exc is not None
-        raise last_exc
+        raise last_exc  # type: ignore[union-attr]  # unreachable — loop always raises
 
 
 # --------------------------------------------------------------------------- #
@@ -315,12 +314,14 @@ def make_event_summary(
         severity=severity,
         risk_score=0,
         final_verdict=FinalVerdict.NONE,
-        writeback_required=disposition_policy is DispositionPolicy.REQUIRED,
+        writeback_required=disposition_policy == DispositionPolicy.REQUIRED,
         writeback_readiness=(
             WritebackReadiness.NOT_REQUIRED
-            if disposition_policy is DispositionPolicy.NOT_REQUIRED
+            if disposition_policy == DispositionPolicy.NOT_REQUIRED
             else WritebackReadiness.CAPABILITY_UNKNOWN
         ),
+        writeback_overall_status=None,
+        pending_writeback_count=0,
         disposition_policy=disposition_policy,
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),

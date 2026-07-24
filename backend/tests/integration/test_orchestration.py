@@ -47,7 +47,10 @@ from app.orchestration.workflow_graph import (
     NODE_PLANNER,
     NODE_RISK,
     P0_NODE_SEQUENCE,
+    ROUTE_CLOSE,
+    ROUTE_DISPOSITION_ONLY,
     ROUTE_INVESTIGATE,
+    ROUTE_MANUAL_HOLD,
     build_investigation_graph,
     route_after_triage,
 )
@@ -113,6 +116,13 @@ async def _ready_resolver(_event_id: str) -> WritebackReadiness:
     Note: ``triage_graph_node`` (workflow_graph.py:370-372) always calls
     ``runtime.get_event_status_update_readiness()`` and writes it to
     ``event_status_update_readiness`` in graph state regardless of routing.
+
+    .. warning::
+       This resolver always returns NOT_REQUIRED regardless of disposition
+       policy.  When writing tests for REQUIRED-policy events (ISSUE-062),
+       override with a resolver that returns the appropriate readiness value.
+       Forgetting to do so will produce a misleading
+       ``event_status_update_readiness`` in the graph state.
     """
     return WritebackReadiness.NOT_REQUIRED
 
@@ -351,6 +361,10 @@ async def test_agent_failure_retry_evidence_agent(
     )
 
     # ── Wrap with retry logic; RetryingAgentWrapper calls execute() ───────
+    # NOTE: max_retries=1 (2 total attempts) is intentionally lower than the
+    # production MAX_AGENT_RETRIES=2 (3 total attempts) so the test completes
+    # faster — the scenario only needs one failure + one success to validate
+    # the retry-and-trace contract.
     rw = RetryingAgentWrapper(flaky, max_retries=1)  # initial + 1 retry
     result = await rw.execute(object())  # stand-in for EvidenceAgentInput
     assert isinstance(result, EvidenceOutput)
@@ -502,11 +516,17 @@ async def test_context_consistency_concurrent_writes_no_lost_updates(
     context_store: EventContextStore,
 ) -> None:
     """ISSUE-055 Scenario 4: two writers concurrently modify different
-    EventContext fields. No lost update; version conflict retry succeeds.
+    EventContext fields. Both writes are persisted — no lost update.
 
     Two agent writers (TriageAgent and EvidenceAgent) each write to their
-    owned field. Even when writes interleave, the CAS-based store ensures
-    both updates are persisted with distinct versions.
+    owned field. Even when writes interleave, both updates are persisted
+    with distinct versions because writes target different fields and the
+    underlying UPSERT serializes at the DB row level.
+
+    .. note::
+       This test validates concurrent writes to **different** fields.
+       For true CAS (optimistic-locking) conflict detection on the **same**
+       field, see :func:`test_compare_and_set_rejects_stale_version`.
     """
     # ── Setup: ingest event and initialize context ──────────────────────
     event_id = await _ingest_event(
@@ -551,8 +571,6 @@ async def test_context_consistency_concurrent_writes_no_lost_updates(
 
     async def writer_b() -> None:
         """EvidenceAgent writes evidence_output."""
-        # Small delay to increase interleave probability
-        await asyncio.sleep(0.01)
         await context_store.set(event_id, "evidence_output", evidence_payload)
 
     # ── Execute concurrently ────────────────────────────────────────────
@@ -696,3 +714,191 @@ def test_route_after_triage_required_policy_investigates() -> None:
         f"REQUIRED + need_investigation=True must route to INVESTIGATE, "
         f"got {route_after_triage(state)}"
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Route boundary tests (ISSUE-055 review: Should-Fix #4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def test_route_after_triage_not_required_no_investigation_routes_to_close() -> None:
+    """NOT_REQUIRED + need_investigation=False → ROUTE_CLOSE (early shortcut).
+
+    When an event does not require investigation and disposition is
+    NOT_REQUIRED, the graph short-circuits from TRIAGING straight to CLOSED,
+    skipping the entire P0 analysis chain.
+    """
+    state = make_investigation_state(
+        event_id="evt-orch-ni-false-001",
+        disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+        need_investigation=False,
+    )
+    assert route_after_triage(state) == ROUTE_CLOSE, (
+        f"NOT_REQUIRED + need_investigation=False must route to {ROUTE_CLOSE}, "
+        f"got {route_after_triage(state)}"
+    )
+
+
+def test_route_after_triage_not_required_fp_routes_to_close() -> None:
+    """NOT_REQUIRED + FP (close_as_fp) → ROUTE_CLOSE.
+
+    False-positive events with NOT_REQUIRED policy skip investigation and
+    go directly to CLOSED. The ``close_as_fp`` flag signals that the event
+    was determined to be a false positive during triage.
+    """
+    state = make_investigation_state(
+        event_id="evt-orch-fp-001",
+        disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+        need_investigation=True,
+        false_positive_match={"recommendation": "close_as_fp"},
+    )
+    assert route_after_triage(state) == ROUTE_CLOSE, (
+        f"NOT_REQUIRED + close_as_fp=True must route to {ROUTE_CLOSE}, "
+        f"got {route_after_triage(state)}"
+    )
+
+
+def test_route_after_triage_required_fp_readiness_ready_routes_to_disposition_only() -> None:
+    """REQUIRED + FP + readiness=READY → ROUTE_DISPOSITION_ONLY.
+
+    A REQUIRED event flagged as false positive with READY writeback readiness
+    skips the full investigation chain and enters the disposition-only path,
+    which handles the required writeback before closing.
+    """
+    state = make_investigation_state(
+        event_id="evt-orch-req-fp-001",
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        need_investigation=True,
+        false_positive_match={"recommendation": "close_as_fp"},
+        event_status_update_readiness=WritebackReadiness.READY.value,
+    )
+    assert route_after_triage(state) == ROUTE_DISPOSITION_ONLY, (
+        f"REQUIRED + FP + READY must route to {ROUTE_DISPOSITION_ONLY}, "
+        f"got {route_after_triage(state)}"
+    )
+
+
+def test_route_after_triage_required_fp_readiness_not_ready_routes_to_manual_hold() -> None:
+    """REQUIRED + FP + readiness≠READY → ROUTE_MANUAL_HOLD.
+
+    A REQUIRED event flagged as false positive that is NOT_READY (e.g.
+    CAPABILITY_UNKNOWN) cannot proceed to disposition — it must be placed
+    on manual hold until the writeback target becomes reachable.
+    """
+    state = make_investigation_state(
+        event_id="evt-orch-req-fp-hold-001",
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        need_investigation=True,
+        false_positive_match={"recommendation": "close_as_fp"},
+        event_status_update_readiness=WritebackReadiness.CAPABILITY_UNKNOWN.value,
+    )
+    assert route_after_triage(state) == ROUTE_MANUAL_HOLD, (
+        f"REQUIRED + FP + CAPABILITY_UNKNOWN must route to {ROUTE_MANUAL_HOLD}, "
+        f"got {route_after_triage(state)}"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CAS optimistic-locking test (ISSUE-055 review: Should-Fix #1)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_compare_and_set_rejects_stale_version(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+    context_store: EventContextStore,
+) -> None:
+    """ISSUE-055: ``compare_and_set`` rejects a writer holding a stale version.
+
+    Two writers race on the **same** field (triage_result).  Writer A holds
+    version 1; writer B writes first and bumps the version to 2; writer A's
+    CAS with expected_version=1 must return ``False`` because the field has
+    moved on.  This is the real optimistic-locking contract the orchestration
+    layer relies on.
+    """
+    # ── Setup ────────────────────────────────────────────────────────────────
+    event_id = await _ingest_event(
+        event_service,
+        session_factory,
+        object_id="INC-orch-cas-stale-001",
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+    )
+
+    from app.api.v1.schemas import EventSummary as APIEventSummary
+
+    api_summary = APIEventSummary(
+        event_id=event_id,
+        event_type=EventType.DATA_EXFILTRATION,
+        title="CAS stale version test",
+        status=EventStatus.TRIAGING,
+        severity=Severity.HIGH,
+        risk_score=0,
+        final_verdict=FinalVerdict.NONE,
+        writeback_required=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+    )
+    await context_store.init_context(event_id, api_summary)
+
+    # ── Writer B wins the race — writes first (version → 1) ──────────────────
+    winner_payload: dict[str, Any] = {
+        "event_type": EventType.DATA_EXFILTRATION.value,
+        "severity": Severity.HIGH.value,
+        "need_investigation": True,
+        "reasoning": "writer B won the race",
+    }
+    set_result = await context_store.set(event_id, "triage_result", winner_payload)
+    assert set_result.version == 1
+
+    # ── Writer B writes again (version → 2) ──────────────────────────────────
+    winner_payload_v2: dict[str, Any] = {
+        **winner_payload,
+        "reasoning": "writer B updated — v2",
+    }
+    set_result = await context_store.set(event_id, "triage_result", winner_payload_v2)
+    assert set_result.version == 2
+
+    # ── Writer A tries CAS with stale expected_version=1 → must fail ─────────
+    stale_payload: dict[str, Any] = {
+        "event_type": EventType.INSIDER_THREAT.value,
+        "severity": Severity.LOW.value,
+        "need_investigation": False,
+        "reasoning": "stale writer A — should be rejected",
+    }
+    cas_ok = await context_store.compare_and_set(
+        event_id, "triage_result", expected_version=1, value=stale_payload
+    )
+    assert cas_ok is False, (
+        "compare_and_set with stale version must return False — "
+        "field is already at version 2"
+    )
+
+    # ── Verify writer B's value is still intact (no lost update) ─────────────
+    full_ctx = await context_store.get_full_context(event_id)
+    stored = full_ctx.triage_result
+    assert isinstance(stored, dict)
+    assert stored.get("reasoning") == "writer B updated — v2"
+
+    # ── CAS with current version should succeed ──────────────────────────────
+    current_version = await context_store.get_field_version(event_id, "triage_result")
+    assert current_version is not None and current_version >= 2
+
+    fresh_payload: dict[str, Any] = {
+        "event_type": EventType.DATA_EXFILTRATION.value,
+        "severity": Severity.HIGH.value,
+        "need_investigation": True,
+        "reasoning": "fresh writer with correct version",
+    }
+    cas_ok = await context_store.compare_and_set(
+        event_id, "triage_result", expected_version=current_version, value=fresh_payload
+    )
+    assert cas_ok is True, (
+        f"compare_and_set with current version {current_version} must succeed"
+    )
+
+    # Verify the fresh write replaced writer B's value
+    full_ctx = await context_store.get_full_context(event_id)
+    stored = full_ctx.triage_result
+    assert isinstance(stored, dict)
+    assert stored.get("reasoning") == "fresh writer with correct version"
