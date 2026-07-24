@@ -108,8 +108,26 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# WARNING: _ready_resolver — NOT_REQUIRED ONLY
+# ═══════════════════════════════════════════════════════════════════════════════
+# This resolver unconditionally returns WritebackReadiness.NOT_REQUIRED.
+# It is safe ONLY for tests whose events have DispositionPolicy.NOT_REQUIRED.
+#
+# When you write tests for DispositionPolicy.REQUIRED events (ISSUE-062),
+# you MUST provide a resolver that returns the correct readiness value
+# (e.g. READY, NOT_READY, CAPABILITY_UNKNOWN).  Forgetting to do so will
+# silently write event_status_update_readiness=NOT_REQUIRED into the graph
+# state, causing REQUIRED events to be misrouted as if they were NOT_REQUIRED.
+#
+# The existing routing tests (test_route_after_triage_required_*) bypass
+# this hazard by directly constructing InvestigationState with the correct
+# event_status_update_readiness field, without calling the resolver.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 async def _ready_resolver(_event_id: str) -> WritebackReadiness:
-    """Return NOT_REQUIRED — semantically honest for NOT_REQUIRED policy events.
+    """Return NOT_REQUIRED — safe ONLY for NOT_REQUIRED disposition events.
 
     ``route_after_triage`` skips readiness checks for NOT_REQUIRED +
     need_investigation=True, so this value does not affect routing.
@@ -123,6 +141,8 @@ async def _ready_resolver(_event_id: str) -> WritebackReadiness:
        override with a resolver that returns the appropriate readiness value.
        Forgetting to do so will produce a misleading
        ``event_status_update_readiness`` in the graph state.
+
+       See the module-level warning block above for details.
     """
     return WritebackReadiness.NOT_REQUIRED
 
@@ -221,7 +241,7 @@ def _build_agents(
 
 
 @pytest.mark.asyncio
-async def test_golden_path_full_orchestration_to_reporting(
+async def test_golden_path_full_orchestration_to_closed(
     session_factory: async_sessionmaker[AsyncSession],
     event_service: EventService,
     state_machine_service: StateMachineService,
@@ -234,9 +254,10 @@ async def test_golden_path_full_orchestration_to_reporting(
 
     For NOT_REQUIRED disposition, the full P0 investigation chain executes
     through triage → planner → evidence → risk → response → approval →
-    execute → verify → report → close, ending at CLOSED (not REPORTING).
-    NOTE: REQUIRED writeback paths should be tested separately once
-    ISSUE-062 (XDR writeback integration) lands.
+    execute → verify → report → close, ending at CLOSED.
+
+    For disposition_policy=REQUIRED, the full chain to CLOSED with writeback
+    confirmation is deferred to ISSUE-062.  This test covers NOT_REQUIRED only.
 
     We assert:
     - node_trace matches P0_NODE_SEQUENCE
@@ -262,7 +283,11 @@ async def test_golden_path_full_orchestration_to_reporting(
         event_service=event_service,
         readiness_resolver=_ready_resolver,
     )
-    agents = _build_agents()
+    agents = _build_agents(
+        rag=None,  # 显式禁用 RAG — P0_NODE_SEQUENCE 不含 NODE_RAG
+    )
+    # NOTE: ISSUE-055 按 Issue 约定：P1 的 rag_output 按安装状态断言。
+    # RAG 未安装时 P0_NODE_SEQUENCE 不含 NODE_RAG；RAG 安装后需 ISSUE-062 复跑时更新。
     services = _build_services(
         state_machine_service,
         event_service,
