@@ -31,7 +31,6 @@ from app.models.enums import (
     DispositionPolicy,
     EventStatus,
     EventType,
-    FinalVerdict,
     Severity,
     SourceObjectKind,
     WritebackReadiness,
@@ -66,6 +65,7 @@ from app.services.state_machine_service import StateMachineService
 from tests.test_orchestration.conftest import (
     RetryingAgentWrapper,
     assert_audit_log_transitions_valid,
+    make_event_summary,
     make_evidence_stub,
     make_flaky_evidence_stub,
     make_investigation_state,
@@ -241,7 +241,7 @@ def _build_agents(
 
 
 @pytest.mark.asyncio
-async def test_golden_path_full_orchestration_to_closed(
+async def test_golden_path_full_orchestration_to_reporting(
     session_factory: async_sessionmaker[AsyncSession],
     event_service: EventService,
     state_machine_service: StateMachineService,
@@ -250,20 +250,24 @@ async def test_golden_path_full_orchestration_to_closed(
     redis_client: Any,
     audit_log: EventAuditLogService,
 ) -> None:
-    """ISSUE-055 Scenario 1: SuperAgent golden path completes through to CLOSED.
+    """ISSUE-055 Scenario 1: SuperAgent golden path completes through to REPORTING.
 
-    For NOT_REQUIRED disposition, the full P0 investigation chain executes
-    through triage → planner → evidence → risk → response → approval →
-    execute → verify → report → close, ending at CLOSED.
+    Per the Issue spec, the main scenario runs via SuperAgent to **REPORTING**
+    status, asserting node ordering and P0 analysis fields.  CLOSED with
+    writeback confirmation for REQUIRED disposition is deferred to ISSUE-062.
 
-    For disposition_policy=REQUIRED, the full chain to CLOSED with writeback
-    confirmation is deferred to ISSUE-062.  This test covers NOT_REQUIRED only.
+    For NOT_REQUIRED disposition the graph naturally continues past REPORTING
+    to CLOSED (no writeback gate), so we additionally verify CLOSED as a
+    supplementary assertion — but the **primary** endpoint under test is
+    REPORTING, aligning with the Issue's stated scope.
 
     We assert:
     - node_trace matches P0_NODE_SEQUENCE
     - P0 analysis fields populated (triage_result, evidence_output,
       risk_assessment, report_generated)
-    - Final status is CLOSED (NOT_REQUIRED policy completes the full chain)
+    - **Primary**: audit log records REPORTING transition and
+      report_generated=True
+    - **Supplementary**: NOT_REQUIRED policy reaches CLOSED (ISSUE-062 前不要求)
     - All audit log transitions are valid state machine edges
     - Total wall clock under 90 seconds (mock mode)
     """
@@ -323,22 +327,32 @@ async def test_golden_path_full_orchestration_to_closed(
     assert final.get("report_generated") is True, "report_generated should be True"
     assert final.get("need_investigation") is True
 
-    # ── Assert final status is CLOSED ─────────────────────────────────────
-    assert final["event_status"] == EventStatus.CLOSED.value, (
-        f"expected CLOSED, got {final['event_status']}"
+    # ── PRIMARY: Assert graph reached REPORTING (Issue spec endpoint) ─────
+    assert final.get("report_generated") is True, (
+        "report_generated must be True at REPORTING"
     )
-    assert final["halted"] is False
 
     # ── Assert audit log transitions valid ────────────────────────────────
     audit_rows = await assert_audit_log_transitions_valid(
         audit_log, event_id, expected_min_count=len(P0_NODE_SEQUENCE)
     )
-    # Verify that every non-trivial status change appears in order
     observed_statuses = [row.to_status for row in audit_rows if row.to_status is not None]
-    assert EventStatus.CLOSED.value in observed_statuses, "audit log must record CLOSED transition"
+
+    # Primary assertion: REPORTING must be recorded per Issue-055 spec
     assert EventStatus.REPORTING.value in observed_statuses, (
-        "audit log must record REPORTING transition"
+        f"audit log must record REPORTING transition; got {observed_statuses}"
     )
+
+    # Supplementary: NOT_REQUIRED 策略下可自然到达 CLOSED（ISSUE-062 前不要求）
+    assert EventStatus.CLOSED.value in observed_statuses, (
+        "supplementary: NOT_REQUIRED policy should reach CLOSED; "
+        f"got {observed_statuses}"
+    )
+    assert final["event_status"] == EventStatus.CLOSED.value, (
+        f"supplementary: expected final CLOSED for NOT_REQUIRED, "
+        f"got {final['event_status']}"
+    )
+    assert final["halted"] is False
 
     # ── Performance gate ──────────────────────────────────────────────────
     assert elapsed_s < 90.0, f"golden path took {elapsed_s:.1f}s, expected < 90s in mock mode"
@@ -410,6 +424,111 @@ async def test_agent_failure_retry_evidence_agent(
     failed = [t for t in traces if t.status == "failed"]
     assert len(failed) == 1
     assert "attempt 1" in (failed[0].error_detail or "")
+
+
+@pytest.mark.asyncio
+async def test_agent_failure_retry_within_graph(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+    state_machine_service: StateMachineService,
+    context_store: EventContextStore,
+    degraded_flags: DegradedFlagService,
+    redis_client: Any,
+    agent_trace_service: AgentTraceService,
+    audit_log: EventAuditLogService,
+) -> None:
+    """ISSUE-055 Scenario 2b: Flaky evidence agent retries **inside** the graph.
+
+    Unlike :func:`test_agent_failure_retry_evidence_agent` which validates the
+    ``RetryingAgentWrapper`` contract in isolation, this test injects the
+    wrapped flaky agent into ``build_investigation_graph`` and runs the full
+    graph through to completion.  It proves:
+
+    - The graph node (``evidence_node``) calls the wrapped agent correctly
+    - ``evidence_node`` appears exactly once in ``node_trace`` (retries happen
+      inside the wrapper, not via graph-level replan)
+    - The graph continues past ``NODE_EVIDENCE`` into ``NODE_RISK`` and beyond
+      (the failure + retry does not halt the investigation)
+    - Agent trace records contain both a ``failed`` and ``completed`` entry
+      produced by the real ``execute()`` path
+    """
+    # ── Setup: ingest event ────────────────────────────────────────────────
+    event_id = await _ingest_event(
+        event_service,
+        session_factory,
+        object_id="INC-orch-graph-retry-001",
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+    )
+
+    # ── Create a flaky evidence agent that fails once, then succeeds ───────
+    flaky = make_flaky_evidence_stub(
+        fail_count=1,
+        agent_name="evidence_agent",
+        trace_service=agent_trace_service,
+        event_id=event_id,
+    )
+    rw = RetryingAgentWrapper(flaky, max_retries=1)
+
+    # ── Build graph with the wrapped agent as evidence_agent ───────────────
+    workflow_runtime = WorkflowRuntimeService(
+        session_factory,
+        event_service=event_service,
+        readiness_resolver=_ready_resolver,
+    )
+    agents = _build_agents(evidence=rw, rag=None)
+    services = _build_services(
+        state_machine_service,
+        event_service,
+        workflow_runtime,
+        degraded_flags,
+        context_store,
+    )
+    graph = build_investigation_graph(agents, services)
+
+    # ── Run graph to completion ────────────────────────────────────────────
+    initial_state = make_investigation_state(
+        event_id=event_id,
+        need_investigation=True,
+        severity=Severity.HIGH.value,
+    )
+    final = await graph.ainvoke(
+        initial_state,
+        {"configurable": {"thread_id": event_id}},
+    )
+
+    # ── Assert evidence_output was produced (retry succeeded) ──────────────
+    assert final.get("evidence_output") is not None, (
+        "evidence_output must be present after successful retry"
+    )
+
+    # ── Assert NODE_EVIDENCE appears exactly once in node_trace ────────────
+    trace = final["node_trace"]
+    evidence_hits = [n for n in trace if n == NODE_EVIDENCE]
+    assert len(evidence_hits) == 1, (
+        f"NODE_EVIDENCE should appear exactly once (retries inside wrapper), "
+        f"got {len(evidence_hits)}: {trace}"
+    )
+
+    # ── Assert graph continued past evidence into risk ─────────────────────
+    evidence_idx = trace.index(NODE_EVIDENCE)
+    assert NODE_RISK in trace[evidence_idx:], (
+        f"graph must continue to NODE_RISK after NODE_EVIDENCE, got trace: {trace}"
+    )
+
+    # ── Assert agent_trace records from the execute() path ─────────────────
+    traces = await agent_trace_service.get_traces_by_event(event_id)
+    statuses = {t.status for t in traces}
+    assert "failed" in statuses, "missing failed trace record from within-graph execution"
+    assert "completed" in statuses, "missing completed trace record from within-graph execution"
+
+    # ── Assert retry attempts recorded on the wrapper ──────────────────────
+    assert rw.attempts == [False, True], (
+        f"expected [fail, success] attempts inside graph, got {rw.attempts}"
+    )
+
+    # ── Assert final completion ────────────────────────────────────────────
+    assert final["event_status"] == EventStatus.CLOSED.value
+    assert final["halted"] is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -561,20 +680,7 @@ async def test_context_consistency_concurrent_writes_no_lost_updates(
         disposition_policy=DispositionPolicy.NOT_REQUIRED,
     )
 
-    from app.api.v1.schemas import EventSummary as APIEventSummary
-
-    api_summary = APIEventSummary(
-        event_id=event_id,
-        event_type=EventType.DATA_EXFILTRATION,
-        title="concurrency test",
-        status=EventStatus.TRIAGING,
-        severity=Severity.HIGH,
-        risk_score=0,
-        final_verdict=FinalVerdict.NONE,
-        writeback_required=False,
-        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
-        disposition_policy=DispositionPolicy.NOT_REQUIRED,
-    )
+    api_summary = make_event_summary(event_id, status=EventStatus.TRIAGING)
     await context_store.init_context(event_id, api_summary)
 
     # ── Define two concurrent write tasks to different fields ───────────
@@ -649,20 +755,7 @@ async def test_version_conflict_retry_on_concurrent_same_field_write(
         object_id="INC-orch-cas-001",
     )
 
-    from app.api.v1.schemas import EventSummary as APIEventSummary
-
-    api_summary = APIEventSummary(
-        event_id=event_id,
-        event_type=EventType.DATA_EXFILTRATION,
-        title="CAS retry test",
-        status=EventStatus.TRIAGING,
-        severity=Severity.HIGH,
-        risk_score=0,
-        final_verdict=FinalVerdict.NONE,
-        writeback_required=False,
-        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
-        disposition_policy=DispositionPolicy.NOT_REQUIRED,
-    )
+    api_summary = make_event_summary(event_id, status=EventStatus.TRIAGING)
     await context_store.init_context(event_id, api_summary)
 
     # ── Sequential writes to same field → versions must increase ────────
@@ -850,20 +943,7 @@ async def test_compare_and_set_rejects_stale_version(
         disposition_policy=DispositionPolicy.NOT_REQUIRED,
     )
 
-    from app.api.v1.schemas import EventSummary as APIEventSummary
-
-    api_summary = APIEventSummary(
-        event_id=event_id,
-        event_type=EventType.DATA_EXFILTRATION,
-        title="CAS stale version test",
-        status=EventStatus.TRIAGING,
-        severity=Severity.HIGH,
-        risk_score=0,
-        final_verdict=FinalVerdict.NONE,
-        writeback_required=False,
-        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
-        disposition_policy=DispositionPolicy.NOT_REQUIRED,
-    )
+    api_summary = make_event_summary(event_id, status=EventStatus.TRIAGING)
     await context_store.init_context(event_id, api_summary)
 
     # ── Writer B wins the race — writes first (version → 1) ──────────────────
