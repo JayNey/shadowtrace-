@@ -84,6 +84,11 @@ def _derive_skip_verification_tools() -> frozenset[str]:
     )
 
 
+# Cache at module level so _verify_phase1_effects doesn't recompute
+# on every Action in the phase 1 loop.
+_SKIP_VERIFICATION_TOOLS: frozenset[str] = _derive_skip_verification_tools()
+
+
 # Effect‑side action execution statuses the VerifyAgent considers.
 # ActionStatus.UNKNOWN is deliberately excluded — when an Action execution
 # status cannot be confirmed, we must NOT run a verification tool against it
@@ -397,7 +402,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # No verification tool registered → treat as non-verifiable (skipped).
             if verify_tool is None:
                 detail = "no_verification_tool_registered"
-                if action.tool_name in _derive_skip_verification_tools():
+                if action.tool_name in _SKIP_VERIFICATION_TOOLS:
                     detail = "non_verifiable_action"
                 results.append(
                     _make_skipped_result(action, detail=detail)
@@ -465,6 +470,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             if tool_result is None:
                 effect_status = EffectStatus.UNVERIFIABLE
                 detail = "verification_tool_unavailable_degraded"
+                await self._finalize_verification_action(
+                    verification_action,
+                    target_status=ActionStatus.UNKNOWN,
+                )
             elif tool_result.status == ToolResultStatus.SUCCESS:
                 data = tool_result.data or {}
                 if "is_verified" not in data:
@@ -517,6 +526,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         target_status=ActionStatus.FAILED,
                     )
             except Exception:
+                # The verification Action may be left in EXECUTING status
+                # (stuck as a zombie) because _finalize_verification_action
+                # itself failed.  Attach a distinguishing marker so
+                # downstream consumers can tell "verification action
+                # correctly finalized" from "verification action state
+                # unknown" — the latter may need manual cleanup.
+                detail = f"{detail};verification_action_dirty"
                 logger.warning(
                     "Failed to finalize verification action %s during exception"
                     " handling for source action %s",
@@ -1042,6 +1058,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 )
                 confirmed, rec, man, detail_suffix = routing
 
+                # CONFIRMED is the happy path — the terminal writeback
+                # receipt was persisted synchronously by activate_and_submit
+                # per the ISSUE-059A contract.  The routing table maps
+                # CONFIRMED → (True, False, False, …), so none of `man`,
+                # `rec`, or `failed_wb` are set.  The empty dict returned
+                # by the CONFIRMED branch is intentional: "no action
+                # needed" is the correct routing decision.
                 if not confirmed:
                     logger.warning(
                         "Terminal writeback %s status=%s → %s event=%s",
@@ -1418,6 +1441,8 @@ def _job_from_row(row: orm.ActionExecutionJob) -> ActionExecutionJob:
 
 __all__ = [
     "VerifyAgent",
+    "_SKIP_VERIFICATION_TOOLS",
+    "_derive_skip_verification_tools",
 ]
 
 
