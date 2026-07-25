@@ -916,7 +916,17 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         event_id,
                     )
                     need_manual = True
-                    blocked_wb.add(activate_result.writeback_id or f"terminal_wb_{event_id}")
+                    # Use the deferred action_id (not a synthetic wb-id) so
+                    # downstream resolve/retry endpoints can match the path
+                    # parameter.  The synthetic f"terminal_wb_{event_id}"
+                    # does not conform to the wbk-{8hex} format and would
+                    # always fail lookup.  (ISSUE-060 review SF-3)
+                    _blocked_ref = (
+                        activate_result.action_id
+                        or activate_result.writeback_id
+                    )
+                    if _blocked_ref is not None:
+                        blocked_wb.add(_blocked_ref)
                     overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
             except Exception as exc:
                 logger.error(
@@ -967,13 +977,22 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 need_wb_recovery = need_wb_recovery or terminal_wb_eval["need_recovery"]
                 failed_wb.update(terminal_wb_eval["failed_wb"])
 
-            if need_manual_from_wb:
-                need_manual = True
-                if overall_status == VerificationOverallStatus.SUCCESS:
-                    overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
+            # Evaluate writeback recovery first (lower priority), then
+            # manual resolution (higher priority).  When both the main
+            # writeback evaluation and the terminal writeback evaluation
+            # flag issues, MANUAL_RESOLUTION must win over WAITING:
+            # a terminal writeback receipt that is missing or permanently
+            # failed requires operator intervention, not a polling loop.
             if need_wb_recovery:
                 if overall_status == VerificationOverallStatus.SUCCESS:
                     overall_status = VerificationOverallStatus.WAITING
+            if need_manual_from_wb:
+                need_manual = True
+                if overall_status in (
+                    VerificationOverallStatus.SUCCESS,
+                    VerificationOverallStatus.WAITING,
+                ):
+                    overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
             if failed_wb:
                 if overall_status not in (
                     VerificationOverallStatus.MANUAL_RESOLUTION,
@@ -1060,11 +1079,26 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
             # READY — evaluate the eight WritebackStatus values.
             if wb_status is None:
-                # No writeback command has been issued yet — route to
-                # recovery so the caller polls/wait for a status to appear.
-                confirmed, rec, man, detail_suffix = (
-                    False, True, False, "writeback_no_status_waiting"
-                )
+                # No writeback status recorded yet.  Distinguish two cases:
+                # (a) No outbox record exists → the DispositionSyncService
+                #     hasn't created the outbound command yet.  Route to
+                #     recovery so the caller waits for the next DSS cycle
+                #     to pick it up naturally, but use a distinct detail
+                #     suffix so downstream consumers can tell this apart
+                #     from "command created but not yet terminal."
+                # (b) Outbox record(s) exist but no receipt → the command
+                #     was dispatched but no status update has arrived yet.
+                #     Route to recovery with the existing
+                #     "writeback_no_status_waiting" detail.
+                ob_records = outbox_map.get(action.action_id, [])
+                if ob_records:
+                    confirmed, rec, man, detail_suffix = (
+                        False, True, False, "writeback_no_status_waiting"
+                    )
+                else:
+                    confirmed, rec, man, detail_suffix = (
+                        False, True, False, "writeback_not_yet_dispatched"
+                    )
             elif wb_status == WritebackStatus.UNKNOWN:
                 # UNKNOWN → need_recovery (not manual) on first lookup.
                 # After VERIFY_UNKNOWN_MAX_LOOKUPS attempts without a
@@ -1399,7 +1433,17 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     event_id,
                 )
                 empty["need_manual"] = True
-                blocked_wb_set.add(f"terminal_wb_{event_id}")
+                # Use activate_result.action_id (the deferred action) rather
+                # than a synthetic f"terminal_wb_{event_id}" which does not
+                # conform to the wbk-{8hex} format and would fail downstream
+                # resolve/retry path-parameter matching.
+                # (ISSUE-060 review SF-3)
+                _blocked_ref = (
+                    activate_result.action_id
+                    or activate_result.writeback_id
+                )
+                if _blocked_ref is not None:
+                    blocked_wb_set.add(_blocked_ref)
             return empty
         if self._session_factory is None:
             logger.warning(
