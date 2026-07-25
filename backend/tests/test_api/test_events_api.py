@@ -42,6 +42,8 @@ _DEV_TOKENS = json.dumps(
 
 @pytest.fixture(autouse=True)
 def _dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.config import get_settings
+
     monkeypatch.setenv("DEV_AUTH_TOKENS", _DEV_TOKENS)
     monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
     monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
@@ -50,6 +52,8 @@ def _dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOURCE_MODE", "mock_xdr")
     monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
     monkeypatch.setenv("SIMULATION_ENABLED", "true")
+    monkeypatch.setenv("TASK_MODE", "background")
+    get_settings.cache_clear()
 
 
 def _hdr(role: str = "analyst") -> dict[str, str]:

@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
+from collections.abc import Iterator
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -33,10 +35,12 @@ _DEV_TOKENS = json.dumps(
 
 
 @pytest.fixture(autouse=True)
-def _celery_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+def _celery_settings(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("DEV_AUTH_TOKENS", _DEV_TOKENS)
     monkeypatch.setenv("TASK_MODE", "celery")
     monkeypatch.setenv("LLM_MODE", "mock")
+    get_settings.cache_clear()
+    yield
     get_settings.cache_clear()
 
 
