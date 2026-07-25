@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 # ── Writeback status → phase‑2 routing table (ISSUE-060 acceptance step 5) ──
 # Returns (confirmed: bool, need_recovery: bool, need_manual: bool, detail_suffix)
-_WRITEBACK_STATUS_ROUTING: dict[WritebackStatus | None, tuple[bool, bool, bool, str]] = {
+_WRITEBACK_STATUS_ROUTING: dict[WritebackStatus, tuple[bool, bool, bool, str]] = {
     WritebackStatus.CONFIRMED: (True, False, False, "writeback_confirmed"),
     WritebackStatus.PENDING: (False, True, False, "writeback_pending_waiting"),
     WritebackStatus.SENDING: (False, True, False, "writeback_sending_waiting"),
@@ -72,6 +72,15 @@ _WRITEBACK_STATUS_ROUTING: dict[WritebackStatus | None, tuple[bool, bool, bool, 
     # is infeasible.  Before ISSUE-062 lands, the recovery flag still
     # correctly signals "don't give up yet" — the caller can poll the
     # writeback status or escalate after a timeout.
+    #
+    # TODO(ISSUE-062): The current routing maps UNKNOWN → need_recovery=True,
+    # need_manual=False, which sends the writeback into an infinite recovery
+    # loop with no timeout or retry-exhaustion guard.  ISSUE-062
+    # (WritebackRecoveryHandler) must implement the second half of §4.5:
+    # when provider-side lookup is infeasible, set need_manual_resolution=True
+    # so the writeback is promoted to an operator-facing resolution path.
+    # Until then, callers that observe UNKNOWN writebacks should impose their
+    # own timeout (e.g. 3 recovery cycles → escalate to need_manual=True).
     WritebackStatus.UNKNOWN: (False, True, False, "writeback_unknown_requires_lookup"),
     WritebackStatus.PARTIAL: (False, True, False, "writeback_partial_recovery"),
     WritebackStatus.FAILED: (False, True, False, "writeback_failed_recovery"),
@@ -80,6 +89,15 @@ _WRITEBACK_STATUS_ROUTING: dict[WritebackStatus | None, tuple[bool, bool, bool, 
     # explicitly before consulting this table.  See _evaluate_writeback_statuses
     # for the explicit None check.
 }
+
+
+# Exception types that indicate transient infrastructure failures rather
+# than permanent logic errors.  Used by _finalize_verification_action to
+# distinguish retry-eligible failures from zombie-creating ones.
+_TRANSIENT_EXC_TYPES = (
+    ConnectionError,
+    TimeoutError,
+)
 
 
 # Tools whose observable entity effect is not verifiable via tool observation.
@@ -96,6 +114,13 @@ def _derive_skip_verification_tools() -> frozenset[str]:
 
 # Cache at module level so _verify_phase1_effects doesn't recompute
 # on every Action in the phase 1 loop.
+#
+# DEPRECATED: This cache is computed once at import time and will not pick up
+# Provider manifest extensions registered after startup.  The real-time check
+# in _verify_phase1_effects (``verify_tool is None`` path) already recomputes
+# the effective skip list on every call, so this module-level cache is only
+# used by tests (which verify cache consistency).  Remove once those tests
+# are migrated to the real-time path.
 _SKIP_VERIFICATION_TOOLS: frozenset[str] = _derive_skip_verification_tools()
 
 
@@ -848,15 +873,17 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
             if not action.writeback_applicable:
                 # Obligation exists at the event level but doesn't land on
-                # this specific action.  The VerificationActionResult must
-                # satisfy its own validator, so writeback_required is set to
-                # False here — the CLOSED gate still checks the event-level
-                # obligation separately.
+                # this specific action.  writeback_required expresses the
+                # event-level business obligation and MUST NOT be rewritten
+                # by writeback_applicable (§4.5 item 6).  The SKIPPED
+                # effect_status is permitted by the VerificationActionResult
+                # validator regardless of writeback_required; the CLOSED gate
+                # separately checks the event-level obligation.
                 results.append(
                     VerificationActionResult(
                         action_id=action.action_id,
                         effect_status=EffectStatus.SKIPPED,
-                        writeback_required=False,
+                        writeback_required=action.writeback_required,
                         writeback_readiness=WritebackReadiness.NOT_REQUIRED,
                         writeback_status=None,
                         writeback_ids=wb_ids,
@@ -1336,11 +1363,27 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 # consistent with the persisted row.
                 action.status = target_status
             except Exception as exc:
-                logger.warning(
-                    "Failed to finalize verification action %s: %s",
-                    action.action_id,
-                    exc,
-                )
+                # Distinguish transient errors (network blip, connection
+                # pool exhaustion, deadlock retry) from permanent errors
+                # (schema mismatch, constraint violation).  Transient
+                # failures are warnings — the caller can retry on the next
+                # cycle.  Permanent failures are errors that risk leaving
+                # the verification Action as a zombie in EXECUTING status.
+                if isinstance(exc, _TRANSIENT_EXC_TYPES):
+                    logger.warning(
+                        "Transient failure finalizing verification action %s "
+                        "(will retry next cycle): %s",
+                        action.action_id,
+                        exc,
+                    )
+                else:
+                    logger.error(
+                        "Permanent failure finalizing verification action %s "
+                        "(action may be stuck in EXECUTING status): %s",
+                        action.action_id,
+                        exc,
+                        exc_info=True,
+                    )
 
     # ------------------------------------------------------------------ #
     # Working memory & event bus
@@ -1474,9 +1517,14 @@ def _make_skipped_result(
             writeback_ids=[],
             detail=detail,
         )
-    wb_required = action.writeback_required and action.writeback_applicable
-    wb_readiness = action.writeback_readiness if wb_required else WritebackReadiness.NOT_REQUIRED
-    wb_status = action.writeback_status if wb_required else None
+    # writeback_required expresses the event-level business obligation and
+    # MUST NOT be rewritten by technical capability flags like
+    # writeback_applicable (§4.5 item 6).  The SKIPPED effect_status is
+    # already exempt from the Validator's writeback-consistency check,
+    # so preserving the original obligation is safe.
+    wb_required = action.writeback_required
+    wb_readiness = WritebackReadiness.NOT_REQUIRED
+    wb_status = None
     return VerificationActionResult(
         action_id=action.action_id,
         effect_status=EffectStatus.SKIPPED,
