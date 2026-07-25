@@ -70,10 +70,19 @@ _WRITEBACK_STATUS_ROUTING: dict[
     None: (False, True, False, "writeback_no_status_waiting"),
 }
 
-# Actions whose observable entity effect is not verifiable via tool observation.
-_SKIP_VERIFICATION_TOOLS: frozenset[str] = frozenset(
-    {"create_ticket", "close_false_positive_ticket", "notify_security_team"}
-)
+# Tools whose observable entity effect is not verifiable via tool observation.
+# Derived dynamically from VERIFICATION_MAPPING so the two stay in sync —
+# a tool is "non-verifiable" when every target_type mapping in the baseline
+# resolves to None.
+def _derive_skip_verification_tools() -> frozenset[str]:
+    from app.agents.rules.verification_mapping import VERIFICATION_MAPPING
+
+    return frozenset(
+        tool_name
+        for tool_name, targets in VERIFICATION_MAPPING.items()
+        if targets and all(v is None for v in targets.values())
+    )
+
 
 # Terminal / non-terminal job statuses for effect evaluation.
 _TERMINAL_JOB_STATUSES: frozenset[ExecutionJobStatus] = frozenset(
@@ -353,7 +362,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # No verification tool registered → treat as non-verifiable (skipped).
             if verify_tool is None:
                 detail = "no_verification_tool_registered"
-                if action.tool_name in _SKIP_VERIFICATION_TOOLS:
+                if action.tool_name in _derive_skip_verification_tools():
                     detail = "non_verifiable_action"
                 results.append(
                     _make_skipped_result(action, detail=detail)
@@ -491,9 +500,14 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # never be reversed by technical unavailability (§4.5 item 6).
             # The model validator on VerificationActionResult permits
             # writeback_required=True + writeback_readiness=NOT_REQUIRED
-            # + writeback_status=None when effect_status=UNVERIFIABLE.
+            # + writeback_status=… when effect_status=UNVERIFIABLE.
+            #
+            # Preserve the original writeback_status — UNVERIFIABLE means
+            # we couldn't observe the entity effect, not that the writeback
+            # status changed.  Losing PENDING/SENDING/CONFIRMED state here
+            # would silently break downstream writeback recovery paths.
             wb_readiness = WritebackReadiness.NOT_REQUIRED
-            wb_status = None
+            wb_status = action.writeback_status
 
         return VerificationActionResult(
             action_id=action.action_id,
@@ -553,7 +567,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 phase1_need_manual,
                 event_id,
             )
-            if phase1_need_replan:
+            if phase1_need_replan and phase1_need_manual:
+                # Both effect FAILED (replan) and UNVERIFIABLE (manual)
+                # conditions exist — FAILED captures the higher severity
+                # while both routing flags remain independently set for
+                # the caller to act on.
+                overall_status = VerificationOverallStatus.FAILED
+            elif phase1_need_replan:
                 overall_status = VerificationOverallStatus.PARTIAL
             elif phase1_need_manual:
                 overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
@@ -809,7 +829,25 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
     ]:
         """Load Actions, Jobs, and Outbox records from the database."""
         if self._session_factory is None:
-            return _plan_actions(response_plan), {}, {}
+            actions = _plan_actions(response_plan)
+            # Build minimal jobs_map from Action.execution_job_id so that
+            # _run_verification_tool receives the job_id context even
+            # without DB access.  Missing job metadata (provider_name,
+            # status) degrades gracefully — the observation tool can still
+            # use the job_id to scope its independent observation.
+            jobs_map: dict[str, ActionExecutionJob] = {}
+            for a in actions:
+                if a.execution_job_id:
+                    jobs_map[a.action_id] = ActionExecutionJob(
+                        job_id=a.execution_job_id,
+                        event_id=a.event_id or event_id,
+                        action_id=a.action_id,
+                        provider_name=getattr(a, "provider_name", None) or "",
+                        idempotency_key=getattr(a, "idempotency_key", None)
+                        or f"idem-{a.action_id}",
+                        status=ExecutionJobStatus.UNKNOWN,
+                    )
+            return actions, jobs_map, {}
 
         async with self._session_factory() as session:
             # Load persisted Actions for this event's current plan revision.
@@ -836,7 +874,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         )
                     )
                 ).all()
-                jobs_map = {r.job_id: _job_from_row(r) for r in job_rows}
+                jobs_map = {r.action_id: _job_from_row(r) for r in job_rows}
 
             # Load outbox records.
             outbox_map: dict[str, list[Any]] = {}
@@ -856,28 +894,14 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
     async def _load_disposition_policy(
         self, event_id: str
     ) -> DispositionPolicy | None:
-        """Read disposition_policy from the event row or working memory."""
-        # Attempt reading from working memory first.  disposition_policy is
-        # stored on the SecurityEvent row, not on triage_result — but some
-        # codepaths may cache it in working memory under the event key.
-        if self.working_memory is not None:
-            try:
-                policy_raw = await self.working_memory.read(
-                    event_id, "disposition_policy"
-                )
-                if policy_raw is not None:
-                    if isinstance(policy_raw, DispositionPolicy):
-                        return policy_raw
-                    if isinstance(policy_raw, str):
-                        return DispositionPolicy(policy_raw)
-            except Exception:
-                logger.debug(
-                    "Failed to read disposition_policy from working memory"
-                    " for event=%s, falling back to DB query",
-                    event_id,
-                    exc_info=True,
-                )
+        """Read disposition_policy from the SecurityEvent row.
 
+        ``disposition_policy`` is a SecurityEvent column, **not** an
+        EventContext field.  Attempting to read it via working_memory with
+        key ``"disposition_policy"`` would trigger a ``GuardrailViolationError``
+        because ``"disposition_policy"`` is not registered in ``FIELD_OWNERSHIP``.
+        The correct path is the DB query below.
+        """
         if self._session_factory is None:
             return None
 
@@ -929,7 +953,17 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             "need_manual": False,
         }
         terminal_wb_id = activate_result.terminal_writeback_id
-        if terminal_wb_id is None or self._session_factory is None:
+        if terminal_wb_id is None:
+            return empty
+        if self._session_factory is None:
+            logger.warning(
+                "Cannot verify terminal writeback %s: no session_factory"
+                " event=%s — escalating to manual resolution",
+                terminal_wb_id,
+                event_id,
+            )
+            empty["need_manual"] = True
+            empty["blocked_wb"].add(terminal_wb_id)
             return empty
 
         try:
@@ -1028,7 +1062,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             plan_revision=source_action.plan_revision,
             action_fingerprint=f"verify:{verify_tool}:{source_action.action_id}",
             action_category=ActionCategory.VERIFICATION,
-            action_name=f"verify_{source_action.action_name}",
+            action_name=f"verify_{source_action.action_name}"[:255],
             tool_name=verify_tool,
             action_level=source_action.action_level,
             execution_phase=ActionExecutionPhase.IMMEDIATE,
@@ -1072,11 +1106,27 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         )
                         session.add(row)
             except Exception as exc:
-                logger.warning(
-                    "Failed to persist verification action %s: %s",
-                    action_id,
-                    exc,
-                )
+                # Distinguish integrity errors (idempotent re-run — the row
+                # already exists, which is fine) from other DB failures
+                # (connection lost, constraint violation, …) which leave an
+                # audit gap.  We still return the in-memory Action so the
+                # observation can proceed, but the warning now carries the
+                # explicit audit-gap marker.
+                from sqlalchemy.exc import IntegrityError
+
+                if isinstance(exc, IntegrityError):
+                    logger.debug(
+                        "Verification action %s already persisted (idempotent re-run)",
+                        action_id,
+                    )
+                else:
+                    logger.warning(
+                        "Failed to persist verification action %s — audit trail"
+                        " incomplete for this verification (source_action=%s): %s",
+                        action_id,
+                        source_action.action_id,
+                        exc,
+                    )
 
         return verification_action
 
@@ -1350,5 +1400,5 @@ def _deterministic_verification_action_id(
     """
     digest = hashlib.sha256(
         f"verify:{event_id}:{source_action_id}:{verify_tool}".encode()
-    ).hexdigest()[:8]
+    ).hexdigest()[:16]
     return f"act-{digest}"

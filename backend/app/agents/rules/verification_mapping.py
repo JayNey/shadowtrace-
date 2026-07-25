@@ -44,7 +44,13 @@ VERIFICATION_MAPPING: dict[str, dict[str, str | None]] = {
     "create_ticket": {"ticket": None},
     "close_false_positive_ticket": {"ticket": None},
     "notify_security_team": {"channel": None},
-    # Cross-cutting observation
+    # Cross-cutting observation tools that self-map (verification tool name
+    # equals response tool name).  This is NOT "submitter self-certifying":
+    # the verification call is a fresh independent observation scoped to a
+    # different entity domain — check_new_alerts re-queries the alert feed
+    # for the same event rather than trusting the alert that triggered the
+    # response, and check_traffic_drop observes network telemetry which is
+    # a separate data source from the containment action's execution path.
     "check_new_alerts": {"event": "check_new_alerts"},
     "check_traffic_drop": {"ip": "check_traffic_drop", "host": "check_traffic_drop"},
 }
