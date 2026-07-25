@@ -185,6 +185,7 @@ async def _seed_agent_trace(
     started_at: datetime = _SEED_NOW,
     duration_ms: int = 1200,
     llm_tokens_used: int = 450,
+    output_data: dict[str, object] | None = None,
 ) -> str:
     trace_id = _id("trc")
     row = orm.AgentTrace(
@@ -197,6 +198,7 @@ async def _seed_agent_trace(
         duration_ms=duration_ms,
         llm_model="gpt-4o",
         llm_tokens_used=llm_tokens_used,
+        output_data=output_data or {},
     )
     session.add(row)
     return trace_id
@@ -869,3 +871,56 @@ class TestDecisionTraceDegradationAndEdgeCases:
         assert len(agent_entries) == 1
         assert agent_entries[0].detail.get("timestamp_inferred") is True
         assert trace.summary.agent_count == 1
+
+    @pytest.mark.asyncio
+    async def test_agent_trace_includes_decision_basis_and_severity_title(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    output_data={
+                        "severity": "high",
+                        "event_type": "data_exfiltration",
+                        "_decision_basis": {
+                            "structured_conclusion": "critical exfiltration detected",
+                            "confidence": 0.95,
+                            "evidence_refs": ["evd-1"],
+                        },
+                    },
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        agent = next(
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        )
+        assert agent.title == "TriageAgent 完成分诊：severity=high"
+        assert agent.detail["severity"] == "high"
+        assert agent.detail["structured_conclusion"] == "critical exfiltration detected"
+        assert agent.detail["confidence"] == 0.95
+
+    @pytest.mark.asyncio
+    async def test_running_agent_title_uses_in_progress_wording(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(session, event_id, status="running")
+
+        trace = await service.get_decision_trace(event_id)
+        agent = next(
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        )
+        assert "执行中分诊" in agent.title

@@ -182,3 +182,14 @@ async def test_decision_trace_invalid_entry_type_is_ignored(
     assert body["total"] == 0
     assert body["entries"] == []
     assert body["summary"]["tool_call_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_decision_trace_event_not_found_returns_404(
+    client: TestClient,
+) -> None:
+    resp = client.get(
+        "/api/v1/events/evt-does-not-exist/decision-trace",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 404

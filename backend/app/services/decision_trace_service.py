@@ -19,6 +19,7 @@ from app.db import models as orm
 from app.db.orm.approval import ApprovalRecordORM
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
 from app.models.enums import DecisionTraceEntryType
+from app.services.agent_trace_service import TraceProjection
 
 logger = logging.getLogger(__name__)
 
@@ -64,17 +65,74 @@ def _maybe_inferred_detail(base: dict[str, Any], inferred: bool) -> dict[str, An
     return {**base, "timestamp_inferred": True}
 
 
-def _agent_title(agent_name: str, status: str) -> str:
-    templates = {
-        "TriageAgent": f"{agent_name} 完成分诊：status={status}",
-        "RiskAgent": f"{agent_name} 完成风险评估：status={status}",
-        "EvidenceAgent": f"{agent_name} 完成证据收集：status={status}",
-        "PlannerAgent": f"{agent_name} 完成计划生成：status={status}",
-        "ResponseAgent": f"{agent_name} 完成响应方案：status={status}",
-        "VerifyAgent": f"{agent_name} 完成效果验证：status={status}",
-        "ReportAgent": f"{agent_name} 完成报告生成：status={status}",
+def _agent_status_verb(status: str) -> str:
+    normalized = status.lower()
+    if normalized in {"running", "in_progress", "started", "pending"}:
+        return "执行中"
+    if normalized in {"failed", "error"}:
+        return "执行失败"
+    return "完成"
+
+
+def _agent_decision_basis(output_data: Any) -> dict[str, Any]:
+    if not isinstance(output_data, dict):
+        return {}
+    stored = output_data.get("_decision_basis")
+    if isinstance(stored, dict) and stored:
+        return stored
+    return TraceProjection.decision_basis(output_data)
+
+
+def _agent_title(agent_name: str, status: str, output_data: Any) -> str:
+    verb = _agent_status_verb(status)
+    action_labels = {
+        "TriageAgent": "分诊",
+        "RiskAgent": "风险评估",
+        "EvidenceAgent": "证据收集",
+        "PlannerAgent": "计划生成",
+        "ResponseAgent": "响应方案",
+        "VerifyAgent": "效果验证",
+        "ReportAgent": "报告生成",
     }
-    return templates.get(agent_name, f"{agent_name} 执行完成：status={status}")
+    label = action_labels.get(agent_name, "执行")
+    title = f"{agent_name} {verb}{label}"
+
+    basis = _agent_decision_basis(output_data)
+    if agent_name == "TriageAgent" and isinstance(output_data, dict):
+        severity = output_data.get("severity")
+        if severity is not None:
+            return f"{title}：severity={severity}"
+    conclusion = basis.get("structured_conclusion")
+    if isinstance(conclusion, str) and conclusion.strip():
+        return f"{title}：{conclusion[:120]}"
+    return f"{title}：status={status}"
+
+
+def _agent_detail(row: orm.AgentTrace, inferred: bool) -> dict[str, Any]:
+    detail: dict[str, Any] = {
+        "agent_name": row.agent_name,
+        "status": row.status,
+        "duration_ms": row.duration_ms,
+        "tokens_used": row.llm_tokens_used,
+        "model": row.llm_model,
+    }
+    output_data = row.output_data if isinstance(row.output_data, dict) else {}
+    basis = _agent_decision_basis(output_data)
+    for key in (
+        "structured_conclusion",
+        "confidence",
+        "evidence_refs",
+        "selected_action",
+        "rules_applied",
+        "model_name",
+    ):
+        value = basis.get(key)
+        if value not in (None, "", [], {}):
+            detail[key] = value
+    for key in ("severity", "event_type", "need_investigation"):
+        if key in output_data and output_data[key] is not None:
+            detail[key] = output_data[key]
+    return _maybe_inferred_detail(detail, inferred)
 
 
 # --------------------------------------------------------------------------- #
@@ -92,17 +150,8 @@ def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEnt
                 entry_type=DecisionTraceEntryType.AGENT_EXECUTION,
                 timestamp=ts,
                 actor=row.agent_name,
-                title=_agent_title(row.agent_name, row.status),
-                detail=_maybe_inferred_detail(
-                    {
-                        "agent_name": row.agent_name,
-                        "status": row.status,
-                        "duration_ms": row.duration_ms,
-                        "tokens_used": row.llm_tokens_used,
-                        "model": row.llm_model,
-                    },
-                    inferred,
-                ),
+                title=_agent_title(row.agent_name, row.status, row.output_data),
+                detail=_agent_detail(row, inferred),
                 ref_id=row.trace_id,
             )
         )
