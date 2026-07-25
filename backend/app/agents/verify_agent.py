@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
 from app.agents.rules.verification_mapping import (
+    VERIFICATION_MAPPING,
     resolve_verification_tool,
     validate_verification_tool_params,
 )
@@ -64,11 +65,20 @@ _WRITEBACK_STATUS_ROUTING: dict[WritebackStatus | None, tuple[bool, bool, bool, 
     WritebackStatus.PENDING: (False, True, False, "writeback_pending_waiting"),
     WritebackStatus.SENDING: (False, True, False, "writeback_sending_waiting"),
     WritebackStatus.ACCEPTED: (False, True, False, "writeback_accepted_waiting"),
-    WritebackStatus.UNKNOWN: (False, False, True, "writeback_unknown_requires_lookup"),
+    # UNKNOWN → recovery (not manual). Per ISSUE-060 spec §4.5:
+    # "UNKNOWN→先查证、无法查证时 need_manual_resolution=true".
+    # WritebackRecoveryHandler (ISSUE-062) will attempt a provider-side
+    # lookup first; manual resolution is the fallback only when lookup
+    # is infeasible.  Before ISSUE-062 lands, the recovery flag still
+    # correctly signals "don't give up yet" — the caller can poll the
+    # writeback status or escalate after a timeout.
+    WritebackStatus.UNKNOWN: (False, True, False, "writeback_unknown_requires_lookup"),
     WritebackStatus.PARTIAL: (False, True, False, "writeback_partial_recovery"),
     WritebackStatus.FAILED: (False, True, False, "writeback_failed_recovery"),
     WritebackStatus.CONFLICT: (False, False, True, "writeback_conflict_manual"),
-    None: (False, True, False, "writeback_no_status_waiting"),
+    # None key intentionally omitted — callers must handle wb_status is None
+    # explicitly before consulting this table.  See _evaluate_writeback_statuses
+    # for the explicit None check.
 }
 
 
@@ -77,8 +87,6 @@ _WRITEBACK_STATUS_ROUTING: dict[WritebackStatus | None, tuple[bool, bool, bool, 
 # a tool is "non-verifiable" when every target_type mapping in the baseline
 # resolves to None.
 def _derive_skip_verification_tools() -> frozenset[str]:
-    from app.agents.rules.verification_mapping import VERIFICATION_MAPPING
-
     return frozenset(
         tool_name
         for tool_name, targets in VERIFICATION_MAPPING.items()
@@ -439,8 +447,6 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 # "non_verifiable_action" only when ALL target_type entries
                 # for this tool resolve to None (i.e. the tool is known but
                 # inherently unobservable).
-                from app.agents.rules.verification_mapping import VERIFICATION_MAPPING
-
                 tool_mapping = VERIFICATION_MAPPING.get(action.tool_name)
                 is_non_verifiable = (
                     tool_mapping is not None
@@ -559,6 +565,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     target_status=ActionStatus.FAILED,
                 )
             else:
+                # ToolResultStatus values other than SUCCESS/FAILED
+                # (e.g. DEGRADED, TIMEOUT, or future additions) are
+                # all treated as UNVERIFIABLE — the observation did not
+                # produce a conclusive result, so we escalate to manual
+                # rather than guessing.
                 effect_status = EffectStatus.UNVERIFIABLE
                 detail = f"verification_tool_status_{tool_result.status.value}"
                 await self._finalize_verification_action(
@@ -713,11 +724,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # Derive plan_revision from the response plan's actions.
             # All actions in a single ResponsePlan share the same revision;
             # fall back to 1 when the plan is empty (defensive).
-            _plan_revision = 1
-            for a in actions:
-                if a.plan_revision:
-                    _plan_revision = a.plan_revision
-                    break
+            # Use direct indexing instead of a truthiness loop — int(0) is
+            # a valid revision but is falsy in Python, so `if a.plan_revision:`
+            # would silently skip it (ISSUE-060 review B2).
+            _plan_revision = actions[0].plan_revision if actions else 1
             try:
                 activate_result: _ActivateResult = (
                     await self._event_disposition_service.activate_and_submit(
@@ -873,13 +883,26 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 continue
 
             # READY — evaluate the eight WritebackStatus values.
-            routing = _WRITEBACK_STATUS_ROUTING.get(
-                wb_status,
-                (False, True, False, "writeback_status_unknown"),
-            )
-            confirmed, rec, man, detail_suffix = routing
+            if wb_status is None:
+                # No writeback command has been issued yet — route to
+                # recovery so the caller polls/wait for a status to appear.
+                confirmed, rec, man, detail_suffix = (
+                    False, True, False, "writeback_no_status_waiting"
+                )
+            else:
+                routing = _WRITEBACK_STATUS_ROUTING.get(
+                    wb_status,
+                    (False, True, False, "writeback_status_unknown"),
+                )
+                confirmed, rec, man, detail_suffix = routing
 
             if confirmed:
+                # Phase 2 writeback receipt confirmed — effect_status=VERIFIED
+                # here means "writeback receipt confirmed", NOT "entity effect
+                # verified" (phase 1).  Downstream consumers that route on
+                # effect_status alone must also check the `detail` field
+                # ("writeback_confirmed" vs "effect_verified") or the
+                # verification_phase marker on the parent VerificationResult.
                 results.append(
                     VerificationActionResult(
                         action_id=action.action_id,
@@ -1367,6 +1390,14 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         Publish failures are collected in ``result.publish_failures`` so the
         caller can detect gaps in the event-bus delivery without blocking the
         verification pipeline.
+
+        .. note::
+
+           VerifyAgent itself does **not** retry failed publishes.  The
+           ``publish_failures`` list is surfaced to the caller (SuperAgent /
+           orchestration layer) which owns the retry decision.  Callers
+           SHOULD inspect ``result.publish_failures`` after ``execute()``
+           returns and re-publish any failed action_ids.
         """
         if self.event_bus is None:
             return
@@ -1403,7 +1434,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 def _plan_actions(response_plan: Any) -> list[Action]:
     """Extract Action list from a ResponsePlan object or dict."""
     if hasattr(response_plan, "actions"):
-        return list(response_plan.actions)
+        try:
+            return list(response_plan.actions)
+        except TypeError:
+            logger.warning(
+                "response_plan.actions is not iterable — returning empty list"
+            )
+            return []
     if isinstance(response_plan, dict):
         raw = response_plan.get("actions", [])
         return [Action.model_validate(a) if isinstance(a, dict) else a for a in raw]
@@ -1565,5 +1602,5 @@ def _deterministic_verification_action_id(
     """
     digest = hashlib.sha256(
         f"verify:{event_id}:{source_action_id}:{verify_tool}".encode()
-    ).hexdigest()[:8]
+    ).hexdigest()[:12]
     return f"act-{digest}"

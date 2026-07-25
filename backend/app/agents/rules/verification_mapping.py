@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 # Inner key: target_type → verification tool name (str) or None (no verification).
 # A tool_name absent from the outer dict is treated as "no mapping registered"
 # (unverifiable via tool observation).
+#
+# NOTE: The type is ``dict[str, dict[str, str | None]]`` (nested by tool_name
+# then target_type), not a flat ``dict[str, str | None]``.  This is intentional:
+# the same response tool can map to different verification tools for different
+# target types (e.g. ``check_traffic_drop`` maps ``ip`` and ``host`` to
+# different observation targets).  resolve_verification_tool() provides the
+# flattened lookup interface consumed by VerifyAgent.
 VERIFICATION_MAPPING: dict[str, dict[str, str | None]] = {
     # Network containment
     "block_ip": {"ip": "check_ip_block_status"},
@@ -79,7 +86,12 @@ VERIFICATION_TOOL_EXPECTED_PARAMS: dict[str, list[str]] = {
 # Module-level sentinel for missing nested dict keys.  Must be defined at
 # module scope so both _resolve_nested_key() and validate_verification_tool_params()
 # can reference it; a function-local sentinel is invisible to the caller.
-_MISSING: Any = object()
+#
+# Uses a dedicated type (not a bare ``object()``) so that ``is`` comparisons
+# survive pickle / multiprocessing fork boundaries — type identity is
+# preserved across process boundaries where object identity is not.
+_MISSING_SENTINEL_TYPE = type('_MissingSentinel', (), {})
+_MISSING: Any = _MISSING_SENTINEL_TYPE()
 
 
 def _resolve_nested_key(data: dict[str, Any], dotted_key: str) -> Any:
