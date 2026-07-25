@@ -84,28 +84,21 @@ def _derive_skip_verification_tools() -> frozenset[str]:
     )
 
 
-# Terminal / non-terminal job statuses for effect evaluation.
-_TERMINAL_JOB_STATUSES: frozenset[ExecutionJobStatus] = frozenset(
-    {
-        ExecutionJobStatus.SUCCESS,
-        ExecutionJobStatus.PARTIAL_SUCCESS,
-        ExecutionJobStatus.FAILED,
-        ExecutionJobStatus.TIMED_OUT,
-        ExecutionJobStatus.CANCELLED,
-    }
-)
-
 # Effect‑side action execution statuses the VerifyAgent considers.
-# ActionStatus.EXECUTING is deliberately excluded — asynchronous actions
-# that are still running must not be prematurely verified (their effect
-# may not have materialised yet, which would produce false FAILED results
-# and trigger unnecessary re-planning).
+# ActionStatus.UNKNOWN is deliberately excluded — when an Action execution
+# status cannot be confirmed, we must NOT run a verification tool against it
+# (the tool could return a false-positive is_verified and mask the fact that
+# the Action's actual execution state is unknown).  UNKNOWN actions go
+# directly to manual resolution.
+# ActionStatus.EXECUTING is also excluded — asynchronous actions that are
+# still running must not be prematurely verified (their effect may not have
+# materialised yet, which would produce false FAILED results and trigger
+# unnecessary re-planning).
 _EXECUTED_STATUSES: frozenset[ActionStatus] = frozenset(
     {
         ActionStatus.SUCCESS,
         ActionStatus.PARTIAL_SUCCESS,
         ActionStatus.FAILED,
-        ActionStatus.UNKNOWN,
     }
 )
 
@@ -324,6 +317,48 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=action.writeback_status,
                         writeback_ids=[],
                         detail="pending_execution",
+                    )
+                )
+                continue
+
+            # UNKNOWN execution status → direct to manual resolution.
+            # The Action was submitted but its execution result cannot be
+            # confirmed.  Running a verification tool on an UNKNOWN action
+            # risks producing a false-positive is_verified that masks the
+            # fact that we don't know whether the action actually executed.
+            if action.status == ActionStatus.UNKNOWN:
+                results.append(
+                    VerificationActionResult(
+                        action_id=action.action_id,
+                        effect_status=EffectStatus.UNVERIFIABLE,
+                        writeback_required=action.writeback_required,
+                        writeback_readiness=action.writeback_readiness,
+                        writeback_status=action.writeback_status,
+                        writeback_ids=[],
+                        detail="action_execution_unknown",
+                    )
+                )
+                need_manual = True
+                continue
+
+            # WAITING_APPROVAL / APPROVED — the action has been approved
+            # but not yet executed.  Distinguish from PENDING (not yet
+            # submitted) with a more precise detail message.
+            if action.status in (ActionStatus.WAITING_APPROVAL, ActionStatus.APPROVED):
+                detail = (
+                    "approved_pending_execution"
+                    if action.writeback_required
+                    else "action_not_executed"
+                )
+                results.append(
+                    VerificationActionResult(
+                        action_id=action.action_id,
+                        effect_status=EffectStatus.SKIPPED,
+                        writeback_required=action.writeback_required,
+                        writeback_readiness=action.writeback_readiness,
+                        writeback_status=action.writeback_status,
+                        writeback_ids=[],
+                        detail=detail,
                     )
                 )
                 continue
@@ -663,10 +698,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 activate_result=activate_result,
             )
             if terminal_wb_eval["need_manual"]:
-                need_manual_from_wb = True
+                need_manual_from_wb = need_manual_from_wb or terminal_wb_eval["need_manual"]
                 blocked_wb.update(terminal_wb_eval["blocked_wb"])
             if terminal_wb_eval["need_recovery"]:
-                need_wb_recovery = True
+                need_wb_recovery = need_wb_recovery or terminal_wb_eval["need_recovery"]
                 failed_wb.update(terminal_wb_eval["failed_wb"])
 
             if need_manual_from_wb:
@@ -1137,7 +1172,6 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         target_status: ActionStatus,
     ) -> None:
         """Transition a verification Action to its terminal status."""
-        action.status = target_status
         if self._session_factory is not None:
             try:
                 async with self._session_factory() as session:
@@ -1150,6 +1184,9 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         if row is not None:
                             row.status = target_status.value
                             row.updated_at = datetime.now(UTC)
+                # Commit succeeded — update the domain object to stay
+                # consistent with the persisted row.
+                action.status = target_status
             except Exception as exc:
                 logger.warning(
                     "Failed to finalize verification action %s: %s",
