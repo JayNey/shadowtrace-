@@ -170,6 +170,29 @@ def resolve_verification_tool(
     if provider_manifest_overrides:
         override = provider_manifest_overrides.get(tool_name, {}).get(target_type or "")
         if override is not None:
+            # Whitelist validation: the override value must be a known
+            # verification tool name — either registered in the baseline
+            # mapping values or listed in VERIFICATION_TOOL_EXPECTED_PARAMS.
+            # This prevents a misconfigured or compromised Provider from
+            # injecting arbitrary tool names into the verification path
+            # (ISSUE-060 SF-3).
+            _known_baseline = {
+                v
+                for inner in VERIFICATION_MAPPING.values()
+                for v in inner.values()
+                if v is not None
+            }
+            _known_expected = set(VERIFICATION_TOOL_EXPECTED_PARAMS)
+            _known_verification_tools = _known_baseline | _known_expected
+            if override not in _known_verification_tools:
+                logger.warning(
+                    "Rejected unregistered verification tool override: %s "
+                    "(tool_name=%s, target_type=%s)",
+                    override,
+                    tool_name,
+                    target_type,
+                )
+                return None
             return cast(str, override)
         # When the override dict has an entry for this (tool_name, target_type)
         # whose value is explicitly None, the .get() above returns None and we

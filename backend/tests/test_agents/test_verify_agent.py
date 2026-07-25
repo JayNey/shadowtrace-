@@ -1189,10 +1189,13 @@ class TestVerificationMapping:
         assert resolve_verification_tool("create_ticket", "ticket") is None
 
     async def test_provider_override(self):
-        """Provider manifest can override the baseline mapping."""
-        override = {"block_ip": {"ip": "custom_check_ip_advanced"}}
+        """Provider manifest can override the baseline mapping with a known tool."""
+        # Override maps block_ip → check_domain_block_status instead of the
+        # baseline check_ip_block_status.  The override value must be a
+        # registered verification tool name (ISSUE-060 SF-3).
+        override = {"block_ip": {"ip": "check_domain_block_status"}}
         result = resolve_verification_tool("block_ip", "ip", provider_manifest_overrides=override)
-        assert result == "custom_check_ip_advanced"
+        assert result == "check_domain_block_status"
 
     async def test_rollback_tools_mapped(self):
         """Rollback tools (unblock_ip, etc.) also map to verification tools."""
@@ -1206,12 +1209,14 @@ class TestVerificationMapping:
     async def test_provider_override_can_un_skip(self):
         """Provider manifest can override a None baseline to enable verification."""
         # create_ticket baseline is {"ticket": None} — skipped by default.
+        # Override uses check_new_alerts (a known verification tool) to
+        # demonstrate the "un-skip" capability (ISSUE-060 SF-3).
         result = resolve_verification_tool(
             "create_ticket",
             "ticket",
-            provider_manifest_overrides={"create_ticket": {"ticket": "check_ticket_status"}},
+            provider_manifest_overrides={"create_ticket": {"ticket": "check_new_alerts"}},
         )
-        assert result == "check_ticket_status"
+        assert result == "check_new_alerts"
 
     async def test_resolve_unknown_target_type_returns_none(self):
         """Unknown target_type → resolve_verification_tool returns None (no guess)."""
@@ -1337,8 +1342,9 @@ class TestRegressionShouldFix:
         result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
-        # The detail should contain the exception TYPE name, not the raw message.
-        assert "RuntimeError" in (result.results[0].detail or "")
+        # The detail should contain a stable error code, not the raw
+        # exception type name or message (ISSUE-060 Nit SF-6).
+        assert "ERR_T_RUNTIME" in (result.results[0].detail or "")
 
     async def test_verification_action_persist_failure_graceful(self):
         """DB insert failure for verification action → returns result anyway.
@@ -2340,8 +2346,8 @@ class TestReviewRound2Fixes:
 
         r = result.results[0]
         assert r.effect_status == EffectStatus.UNVERIFIABLE
-        # The detail exposes the exception type (sanitised)...
-        assert "RuntimeError" in (r.detail or "")
+        # The detail exposes a stable error code (sanitised — ISSUE-060 Nit SF-6)...
+        assert "ERR_T_RUNTIME" in (r.detail or "")
         # ...AND includes the dirty marker to signal the verification
         # Action may be stuck in EXECUTING.
         assert ";verification_action_dirty" in (r.detail or "")
@@ -2436,21 +2442,6 @@ class TestReviewRound2Fixes:
         assert r.writeback_readiness == WritebackReadiness.NOT_REQUIRED
         # writeback_status preserved (PENDING), not wiped to None.
         assert r.writeback_status == WritebackStatus.PENDING
-
-    # ── _SKIP_VERIFICATION_TOOLS module-level cache is correct ───────────
-
-    async def test_skip_verification_tools_module_cache(self):
-        """The module-level _SKIP_VERIFICATION_TOOLS cache matches
-        _derive_skip_verification_tools() output."""
-        from app.agents.verify_agent import (
-            _SKIP_VERIFICATION_TOOLS,
-            _derive_skip_verification_tools,
-        )
-
-        fresh = _derive_skip_verification_tools()
-        assert _SKIP_VERIFICATION_TOOLS == fresh
-        assert "create_ticket" in _SKIP_VERIFICATION_TOOLS
-        assert "notify_security_team" in _SKIP_VERIFICATION_TOOLS
 
 
 # --------------------------------------------------------------------------- #
@@ -2763,12 +2754,13 @@ class TestShouldFixFixes:
             execution_owner=ExecutionOwner.DIRECT_TOOL,
         )
         # Override: create_ticket normally maps to None (non-verifiable),
-        # but with a provider override it should map to check_ticket_status.
-        overrides = {"create_ticket": {"ticket": "check_ticket_status"}}
+        # but with a provider override it should map to check_new_alerts
+        # (a known verification tool — ISSUE-060 SF-3).
+        overrides = {"create_ticket": {"ticket": "check_new_alerts"}}
         agent = VerifyAgent(
             tool_executor=_mock_executor(
                 {
-                    "check_ticket_status": _tool_result_success(True),
+                    "check_new_alerts": _tool_result_success(True),
                 }
             ),
             working_memory=FakeWorkingMemory(),

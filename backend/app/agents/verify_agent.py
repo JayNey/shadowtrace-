@@ -54,6 +54,7 @@ from app.models.enums import (
 )
 from app.models.execution import ActionExecutionJob
 from app.models.tool_meta import ToolResult, ToolResultStatus
+from app.services.event_disposition_service import DispositionActivationResult
 from app.services.working_memory import BoundWorkingMemory
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,34 @@ _TRANSIENT_EXC_TYPES = (
     TimeoutError,
 )
 
+# Error codes for exception type classification in verification detail
+# strings.  Using stable codes rather than bare exception type names gives
+# downstream consumers (dashboards, alerting) a reliable discriminator even
+# when the exception hierarchy changes (e.g. a subclass of RuntimeError is
+# introduced).  Codes are short (<16 chars) and deliberately non-descriptive
+# — downstream consumers must not depend on the code's meaning beyond
+# "different code = different failure class" (ISSUE-060 Nit SF-6).
+_EXC_ERROR_CODES: dict[type[BaseException], str] = {
+    ConnectionError: "ERR_T_CONN",
+    TimeoutError: "ERR_T_TIMEOUT",
+    ValueError: "ERR_T_VALUE",
+    TypeError: "ERR_T_TYPE",
+    KeyError: "ERR_T_KEY",
+    LookupError: "ERR_T_LOOKUP",
+    OSError: "ERR_T_OS",
+    RuntimeError: "ERR_T_RUNTIME",
+    AssertionError: "ERR_T_ASSERT",
+}
+
+
+def _error_code_for_exception(exc: BaseException) -> str:
+    """Return a stable error code for *exc*, falling back to
+    ``"ERR_T_UNKNOWN"`` when no specific mapping is registered."""
+    for exc_type, code in _EXC_ERROR_CODES.items():
+        if isinstance(exc, exc_type):
+            return code
+    return "ERR_T_UNKNOWN"
+
 
 # Tools whose observable entity effect is not verifiable via tool observation.
 # Derived dynamically from VERIFICATION_MAPPING so the two stay in sync —
@@ -112,28 +141,6 @@ def _derive_skip_verification_tools() -> frozenset[str]:
     )
 
 
-# Cache at module level so _verify_phase1_effects doesn't recompute
-# on every Action in the phase 1 loop.
-#
-# DEPRECATED: This cache is computed once at import time and will not pick up
-# Provider manifest extensions registered after startup.  The real-time check
-# in _verify_phase1_effects (``verify_tool is None`` path) already recomputes
-# the effective skip list on every call, so this module-level cache is only
-# used by tests (which verify cache consistency).  Remove once those tests
-# are migrated to the real-time path.
-_SKIP_VERIFICATION_TOOLS: frozenset[str] = _derive_skip_verification_tools()
-
-
-# Effect‑side action execution statuses the VerifyAgent considers.
-# ActionStatus.UNKNOWN is deliberately excluded — when an Action execution
-# status cannot be confirmed, we must NOT run a verification tool against it
-# (the tool could return a false-positive is_verified and mask the fact that
-# the Action's actual execution state is unknown).  UNKNOWN actions go
-# directly to manual resolution.
-# ActionStatus.EXECUTING is also excluded — asynchronous actions that are
-# still running must not be prematurely verified (their effect may not have
-# materialised yet, which would produce false FAILED results and trigger
-# unnecessary re-planning).
 _EXECUTED_STATUSES: frozenset[ActionStatus] = frozenset(
     {
         ActionStatus.SUCCESS,
@@ -175,6 +182,34 @@ class _ActivateResult:
         self.derived_disposition = derived_disposition
         self.disposition_id = disposition_id
         self.writeback_id = writeback_id
+
+
+# Import-time contract assertion: _ActivateResult must expose the same
+# field names as the canonical DispositionActivationResult from
+# EventDispositionService (ISSUE-059A).  If DispositionActivationResult
+# adds a required field or renames an existing one, this assertion fails
+# at import time rather than surfacing as a silent AttributeError at
+# runtime inside the phase-2 except-Exception handler (ISSUE-060 SF-2).
+_EXPECTED_EDS_FIELDS = {"action_id", "activated", "skipped_reason", "derived_disposition", "disposition_id", "writeback_id"}
+_ACTUAL_EDS_FIELDS = set(DispositionActivationResult.model_fields)
+assert _EXPECTED_EDS_FIELDS.issubset(_ACTUAL_EDS_FIELDS), (
+    f"DispositionActivationResult field contract changed — "
+    f"_ActivateResult in verify_agent.py needs updating. "
+    f"Missing expected fields: {_EXPECTED_EDS_FIELDS - _ACTUAL_EDS_FIELDS}"
+)
+# Reverse check: DispositionActivationResult must not have unexpected
+# required fields that _ActivateResult doesn't cover (extra fields
+# with defaults are safe — they won't cause AttributeError).
+_EDS_REQUIRED = {
+    name
+    for name, field in DispositionActivationResult.model_fields.items()
+    if field.is_required()
+}
+_UNCOVERED_REQUIRED = _EDS_REQUIRED - _EXPECTED_EDS_FIELDS
+assert not _UNCOVERED_REQUIRED, (
+    f"DispositionActivationResult has new required fields not covered "
+    f"by _ActivateResult: {_UNCOVERED_REQUIRED}"
+)
 
 
 class _EventDispositionServiceProtocol(Protocol):
@@ -465,13 +500,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
             # No verification tool registered → treat as non-verifiable (skipped).
             if verify_tool is None:
-                # Live lookup avoids the stale _SKIP_VERIFICATION_TOOLS
-                # module-level cache (PR#7 Should-Fix: provider manifest
-                # runtime extension could change mappings).
-                # Match the original _derive_skip_verification_tools logic:
-                # "non_verifiable_action" only when ALL target_type entries
-                # for this tool resolve to None (i.e. the tool is known but
-                # inherently unobservable).
+                # Determine skip reason via live lookup — avoids stale
+                # provider manifest mappings.
                 tool_mapping = VERIFICATION_MAPPING.get(action.tool_name)
                 is_non_verifiable = (
                     tool_mapping is not None
@@ -609,10 +639,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 exc,
             )
             effect_status = EffectStatus.UNVERIFIABLE
-            # Sanitise: only expose the exception type name, not the full
-            # message (which may contain IPs, paths, or provider internals).
-            # The full traceback is logged above for debugging.
-            detail = f"verification_exception: {type(exc).__name__}"
+            # Sanitise: expose a stable error code rather than the full
+            # exception type name or message (which may contain IPs, paths,
+            # or provider internals).  Error codes allow downstream consumers
+            # to distinguish failure classes without depending on Python
+            # exception hierarchy details.  The full traceback is logged
+            # above for debugging (ISSUE-060 Nit SF-6).
+            detail = f"verification_exception: {_error_code_for_exception(exc)}"
             try:
                 if verification_action is not None:
                     await self._finalize_verification_action(
@@ -747,12 +780,21 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         terminal_activated = False
         if self._event_disposition_service is not None:
             # Derive plan_revision from the response plan's actions.
-            # All actions in a single ResponsePlan share the same revision;
-            # fall back to 1 when the plan is empty (defensive).
+            # All actions in a single ResponsePlan share the same revision.
             # Use direct indexing instead of a truthiness loop — int(0) is
             # a valid revision but is falsy in Python, so `if a.plan_revision:`
             # would silently skip it (ISSUE-060 review B2).
-            _plan_revision = actions[0].plan_revision if actions else 1
+            #
+            # When actions is empty, fall back to loading the current plan
+            # revision from the database rather than defaulting to 1.
+            # A default of 1 is wrong when the real plan_revision is 0 —
+            # EventDispositionService.activate_and_submit would target the
+            # wrong revision, potentially activating deferred Actions from
+            # a different revision or returning not_required for a revision
+            # that has no deferred Actions (ISSUE-060 review SF-1).
+            _plan_revision: int | None = actions[0].plan_revision if actions else None
+            if _plan_revision is None:
+                _plan_revision = await self._load_event_plan_revision(event_id)
             try:
                 activate_result: _ActivateResult = (
                     await self._event_disposition_service.activate_and_submit(
@@ -1040,8 +1082,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         missing,
                     )
                 # DB-persisted state takes priority over plan defaults.
+                # Merge preserves plan order — downstream consumers
+                # may rely on results[0] being the first planned action.
                 final = {**plan_actions_map, **db_actions}
-                actions = list(final.values())
+                actions = [final[aid] for aid in plan_actions_map if aid in final]
 
             # Load jobs.
             job_ids = [a.execution_job_id for a in actions if a.execution_job_id]
@@ -1111,6 +1155,44 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     event_id,
                 )
                 return None
+
+    async def _load_event_plan_revision(self, event_id: str) -> int:
+        """Load the current plan_revision for *event_id* from the database.
+
+        Used as a fallback when ``response_plan.actions`` is empty and the
+        plan_revision cannot be derived from action records in memory.
+        Returns the maximum ``plan_revision`` across all Actions for the
+        event, or 1 if no Actions exist (a plan with zero Actions defaults
+        to revision 1, matching the ORM default on the ``Action`` table).
+        """
+        if self._session_factory is None:
+            logger.debug(
+                "No session_factory — defaulting plan_revision=1 for event=%s",
+                event_id,
+            )
+            return 1
+
+        async with self._session_factory() as session:
+            row = (
+                await session.scalars(
+                    select(orm.Action.plan_revision)
+                    .where(orm.Action.event_id == event_id)
+                    .order_by(orm.Action.plan_revision.desc())
+                    .limit(1)
+                )
+            ).first()
+            if row is not None:
+                logger.debug(
+                    "Loaded plan_revision=%d for event=%s from DB",
+                    row,
+                    event_id,
+                )
+                return int(row)
+            logger.debug(
+                "No actions in DB for event=%s — defaulting plan_revision=1",
+                event_id,
+            )
+            return 1
 
     async def _collect_writeback_ids(
         self,
@@ -1628,7 +1710,6 @@ def _job_from_row(row: orm.ActionExecutionJob) -> ActionExecutionJob:
 
 __all__ = [
     "VerifyAgent",
-    "_SKIP_VERIFICATION_TOOLS",
     "_derive_skip_verification_tools",
 ]
 
