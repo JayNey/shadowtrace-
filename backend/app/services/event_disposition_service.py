@@ -137,6 +137,7 @@ class EventDispositionService:
                     orm.Action.execution_phase == ActionExecutionPhase.POST_VERIFY.value,
                     orm.Action.superseded_by_revision.is_(None),
                 )
+                .order_by(orm.Action.action_id.asc())
                 .limit(1)
             )
         if row is None:
@@ -254,7 +255,7 @@ class EventDispositionService:
                         details={"action_id": deferred.action_id},
                     )
                 action = _action_from_row(row)
-                closure_cycle = await _closure_cycle(session, event_id)
+                closure_cycle = int(action.plan_revision)
 
                 existing = await _find_active_terminal_outbox(
                     session,
@@ -493,15 +494,6 @@ def _template_unchanged(action: Action) -> bool:
     current = compute_template_hash(approved)
     stored = action.approved_operation_template_hash or ""
     return stored == current
-
-
-async def _closure_cycle(session: AsyncSession, event_id: str) -> int:
-    row = await session.scalar(
-        select(func.max(orm.DispositionOutbox.closure_cycle)).where(
-            orm.DispositionOutbox.event_id == event_id
-        )
-    )
-    return int(row or 1)
 
 
 async def _find_active_terminal_outbox(

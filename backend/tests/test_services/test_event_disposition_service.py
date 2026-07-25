@@ -55,6 +55,7 @@ from app.models.enums import (
     SourceDisposition,
     SourceObjectKind,
     WritebackReadiness,
+    WritebackStatus,
 )
 from app.models.source import SourceReference
 from app.services.context_service import EventContextStore, event_summary_from_security_event
@@ -431,6 +432,7 @@ async def test_activate_required_plan_submits_event_status_update(
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,
     disposition_service: EventDispositionService,
+    disposition_sync: DispositionSyncService,
     cleanup: None,
 ) -> None:
     await _seed_connector_and_source(session_factory, mock_xdr_client=mock_xdr_client)
@@ -472,6 +474,17 @@ async def test_activate_required_plan_submits_event_status_update(
     assert result.disposition_id
     assert result.writeback_id
 
+    delivered = await disposition_sync.process_ready_outboxes(limit=1)
+    assert delivered == 1
+    confirmed = await disposition_sync.resolve_writeback(
+        result.writeback_id,
+        "manual_confirmed",
+        principal="test-operator",
+        comment="integration-test",
+        evidence_ref="evidence://059a-required",
+    )
+    assert confirmed is WritebackStatus.CONFIRMED
+
     async with session_factory() as session:
         outboxes = (
             await session.scalars(
@@ -480,9 +493,19 @@ async def test_activate_required_plan_submits_event_status_update(
         ).all()
         assert len(outboxes) == 1
         assert outboxes[0].intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value
+        assert outboxes[0].closure_cycle == deferred.plan_revision
+        assert outboxes[0].action_id == deferred.action_id
+        receipt = await session.scalar(
+            select(orm.DispositionReceipt).where(
+                orm.DispositionReceipt.writeback_id == result.writeback_id
+            )
+        )
+        assert receipt is not None
+        assert receipt.status == WritebackStatus.CONFIRMED.value
+        assert receipt.action_id == deferred.action_id
         action_row = await session.get(orm.Action, deferred.action_id)
         assert action_row is not None
-        assert action_row.status == ActionStatus.EXECUTING.value
+        assert action_row.status == ActionStatus.SUCCESS.value
 
 
 @pytest.mark.asyncio
@@ -644,6 +667,128 @@ async def test_effect_not_ready_without_verification(
 
     result = await disposition_service.activate_and_submit(event_id, 1, "test-operator")
     assert result.skipped_reason == "effect_not_ready"
+
+
+@pytest.mark.asyncio
+async def test_capability_blocked_skips_with_zero_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    disposition_sync: DispositionSyncService,
+    redis_client,
+    cleanup: None,
+) -> None:
+    from app.core.event_bus import EventBus
+
+    blocked_service = EventDispositionService(
+        session_factory,
+        disposition_sync=disposition_sync,
+        context_store=store,
+        event_bus=EventBus(redis_client),
+        event_disposition_supported=False,
+    )
+    event_id = await _create_event(
+        session_factory,
+        store,
+        final_verdict=FinalVerdict.FALSE_POSITIVE,
+        disposition_only=True,
+    )
+    deferred = _deferred_action(
+        event_id=event_id,
+        approved=[SourceDisposition.IGNORED],
+    )
+    await _insert_action(session_factory, event_id, deferred)
+
+    result = await blocked_service.activate_and_submit(event_id, 1, "test-operator")
+    assert result.activated is False
+    assert result.skipped_reason == "capability_blocked"
+
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(orm.DispositionOutbox)
+            .where(orm.DispositionOutbox.event_id == event_id)
+        )
+        assert int(count or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_activate_plan_revision_2_uses_closure_cycle_2(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    disposition_service: EventDispositionService,
+    cleanup: None,
+) -> None:
+    source_record_id = await _seed_connector_and_source(
+        session_factory,
+        mock_xdr_client=mock_xdr_client,
+    )
+    event_id = await _create_event(session_factory, store)
+    old_action_id = f"act-rev1-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-rev1-{_sfx()}",
+                    writeback_id=f"wbk-rev1-{_sfx()}",
+                    disposition_id=f"disp-rev1-{_sfx()}",
+                    action_id=old_action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash-rev1",
+                    source_sequence=1,
+                    intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    logical_slot="terminal",
+                    idempotency_key=f"idem-rev1-{_sfx()}",
+                    command_payload={"source_locator": _locator().model_dump(mode="json")},
+                    command_payload_sha256="rev1",
+                    delivery_status="delivered",
+                )
+            )
+    deferred = _deferred_action(event_id=event_id, plan_revision=2)
+    immediate_id = f"act-imm-{_sfx()}"
+    locator = _locator()
+    await _insert_action(
+        session_factory,
+        event_id,
+        Action.model_validate(
+            {
+                "action_id": immediate_id,
+                "event_id": event_id,
+                "plan_revision": 2,
+                "action_fingerprint": f"fp-{immediate_id}",
+                "action_category": ActionCategory.RESPONSE,
+                "action_name": "block ip",
+                "tool_name": "block_ip",
+                "action_level": ActionLevel.L2,
+                "execution_owner": ExecutionOwner.XDR_MANAGED,
+                "status": ActionStatus.SUCCESS,
+                "target_type": "ip",
+                "target": "203.0.113.88",
+                "writeback_required": True,
+                "writeback_applicable": True,
+                "writeback_readiness": WritebackReadiness.READY,
+                "disposition_source_ref": locator,
+                "idempotency_key": f"idem-{immediate_id}",
+            }
+        ),
+    )
+    await _insert_action(session_factory, event_id, deferred)
+    await _seed_effect_verification(store, event_id, action_id=immediate_id)
+
+    result = await disposition_service.activate_and_submit(event_id, 2, "test-operator")
+    assert result.activated is True
+
+    async with session_factory() as session:
+        outbox = await session.scalar(
+            select(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.action_id == deferred.action_id
+            )
+        )
+        assert outbox is not None
+        assert outbox.closure_cycle == 2
+        assert outbox.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value
 
 
 def test_resolver_false_positive_to_ignored() -> None:
