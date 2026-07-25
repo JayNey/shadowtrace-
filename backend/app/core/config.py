@@ -75,10 +75,12 @@ class Settings(BaseSettings):
     orchestration_mode: str = Field(default="graph", alias="ORCHESTRATION_MODE")
     react_enabled: bool = Field(default=False, alias="REACT_ENABLED")
     task_mode: str = Field(default="background", alias="TASK_MODE")
-    celery_broker_url: str = Field(default="redis://redis:6379/1", alias="CELERY_BROKER_URL")
+    celery_broker_url: str = Field(default="", alias="CELERY_BROKER_URL")
     approval_timeout_minutes: int = Field(default=30, alias="APPROVAL_TIMEOUT_MINUTES")
 
     def model_post_init(self, __context: object) -> None:
+        if not (self.celery_broker_url or "").strip():
+            object.__setattr__(self, "celery_broker_url", self.redis_url)
         violations = self.production_fail_closed_violations()
         if violations:
             raise ConfigurationError(

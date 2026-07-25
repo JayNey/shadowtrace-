@@ -339,7 +339,7 @@ class ExecutionJobResponse(BaseModel):
 
 class TaskResponse(BaseModel):
     task_id: str
-    status: str
+    state: str
     event_id: str | None = None
 
 
