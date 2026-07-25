@@ -1035,7 +1035,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=None,
                         writeback_ids=wb_ids,
                         detail="writeback_not_applicable",
-                        verification_phase=VerificationPhase.EFFECT,
+                        verification_phase=VerificationPhase.DISPOSITION,
                     )
                 )
                 continue
@@ -1053,7 +1053,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=None,
                         writeback_ids=wb_ids,
                         detail=f"writeback_blocked_{wb_readiness.value}",
-                        verification_phase=VerificationPhase.EFFECT,
+                        verification_phase=VerificationPhase.DISPOSITION,
                     )
                 )
                 continue
