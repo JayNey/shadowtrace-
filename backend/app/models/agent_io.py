@@ -337,6 +337,14 @@ class VerificationActionResult(BaseModel):
     writeback_ids: list[str] = Field(default_factory=list)
     verification_action_id: str | None = None
     detail: str | None = None
+    # Which verification phase produced this result.  Phase 1 (effect)
+    # verifies the entity-level effect of an IMMEDIATE action; phase 2
+    # (disposition) evaluates writeback receipts after disposition
+    # activation.  Consumers that route on effect_status alone should
+    # also check this field to avoid misinterpreting a phase‑2
+    # "effect_status=VERIFIED" (writeback receipt confirmed) as an
+    # entity-effect verification.
+    verification_phase: VerificationPhase | None = None
 
     @model_validator(mode="after")
     def _writeback_fields_are_consistent(self) -> VerificationActionResult:
