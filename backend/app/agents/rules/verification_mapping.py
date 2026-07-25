@@ -15,7 +15,10 @@ deferred action and is never verified by entity-effect observation tools.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Outer key: response/rollback tool_name.
 # Inner key: target_type → verification tool name (str) or None (no verification).
@@ -55,6 +58,63 @@ VERIFICATION_MAPPING: dict[str, dict[str, str | None]] = {
     "check_traffic_drop": {"ip": "check_traffic_drop", "host": "check_traffic_drop"},
 }
 
+# Required parameter keys that each verification tool expects in its params
+# dict.  Keys may use dot-notation for nested access (e.g. "parameters.job_id"
+# means params["parameters"]["job_id"]).  This is checked before calling the
+# verification tool so that missing required params are caught early with a
+# clear diagnostic rather than surfacing as an opaque Provider-side error.
+VERIFICATION_TOOL_EXPECTED_PARAMS: dict[str, list[str]] = {
+    "check_ip_block_status": ["target_type", "target"],
+    "check_domain_block_status": ["target_type", "target"],
+    "check_host_isolation_status": ["target_type", "target"],
+    "check_file_quarantine_status": ["target_type", "target"],
+    "check_process_block_status": ["target_type", "target"],
+    "check_virus_scan_status": ["target_type", "target"],
+    "check_account_status": ["target_type", "target"],
+    "check_new_alerts": ["target_type", "target"],
+    "check_traffic_drop": ["target_type", "target"],
+}
+
+
+def _resolve_nested_key(data: dict[str, Any], dotted_key: str) -> Any:
+    """Resolve a dotted key like ``"parameters.job_id"`` from a nested dict.
+
+    Returns the value if all segments exist, or a sentinel ``_MISSING``
+    object when any intermediate key is absent or the intermediate value
+    is not a dict.
+    """
+    _MISSING: Any = object()
+    current: Any = data
+    for segment in dotted_key.split("."):
+        if not isinstance(current, dict):
+            return _MISSING
+        current = current.get(segment, _MISSING)
+        if current is _MISSING:
+            return _MISSING
+    return current
+
+
+def validate_verification_tool_params(
+    verify_tool: str,
+    params: dict[str, Any],
+) -> list[str]:
+    """Check that *params* contains every key listed in the expected-params
+    mapping for *verify_tool*.
+
+    Returns a (possibly empty) list of missing parameter keys.  When the
+    tool is not listed in ``VERIFICATION_TOOL_EXPECTED_PARAMS`` no
+    validation is performed and an empty list is returned (unknown tools
+    are assumed to accept whatever params the caller provides).
+    """
+    expected = VERIFICATION_TOOL_EXPECTED_PARAMS.get(verify_tool)
+    if expected is None:
+        return []
+    missing: list[str] = []
+    for key in expected:
+        if _resolve_nested_key(params, key) is _MISSING:
+            missing.append(key)
+    return missing
+
 
 def resolve_verification_tool(
     tool_name: str,
@@ -70,12 +130,35 @@ def resolve_verification_tool(
     ``provider_manifest_overrides`` allows a live Provider to extend or
     restrict the baseline mapping at runtime. Overrides are validated
     against the same schema before acceptance.
+
+    **Provider override resolution order**::
+
+        1. If ``provider_manifest_overrides`` is provided, look up
+           ``overrides[tool_name][target_type]``.
+        2. If the override value is a non-``None`` string, return it
+           immediately (the Provider *extends* the baseline).
+        3. If the override value is ``None``, return ``None`` immediately
+           — the Provider has explicitly *disabled* verification for this
+           (tool_name, target_type) pair, and the baseline mapping is
+           **not** consulted as a fallback.  This is by design: a Provider
+           that returns ``None`` for a known tool is asserting "I cannot
+           verify this action type," and silently falling through to the
+           baseline would re-enable a verification path the Provider has
+           declared unavailable.
+        4. If the override dict exists but lacks an entry for *tool_name*
+           or *target_type*, fall through to the baseline mapping (step 5).
+        5. Consult the baseline ``VERIFICATION_MAPPING``.
     """
     # 1. Check provider overrides first (live capability extension).
     if provider_manifest_overrides:
         override = provider_manifest_overrides.get(tool_name, {}).get(target_type or "")
         if override is not None:
             return override
+        # When the override dict has an entry for this (tool_name, target_type)
+        # whose value is explicitly None, the .get() above returns None and we
+        # intentionally skip the baseline fallback below — the Provider has
+        # signalled "verification unavailable for this tool+target."  See the
+        # docstring §3 for the design rationale.
 
     # 2. Baseline mapping.
     inner = VERIFICATION_MAPPING.get(tool_name)
@@ -93,5 +176,7 @@ def resolve_verification_tool(
 
 __all__ = [
     "VERIFICATION_MAPPING",
+    "VERIFICATION_TOOL_EXPECTED_PARAMS",
     "resolve_verification_tool",
+    "validate_verification_tool_params",
 ]

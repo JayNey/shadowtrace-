@@ -26,7 +26,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
-from app.agents.rules.verification_mapping import resolve_verification_tool
+from app.agents.rules.verification_mapping import (
+    resolve_verification_tool,
+    validate_verification_tool_params,
+)
 from app.db import models as orm
 from app.models.action import Action
 from app.models.agent_io import (
@@ -512,6 +515,20 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             }
             if job is not None:
                 params["parameters"] = {"job_id": job.job_id}
+
+            # Validate that params match the verification tool's contract.
+            # Missing required params are caught early with a clear diagnostic
+            # rather than surfacing as an opaque Provider-side error.
+            missing_params = validate_verification_tool_params(
+                verify_tool, params
+            )
+            if missing_params:
+                logger.warning(
+                    "Verification tool %s (action=%s) missing expected params: %s",
+                    verify_tool,
+                    action.action_id,
+                    missing_params,
+                )
 
             tool_result: ToolResult | None = None
             if self.tool_executor is not None:
@@ -1034,13 +1051,39 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         The correct path is the DB query below.
         """
         if self._session_factory is None:
+            logger.debug(
+                "No session_factory available — cannot load disposition_policy"
+                " for event=%s",
+                event_id,
+            )
             return None
 
         async with self._session_factory() as session:
             event_row = await session.get(orm.SecurityEvent, event_id)
-            if event_row is not None and event_row.disposition_policy:
+            if event_row is None:
+                logger.debug(
+                    "SecurityEvent row not found for event=%s —"
+                    " disposition_policy unknown",
+                    event_id,
+                )
+                return None
+            if not event_row.disposition_policy:
+                logger.debug(
+                    "disposition_policy is empty/falsy for event=%s —"
+                    " treating as unknown",
+                    event_id,
+                )
+                return None
+            try:
                 return DispositionPolicy(event_row.disposition_policy)
-            return None
+            except ValueError:
+                logger.warning(
+                    "Unknown disposition_policy %r for event=%s,"
+                    " treating as None",
+                    event_row.disposition_policy,
+                    event_id,
+                )
+                return None
 
     async def _collect_writeback_ids(
         self,
@@ -1306,8 +1349,20 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         event_id: str,
         result: VerificationResult,
     ) -> None:
-        """Persist the VerificationResult to EventContext via WorkingMemory."""
+        """Persist the VerificationResult to EventContext via WorkingMemory.
+
+        Sets ``result.wm_persisted`` to indicate whether the write succeeded
+        so that downstream consumers (report generator, SuperAgent routing)
+        can distinguish "verification not yet run" from "verification ran
+        but its output failed to persist."
+        """
         if self.working_memory is None:
+            result.wm_persisted = False
+            logger.debug(
+                "No working_memory available — verification_result not persisted"
+                " for event=%s",
+                event_id,
+            )
             return
         try:
             await self.working_memory.write(
@@ -1315,7 +1370,9 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 "verification_result",
                 result.model_dump(mode="json"),
             )
+            result.wm_persisted = True
         except Exception as exc:
+            result.wm_persisted = False
             logger.warning(
                 "Failed to write verification_result for event=%s: %s",
                 event_id,
@@ -1327,7 +1384,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         event_id: str,
         result: VerificationResult,
     ) -> None:
-        """Publish action_verified SocketEvent for each per-action result."""
+        """Publish action_verified SocketEvent for each per-action result.
+
+        Publish failures are collected in ``result.publish_failures`` so the
+        caller can detect gaps in the event-bus delivery without blocking the
+        verification pipeline.
+        """
         if self.event_bus is None:
             return
         for item in result.results:
@@ -1348,6 +1410,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     },
                 )
             except Exception:
+                result.publish_failures.append(item.action_id)
                 logger.warning(
                     "event_bus action_verified failed event=%s action=%s",
                     event_id,

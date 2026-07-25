@@ -380,6 +380,16 @@ class VerificationResult(BaseModel):
     need_writeback_recovery: bool = False
     need_manual_resolution: bool = False
     verification_phase: VerificationPhase
+    # True when the VerificationResult was successfully persisted to
+    # WorkingMemory; False when the write failed or working_memory was
+    # unavailable.  Callers can inspect this to decide whether downstream
+    # consumers (e.g. the report generator) can read verification_result
+    # from EventContext.
+    wm_persisted: bool = True
+    # action_ids whose action_verified SocketEvent publish failed.
+    # Publish failures are non-fatal — the event bus is best-effort —
+    # but callers may retry or alert on repeated failures.
+    publish_failures: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _deferred_skipped_not_in_failed_actions(self) -> VerificationResult:
