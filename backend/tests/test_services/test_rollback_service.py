@@ -34,7 +34,6 @@ from app.models.enums import (
     EventStatus,
     EventType,
     ExecutionOwner,
-    ExecutionSubstate,
     Severity,
     SourceDisposition,
     SourceObjectKind,
@@ -152,14 +151,16 @@ async def _seed_event(
             session.add(
                 orm.SecurityEvent(
                     event_id=eid,
-                    event_name="test-rollback",
+                    title="test-rollback",
                     event_type=EventType.INSIDER_THREAT.value,
                     severity=Severity.MEDIUM.value,
                     status=EventStatus.VERIFYING.value,
-                    source_product="mock_xdr",
-                    source_tenant_id="tenant-test",
                     disposition_policy=disposition_policy.value,
-                    execution_substate=ExecutionSubstate.NONE.value,
+                    occurred_at=_utc_now(),
+                    creation_source_ref={
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "tenant-test",
+                    },
                 )
             )
             await session.flush()
