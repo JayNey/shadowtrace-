@@ -16,7 +16,7 @@ deferred action and is never verified by entity-effect observation tools.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -76,14 +76,19 @@ VERIFICATION_TOOL_EXPECTED_PARAMS: dict[str, list[str]] = {
 }
 
 
+# Module-level sentinel for missing nested dict keys.  Must be defined at
+# module scope so both _resolve_nested_key() and validate_verification_tool_params()
+# can reference it; a function-local sentinel is invisible to the caller.
+_MISSING: Any = object()
+
+
 def _resolve_nested_key(data: dict[str, Any], dotted_key: str) -> Any:
     """Resolve a dotted key like ``"parameters.job_id"`` from a nested dict.
 
-    Returns the value if all segments exist, or a sentinel ``_MISSING``
-    object when any intermediate key is absent or the intermediate value
+    Returns the value if all segments exist, or the module-level ``_MISSING``
+    sentinel when any intermediate key is absent or the intermediate value
     is not a dict.
     """
-    _MISSING: Any = object()
     current: Any = data
     for segment in dotted_key.split("."):
         if not isinstance(current, dict):
@@ -153,7 +158,7 @@ def resolve_verification_tool(
     if provider_manifest_overrides:
         override = provider_manifest_overrides.get(tool_name, {}).get(target_type or "")
         if override is not None:
-            return override
+            return cast(str, override)
         # When the override dict has an entry for this (tool_name, target_type)
         # whose value is explicitly None, the .get() above returns None and we
         # intentionally skip the baseline fallback below — the Provider has

@@ -59,9 +59,7 @@ logger = logging.getLogger(__name__)
 
 # ── Writeback status → phase‑2 routing table (ISSUE-060 acceptance step 5) ──
 # Returns (confirmed: bool, need_recovery: bool, need_manual: bool, detail_suffix)
-_WRITEBACK_STATUS_ROUTING: dict[
-    WritebackStatus | None, tuple[bool, bool, bool, str]
-] = {
+_WRITEBACK_STATUS_ROUTING: dict[WritebackStatus | None, tuple[bool, bool, bool, str]] = {
     WritebackStatus.CONFIRMED: (True, False, False, "writeback_confirmed"),
     WritebackStatus.PENDING: (False, True, False, "writeback_pending_waiting"),
     WritebackStatus.SENDING: (False, True, False, "writeback_sending_waiting"),
@@ -72,6 +70,7 @@ _WRITEBACK_STATUS_ROUTING: dict[
     WritebackStatus.CONFLICT: (False, False, True, "writeback_conflict_manual"),
     None: (False, True, False, "writeback_no_status_waiting"),
 }
+
 
 # Tools whose observable entity effect is not verifiable via tool observation.
 # Derived dynamically from VERIFICATION_MAPPING so the two stay in sync —
@@ -197,15 +196,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             audit_service=audit_service,
             event_bus=event_bus,
         )
-        self._session_factory: async_sessionmaker[AsyncSession] | None = (
-            session_factory
+        self._session_factory: async_sessionmaker[AsyncSession] | None = session_factory
+        self._event_disposition_service: _EventDispositionServiceProtocol | None = (
+            event_disposition_service
         )
-        self._event_disposition_service: (
-            _EventDispositionServiceProtocol | None
-        ) = event_disposition_service
-        self._disposition_sync_service: Any | None = (
-            disposition_sync_service
-        )
+        self._disposition_sync_service: Any | None = disposition_sync_service
         self._provider_manifest_overrides: dict[str, dict[str, str]] | None = (
             provider_manifest_overrides
         )
@@ -220,17 +215,18 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
         # 1. Load actions & execution context from the database.
         disposition_policy = await self._load_disposition_policy(event_id)
-        actions, jobs_map, outbox_map = await self._load_execution_state(
-            event_id, response_plan
-        )
+        actions, jobs_map, outbox_map = await self._load_execution_state(event_id, response_plan)
 
         # 2. Phase 1 — entity effect verification for IMMEDIATE actions.
-        phase1_results, phase1_failed, phase1_need_replan, phase1_need_manual = (
-            await self._verify_phase1_effects(
-                event_id=event_id,
-                actions=actions,
-                jobs_map=jobs_map,
-            )
+        (
+            phase1_results,
+            phase1_failed,
+            phase1_need_replan,
+            phase1_need_manual,
+        ) = await self._verify_phase1_effects(
+            event_id=event_id,
+            actions=actions,
+            jobs_map=jobs_map,
         )
 
         # 3. Phase 2 — terminal writeback activation & verification.
@@ -271,10 +267,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         # for manual triage.
         all_phase1_unverifiable = (
             len(phase1_results) > 0
-            and all(
-                r.effect_status == EffectStatus.UNVERIFIABLE
-                for r in phase1_results
-            )
+            and all(r.effect_status == EffectStatus.UNVERIFIABLE for r in phase1_results)
             and len(phase1_failed) == 0
         )
         if all_phase1_unverifiable and phase1_need_manual:
@@ -427,9 +420,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 ActionCategory.VERIFICATION,
                 ActionCategory.SYSTEM,
             ):
-                results.append(
-                    _make_self_verifying_result(action)
-                )
+                results.append(_make_self_verifying_result(action))
                 continue
 
             # Determine the verification tool.
@@ -461,9 +452,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     if is_non_verifiable
                     else "no_verification_tool_registered"
                 )
-                results.append(
-                    _make_skipped_result(action, detail=detail)
-                )
+                results.append(_make_skipped_result(action, detail=detail))
                 continue
 
             # Execute the verification tool (independent observation).
@@ -519,9 +508,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # Validate that params match the verification tool's contract.
             # Missing required params are caught early with a clear diagnostic
             # rather than surfacing as an opaque Provider-side error.
-            missing_params = validate_verification_tool_params(
-                verify_tool, params
-            )
+            missing_params = validate_verification_tool_params(verify_tool, params)
             if missing_params:
                 logger.warning(
                     "Verification tool %s (action=%s) missing expected params: %s",
@@ -722,8 +709,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         # already handled above):
         # Attempt to activate deferred terminal writeback.
         terminal_activated = False
-        has_ed_svc = self._event_disposition_service is not None
-        if has_ed_svc:
+        if self._event_disposition_service is not None:
             # Derive plan_revision from the response plan's actions.
             # All actions in a single ResponsePlan share the same revision;
             # fall back to 1 when the plan is empty (defensive).
@@ -748,10 +734,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         event_id,
                     )
                     need_manual = True
-                    blocked_wb.add(
-                        activate_result.writeback_id
-                        or f"terminal_wb_{event_id}"
-                    )
+                    blocked_wb.add(activate_result.writeback_id or f"terminal_wb_{event_id}")
                     overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
             except Exception as exc:
                 logger.error(
@@ -1012,7 +995,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
             # Load jobs.
             job_ids = [a.execution_job_id for a in actions if a.execution_job_id]
-            jobs_map: dict[str, ActionExecutionJob] = {}
+            jobs_map = {}
             if job_ids:
                 job_rows = (
                     await session.scalars(
@@ -1039,9 +1022,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
             return actions, jobs_map, outbox_map
 
-    async def _load_disposition_policy(
-        self, event_id: str
-    ) -> DispositionPolicy | None:
+    async def _load_disposition_policy(self, event_id: str) -> DispositionPolicy | None:
         """Read disposition_policy from the SecurityEvent row.
 
         ``disposition_policy`` is a SecurityEvent column, **not** an
@@ -1052,8 +1033,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         """
         if self._session_factory is None:
             logger.debug(
-                "No session_factory available — cannot load disposition_policy"
-                " for event=%s",
+                "No session_factory available — cannot load disposition_policy for event=%s",
                 event_id,
             )
             return None
@@ -1062,15 +1042,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             event_row = await session.get(orm.SecurityEvent, event_id)
             if event_row is None:
                 logger.debug(
-                    "SecurityEvent row not found for event=%s —"
-                    " disposition_policy unknown",
+                    "SecurityEvent row not found for event=%s — disposition_policy unknown",
                     event_id,
                 )
                 return None
             if not event_row.disposition_policy:
                 logger.debug(
-                    "disposition_policy is empty/falsy for event=%s —"
-                    " treating as unknown",
+                    "disposition_policy is empty/falsy for event=%s — treating as unknown",
                     event_id,
                 )
                 return None
@@ -1078,8 +1056,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 return DispositionPolicy(event_row.disposition_policy)
             except ValueError:
                 logger.warning(
-                    "Unknown disposition_policy %r for event=%s,"
-                    " treating as None",
+                    "Unknown disposition_policy %r for event=%s, treating as None",
                     event_row.disposition_policy,
                     event_id,
                 )
@@ -1119,10 +1096,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         so phase 2 can merge the terminal writeback evaluation into its
         final routing decision.
         """
-        empty = {
+        failed_wb_set: set[str] = set()
+        blocked_wb_set: set[str] = set()
+        empty: dict[str, Any] = {
             "results": [],
-            "failed_wb": set(),
-            "blocked_wb": set(),
+            "failed_wb": failed_wb_set,
+            "blocked_wb": blocked_wb_set,
             "need_recovery": False,
             "need_manual": False,
         }
@@ -1137,7 +1116,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 event_id,
             )
             empty["need_manual"] = True
-            empty["blocked_wb"].add(terminal_wb_id)
+            blocked_wb_set.add(terminal_wb_id)
             return empty
 
         try:
@@ -1158,7 +1137,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         terminal_wb_id,
                         event_id,
                     )
-                    empty["blocked_wb"].add(terminal_wb_id)
+                    blocked_wb_set.add(terminal_wb_id)
                     empty["need_manual"] = True
                     return empty
 
@@ -1197,11 +1176,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     )
                     if man:
                         empty["need_manual"] = True
-                        empty["blocked_wb"].add(terminal_wb_id)
+                        blocked_wb_set.add(terminal_wb_id)
                     elif rec:
                         empty["need_recovery"] = True
                         if wb_status in (WritebackStatus.FAILED, WritebackStatus.PARTIAL):
-                            empty["failed_wb"].add(terminal_wb_id)
+                            failed_wb_set.add(terminal_wb_id)
 
                 return empty
         except Exception as exc:
@@ -1213,7 +1192,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             )
             empty["need_manual"] = True
             if terminal_wb_id:
-                empty["blocked_wb"].add(terminal_wb_id)
+                blocked_wb_set.add(terminal_wb_id)
             return empty
 
     # ------------------------------------------------------------------ #
@@ -1359,8 +1338,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         if self.working_memory is None:
             result.wm_persisted = False
             logger.debug(
-                "No working_memory available — verification_result not persisted"
-                " for event=%s",
+                "No working_memory available — verification_result not persisted for event=%s",
                 event_id,
             )
             return
@@ -1401,9 +1379,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         "action_id": item.action_id,
                         "effect_status": item.effect_status.value,
                         "writeback_status": (
-                            item.writeback_status.value
-                            if item.writeback_status
-                            else None
+                            item.writeback_status.value if item.writeback_status else None
                         ),
                         "verification_action_id": item.verification_action_id,
                         "detail": item.detail,
@@ -1462,11 +1438,7 @@ def _make_skipped_result(
             detail=detail,
         )
     wb_required = action.writeback_required and action.writeback_applicable
-    wb_readiness = (
-        action.writeback_readiness
-        if wb_required
-        else WritebackReadiness.NOT_REQUIRED
-    )
+    wb_readiness = action.writeback_readiness if wb_required else WritebackReadiness.NOT_REQUIRED
     wb_status = action.writeback_status if wb_required else None
     return VerificationActionResult(
         action_id=action.action_id,
@@ -1518,11 +1490,7 @@ def _action_from_row(row: orm.Action) -> Action:
         auto_execute=row.auto_execute,
         reason=row.reason,
         provider_name=row.provider_name,
-        execution_owner=(
-            ExecutionOwner(row.execution_owner)
-            if row.execution_owner
-            else None
-        ),
+        execution_owner=(ExecutionOwner(row.execution_owner) if row.execution_owner else None),
         execution_job_id=row.execution_job_id,
         tool_call_id=row.tool_call_id,
         idempotency_key=row.idempotency_key,
@@ -1534,11 +1502,7 @@ def _action_from_row(row: orm.Action) -> Action:
             else WritebackReadiness.NOT_REQUIRED
         ),
         writeback_block_reason=row.writeback_block_reason,
-        writeback_status=(
-            WritebackStatus(row.writeback_status)
-            if row.writeback_status
-            else None
-        ),
+        writeback_status=(WritebackStatus(row.writeback_status) if row.writeback_status else None),
         disposition_source_ref=(
             SourceObjectLocator.model_validate(row.disposition_source_ref)
             if row.disposition_source_ref
@@ -1547,11 +1511,7 @@ def _action_from_row(row: orm.Action) -> Action:
         superseded_by_revision=row.superseded_by_revision,
         executed_at=row.executed_at,
         effect_verification_status=row.effect_verification_status,
-        rollback_status=(
-            ActionStatus(row.rollback_status)
-            if row.rollback_status
-            else None
-        ),
+        rollback_status=(ActionStatus(row.rollback_status) if row.rollback_status else None),
         source_action_id=row.source_action_id,
         updated_at=row.updated_at,
     )

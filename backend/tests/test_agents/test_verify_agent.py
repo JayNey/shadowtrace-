@@ -205,9 +205,7 @@ class FakeEventBus:
         self.events: list[dict[str, Any]] = []
 
     async def publish_event(self, event_id: str, event_type: str, payload: dict[str, Any]) -> None:
-        self.events.append(
-            {"event_id": event_id, "type": event_type, "payload": payload}
-        )
+        self.events.append({"event_id": event_id, "type": event_type, "payload": payload})
 
 
 class FakeTraceService:
@@ -256,15 +254,9 @@ class FakeEventDispositionService:
         return _ActivateResult(
             activated=self.activated,
             action_id="act-terminal-00001",
-            skipped_reason=(
-                self._skipped_reason if not self.activated else None
-            ),
-            disposition_id=(
-                self._disposition_id if self.activated else None
-            ),
-            writeback_id=(
-                self._writeback_id if self.activated else None
-            ),
+            skipped_reason=(self._skipped_reason if not self.activated else None),
+            disposition_id=(self._disposition_id if self.activated else None),
+            writeback_id=(self._writeback_id if self.activated else None),
         )
 
 
@@ -337,9 +329,7 @@ class TestHappyPath:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.need_action_replan is True
         assert action.action_id in result.failed_actions
@@ -369,9 +359,7 @@ class TestHappyPath:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         r = result.results[0]
         assert r.effect_status == EffectStatus.SKIPPED
@@ -410,9 +398,7 @@ class TestHappyPath:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # EventDispositionService.activate_and_submit was called.
         assert len(ed_svc.calls) == 1
@@ -441,9 +427,7 @@ class TestHappyPath:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         r = result.results[0]
         assert r.effect_status == EffectStatus.SKIPPED
@@ -477,9 +461,7 @@ class TestDegradation:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
         # All verification tools unavailable → escalated (need_manual_resolution).
@@ -508,9 +490,7 @@ class TestDegradation:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
         assert "verification_tool_error" in (result.results[0].detail or "")
@@ -541,9 +521,7 @@ class TestDependencyFailure:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result is not None
         assert result.overall_status == VerificationOverallStatus.SUCCESS
 
@@ -562,9 +540,7 @@ class TestDependencyFailure:
         )
         # No mock on _load_execution_state → uses real (but sessionless) path.
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert len(result.results) == 1
         assert result.results[0].effect_status == EffectStatus.SKIPPED
 
@@ -593,9 +569,7 @@ class TestDependencyFailure:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         # Phase 1 passes, phase 2 activation unavailable → manual.
         assert result.need_manual_resolution is True
         assert result.overall_status == VerificationOverallStatus.MANUAL_RESOLUTION
@@ -728,9 +702,7 @@ class TestStateMachine:
 
         for _ in range(2):
             agent = VerifyAgent(
-                tool_executor=_mock_executor(
-                    {"check_ip_block_status": _tool_result_success(True)}
-                ),
+                tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
                 working_memory=FakeWorkingMemory(),
                 trace_service=FakeTraceService(),
             )
@@ -777,9 +749,7 @@ class TestWriteback:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         # Writeback failed → recovery needed, NOT action replan.
         assert result.need_action_replan is False
         assert result.need_writeback_recovery is True
@@ -909,9 +879,7 @@ class TestAcceptanceCriteria:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.overall_status == VerificationOverallStatus.SUCCESS
 
     async def test_a1_writeback_fails_event_not_success(self):
@@ -940,9 +908,7 @@ class TestAcceptanceCriteria:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.overall_status != VerificationOverallStatus.SUCCESS
 
     async def test_a2_effect_failure_no_disposition_call(self):
@@ -973,9 +939,7 @@ class TestAcceptanceCriteria:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.need_action_replan is True
         assert len(ed_svc.calls) == 0  # NOT called
 
@@ -1005,9 +969,7 @@ class TestAcceptanceCriteria:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.need_action_replan is False
         assert result.need_writeback_recovery is True
 
@@ -1032,9 +994,7 @@ class TestAcceptanceCriteria:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.results[0].effect_status == EffectStatus.SKIPPED
         assert "non_verifiable" in (result.results[0].detail or "")
 
@@ -1066,9 +1026,7 @@ class TestAcceptanceCriteria:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(actions=[immediate, deferred])
-        )
+        result = await agent.execute(_input(actions=[immediate, deferred]))
 
         deferred_results = [r for r in result.results if r.action_id == deferred.action_id]
         assert len(deferred_results) == 1
@@ -1112,9 +1070,7 @@ class TestAcceptanceCriteria:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=deferred.event_id, actions=[deferred])
-        )
+        result = await agent.execute(_input(event_id=deferred.event_id, actions=[deferred]))
 
         # Phase 1: deferred → skipped (not failed).
         r = result.results[0]
@@ -1157,9 +1113,7 @@ class TestAcceptanceCriteria:
         agent1._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
-        result1 = await agent1.execute(
-            _input(event_id="evt-20260725-00000001", actions=[action1])
-        )
+        result1 = await agent1.execute(_input(event_id="evt-20260725-00000001", actions=[action1]))
         assert result1.results[0].effect_status == EffectStatus.FAILED
 
         # Case 2: tool throws error
@@ -1172,9 +1126,7 @@ class TestAcceptanceCriteria:
         job2 = _job(job_id="job-0002", action_id="act-verify-02")
 
         agent2 = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_error("crash")}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_error("crash")}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
         )
@@ -1184,9 +1136,7 @@ class TestAcceptanceCriteria:
         agent2._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
-        result2 = await agent2.execute(
-            _input(event_id="evt-20260725-00000002", actions=[action2])
-        )
+        result2 = await agent2.execute(_input(event_id="evt-20260725-00000002", actions=[action2]))
         assert result2.results[0].effect_status == EffectStatus.UNVERIFIABLE
 
 
@@ -1196,14 +1146,21 @@ class TestAcceptanceCriteria:
 
 
 class TestVerificationMapping:
-
     async def test_all_response_tools_have_mapping(self):
         """Every baseline response tool has a verification mapping entry or is skipped."""
         response_tools = [
-            "block_ip", "block_domain", "isolate_host", "quarantine_file",
-            "block_process", "scan_host_for_virus", "disable_account",
-            "force_logout", "reset_password", "revoke_token",
-            "create_ticket", "notify_security_team",
+            "block_ip",
+            "block_domain",
+            "isolate_host",
+            "quarantine_file",
+            "block_process",
+            "scan_host_for_virus",
+            "disable_account",
+            "force_logout",
+            "reset_password",
+            "revoke_token",
+            "create_ticket",
+            "notify_security_team",
         ]
         for tool in response_tools:
             result = resolve_verification_tool(tool, None)
@@ -1223,9 +1180,7 @@ class TestVerificationMapping:
     async def test_provider_override(self):
         """Provider manifest can override the baseline mapping."""
         override = {"block_ip": {"ip": "custom_check_ip_advanced"}}
-        result = resolve_verification_tool(
-            "block_ip", "ip", provider_manifest_overrides=override
-        )
+        result = resolve_verification_tool("block_ip", "ip", provider_manifest_overrides=override)
         assert result == "custom_check_ip_advanced"
 
     async def test_rollback_tools_mapped(self):
@@ -1235,16 +1190,14 @@ class TestVerificationMapping:
             resolve_verification_tool("cancel_host_isolation", "host")
             == "check_host_isolation_status"
         )
-        assert (
-            resolve_verification_tool("restore_file", "file")
-            == "check_file_quarantine_status"
-        )
+        assert resolve_verification_tool("restore_file", "file") == "check_file_quarantine_status"
 
     async def test_provider_override_can_un_skip(self):
         """Provider manifest can override a None baseline to enable verification."""
         # create_ticket baseline is {"ticket": None} — skipped by default.
         result = resolve_verification_tool(
-            "create_ticket", "ticket",
+            "create_ticket",
+            "ticket",
             provider_manifest_overrides={"create_ticket": {"ticket": "check_ticket_status"}},
         )
         assert result == "check_ticket_status"
@@ -1296,9 +1249,7 @@ class TestRegressionShouldFix:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         r = result.results[0]
         assert r.effect_status == EffectStatus.UNVERIFIABLE
@@ -1327,9 +1278,7 @@ class TestRegressionShouldFix:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         r = result.results[0]
         assert r.effect_status == EffectStatus.SKIPPED
@@ -1354,9 +1303,7 @@ class TestRegressionShouldFix:
         # Simulate the verification tool executor throwing, AND the
         # subsequent finalize call also failing.
         failing_executor = MagicMock()
-        failing_executor.call = AsyncMock(
-            side_effect=RuntimeError("tool exploded")
-        )
+        failing_executor.call = AsyncMock(side_effect=RuntimeError("tool exploded"))
 
         agent = VerifyAgent(
             tool_executor=failing_executor,
@@ -1376,9 +1323,7 @@ class TestRegressionShouldFix:
         )
 
         # Must not raise — the exception is caught and logged.
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
         # The detail should contain the exception TYPE name, not the raw message.
@@ -1400,9 +1345,7 @@ class TestRegressionShouldFix:
         job = _job(job_id="job-0001", action_id=action.action_id)
 
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -1421,9 +1364,7 @@ class TestRegressionShouldFix:
         )
 
         # Should not crash — the exception is caught inside _run_verification_tool.
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
 
@@ -1446,9 +1387,7 @@ class TestRegressionShouldFix:
         job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -1461,9 +1400,7 @@ class TestRegressionShouldFix:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Action replan NOT triggered by writeback failure alone.
         assert result.need_action_replan is False
@@ -1495,9 +1432,7 @@ class TestRegressionShouldFix:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id="evt-20260725-00000001", actions=[])
-        )
+        result = await agent.execute(_input(event_id="evt-20260725-00000001", actions=[]))
 
         # Phase 2 was invoked (activation called).
         assert len(ed_svc.calls) == 1
@@ -1515,9 +1450,7 @@ class TestRegressionShouldFix:
         event_id = "evt-20260725-00000001"
 
         agent1 = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -1528,14 +1461,10 @@ class TestRegressionShouldFix:
         agent1._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
-        result1 = await agent1.execute(
-            _input(event_id=event_id, actions=[action])
-        )
+        result1 = await agent1.execute(_input(event_id=event_id, actions=[action]))
 
         agent2 = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -1546,15 +1475,12 @@ class TestRegressionShouldFix:
         agent2._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
-        result2 = await agent2.execute(
-            _input(event_id=event_id, actions=[action])
-        )
+        result2 = await agent2.execute(_input(event_id=event_id, actions=[action]))
 
         # Both executions produce the same deterministic verification_action_id.
         assert result1.results[0].verification_action_id is not None
         assert (
-            result1.results[0].verification_action_id
-            == result2.results[0].verification_action_id
+            result1.results[0].verification_action_id == result2.results[0].verification_action_id
         )
 
     async def test_disposition_activation_failure_skips_writeback_eval(self):
@@ -1576,9 +1502,7 @@ class TestRegressionShouldFix:
         job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(activated=False, skipped_reason="capability_blocked")
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -1591,15 +1515,14 @@ class TestRegressionShouldFix:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Activation was attempted.
         assert len(ed_svc.calls) == 1
         # Activation failed → manual resolution, NOT writeback recovery.
         assert result.need_manual_resolution is True
         assert result.overall_status == VerificationOverallStatus.MANUAL_RESOLUTION
+
 
 # --------------------------------------------------------------------------- #
 # Working memory write test
@@ -1680,9 +1603,7 @@ class TestSuggestedBoundary:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # The verification tool must NOT be called for UNKNOWN actions.
         assert not tool_called
@@ -1712,9 +1633,7 @@ class TestSuggestedBoundary:
 
         ed_svc = ThrowingEDS()
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_disposition_service=ed_svc,
@@ -1726,9 +1645,7 @@ class TestSuggestedBoundary:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Phase 1 passes, but phase 2 activation throws → manual escalation.
         assert result.need_manual_resolution is True
@@ -1752,9 +1669,7 @@ class TestSuggestedBoundary:
             data={"detail": "observation complete"},  # no is_verified
         )
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": incomplete_result}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": incomplete_result}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
         )
@@ -1765,9 +1680,7 @@ class TestSuggestedBoundary:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
         assert "missing_is_verified" in (result.results[0].detail or "")
@@ -1794,16 +1707,14 @@ class TestSuggestedBoundary:
         outbox_map = {
             action.action_id: [
                 StubOutbox(action.action_id, "wbk-aaa"),
-                StubOutbox(action.action_id, ""),       # empty → skipped
+                StubOutbox(action.action_id, ""),  # empty → skipped
                 StubOutbox(action.action_id, "wbk-bbb"),
             ]
         }
 
         ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_disposition_service=ed_svc,
@@ -1815,13 +1726,12 @@ class TestSuggestedBoundary:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Phase 2 writeback evaluation includes the collected writeback IDs.
         phase2_results = [
-            r for r in result.results
+            r
+            for r in result.results
             if r.action_id == action.action_id and r.detail == "writeback_confirmed"
         ]
         assert len(phase2_results) == 1
@@ -1836,9 +1746,7 @@ class TestSuggestedBoundary:
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
         )
@@ -1849,9 +1757,7 @@ class TestSuggestedBoundary:
             return_value=None,  # unknown policy
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Phase 1 passes, but unknown disposition_policy → manual.
         assert result.need_manual_resolution is True
@@ -1870,9 +1776,7 @@ class TestSuggestedBoundary:
             status=ExecutionJobStatus.PARTIAL_SUCCESS,
         )
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
         )
@@ -1883,9 +1787,7 @@ class TestSuggestedBoundary:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Partial success action status is in _EXECUTED_STATUSES → verified.
         assert result.results[0].action_id == action.action_id
@@ -1939,9 +1841,7 @@ class TestPR7ReviewFixes:
         await wm.write(action.event_id, "triage_result", {"score": 85})
 
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=wm,
             trace_service=FakeTraceService(),
         )
@@ -1973,9 +1873,7 @@ class TestPR7ReviewFixes:
         captured_job_id: list[str | None] = []
 
         async def capture_call(tool_name, params, event_id, **kw):
-            captured_job_id.append(
-                (params.get("parameters") or {}).get("job_id")
-            )
+            captured_job_id.append((params.get("parameters") or {}).get("job_id"))
             return _tool_result_success(True)
 
         agent = VerifyAgent(
@@ -2031,9 +1929,7 @@ class TestPR7ReviewFixes:
         mock_factory.return_value = None  # won't be used — side_effect wins
 
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -2047,9 +1943,7 @@ class TestPR7ReviewFixes:
         )
 
         # Must not crash — the persist failure is caught and logged.
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # The verification observation still proceeds despite DB failure.
         assert result.results[0].effect_status == EffectStatus.VERIFIED
@@ -2076,9 +1970,7 @@ class TestPR7ReviewFixes:
             writeback_id="wbk-needs-db-verify",
         )
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_disposition_service=ed_svc,
@@ -2091,9 +1983,7 @@ class TestPR7ReviewFixes:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Terminal writeback receipt cannot be verified without DB.
         assert result.need_manual_resolution is True
@@ -2130,9 +2020,7 @@ class TestPR7ReviewFixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         r = result.results[0]
         assert r.effect_status == EffectStatus.UNVERIFIABLE
@@ -2172,14 +2060,12 @@ class TestPR7ReviewFixes:
         # Mock executor: block_ip verification fails (FAILED),
         # block_domain verification throws tool error (UNVERIFIABLE).
         agent = VerifyAgent(
-            tool_executor=_mock_executor({
-                "check_ip_block_status": _tool_result_success(
-                    False, "not blocked"
-                ),
-                "check_domain_block_status": _tool_result_error(
-                    "observation unavailable"
-                ),
-            }),
+            tool_executor=_mock_executor(
+                {
+                    "check_ip_block_status": _tool_result_success(False, "not blocked"),
+                    "check_domain_block_status": _tool_result_error("observation unavailable"),
+                }
+            ),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
         )
@@ -2222,9 +2108,7 @@ class TestPR7ReviewFixes:
         results = []
         for _ in range(2):
             agent = VerifyAgent(
-                tool_executor=_mock_executor(
-                    {"check_ip_block_status": _tool_result_success(True)}
-                ),
+                tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
                 working_memory=FakeWorkingMemory(),
                 trace_service=FakeTraceService(),
                 event_bus=FakeEventBus(),
@@ -2235,9 +2119,7 @@ class TestPR7ReviewFixes:
             agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
                 return_value=DispositionPolicy.NOT_REQUIRED,
             )
-            result = await agent.execute(
-                _input(event_id=event_id, actions=[action])
-            )
+            result = await agent.execute(_input(event_id=event_id, actions=[action]))
             results.append(result)
 
         # Same verification_action_id across runs.
@@ -2303,9 +2185,7 @@ class TestPR7ReviewFixes:
         mock_factory = MagicMock(side_effect=_session_ctx)
 
         agent = VerifyAgent(session_factory=mock_factory)
-        await agent._finalize_verification_action(
-            action, target_status=ActionStatus.SUCCESS
-        )
+        await agent._finalize_verification_action(action, target_status=ActionStatus.SUCCESS)
 
         # Domain object status must NOT have been updated — the DB
         # commit failed, so the in-memory Action must stay at its
@@ -2361,9 +2241,7 @@ class TestReviewRound2Fixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # The tool was unavailable → UNVERIFIABLE.
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
@@ -2406,9 +2284,7 @@ class TestReviewRound2Fixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
         assert len(captured_statuses) == 1
@@ -2430,9 +2306,7 @@ class TestReviewRound2Fixes:
 
         # Simulate tool_executor.call throwing.
         failing_executor = MagicMock()
-        failing_executor.call = AsyncMock(
-            side_effect=RuntimeError("tool exploded")
-        )
+        failing_executor.call = AsyncMock(side_effect=RuntimeError("tool exploded"))
 
         agent = VerifyAgent(
             tool_executor=failing_executor,
@@ -2451,9 +2325,7 @@ class TestReviewRound2Fixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         r = result.results[0]
         assert r.effect_status == EffectStatus.UNVERIFIABLE
@@ -2497,9 +2369,7 @@ class TestReviewRound2Fixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id="evt-20260725-00000001", actions=actions)
-        )
+        result = await agent.execute(_input(event_id="evt-20260725-00000001", actions=actions))
 
         # All UNKNOWN → all UNVERIFIABLE.
         assert all(r.effect_status == EffectStatus.UNVERIFIABLE for r in result.results)
@@ -2545,9 +2415,7 @@ class TestReviewRound2Fixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         r = result.results[0]
         assert r.effect_status == EffectStatus.UNVERIFIABLE
@@ -2608,10 +2476,10 @@ class TestBlockerFixes:
 
         # Build a mock DB session that only returns "act-in-db" for the
         # Action query.  Jobs query returns both since both have job IDs.
-        import app.db.models as orm_mod
 
         class _ActionRow:
             """Minimal stub whose attributes satisfy _action_from_row."""
+
             action_id: str
             event_id: str = "evt-20260725-00000001"
             plan_revision: int = 1
@@ -2653,6 +2521,7 @@ class TestBlockerFixes:
 
         class _JobRow:
             """Minimal stub whose attributes satisfy _job_from_row."""
+
             def __init__(
                 self,
                 action_id: str,
@@ -2703,9 +2572,7 @@ class TestBlockerFixes:
                 # Third+ call: Outbox query → empty.
                 return _Result([])
 
-            async def get(
-                self, model: type[Any], ident: Any, **kwargs: Any
-            ) -> Any | None:
+            async def get(self, model: type[Any], ident: Any, **kwargs: Any) -> Any | None:
                 return None
 
         from contextlib import asynccontextmanager
@@ -2766,9 +2633,7 @@ class TestBlockerFixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # All UNVERIFIABLE + no FAILED → systemic failure → FAILED.
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
@@ -2792,9 +2657,11 @@ class TestBlockerFixes:
 
         # All tool calls return errors → UNVERIFIABLE.
         agent = VerifyAgent(
-            tool_executor=_mock_executor({
-                "check_ip_block_status": _tool_result_error("provider down"),
-            }),
+            tool_executor=_mock_executor(
+                {
+                    "check_ip_block_status": _tool_result_error("provider down"),
+                }
+            ),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -2806,9 +2673,7 @@ class TestBlockerFixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
         assert result.overall_status == VerificationOverallStatus.FAILED
@@ -2838,10 +2703,12 @@ class TestBlockerFixes:
 
         # action1: verified OK, action2: tool error → UNVERIFIABLE.
         agent = VerifyAgent(
-            tool_executor=_mock_executor({
-                "check_ip_block_status": _tool_result_success(True),
-                "check_domain_block_status": _tool_result_error("observation down"),
-            }),
+            tool_executor=_mock_executor(
+                {
+                    "check_ip_block_status": _tool_result_success(True),
+                    "check_domain_block_status": _tool_result_error("observation down"),
+                }
+            ),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -2888,9 +2755,11 @@ class TestShouldFixFixes:
         # but with a provider override it should map to check_ticket_status.
         overrides = {"create_ticket": {"ticket": "check_ticket_status"}}
         agent = VerifyAgent(
-            tool_executor=_mock_executor({
-                "check_ticket_status": _tool_result_success(True),
-            }),
+            tool_executor=_mock_executor(
+                {
+                    "check_ticket_status": _tool_result_success(True),
+                }
+            ),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -2903,9 +2772,7 @@ class TestShouldFixFixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # With the override, create_ticket should be VERIFIED (not SKIPPED).
         r = result.results[0]
@@ -2936,9 +2803,7 @@ class TestShouldFixFixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Without override, create_ticket is non-verifiable → SKIPPED.
         r = result.results[0]
@@ -2953,24 +2818,18 @@ class TestShouldFixFixes:
         # None is also a valid key (no status yet).
         covered = set(_WRITEBACK_STATUS_ROUTING.keys())
         covered.discard(None)
-        assert covered == all_statuses, (
-            f"Missing writeback statuses: {all_statuses - covered}"
-        )
+        assert covered == all_statuses, f"Missing writeback statuses: {all_statuses - covered}"
 
     async def test_failed_writeback_status_routes_to_recovery(self):
         """FAILED writeback → recovery (not success, not manual)."""
-        confirmed, recovery, manual, _detail = _WRITEBACK_STATUS_ROUTING[
-            WritebackStatus.FAILED
-        ]
+        confirmed, recovery, manual, _detail = _WRITEBACK_STATUS_ROUTING[WritebackStatus.FAILED]
         assert confirmed is False
         assert recovery is True
         assert manual is False
 
     async def test_partial_writeback_status_routes_to_recovery(self):
         """PARTIAL writeback → recovery (not success, not manual)."""
-        confirmed, recovery, manual, _detail = _WRITEBACK_STATUS_ROUTING[
-            WritebackStatus.PARTIAL
-        ]
+        confirmed, recovery, manual, _detail = _WRITEBACK_STATUS_ROUTING[WritebackStatus.PARTIAL]
         assert confirmed is False
         assert recovery is True
         assert manual is False
@@ -3002,9 +2861,7 @@ class TestBoundaryFixes:
             return_value=DispositionPolicy.NOT_REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Must not crash, must produce UNVERIFIABLE.
         assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
@@ -3026,9 +2883,11 @@ class TestBoundaryFixes:
         vids: list[str | None] = []
         for _ in range(3):
             agent = VerifyAgent(
-                tool_executor=_mock_executor({
-                    "check_ip_block_status": _tool_result_success(True),
-                }),
+                tool_executor=_mock_executor(
+                    {
+                        "check_ip_block_status": _tool_result_success(True),
+                    }
+                ),
                 working_memory=FakeWorkingMemory(),
                 trace_service=FakeTraceService(),
                 event_bus=FakeEventBus(),
@@ -3039,16 +2898,12 @@ class TestBoundaryFixes:
             agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
                 return_value=DispositionPolicy.NOT_REQUIRED,
             )
-            result = await agent.execute(
-                _input(event_id=event_id, actions=[action])
-            )
+            result = await agent.execute(_input(event_id=event_id, actions=[action]))
             vids.append(result.results[0].verification_action_id)
 
         # All runs produce the same deterministic verification_action_id.
         assert all(v is not None for v in vids)
         assert len(set(vids)) == 1
-
-
 
 
 def _mock_executor(results: dict[str, ToolResult]) -> Any:

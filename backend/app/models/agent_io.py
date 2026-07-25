@@ -362,9 +362,7 @@ class VerificationActionResult(BaseModel):
                 EffectStatus.UNVERIFIABLE,
                 EffectStatus.SKIPPED,
             ):
-                raise ValueError(
-                    "writeback_required=true forbids writeback_readiness=NOT_REQUIRED"
-                )
+                raise ValueError("writeback_required=true forbids writeback_readiness=NOT_REQUIRED")
         return self
 
 
