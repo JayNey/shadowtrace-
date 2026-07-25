@@ -302,6 +302,7 @@ async def _seed_disposition_outbox(
     source_record_id: str,
     intent_kind: DispositionIntentKind = DispositionIntentKind.ENTITY_ACTION_SUBMIT,
     disposition_id: str | None = None,
+    source_sequence: int = 1,
 ) -> str:
     did = disposition_id or f"disp-{_sfx()}"
     async with session_factory() as session:
@@ -315,7 +316,7 @@ async def _seed_disposition_outbox(
                 closure_cycle=1,
                 source_record_id=source_record_id,
                 source_locator_hash=f"hash-{_sfx()}",
-                source_sequence=1,
+                source_sequence=source_sequence,
                 intent_kind=intent_kind.value,
                 logical_slot="default",
                 idempotency_key=f"idem-{_sfx()}",
@@ -942,6 +943,7 @@ async def test_rollback_action_multiple_dispositions_creates_multiple_compensati
         event_id=event_id,
         source_record_id=source_record_id,
         intent_kind=DispositionIntentKind.EXECUTION_RESULT_RECORD,
+        source_sequence=2,
     )
 
     mock_sync = _MockDispositionSync()
