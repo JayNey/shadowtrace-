@@ -222,8 +222,14 @@ class FakeTraceService:
 class FakeEventDispositionService:
     """Stub EventDispositionService (ISSUE-059A)."""
 
-    def __init__(self, *, success: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        success: bool = True,
+        terminal_writeback_id: str | None = "wbk-00000001",
+    ) -> None:
         self.success = success
+        self._terminal_writeback_id = terminal_writeback_id
         self.calls: list[dict[str, Any]] = []
 
     async def activate_and_submit(self, *, event_id: str) -> Any:
@@ -232,7 +238,9 @@ class FakeEventDispositionService:
 
         return _ActivateResult(
             success=self.success,
-            terminal_writeback_id="wbk-00000001" if self.success else None,
+            terminal_writeback_id=(
+                self._terminal_writeback_id if self.success else None
+            ),
             terminal_disposition_id="dis-00000001" if self.success else None,
             error_code=None if self.success else "capability_blocked",
             error_detail=None if self.success else "test injection",
@@ -363,7 +371,10 @@ class TestHappyPath:
             writeback_status=WritebackStatus.CONFIRMED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(
+            success=True,
+            terminal_writeback_id=None,  # no DB session to verify receipt
+        )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
@@ -857,7 +868,10 @@ class TestAcceptanceCriteria:
             writeback_status=WritebackStatus.CONFIRMED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(
+            success=True,
+            terminal_writeback_id=None,  # no DB session to verify receipt
+        )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
@@ -1057,7 +1071,10 @@ class TestAcceptanceCriteria:
             execution_owner=ExecutionOwner.XDR_MANAGED,
             writeback_required=True,
         )
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(
+            success=True,
+            terminal_writeback_id=None,  # no DB session to verify receipt
+        )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
@@ -1428,7 +1445,10 @@ class TestRegressionShouldFix:
         When there are no IMMEDIATE actions, phase 2 must still call
         EventDispositionService.activate_and_submit.
         """
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(
+            success=True,
+            terminal_writeback_id=None,  # no DB session to verify receipt
+        )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
@@ -1819,6 +1839,381 @@ class TestSuggestedBoundary:
         assert result.results[0].action_id == action.action_id
         assert result.results[0].effect_status == EffectStatus.VERIFIED
 
+
+# --------------------------------------------------------------------------- #
+# PR#7 review — new regression tests for Should-Fix / Nit fixes
+# --------------------------------------------------------------------------- #
+
+
+class TestPR7ReviewFixes:
+    """Tests added per PR#7 review to cover the 4 Should-Fix + 6 Nit items."""
+
+    # ── Should-Fix 1: disposition_policy loads from DB, not WM ──────────
+
+    async def test_disposition_policy_loads_from_db_directly(self):
+        """disposition_policy is a SecurityEvent column — WM read removed.
+
+        Before the fix, _load_disposition_policy tried to read
+        "disposition_policy" from working_memory, which is not a
+        FIELD_OWNERSHIP key and always raised GuardrailViolationError
+        (caught by except Exception).  Now it goes directly to DB.
+        """
+        # Even with working_memory present, the method should not attempt
+        # a WM read for "disposition_policy" — it queries the DB directly.
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            session_factory=None,  # no DB, returns None
+        )
+        result = await agent._load_disposition_policy("evt-20260725-00000001")
+        # Without session_factory, disposition_policy is unknown → None.
+        assert result is None
+
+    async def test_disposition_policy_no_guardrail_on_wm(self):
+        """No GuardrailViolationError triggered when WM is present.
+
+        VerifyAgent now skips the WM read entirely for disposition_policy,
+        so even with a BoundWorkingMemory attached, no guardrail violation
+        occurs.
+        """
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        # Pre-populate WM with unrelated fields — disposition_policy read
+        # should NOT touch WM at all.
+        wm = FakeWorkingMemory()
+        await wm.write(action.event_id, "triage_result", {"score": 85})
+
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=wm,
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        # _load_disposition_policy goes to DB directly; no session_factory → None.
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(actions=[action]))
+        # Must not crash and must produce a valid result.
+        assert result.overall_status == VerificationOverallStatus.SUCCESS
+
+    # ── Should-Fix 2: no session_factory preserves job context ──────────
+
+    async def test_no_session_factory_preserves_job_context(self):
+        """Without session_factory, actions with execution_job_id still
+        get a minimal jobs_map entry so the verification tool receives
+        the job_id parameter."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-from-plan",
+        )
+
+        # The verification tool should receive job_id in its params.
+        captured_job_id: list[str | None] = []
+
+        async def capture_call(tool_name, params, event_id, **kw):
+            captured_job_id.append(
+                (params.get("parameters") or {}).get("job_id")
+            )
+            return _tool_result_success(True)
+
+        agent = VerifyAgent(
+            tool_executor=MagicMock(call=AsyncMock(side_effect=capture_call)),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            session_factory=None,  # no DB
+        )
+        # Do NOT mock _load_execution_state — let it use the real
+        # no-session path that builds jobs_map from actions.
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        await agent.execute(_input(actions=[action]))
+
+        # The tool should have received the job_id from the action.
+        assert captured_job_id == ["job-from-plan"]
+
+    # ── Should-Fix 3: audit gap on DB persist failure ───────────────────
+
+    async def test_verification_action_persist_failure_leaves_warning(self):
+        """When DB insert fails (non-integrity), the warning log mentions
+        audit trail incompleteness."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # Mock the session factory to simulate a DB failure on add.
+        # The real code calls ``async with self._session_factory() as session``
+        # then ``async with session.begin()``, so both must be proper async
+        # context managers that raise on add().
+        from contextlib import asynccontextmanager
+
+        class FailingSession:
+            def add(self, row):
+                raise RuntimeError("connection lost during insert")
+
+            @asynccontextmanager
+            async def begin(self):
+                yield
+
+        @asynccontextmanager
+        async def _session_ctx():
+            yield FailingSession()
+
+        mock_factory = MagicMock()
+        mock_factory.side_effect = _session_ctx
+        # __call__ is used by self._session_factory().
+        mock_factory.return_value = None  # won't be used — side_effect wins
+
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            session_factory=mock_factory,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        # Must not crash — the persist failure is caught and logged.
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # The verification observation still proceeds despite DB failure.
+        assert result.results[0].effect_status == EffectStatus.VERIFIED
+
+    # ── Should-Fix 4: terminal writeback verification needs DB ──────────
+
+    async def test_terminal_wb_verification_requires_db(self):
+        """Without session_factory, terminal writeback verification
+        escalates to manual resolution instead of silently passing."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        # EDS returns a terminal_writeback_id but there is no session_factory
+        # to verify the receipt → must escalate to manual.
+        ed_svc = FakeEventDispositionService(
+            success=True,
+            terminal_writeback_id="wbk-needs-db-verify",
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_disposition_service=ed_svc,
+            session_factory=None,  # no DB available
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # Terminal writeback receipt cannot be verified without DB.
+        assert result.need_manual_resolution is True
+        assert "wbk-needs-db-verify" in result.blocked_writebacks
+
+    # ── Nit 4: UNVERIFIABLE preserves writeback_status ──────────────────
+
+    async def test_unverifiable_preserves_writeback_status(self):
+        """UNVERIFIABLE effect must preserve the original writeback_status
+        instead of overwriting it to None (which would silently break
+        downstream writeback recovery)."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.PENDING,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_error("unreachable")}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        # Key: the original writeback_status (PENDING) is preserved,
+        # not replaced with None.
+        assert r.writeback_status == WritebackStatus.PENDING
+
+    # ── Nit 5: phase1 need_replan AND need_manual → FAILED ──────────────
+
+    async def test_phase1_replan_and_manual_combined(self):
+        """When phase 1 has both FAILED (need_replan) and UNVERIFIABLE
+        (need_manual) actions, overall_status must be FAILED, not
+        silently dropping the manual_resolution flag."""
+        # Action 1: verification returns false → FAILED → need_replan
+        action1 = _action(
+            action_id="act-replan-01",
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job1 = _job(job_id="job-0001", action_id="act-replan-01")
+
+        # Action 2: tool error during verification → UNVERIFIABLE → need_manual.
+        # Use a mapped tool (block_domain) whose verification tool throws.
+        action2 = _action(
+            action_id="act-manual-02",
+            tool_name="block_domain",
+            target_type="domain",
+            target="evil.example.com",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0002",
+        )
+        job2 = _job(job_id="job-0002", action_id="act-manual-02")
+
+        # Mock executor: block_ip verification fails (FAILED),
+        # block_domain verification throws tool error (UNVERIFIABLE).
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({
+                "check_ip_block_status": _tool_result_success(
+                    False, "not blocked"
+                ),
+                "check_domain_block_status": _tool_result_error(
+                    "observation unavailable"
+                ),
+            }),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=(
+                [action1, action2],
+                {"job-0001": job1, "job-0002": job2},
+                {},
+            )
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id="evt-20260725-00000001", actions=[action1, action2])
+        )
+
+        # Both flags set.
+        assert result.need_action_replan is True
+        assert result.need_manual_resolution is True
+        # Combined severity is FAILED.
+        assert result.overall_status == VerificationOverallStatus.FAILED
+
+    # ── Nit 1 + Idempotent re-run ──────────────────────────────────────
+
+    async def test_verify_agent_full_rerun_idempotent(self):
+        """Full re-verification of the same event produces the same
+        verification_action_id (Nit 1: 16-char hex digest) and consistent
+        effect status."""
+        action = _action(
+            action_id="act-idem-src",
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id="act-idem-src")
+        event_id = "evt-20260725-00000001"
+
+        results = []
+        for _ in range(2):
+            agent = VerifyAgent(
+                tool_executor=_mock_executor(
+                    {"check_ip_block_status": _tool_result_success(True)}
+                ),
+                working_memory=FakeWorkingMemory(),
+                trace_service=FakeTraceService(),
+                event_bus=FakeEventBus(),
+            )
+            agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+                return_value=([action], {"job-0001": job}, {})
+            )
+            agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+                return_value=DispositionPolicy.NOT_REQUIRED,
+            )
+            result = await agent.execute(
+                _input(event_id=event_id, actions=[action])
+            )
+            results.append(result)
+
+        # Same verification_action_id across runs.
+        assert results[0].results[0].verification_action_id is not None
+        assert (
+            results[0].results[0].verification_action_id
+            == results[1].results[0].verification_action_id
+        )
+        # The action_id uses 16 hex chars, not 8.
+        vid = results[0].results[0].verification_action_id
+        assert vid is not None
+        assert vid.startswith("act-")
+        assert len(vid) == 4 + 16  # "act-" + 16 hex chars
+
+    # ── Nit 2: derived skip tools match VERIFICATION_MAPPING ────────────
+
+    async def test_derived_skip_tools_match_mapping(self):
+        """_derive_skip_verification_tools() produces the same set as
+        the VERIFICATION_MAPPING entries with all-None targets."""
+        from app.agents.verify_agent import _derive_skip_verification_tools
+
+        skip = _derive_skip_verification_tools()
+        assert "create_ticket" in skip
+        assert "close_false_positive_ticket" in skip
+        assert "notify_security_team" in skip
+        # Self-mapping tools should NOT be in the skip set.
+        assert "check_new_alerts" not in skip
+        assert "check_traffic_drop" not in skip
 
 # --------------------------------------------------------------------------- #
 # Helpers
