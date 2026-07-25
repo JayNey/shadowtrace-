@@ -496,9 +496,10 @@ async def test_activate_required_plan_submits_event_status_update(
         assert outboxes[0].closure_cycle == deferred.plan_revision
         assert outboxes[0].action_id == deferred.action_id
         receipt = await session.scalar(
-            select(orm.DispositionReceipt).where(
-                orm.DispositionReceipt.writeback_id == result.writeback_id
-            )
+            select(orm.DispositionReceipt)
+            .where(orm.DispositionReceipt.writeback_id == result.writeback_id)
+            .order_by(orm.DispositionReceipt.sequence.desc())
+            .limit(1)
         )
         assert receipt is not None
         assert receipt.status == WritebackStatus.CONFIRMED.value
@@ -719,33 +720,19 @@ async def test_activate_plan_revision_2_uses_closure_cycle_2(
     disposition_service: EventDispositionService,
     cleanup: None,
 ) -> None:
-    source_record_id = await _seed_connector_and_source(
-        session_factory,
-        mock_xdr_client=mock_xdr_client,
-    )
+    await _seed_connector_and_source(session_factory, mock_xdr_client=mock_xdr_client)
     event_id = await _create_event(session_factory, store)
-    old_action_id = f"act-rev1-{_sfx()}"
+    rev1_deferred = _deferred_action(
+        event_id=event_id,
+        action_id=f"act-rev1-{_sfx()}",
+        plan_revision=1,
+    )
+    await _insert_action(session_factory, event_id, rev1_deferred)
     async with session_factory() as session:
         async with session.begin():
-            session.add(
-                orm.DispositionOutbox(
-                    outbox_id=f"obx-rev1-{_sfx()}",
-                    writeback_id=f"wbk-rev1-{_sfx()}",
-                    disposition_id=f"disp-rev1-{_sfx()}",
-                    action_id=old_action_id,
-                    event_id=event_id,
-                    closure_cycle=1,
-                    source_record_id=source_record_id,
-                    source_locator_hash="hash-rev1",
-                    source_sequence=1,
-                    intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE.value,
-                    logical_slot="terminal",
-                    idempotency_key=f"idem-rev1-{_sfx()}",
-                    command_payload={"source_locator": _locator().model_dump(mode="json")},
-                    command_payload_sha256="rev1",
-                    delivery_status="delivered",
-                )
-            )
+            row = await session.get(orm.Action, rev1_deferred.action_id)
+            assert row is not None
+            row.superseded_by_revision = 2
     deferred = _deferred_action(event_id=event_id, plan_revision=2)
     immediate_id = f"act-imm-{_sfx()}"
     locator = _locator()
