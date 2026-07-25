@@ -618,6 +618,7 @@ async def investigate_event(
     # Enqueue orchestration as a background task (mode-dependent).
     settings = get_settings()
     mode = (settings.orchestration_mode or "graph").strip().lower()
+    task_mode = (settings.task_mode or "background").strip().lower()
 
     if mode == "analysis_only":
 
@@ -649,6 +650,11 @@ async def investigate_event(
                     logger.exception("Failed to mark event as FAILED: %s", event_id)
 
         background.add_task(_run_pipeline)
+        task_id = event_id
+    elif task_mode == "celery":
+        from app.tasks.investigation_tasks import dispatch_investigation
+
+        task_id = await dispatch_investigation(event_id)
     else:
         lease = get_event_lease()
         from app.orchestration.lease import generate_owner_id
@@ -708,10 +714,11 @@ async def investigate_event(
                     await lease.release(event_id, owner_id)
 
         background.add_task(_run_super_agent)
+        task_id = event_id
 
     return s.InvestigateResponse(
         event_id=event_id,
-        task_id=event_id,
+        task_id=task_id,
         status=event.status,
     )
 

@@ -356,7 +356,18 @@ def test_export_openapi_writes_valid_json(tmp_path: Path) -> None:
         "/api/v1/stats",
     ],
 )
-def test_placeholder_get_endpoints_validate(client: TestClient, path: str) -> None:
+def test_placeholder_get_endpoints_validate(
+    client: TestClient,
+    path: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if path == "/api/v1/tasks/task-1":
+
+        async def _resolve(_task_id: str) -> tuple[str, str | None]:
+            return "SUCCESS", s.EXAMPLE_EVENT_ID
+
+        monkeypatch.setattr("app.api.v1.execution_jobs.resolve_task_state", _resolve)
+
     # 200 implies the placeholder passed its response_model validation.
     resp = client.get(path, headers=_hdr("analyst"))
     assert resp.status_code == 200, resp.text
