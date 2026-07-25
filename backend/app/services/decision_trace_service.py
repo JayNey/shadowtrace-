@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
+from app.db.orm.approval import ApprovalRecordORM
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
 from app.models.enums import DecisionTraceEntryType
 
 logger = logging.getLogger(__name__)
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # Fixed ordering for entries sharing the same timestamp.
 _ENTRY_TYPE_ORDER: dict[DecisionTraceEntryType, int] = {
@@ -47,6 +50,33 @@ def _ts(obj: Any, *attrs: str) -> datetime | None:
     return None
 
 
+def _require_ts(obj: Any, *attrs: str) -> tuple[datetime, bool]:
+    """Return a timestamp, falling back to epoch when none is present."""
+    found = _ts(obj, *attrs)
+    if found is not None:
+        return found, False
+    return _EPOCH, True
+
+
+def _maybe_inferred_detail(base: dict[str, Any], inferred: bool) -> dict[str, Any]:
+    if not inferred:
+        return base
+    return {**base, "timestamp_inferred": True}
+
+
+def _agent_title(agent_name: str, status: str) -> str:
+    templates = {
+        "TriageAgent": f"{agent_name} 完成分诊：status={status}",
+        "RiskAgent": f"{agent_name} 完成风险评估：status={status}",
+        "EvidenceAgent": f"{agent_name} 完成证据收集：status={status}",
+        "PlannerAgent": f"{agent_name} 完成计划生成：status={status}",
+        "ResponseAgent": f"{agent_name} 完成响应方案：status={status}",
+        "VerifyAgent": f"{agent_name} 完成效果验证：status={status}",
+        "ReportAgent": f"{agent_name} 完成报告生成：status={status}",
+    }
+    return templates.get(agent_name, f"{agent_name} 执行完成：status={status}")
+
+
 # --------------------------------------------------------------------------- #
 # Per-source normalizers
 # --------------------------------------------------------------------------- #
@@ -55,23 +85,24 @@ def _ts(obj: Any, *attrs: str) -> datetime | None:
 def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEntry]:
     entries: list[DecisionTraceEntry] = []
     for row in rows:
-        ts = _ts(row, "started_at", "completed_at")
-        if ts is None:
-            continue
+        ts, inferred = _require_ts(row, "started_at", "completed_at")
         entries.append(
             DecisionTraceEntry(
                 entry_id=_new_entry_id(),
                 entry_type=DecisionTraceEntryType.AGENT_EXECUTION,
                 timestamp=ts,
                 actor=row.agent_name,
-                title=f"{row.agent_name} completed: status={row.status}",
-                detail={
-                    "agent_name": row.agent_name,
-                    "status": row.status,
-                    "duration_ms": row.duration_ms,
-                    "tokens_used": row.llm_tokens_used,
-                    "model": row.llm_model,
-                },
+                title=_agent_title(row.agent_name, row.status),
+                detail=_maybe_inferred_detail(
+                    {
+                        "agent_name": row.agent_name,
+                        "status": row.status,
+                        "duration_ms": row.duration_ms,
+                        "tokens_used": row.llm_tokens_used,
+                        "model": row.llm_model,
+                    },
+                    inferred,
+                ),
                 ref_id=row.trace_id,
             )
         )
@@ -81,23 +112,24 @@ def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEnt
 def _normalize_tool_calls(rows: list[orm.ToolCallLog]) -> list[DecisionTraceEntry]:
     entries: list[DecisionTraceEntry] = []
     for row in rows:
-        ts = _ts(row, "started_at", "completed_at")
-        if ts is None:
-            continue
+        ts, inferred = _require_ts(row, "started_at", "completed_at")
         entries.append(
             DecisionTraceEntry(
                 entry_id=_new_entry_id(),
                 entry_type=DecisionTraceEntryType.TOOL_CALL,
                 timestamp=ts,
                 actor=row.tool_name,
-                title=f"{row.tool_name} completed: status={row.status}",
-                detail={
-                    "tool_name": row.tool_name,
-                    "tool_category": row.tool_category,
-                    "status": row.status,
-                    "duration_ms": row.duration_ms,
-                    "retry_count": row.retry_count,
-                },
+                title=f"{row.tool_name} 工具调用完成：status={row.status}",
+                detail=_maybe_inferred_detail(
+                    {
+                        "tool_name": row.tool_name,
+                        "tool_category": row.tool_category,
+                        "status": row.status,
+                        "duration_ms": row.duration_ms,
+                        "retry_count": row.retry_count,
+                    },
+                    inferred,
+                ),
                 ref_id=row.call_id,
             )
         )
@@ -113,7 +145,7 @@ def _normalize_llm_calls(rows: list[orm.LLMCallLog]) -> list[DecisionTraceEntry]
                 entry_type=DecisionTraceEntryType.LLM_CALL,
                 timestamp=row.created_at,
                 actor=row.agent_name,
-                title=f"{row.agent_name} LLM call ({row.model_name}): {row.total_tokens} tokens",
+                title=f"{row.agent_name} LLM 调用（{row.model_name}）：{row.total_tokens} tokens",
                 detail={
                     "agent_name": row.agent_name,
                     "model_name": row.model_name,
@@ -141,7 +173,7 @@ def _normalize_state_transitions(rows: list[orm.EventAuditLog]) -> list[Decision
                 entry_type=DecisionTraceEntryType.STATE_TRANSITION,
                 timestamp=row.created_at,
                 actor=row.operator or "system",
-                title=f"{from_s} → {to_s}",
+                title=f"状态转换：{from_s} → {to_s}",
                 detail={
                     "from_status": row.from_status,
                     "to_status": row.to_status,
@@ -154,40 +186,33 @@ def _normalize_state_transitions(rows: list[orm.EventAuditLog]) -> list[Decision
     return entries
 
 
-def _normalize_approvals(
-    approval_records: list[dict[str, Any]],
-) -> list[DecisionTraceEntry]:
+def _normalize_approval_rows(rows: list[ApprovalRecordORM]) -> list[DecisionTraceEntry]:
     entries: list[DecisionTraceEntry] = []
-    for rec in approval_records:
-        ts_raw = rec.get("created_at") or rec.get("decided_at") or rec.get("timestamp")
-        ts: datetime | None = None
-        if isinstance(ts_raw, str):
-            try:
-                ts = datetime.fromisoformat(ts_raw.replace("Z", "+00:00"))
-            except (ValueError, TypeError):
-                pass
-        elif isinstance(ts_raw, datetime):
-            ts = ts_raw
-        if ts is None:
-            continue
-
-        decision = rec.get("decision") or rec.get("status") or "unknown"
-        operator = rec.get("operator") or rec.get("reviewed_by") or "system"
+    for row in rows:
+        ts, inferred = _require_ts(row, "decided_at", "requested_at")
+        operator = row.operator or "system"
+        reason = row.comment
+        if reason is None and isinstance(row.detail, dict):
+            reason = row.detail.get("reason")
         entries.append(
             DecisionTraceEntry(
                 entry_id=_new_entry_id(),
                 entry_type=DecisionTraceEntryType.APPROVAL,
                 timestamp=ts,
-                actor=str(operator),
-                title=f"Approval by {operator}: {decision}",
-                detail={
-                    "decision": decision,
-                    "operator": str(operator),
-                    "reason": rec.get("reason"),
-                    "action_id": rec.get("action_id"),
-                    "plan_revision": rec.get("plan_revision"),
-                },
-                ref_id=rec.get("decision_id") or rec.get("approval_id"),
+                actor=operator,
+                title=f"审批 {operator}：{row.decision}",
+                detail=_maybe_inferred_detail(
+                    {
+                        "decision": row.decision,
+                        "operator": operator,
+                        "reason": reason,
+                        "action_id": row.action_id,
+                        "plan_revision": row.plan_revision,
+                        "approval_cycle": row.approval_cycle,
+                    },
+                    inferred,
+                ),
+                ref_id=row.decision_id or row.approval_id,
             )
         )
     return entries
@@ -196,25 +221,25 @@ def _normalize_approvals(
 def _normalize_action_executions(rows: list[orm.ActionExecutionJob]) -> list[DecisionTraceEntry]:
     entries: list[DecisionTraceEntry] = []
     for row in rows:
-        ts = _ts(row, "created_at", "started_at")
-        if ts is None:
-            continue
+        ts, inferred = _require_ts(row, "started_at", "created_at", "updated_at")
         entries.append(
             DecisionTraceEntry(
                 entry_id=_new_entry_id(),
                 entry_type=DecisionTraceEntryType.ACTION_EXECUTION,
                 timestamp=ts,
                 actor=row.provider_name,
-                title=f"Action {row.action_id}: {row.status}",
-                detail={
-                    "job_id": row.job_id,
-                    "action_id": row.action_id,
-                    "provider_name": row.provider_name,
-                    "status": row.status,
-                    "attempt": row.attempt,
-                    "provider_code": row.provider_code,
-                    "provider_message": row.provider_message,
-                },
+                title=f"动作执行 {row.action_id}：{row.status}",
+                detail=_maybe_inferred_detail(
+                    {
+                        "job_id": row.job_id,
+                        "action_id": row.action_id,
+                        "provider_name": row.provider_name,
+                        "status": row.status,
+                        "attempt": row.attempt,
+                        "provider_code": row.provider_code,
+                    },
+                    inferred,
+                ),
                 ref_id=row.job_id,
             )
         )
@@ -224,25 +249,26 @@ def _normalize_action_executions(rows: list[orm.ActionExecutionJob]) -> list[Dec
 def _normalize_dispositions(rows: list[orm.DispositionOutbox]) -> list[DecisionTraceEntry]:
     entries: list[DecisionTraceEntry] = []
     for row in rows:
-        ts = _ts(row, "created_at", "delivered_at")
-        if ts is None:
-            continue
+        ts, inferred = _require_ts(row, "created_at", "delivered_at")
         entries.append(
             DecisionTraceEntry(
                 entry_id=_new_entry_id(),
                 entry_type=DecisionTraceEntryType.DISPOSITION,
                 timestamp=ts,
                 actor="system",
-                title=f"Disposition {row.disposition_id}: {row.intent_kind}",
-                detail={
-                    "disposition_id": row.disposition_id,
-                    "action_id": row.action_id,
-                    "intent_kind": row.intent_kind,
-                    "delivery_status": row.delivery_status,
-                    "writeback_status": row.latest_writeback_status,
-                    "closure_cycle": row.closure_cycle,
-                    "attempt": row.attempt,
-                },
+                title=f"处置命令 {row.disposition_id}：{row.intent_kind}",
+                detail=_maybe_inferred_detail(
+                    {
+                        "disposition_id": row.disposition_id,
+                        "action_id": row.action_id,
+                        "intent_kind": row.intent_kind,
+                        "delivery_status": row.delivery_status,
+                        "writeback_status": row.latest_writeback_status,
+                        "closure_cycle": row.closure_cycle,
+                        "attempt": row.attempt,
+                    },
+                    inferred,
+                ),
                 ref_id=row.outbox_id,
             )
         )
@@ -252,25 +278,26 @@ def _normalize_dispositions(rows: list[orm.DispositionOutbox]) -> list[DecisionT
 def _normalize_writebacks(rows: list[orm.DispositionReceipt]) -> list[DecisionTraceEntry]:
     entries: list[DecisionTraceEntry] = []
     for row in rows:
-        ts = _ts(row, "confirmed_at", "submitted_at", "observed_at")
-        if ts is None:
-            continue
+        ts, inferred = _require_ts(row, "confirmed_at", "submitted_at", "observed_at")
         entries.append(
             DecisionTraceEntry(
                 entry_id=_new_entry_id(),
                 entry_type=DecisionTraceEntryType.WRITEBACK,
                 timestamp=ts,
                 actor="system",
-                title=f"Writeback {row.writeback_id}: {row.status}",
-                detail={
-                    "writeback_id": row.writeback_id,
-                    "disposition_id": row.disposition_id,
-                    "action_id": row.action_id,
-                    "status": row.status,
-                    "confirmation_evidence": row.confirmation_evidence,
-                    "simulated": row.simulated,
-                    "sequence": row.sequence,
-                },
+                title=f"写回回执 {row.writeback_id}：{row.status}",
+                detail=_maybe_inferred_detail(
+                    {
+                        "writeback_id": row.writeback_id,
+                        "disposition_id": row.disposition_id,
+                        "action_id": row.action_id,
+                        "status": row.status,
+                        "confirmation_evidence": row.confirmation_evidence,
+                        "simulated": row.simulated,
+                        "sequence": row.sequence,
+                    },
+                    inferred,
+                ),
                 ref_id=row.writeback_id,
             )
         )
@@ -309,7 +336,6 @@ class DecisionTraceService:
         """
         all_entries: list[DecisionTraceEntry] = []
         missing: list[str] = []
-        approval_records: list[dict[str, Any]] = []
 
         async with self._session_factory() as session:
             # 1. Agent traces
@@ -344,13 +370,13 @@ class DecisionTraceService:
                 logger.warning("Failed to fetch audit logs for %s: %s", event_id, exc)
                 missing.append("event_audit_log")
 
-            # 5. Approvals (from event_context_snapshot JSONB)
+            # 5. Approvals (approval_record table — ISSUE-058)
             try:
-                approval_records = await self._fetch_approval_records(session, event_id)
-                all_entries.extend(_normalize_approvals(approval_records))
+                approval_rows = await self._fetch_approval_records(session, event_id)
+                all_entries.extend(_normalize_approval_rows(approval_rows))
             except Exception as exc:
                 logger.warning("Failed to fetch approvals for %s: %s", event_id, exc)
-                missing.append("approval_records")
+                missing.append("approval_record")
 
             # 6. Action execution jobs
             try:
@@ -379,10 +405,8 @@ class DecisionTraceService:
         # Sort: timestamp ascending, then entry_type order, then entry_id.
         all_entries.sort(key=_sort_key)
 
-        # Compute summary from the full (unfiltered) set.
-        summary = self._compute_summary(all_entries, approval_records)
+        summary = self._compute_summary(all_entries)
 
-        # Compute total_duration_ms from first to last entry.
         if all_entries:
             first_ts = all_entries[0].timestamp
             last_ts = all_entries[-1].timestamp
@@ -439,15 +463,13 @@ class DecisionTraceService:
 
     async def _fetch_approval_records(
         self, session: AsyncSession, event_id: str
-    ) -> list[dict[str, Any]]:
-        row = await session.get(orm.SecurityEvent, event_id)
-        if row is None or row.event_context_snapshot is None:
-            return []
-        ctx = row.event_context_snapshot
-        records = ctx.get("approval_records")
-        if isinstance(records, list):
-            return records
-        return []
+    ) -> list[ApprovalRecordORM]:
+        rows = await session.scalars(
+            select(ApprovalRecordORM)
+            .where(ApprovalRecordORM.event_id == event_id)
+            .order_by(ApprovalRecordORM.requested_at.asc())
+        )
+        return list(rows)
 
     async def _fetch_action_jobs(
         self, session: AsyncSession, event_id: str
@@ -488,10 +510,7 @@ class DecisionTraceService:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _compute_summary(
-        entries: list[DecisionTraceEntry],
-        approval_records: list[dict[str, Any]],
-    ) -> DecisionTraceSummary:
+    def _compute_summary(entries: list[DecisionTraceEntry]) -> DecisionTraceSummary:
         summary = DecisionTraceSummary()
         for entry in entries:
             if entry.entry_type == DecisionTraceEntryType.AGENT_EXECUTION:
@@ -513,11 +532,6 @@ class DecisionTraceService:
                 summary.disposition_count += 1
             elif entry.entry_type == DecisionTraceEntryType.WRITEBACK:
                 summary.writeback_count += 1
-
-        # approval_count should reflect the actual records even if some lack timestamps.
-        if summary.approval_count < len(approval_records):
-            summary.approval_count = len(approval_records)
-
         return summary
 
 

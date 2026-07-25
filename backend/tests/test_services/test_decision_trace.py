@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.db import models as orm
+from app.db.orm.approval import ApprovalRecordORM
 from app.models.decision_trace import DecisionTrace
 from app.models.enums import DecisionTraceEntryType
 from app.services.decision_trace_service import (
@@ -70,6 +71,7 @@ async def clean_tables(
             await session.execute(delete(orm.LLMCallLog))
             await session.execute(delete(orm.EventAuditLog))
             await session.execute(delete(orm.AgentTrace))
+            await session.execute(delete(ApprovalRecordORM))
             await session.execute(delete(orm.Action))
             await session.execute(delete(orm.Report))
             await session.execute(delete(orm.Evidence))
@@ -87,6 +89,7 @@ async def clean_tables(
             await session.execute(delete(orm.LLMCallLog))
             await session.execute(delete(orm.EventAuditLog))
             await session.execute(delete(orm.AgentTrace))
+            await session.execute(delete(ApprovalRecordORM))
             await session.execute(delete(orm.Action))
             await session.execute(delete(orm.Report))
             await session.execute(delete(orm.Evidence))
@@ -285,6 +288,38 @@ async def _seed_action(
     return aid
 
 
+async def _seed_approval_record(
+    session: AsyncSession,
+    event_id: str,
+    action_id: str,
+    *,
+    decision: str = "approved",
+    operator: str = "analyst-1",
+    comment: str = "valid threat",
+    requested_at: datetime = _SEED_NOW + timedelta(seconds=6),
+    decided_at: datetime | None = None,
+    plan_revision: int = 1,
+) -> str:
+    approval_id = _id("appr")
+    decision_id = _id("dec")
+    row = ApprovalRecordORM(
+        approval_id=approval_id,
+        action_id=action_id,
+        event_id=event_id,
+        plan_revision=plan_revision,
+        approval_cycle=0,
+        decision_id=decision_id,
+        required_level="L4",
+        decision=decision,
+        operator=operator,
+        comment=comment,
+        requested_at=requested_at,
+        decided_at=decided_at if decided_at is not None else requested_at,
+    )
+    session.add(row)
+    return decision_id
+
+
 async def _seed_action_job(
     session: AsyncSession,
     event_id: str,
@@ -377,20 +412,7 @@ class TestDecisionTraceFullTimeline:
 
         async with session_factory() as session:
             async with session.begin():
-                await _seed_security_event(
-                    session,
-                    event_id,
-                    approval_records=[
-                        {
-                            "decision": "approved",
-                            "operator": "analyst-1",
-                            "reason": "valid threat",
-                            "action_id": "act-approval",
-                            "plan_revision": 1,
-                            "created_at": (_SEED_NOW + timedelta(seconds=6)).isoformat(),
-                        }
-                    ],
-                )
+                await _seed_security_event(session, event_id)
                 await _seed_source_connector(session)
                 await _seed_source_object(session)
                 await _seed_agent_trace(session, event_id)  # ~0s
@@ -404,8 +426,15 @@ class TestDecisionTraceFullTimeline:
                     "scoring",
                     _SEED_NOW + timedelta(seconds=4),
                 )  # ~4s
-                # approval at ~6s via event_context_snapshot
                 action_id = await _seed_action(session, event_id)
+                await _seed_approval_record(
+                    session,
+                    event_id,
+                    action_id,
+                    operator="analyst-1",
+                    comment="valid threat",
+                    requested_at=_SEED_NOW + timedelta(seconds=6),
+                )  # ~6s
                 await _seed_action_job(session, event_id, action_id)  # ~7s
                 outbox_id, disposition_id = await _seed_disposition_outbox(
                     session, event_id, action_id
@@ -504,17 +533,7 @@ class TestDecisionTraceFullTimeline:
 
         async with session_factory() as session:
             async with session.begin():
-                await _seed_security_event(
-                    session,
-                    event_id,
-                    approval_records=[
-                        {
-                            "decision": "approved",
-                            "operator": "admin",
-                            "created_at": _SEED_NOW.isoformat(),
-                        }
-                    ],
-                )
+                await _seed_security_event(session, event_id)
                 await _seed_source_connector(session)
                 await _seed_source_object(session)
                 await _seed_agent_trace(session, event_id)
@@ -546,6 +565,14 @@ class TestDecisionTraceFullTimeline:
                 )
                 await _seed_audit_log(session, event_id)
                 action_id = await _seed_action(session, event_id)
+                await _seed_approval_record(
+                    session,
+                    event_id,
+                    action_id,
+                    operator="admin",
+                    comment="approved",
+                    requested_at=_SEED_NOW,
+                )
                 await _seed_action_job(session, event_id, action_id)
                 await _seed_disposition_outbox(session, event_id, action_id)
 
@@ -679,30 +706,27 @@ class TestDecisionTraceService:
         assert len(eid) == 12  # "dte-" + 8 hex
 
     @pytest.mark.asyncio
-    async def test_approval_records_from_context_snapshot(
+    async def test_approval_records_from_approval_table_without_snapshot(
         self,
         service: DecisionTraceService,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
         event_id = _id("evt")
-        decided_at = (_SEED_NOW + timedelta(seconds=5)).isoformat()
+        decided_at = _SEED_NOW + timedelta(seconds=5)
 
         async with session_factory() as session:
             async with session.begin():
-                await _seed_security_event(
+                await _seed_security_event(session, event_id)
+                action_id = await _seed_action(session, event_id)
+                decision_id = await _seed_approval_record(
                     session,
                     event_id,
-                    approval_records=[
-                        {
-                            "decision": "approved",
-                            "operator": "soc-analyst",
-                            "reason": "confirmed threat",
-                            "action_id": "act-1",
-                            "plan_revision": 2,
-                            "created_at": decided_at,
-                            "decision_id": "dec-123",
-                        }
-                    ],
+                    action_id,
+                    operator="soc-analyst",
+                    comment="confirmed threat",
+                    requested_at=decided_at,
+                    decided_at=decided_at,
+                    plan_revision=2,
                 )
 
         trace = await service.get_decision_trace(event_id)
@@ -716,8 +740,8 @@ class TestDecisionTraceService:
         assert a.actor == "soc-analyst"
         assert a.detail["decision"] == "approved"
         assert a.detail["reason"] == "confirmed threat"
-        assert a.detail["action_id"] == "act-1"
-        assert a.ref_id == "dec-123"
+        assert a.detail["action_id"] == action_id
+        assert a.ref_id == decision_id
 
     @pytest.mark.asyncio
     async def test_writeback_receipts_require_action_rows(
@@ -758,3 +782,90 @@ class TestDecisionTraceService:
         assert len(wb_entries) == 1
         assert wb_entries[0].ref_id == "wb-test-1"
         assert wb_entries[0].detail["status"] == "confirmed"
+
+
+class TestDecisionTraceDegradationAndEdgeCases:
+    @pytest.mark.asyncio
+    async def test_pending_approval_summary_matches_entry_count(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        event_id = _id("evt")
+        requested_at = _SEED_NOW + timedelta(seconds=2)
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                action_id = await _seed_action(session, event_id)
+                await _seed_approval_record(
+                    session,
+                    event_id,
+                    action_id,
+                    decision="require_approval",
+                    operator=None,
+                    comment=None,
+                    requested_at=requested_at,
+                    decided_at=None,
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        approval_entries = [
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.APPROVAL
+        ]
+        assert len(approval_entries) == 1
+        assert trace.summary.approval_count == 1
+        assert approval_entries[0].timestamp == requested_at
+
+    @pytest.mark.asyncio
+    async def test_missing_source_agent_trace_failure(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_tool_call(session, event_id)
+
+        async def _boom(_session: AsyncSession, _event_id: str) -> list[orm.AgentTrace]:
+            raise RuntimeError("agent trace query failed")
+
+        monkeypatch.setattr(service, "_fetch_agent_traces", _boom)
+
+        trace = await service.get_decision_trace(event_id)
+        assert "agent_trace" in trace.missing_sources
+        assert any(e.entry_type == DecisionTraceEntryType.TOOL_CALL for e in trace.entries)
+
+    @pytest.mark.asyncio
+    async def test_agent_trace_without_timestamp_still_emits_entry(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                session.add(
+                    orm.AgentTrace(
+                        trace_id=_id("trc"),
+                        event_id=event_id,
+                        agent_name="TriageAgent",
+                        status="running",
+                        started_at=None,
+                        completed_at=None,
+                    )
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        agent_entries = [
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        ]
+        assert len(agent_entries) == 1
+        assert agent_entries[0].detail.get("timestamp_inferred") is True
+        assert trace.summary.agent_count == 1

@@ -50,6 +50,7 @@ from app.models.action import Action as ActionModel
 from app.models.disposition import SourceObjectLocator
 from app.models.enums import (
     ActionStatus,
+    DecisionTraceEntryType,
     DispositionPolicy,
     EventStatus,
     EventType,
@@ -1326,25 +1327,26 @@ async def get_decision_trace(
             missing_sources=["all (database unavailable)"],
         )
 
+    page = max(1, page)
+    page_size = min(max(1, page_size), 200)
+
     try:
         service = DecisionTraceService(sf)
         trace = await service.get_decision_trace(event_id)
-    except Exception:
-        logger.warning("Decision trace unavailable for %s", event_id, exc_info=True)
+    except (sa_exc.SQLAlchemyError, OSError) as exc:
+        logger.warning("Decision trace unavailable for %s: %s", event_id, exc, exc_info=True)
         return s.DecisionTraceResponse(
             event_id=event_id,
             missing_sources=["all (database unavailable)"],
         )
 
-    # Filter by entry_type(s) when requested.
     entries = trace.entries
     if entry_type:
-        allowed = set(entry_type)
+        valid_types = {item.value for item in DecisionTraceEntryType}
+        allowed = {value for value in entry_type if value in valid_types}
         entries = [e for e in entries if e.entry_type.value in allowed]
 
     total = len(entries)
-
-    # Paginate
     start = (page - 1) * page_size
     page_entries = entries[start : start + page_size]
 
