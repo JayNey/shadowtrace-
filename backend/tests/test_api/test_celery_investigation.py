@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
-
-from collections.abc import Iterator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
