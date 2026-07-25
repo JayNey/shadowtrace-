@@ -129,6 +129,7 @@ async def cleanup(
                 orm.Report,
                 orm.SourceEventLink,
                 orm.SourceObject,
+                orm.SourceConnector,
                 orm.SecurityEvent,
             ):
                 await session.execute(delete(table))
@@ -174,14 +175,22 @@ async def _seed_source_object(
     source_record_id: str | None = None,
 ) -> str:
     srid = source_record_id or f"src-{_sfx()}"
+    connector_id = f"conn-{_sfx()}"
     async with session_factory() as session:
         async with session.begin():
+            session.add(
+                orm.SourceConnector(
+                    connector_id=connector_id,
+                    source_product="mock_xdr",
+                    display_name="Test connector",
+                )
+            )
             session.add(
                 orm.SourceObject(
                     source_record_id=srid,
                     source_product="mock_xdr",
                     source_tenant_id="tenant-test",
-                    connector_id="conn-test",
+                    connector_id=connector_id,
                     source_kind=SourceObjectKind.INCIDENT.value,
                     source_object_type="incident",
                     source_object_id=f"incident-{_sfx()}",
