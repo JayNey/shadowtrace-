@@ -275,7 +275,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
         for action in actions:
             # POST_VERIFY deferred → skipped, never in failed_actions.
-            if action.execution_phase is ActionExecutionPhase.POST_VERIFY:
+            if action.execution_phase == ActionExecutionPhase.POST_VERIFY:
                 results.append(
                     _make_skipped_result(
                         action,
@@ -287,7 +287,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # Actions without execution phase = IMMEDIATE implicitly.
             # Still executing → skip (don't verify prematurely; the async
             # effect may not have materialised yet).
-            if action.status is ActionStatus.EXECUTING:
+            if action.status == ActionStatus.EXECUTING:
                 results.append(
                     VerificationActionResult(
                         action_id=action.action_id,
@@ -353,11 +353,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             results.append(result)
 
             # Classify effect status for routing.
-            if result.effect_status is EffectStatus.VERIFIED:
+            if result.effect_status == EffectStatus.VERIFIED:
                 continue
-            elif result.effect_status is EffectStatus.UNVERIFIABLE:
+            elif result.effect_status == EffectStatus.UNVERIFIABLE:
                 need_manual = True
-            elif result.effect_status is EffectStatus.FAILED:
+            elif result.effect_status == EffectStatus.FAILED:
                 failed_action_ids.add(action.action_id)
                 need_replan = True
             # SKIPPED does not trigger replan/failed.
@@ -405,8 +405,14 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 detail = "verification_tool_unavailable_degraded"
             elif tool_result.status == ToolResultStatus.SUCCESS:
                 data = tool_result.data or {}
-                is_verified = data.get("is_verified", False)
-                if is_verified:
+                if "is_verified" not in data:
+                    # Provider returned SUCCESS but didn't include the
+                    # is_verified key — the observation is inconclusive,
+                    # not failed.  Treating it as FAILED would trigger
+                    # a spurious re-plan that wastes agent budget.
+                    effect_status = EffectStatus.UNVERIFIABLE
+                    detail = "verification_result_missing_is_verified_field"
+                elif data["is_verified"]:
                     effect_status = EffectStatus.VERIFIED
                     detail = "effect_verified"
                 else:
@@ -462,7 +468,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         wb_readiness = action.writeback_readiness
         wb_status = action.writeback_status
 
-        if effect_status is EffectStatus.UNVERIFIABLE:
+        if effect_status == EffectStatus.UNVERIFIABLE:
             # writeback_required preserves the business obligation — it must
             # never be reversed by technical unavailability (§4.5 item 6).
             # The model validator on VerificationActionResult permits
@@ -504,7 +510,16 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         bool,  # need_writeback_recovery
         bool,  # need_manual_resolution
     ]:
-        """Phase 2: activate deferred terminal writeback, then verify receipts."""
+        """Phase 2: activate deferred terminal writeback, then verify receipts.
+
+        Contract with EventDispositionService (ISSUE-059A):
+        ``activate_and_submit`` MUST synchronously persist the terminal
+        writeback receipt with status CONFIRMED before returning
+        ``_ActivateResult(success=True)``.  This method independently
+        verifies the receipt via ``_evaluate_terminal_writeback_status``
+        so that a PENDING/FAILED terminal writeback is never reported
+        as SUCCESS.
+        """
         results: list[VerificationActionResult] = []
         failed_wb: set[str] = set()
         blocked_wb: set[str] = set()
@@ -527,15 +542,27 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             return results, failed_wb, blocked_wb, overall_status, need_wb_recovery, need_manual
 
         # If disposition is not required, no writeback to verify.
-        if disposition_policy is DispositionPolicy.NOT_REQUIRED:
+        if disposition_policy == DispositionPolicy.NOT_REQUIRED:
             logger.info("Phase 2 skipped: disposition_policy=not_required event=%s", event_id)
             return results, failed_wb, blocked_wb, overall_status, need_wb_recovery, need_manual
 
-        # disposition_policy is None or REQUIRED:
+        # disposition_policy is None → unknown; the event's disposition
+        # requirement cannot be determined.  Escalate to manual resolution
+        # rather than silently returning SUCCESS when a policy may exist.
+        if disposition_policy is None:
+            logger.warning(
+                "disposition_policy unknown for event=%s, requiring manual resolution",
+                event_id,
+            )
+            need_manual = True
+            overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
+            return results, failed_wb, blocked_wb, overall_status, need_wb_recovery, need_manual
+
+        # disposition_policy is REQUIRED:
         # Attempt to activate deferred terminal writeback.
         terminal_activated = False
         has_ed_svc = self._event_disposition_service is not None
-        if disposition_policy is DispositionPolicy.REQUIRED and has_ed_svc:
+        if disposition_policy == DispositionPolicy.REQUIRED and has_ed_svc:
             try:
                 activate_result: _ActivateResult = (
                     await self._event_disposition_service.activate_and_submit(
@@ -563,7 +590,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 )
                 need_manual = True
                 overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
-        elif disposition_policy is DispositionPolicy.REQUIRED:
+        elif disposition_policy == DispositionPolicy.REQUIRED:
             # No EventDispositionService available → manual resolution.
             logger.warning(
                 "Phase 2 activation unavailable: no EventDispositionService event=%s",
@@ -587,6 +614,22 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             blocked_wb = wb_eval["blocked_wb"]
             need_wb_recovery = wb_eval["need_recovery"]
             need_manual_from_wb = wb_eval["need_manual"]
+
+            # Additionally verify the terminal disposition writeback receipt
+            # that activate_and_submit just submitted (ISSUE-059A contract:
+            # the service is expected to synchronously persist a CONFIRMED
+            # receipt before returning).  If the receipt is not yet CONFIRMED
+            # we surface it via the same routing flags.
+            terminal_wb_eval = await self._evaluate_terminal_writeback_status(
+                event_id=event_id,
+                activate_result=activate_result,
+            )
+            if terminal_wb_eval["need_manual"]:
+                need_manual_from_wb = True
+                blocked_wb.update(terminal_wb_eval["blocked_wb"])
+            if terminal_wb_eval["need_recovery"]:
+                need_wb_recovery = True
+                failed_wb.update(terminal_wb_eval["failed_wb"])
 
             if need_manual_from_wb:
                 need_manual = True
@@ -628,11 +671,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 continue
             if action.superseded_by_revision is not None:
                 continue
-            if action.status is ActionStatus.REJECTED:
+            if action.status == ActionStatus.REJECTED:
                 continue
             # POST_VERIFY deferred actions are handled by phase 2 activation,
             # not by direct writeback status evaluation.
-            if action.execution_phase is ActionExecutionPhase.POST_VERIFY:
+            if action.execution_phase == ActionExecutionPhase.POST_VERIFY:
                 continue
 
             wb_status = action.writeback_status
@@ -659,7 +702,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 continue
 
             # Required but not READY → blocked.
-            if wb_readiness is not WritebackReadiness.READY:
+            if wb_readiness != WritebackReadiness.READY:
                 blocked_wb.add(action.action_id)
                 need_manual = True
                 results.append(
@@ -810,7 +853,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     if isinstance(policy_raw, str):
                         return DispositionPolicy(policy_raw)
             except Exception:
-                pass
+                logger.debug(
+                    "Failed to read disposition_policy from working memory"
+                    " for event=%s, falling back to DB query",
+                    event_id,
+                    exc_info=True,
+                )
 
         if self._session_factory is None:
             return None
@@ -837,6 +885,103 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             if wb_id:
                 wb_ids.append(wb_id)
         return wb_ids
+
+    async def _evaluate_terminal_writeback_status(
+        self,
+        *,
+        event_id: str,
+        activate_result: _ActivateResult,
+    ) -> dict[str, Any]:
+        """Evaluate the terminal disposition's writeback receipt after activation.
+
+        ISSUE-059A contract: ``EventDispositionService.activate_and_submit``
+        is expected to synchronously persist the terminal writeback receipt
+        with status CONFIRMED before returning.  This method independently
+        verifies that the receipt was persisted and evaluates its status.
+
+        Returns a dict with the same shape as ``_evaluate_writeback_statuses``
+        so phase 2 can merge the terminal writeback evaluation into its
+        final routing decision.
+        """
+        empty = {
+            "results": [],
+            "failed_wb": set(),
+            "blocked_wb": set(),
+            "need_recovery": False,
+            "need_manual": False,
+        }
+        terminal_wb_id = activate_result.terminal_writeback_id
+        if terminal_wb_id is None or self._session_factory is None:
+            return empty
+
+        try:
+            async with self._session_factory() as session:
+                # Read the latest (highest sequence) receipt for this writeback.
+                receipt_row = (
+                    await session.scalars(
+                        select(orm.DispositionReceipt)
+                        .where(orm.DispositionReceipt.writeback_id == terminal_wb_id)
+                        .order_by(orm.DispositionReceipt.sequence.desc())
+                        .limit(1)
+                    )
+                ).first()
+
+                if receipt_row is None:
+                    logger.warning(
+                        "Terminal writeback receipt not found: wb_id=%s event=%s",
+                        terminal_wb_id,
+                        event_id,
+                    )
+                    empty["blocked_wb"].add(terminal_wb_id)
+                    empty["need_manual"] = True
+                    return empty
+
+                # Map the receipt status string to a WritebackStatus enum value.
+                try:
+                    wb_status = WritebackStatus(receipt_row.status)
+                except ValueError:
+                    logger.warning(
+                        "Unknown terminal writeback status %s for wb_id=%s event=%s",
+                        receipt_row.status,
+                        terminal_wb_id,
+                        event_id,
+                    )
+                    wb_status = WritebackStatus.UNKNOWN
+
+                routing = _WRITEBACK_STATUS_ROUTING.get(
+                    wb_status,
+                    (False, True, False, "writeback_status_unknown"),
+                )
+                confirmed, rec, man, detail_suffix = routing
+
+                if not confirmed:
+                    logger.warning(
+                        "Terminal writeback %s status=%s → %s event=%s",
+                        terminal_wb_id,
+                        wb_status.value,
+                        detail_suffix,
+                        event_id,
+                    )
+                    if man:
+                        empty["need_manual"] = True
+                        empty["blocked_wb"].add(terminal_wb_id)
+                    elif rec:
+                        empty["need_recovery"] = True
+                        if wb_status in (WritebackStatus.FAILED, WritebackStatus.PARTIAL):
+                            empty["failed_wb"].add(terminal_wb_id)
+
+                return empty
+        except Exception as exc:
+            logger.warning(
+                "Failed to evaluate terminal writeback %s event=%s: %s",
+                terminal_wb_id,
+                event_id,
+                exc,
+            )
+            empty["need_manual"] = True
+            if terminal_wb_id:
+                empty["blocked_wb"].add(terminal_wb_id)
+            return empty
 
     # ------------------------------------------------------------------ #
     # Verification action lifecycle
@@ -1026,10 +1171,25 @@ def _make_skipped_result(
     """Build a skipped VerificationActionResult with writeback fields that
     are consistent with the VerificationActionResult validator.
 
-    For deferred POST_VERIFY actions that are writeback_required but not yet
-    applicable, the writeback fields report the obligation as not (yet) active
-    so the validator accepts the combination.
+    For deferred POST_VERIFY actions (``detail="deferred_pending_activation"``)
+    the writeback obligation is preserved even though the action has not yet
+    been activated — the obligation exists at the event level; it just hasn't
+    landed on this specific action yet.  The validator permits
+    ``writeback_required=True + writeback_readiness=NOT_REQUIRED`` for
+    SKIPPED results.
     """
+    if detail == "deferred_pending_activation":
+        # Preserve the business obligation — it hasn't been discharged yet,
+        # it's just waiting for phase 2 activation.
+        return VerificationActionResult(
+            action_id=action.action_id,
+            effect_status=EffectStatus.SKIPPED,
+            writeback_required=action.writeback_required,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            writeback_status=None,
+            writeback_ids=[],
+            detail=detail,
+        )
     wb_required = action.writeback_required and action.writeback_applicable
     wb_readiness = (
         action.writeback_readiness

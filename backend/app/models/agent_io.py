@@ -341,19 +341,27 @@ class VerificationActionResult(BaseModel):
     @model_validator(mode="after")
     def _writeback_fields_are_consistent(self) -> VerificationActionResult:
         if not self.writeback_required:
-            if self.writeback_readiness is not WritebackReadiness.NOT_REQUIRED:
+            if self.writeback_readiness != WritebackReadiness.NOT_REQUIRED:
                 raise ValueError(
                     "writeback_required=false requires writeback_readiness=NOT_REQUIRED"
                 )
             if self.writeback_status is not None:
                 raise ValueError("writeback_required=false requires writeback_status=null")
-        elif self.writeback_readiness is WritebackReadiness.NOT_REQUIRED:
+        elif self.writeback_readiness == WritebackReadiness.NOT_REQUIRED:
             # UNVERIFIABLE means the verification tool was unavailable — the
             # business obligation (writeback_required) stays intact but we
             # cannot observe writeback readiness/status.  The rule in 方案
             # §4.5 item 6: "writeback_required 只表达业务义务，禁止由技术能力
             # 反向改写".
-            if self.effect_status is not EffectStatus.UNVERIFIABLE:
+            #
+            # SKIPPED deferred_pending_activation means the writeback
+            # obligation exists at the event level but hasn't been activated
+            # yet — phase 2 will discharge it.  The obligation must not be
+            # dropped from the Phase 1 result.
+            if self.effect_status not in (
+                EffectStatus.UNVERIFIABLE,
+                EffectStatus.SKIPPED,
+            ):
                 raise ValueError(
                     "writeback_required=true forbids writeback_readiness=NOT_REQUIRED"
                 )
@@ -380,7 +388,7 @@ class VerificationResult(BaseModel):
         deferred = {
             item.action_id
             for item in self.results
-            if item.effect_status is EffectStatus.SKIPPED
+            if item.effect_status == EffectStatus.SKIPPED
             and item.detail == "deferred_pending_activation"
         }
         leaked = deferred.intersection(self.failed_actions)
@@ -499,13 +507,13 @@ class InvestigationResult(BaseModel):
     @model_validator(mode="after")
     def _writeback_null_when_not_required(self) -> InvestigationResult:
         if not self.writeback_required:
-            if self.writeback_readiness is not WritebackReadiness.NOT_REQUIRED:
+            if self.writeback_readiness != WritebackReadiness.NOT_REQUIRED:
                 raise ValueError(
                     "writeback_required=false requires writeback_readiness=NOT_REQUIRED"
                 )
             if self.writeback_overall_status is not None:
                 raise ValueError("writeback_required=false requires writeback_overall_status=null")
-        elif self.writeback_readiness is WritebackReadiness.NOT_REQUIRED:
+        elif self.writeback_readiness == WritebackReadiness.NOT_REQUIRED:
             raise ValueError("writeback_required=true forbids writeback_readiness=NOT_REQUIRED")
         return self
 
