@@ -380,10 +380,11 @@ class VerificationResult(BaseModel):
     verification_phase: VerificationPhase
     # True when the VerificationResult was successfully persisted to
     # WorkingMemory; False when the write failed or working_memory was
-    # unavailable.  Callers can inspect this to decide whether downstream
-    # consumers (e.g. the report generator) can read verification_result
-    # from EventContext.
-    wm_persisted: bool = True
+    # unavailable.  Default is False — only VerifyAgent._write_verification_result
+    # sets this to True after a successful write.  Callers can inspect this
+    # to decide whether downstream consumers (e.g. the report generator) can
+    # read verification_result from EventContext.
+    wm_persisted: bool = False
     # action_ids whose action_verified SocketEvent publish failed.
     # Publish failures are non-fatal — the event bus is best-effort —
     # but callers may retry or alert on repeated failures.
