@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from sqlalchemy import select
+from sqlalchemy.exc import InternalError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
@@ -38,6 +39,7 @@ from app.models.agent_io import (
     EffectStatus,
     VerificationActionResult,
     VerificationOverallStatus,
+    VerificationPhase,
     VerificationResult,
     VerifyAgentInput,
 )
@@ -84,6 +86,10 @@ _WRITEBACK_STATUS_ROUTING: dict[WritebackStatus, tuple[bool, bool, bool, str]] =
     # Until then, callers that observe UNKNOWN writebacks should impose their
     # own timeout (e.g. 3 recovery cycles → escalate to need_manual=True).
     WritebackStatus.UNKNOWN: (False, True, False, "writeback_unknown_requires_lookup"),
+    # TODO(ISSUE-062): PARTIAL 写回当前无条件走 recovery，但部分子目标
+    # 因权限问题永久失败时重试无法改善且可能产生重复副作用。
+    # ISSUE-062 实现后应按逐目标结果区分可重试/不可重试 PARTIAL 子状态，
+    # 将不可重试部分升级为 need_manual_resolution=True。
     WritebackStatus.PARTIAL: (False, True, False, "writeback_partial_recovery"),
     WritebackStatus.FAILED: (False, True, False, "writeback_failed_recovery"),
     WritebackStatus.CONFLICT: (False, False, True, "writeback_conflict_manual"),
@@ -114,6 +120,8 @@ VERIFY_UNKNOWN_MAX_LOOKUPS: int = 3
 _TRANSIENT_EXC_TYPES = (
     ConnectionError,
     TimeoutError,
+    OperationalError,   # deadlocks, server gone away
+    InternalError,       # serialization failures
 )
 
 # Error codes for exception type classification in verification detail
@@ -475,6 +483,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                             writeback_status=action.writeback_status,
                             writeback_ids=[],
                             detail="execution_timeout",
+                            verification_phase=VerificationPhase.EFFECT,
                         )
                     )
                     need_manual = True
@@ -489,6 +498,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=action.writeback_status,
                         writeback_ids=[],
                         detail="pending_execution",
+                        verification_phase=VerificationPhase.EFFECT,
                     )
                 )
                 continue
@@ -508,6 +518,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=action.writeback_status,
                         writeback_ids=[],
                         detail="action_execution_unknown",
+                        verification_phase=VerificationPhase.EFFECT,
                     )
                 )
                 need_manual = True
@@ -531,6 +542,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=action.writeback_status,
                         writeback_ids=[],
                         detail=detail,
+                        verification_phase=VerificationPhase.EFFECT,
                     )
                 )
                 continue
@@ -546,6 +558,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=None,
                         writeback_ids=[],
                         detail="action_not_executed",
+                        verification_phase=VerificationPhase.EFFECT,
                     )
                 )
                 continue
@@ -768,6 +781,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             writeback_ids=[],
             verification_action_id=verification_action_id,
             detail=detail,
+            verification_phase=VerificationPhase.EFFECT,
         )
 
     # ------------------------------------------------------------------ #
@@ -1002,6 +1016,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=None,
                         writeback_ids=wb_ids,
                         detail="writeback_not_applicable",
+                        verification_phase=VerificationPhase.EFFECT,
                     )
                 )
                 continue
@@ -1019,6 +1034,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=None,
                         writeback_ids=wb_ids,
                         detail=f"writeback_blocked_{wb_readiness.value}",
+                        verification_phase=VerificationPhase.EFFECT,
                     )
                 )
                 continue
@@ -1077,6 +1093,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=wb_status,
                         writeback_ids=wb_ids,
                         detail=detail_suffix,
+                        verification_phase=VerificationPhase.DISPOSITION,
                     )
                 )
             elif man:
@@ -1091,6 +1108,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=wb_status,
                         writeback_ids=wb_ids,
                         detail=detail_suffix,
+                        verification_phase=VerificationPhase.DISPOSITION,
                     )
                 )
             else:
@@ -1107,6 +1125,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_status=wb_status,
                         writeback_ids=wb_ids,
                         detail=detail_suffix,
+                        verification_phase=VerificationPhase.DISPOSITION,
                     )
                 )
 
@@ -1548,8 +1567,26 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                             with_for_update=True,
                         )
                         if row is not None:
-                            row.status = target_status.value
-                            row.updated_at = datetime.now(UTC)
+                            # Guard against concurrent finalization: if the
+                            # Action is already in a terminal state (SUCCESS,
+                            # FAILED, or UNKNOWN), another VerifyAgent instance
+                            # has already finalized it — skip the update and
+                            # log at info level.
+                            _TERMINAL_STATUSES = {
+                                ActionStatus.SUCCESS.value,
+                                ActionStatus.FAILED.value,
+                                ActionStatus.UNKNOWN.value,
+                            }
+                            if row.status in _TERMINAL_STATUSES:
+                                logger.info(
+                                    "Verification action %s already finalized "
+                                    "by concurrent operation (current status: %s)",
+                                    action.action_id,
+                                    row.status,
+                                )
+                            else:
+                                row.status = target_status.value
+                                row.updated_at = datetime.now(UTC)
                 # Commit succeeded — update the domain object to stay
                 # consistent with the persisted row.
                 action.status = target_status
@@ -1707,6 +1744,7 @@ def _make_skipped_result(
             writeback_status=None,
             writeback_ids=[],
             detail=detail,
+            verification_phase=VerificationPhase.EFFECT,
         )
     # writeback_required expresses the event-level business obligation and
     # MUST NOT be rewritten by technical capability flags like
@@ -1724,6 +1762,7 @@ def _make_skipped_result(
         writeback_status=wb_status,
         writeback_ids=[],
         detail=detail,
+        verification_phase=VerificationPhase.EFFECT,
     )
 
 
@@ -1737,6 +1776,7 @@ def _make_self_verifying_result(action: Action) -> VerificationActionResult:
         writeback_status=None,
         writeback_ids=[],
         detail="self_verifying",
+        verification_phase=VerificationPhase.EFFECT,
     )
 
 
