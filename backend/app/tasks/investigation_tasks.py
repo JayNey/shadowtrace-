@@ -101,7 +101,7 @@ async def execute_investigation(event_id: str) -> dict[str, str]:
 
 async def dispatch_investigation(event_id: str) -> str:
     """Enqueue ``run_investigation`` and return the Celery task id."""
-    task_id = celery_uuid()
+    task_id = str(celery_uuid())
     await register_task_metadata(task_id, event_id)
     try:
         run_investigation.apply_async(
@@ -132,7 +132,7 @@ async def resolve_task_state(task_id: str) -> tuple[str, str | None]:
     return result.state, event_id
 
 
-@celery_app.task(
+@celery_app.task(  # type: ignore[untyped-decorator]
     name=TASK_NAME,
     bind=True,
     acks_late=True,
