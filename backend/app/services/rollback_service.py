@@ -228,7 +228,14 @@ class RollbackService:
                 # Inherit disposition_source_ref from the original Action so the
                 # rollback targets the same source object for XDR_MANAGED execution
                 # and compensation writebacks (ISSUE-059 §_validate_claim_preconditions).
-                disposition_source_ref = original.disposition_source_ref
+                # Convert Pydantic model → dict for SQLAlchemy JSONB storage.
+                disposition_source_ref_raw = original.disposition_source_ref
+                disposition_source_ref: dict[str, Any] | None = None
+                if disposition_source_ref_raw is not None:
+                    if hasattr(disposition_source_ref_raw, "model_dump"):
+                        disposition_source_ref = disposition_source_ref_raw.model_dump(mode="json")
+                    else:
+                        disposition_source_ref = disposition_source_ref_raw  # type: ignore[assignment]
 
                 # Live-mode gate: compensation writebacks require confirmed XDR
                 # writeback capability (ISSUE-061 spec §降级策略).

@@ -173,14 +173,15 @@ async def _seed_source_object(
     event_id: str,
     *,
     source_record_id: str | None = None,
+    connector_id: str | None = None,
 ) -> str:
     srid = source_record_id or f"src-{_sfx()}"
-    connector_id = f"conn-{_sfx()}"
+    cid = connector_id or f"conn-{_sfx()}"
     async with session_factory() as session:
         async with session.begin():
             session.add(
                 orm.SourceConnector(
-                    connector_id=connector_id,
+                    connector_id=cid,
                     source_product="mock_xdr",
                     display_name="Test connector",
                 )
@@ -190,7 +191,7 @@ async def _seed_source_object(
                     source_record_id=srid,
                     source_product="mock_xdr",
                     source_tenant_id="tenant-test",
-                    connector_id=connector_id,
+                    connector_id=cid,
                     source_kind=SourceObjectKind.INCIDENT.value,
                     source_object_type="incident",
                     source_object_id=f"incident-{_sfx()}",
@@ -360,6 +361,7 @@ class _MockDispositionSync:
         event_id: str,
         source_record_id: str,
         logical_slot: str = "default",
+        guard_context: dict[str, Any] | None = None,
     ) -> _FakeOutboxRecord:
         self.call_count += 1
         self.commands.append(command)
@@ -845,11 +847,14 @@ async def test_rollback_action_with_writeback_required_creates_compensation(
         session_factory,
         disposition_policy=DispositionPolicy.REQUIRED,
     )
-    source_record_id = await _seed_source_object(session_factory, event_id)
+    conn_id = f"conn-{_sfx()}"
+    source_record_id = await _seed_source_object(
+        session_factory, event_id, connector_id=conn_id
+    )
     disposition_source_ref = {
         "source_product": "mock_xdr",
         "source_tenant_id": "tenant-test",
-        "connector_id": "conn-test",
+        "connector_id": conn_id,
         "source_kind": SourceObjectKind.INCIDENT.value,
         "source_object_id": f"incident-{_sfx()}",
     }
@@ -912,11 +917,14 @@ async def test_rollback_action_multiple_dispositions_creates_multiple_compensati
         session_factory,
         disposition_policy=DispositionPolicy.REQUIRED,
     )
-    source_record_id = await _seed_source_object(session_factory, event_id)
+    conn_id = f"conn-{_sfx()}"
+    source_record_id = await _seed_source_object(
+        session_factory, event_id, connector_id=conn_id
+    )
     disposition_source_ref = {
         "source_product": "mock_xdr",
         "source_tenant_id": "tenant-test",
-        "connector_id": "conn-test",
+        "connector_id": conn_id,
         "source_kind": SourceObjectKind.INCIDENT.value,
         "source_object_id": f"incident-{_sfx()}",
     }
