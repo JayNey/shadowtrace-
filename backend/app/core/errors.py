@@ -119,6 +119,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "qa_unavailable": ErrorCategory.TRANSIENT,
     # Generic dependency / domain defaults used by subclasses
     "dependency_unavailable": ErrorCategory.TRANSIENT,
+    "task_unavailable": ErrorCategory.TRANSIENT,
     "tool_execution_error": ErrorCategory.TOOL,
     "llm_error": ErrorCategory.LLM,
     # Mock XDR (ISSUE-010) — fixture-only codes, not vendor facts
