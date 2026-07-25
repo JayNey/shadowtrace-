@@ -146,7 +146,7 @@ async def _seed_event(
     event_id: str | None = None,
     disposition_policy: DispositionPolicy = DispositionPolicy.NOT_REQUIRED,
 ) -> str:
-    eid = event_id or new_event_id()
+    eid = event_id or new_event_id(identity=f"test-rollback:{_sfx()}", occurred_at=_utc_now())
     async with session_factory() as session:
         async with session.begin():
             session.add(
