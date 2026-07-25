@@ -2551,6 +2551,481 @@ class TestReviewRound2Fixes:
         assert "notify_security_team" in _SKIP_VERIFICATION_TOOLS
 
 
+# --------------------------------------------------------------------------- #
+# PR#7 Blocker & Should-Fix regression tests
+# --------------------------------------------------------------------------- #
+
+
+class TestBlockerFixes:
+    """Tests for the two Blocker issues identified in PR#7 review."""
+
+    # ── Blocker #1: partial DB hit preserves all plan actions ────────────
+
+    async def test_partial_db_hit_preserves_all_actions(self):
+        """When DB returns fewer Actions than the plan, all plan Actions
+        are preserved — none are silently dropped.
+
+        This test calls _load_execution_state directly (rather than going
+        through execute()) to isolate the data-loading layer that was
+        patched for Blocker #1.
+        """
+        plan_action1 = _action(
+            action_id="act-in-db",
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        plan_action2 = _action(
+            action_id="act-not-in-db",
+            tool_name="block_domain",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0002",
+        )
+        plan = _plan([plan_action1, plan_action2])
+
+        # Build a mock DB session that only returns "act-in-db" for the
+        # Action query.  Jobs query returns both since both have job IDs.
+        import app.db.models as orm_mod
+
+        class _ActionRow:
+            """Minimal stub whose attributes satisfy _action_from_row."""
+            action_id: str
+            event_id: str = "evt-20260725-00000001"
+            plan_revision: int = 1
+            action_fingerprint: str = "fp:test"
+            action_category: str = "response"
+            action_name: str = "test"
+            tool_name: str = "block_ip"
+            action_level: str = "l2"
+            execution_phase: str | None = "immediate"
+            activation_condition: str | None = None
+            approved_operation_template_hash: str | None = None
+            approved_terminal_dispositions: list[str] = []
+            target_type: str | None = "ip"
+            target: str | None = "10.0.0.1"
+            parameters: dict[str, Any] = {}
+            status: str = "success"
+            auto_execute: bool = True
+            reason: str | None = None
+            provider_name: str | None = "mock_observation"
+            execution_owner: str | None = "direct_tool"
+            execution_job_id: str | None = "job-0001"
+            tool_call_id: str | None = None
+            idempotency_key: str | None = "idem-act-in-db"
+            writeback_required: bool = False
+            writeback_applicable: bool = False
+            writeback_readiness: str | None = "not_required"
+            writeback_block_reason: str | None = None
+            writeback_status: str | None = None
+            disposition_source_ref: Any = None
+            superseded_by_revision: int | None = None
+            executed_at: Any = None
+            effect_verification_status: str | None = None
+            rollback_status: str | None = None
+            source_action_id: str | None = None
+            updated_at: Any = None
+
+            def __init__(self, action_id: str) -> None:
+                self.action_id = action_id
+
+        class _JobRow:
+            """Minimal stub whose attributes satisfy _job_from_row."""
+            def __init__(
+                self,
+                action_id: str,
+                job_id: str,
+            ) -> None:
+                self.action_id = action_id
+                self.job_id = job_id
+                self.event_id = "evt-20260725-00000001"
+                self.provider_name = "mock_observation"
+                self.idempotency_key = f"idem-{action_id}"
+                self.provider_job_id = None
+                self.status = "success"
+                self.claimed_by = None
+                self.lease_expires_at = None
+                self.poll_after_ms = None
+                self.attempt = 1
+                self.provider_code = None
+                self.provider_message = None
+                self.raw_result = {}
+                self.created_at = None
+                self.updated_at = None
+                self.started_at = None
+                self.finished_at = None
+
+        db_action = _ActionRow("act-in-db")
+        job1 = _JobRow("act-in-db", "job-0001")
+        job2 = _JobRow("act-not-in-db", "job-0002")
+
+        class _Result:
+            def __init__(self, rows: list[Any]) -> None:
+                self._rows = rows
+
+            def all(self) -> list[Any]:
+                return self._rows
+
+        class _PartialDBSession:
+            def __init__(self) -> None:
+                self._scalar_call = 0
+
+            async def scalars(self, stmt: Any) -> _Result:
+                self._scalar_call += 1
+                if self._scalar_call == 1:
+                    # First call: Action query → only one in DB.
+                    return _Result([db_action])
+                if self._scalar_call == 2:
+                    # Second call: Job query → both jobs exist.
+                    return _Result([job1, job2])
+                # Third+ call: Outbox query → empty.
+                return _Result([])
+
+            async def get(
+                self, model: type[Any], ident: Any, **kwargs: Any
+            ) -> Any | None:
+                return None
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _PartialDBSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+
+        agent = VerifyAgent(
+            session_factory=mock_factory,
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+
+        actions, jobs_map, outbox_map = await agent._load_execution_state(
+            event_id="evt-20260725-00000001",
+            response_plan=plan,
+        )
+
+        action_ids = {a.action_id for a in actions}
+        # BOTH actions must be present — none dropped.
+        assert "act-in-db" in action_ids
+        assert "act-not-in-db" in action_ids
+        # The DB action should have status from DB (SUCCESS from row).
+        db_action_obj = next(a for a in actions if a.action_id == "act-in-db")
+        assert db_action_obj.status == ActionStatus.SUCCESS
+        # Both jobs should be present.
+        assert "act-in-db" in jobs_map
+        assert "act-not-in-db" in jobs_map
+
+    # ── Blocker #2: all tools unavailable → overall_status=FAILED ────────
+
+    async def test_all_tools_unavailable_yields_failed(self):
+        """When all verification tools are unavailable, overall_status
+        must be FAILED (not MANUAL_RESOLUTION) per ISSUE-060 spec."""
+        action = _action(
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # tool_executor=None → all verification calls return None → UNVERIFIABLE.
+        agent = VerifyAgent(
+            tool_executor=None,  # systemic unavailability
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # All UNVERIFIABLE + no FAILED → systemic failure → FAILED.
+        assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert result.overall_status == VerificationOverallStatus.FAILED
+        # need_manual_resolution stays True (escalated in the spec).
+        assert result.need_manual_resolution is True
+        # need_action_replan is False (no actual effect failure).
+        assert result.need_action_replan is False
+
+    async def test_all_tools_error_yields_failed(self):
+        """When all verification tools return errors, overall_status
+        must also be FAILED (systemic, not per-action)."""
+        action = _action(
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # All tool calls return errors → UNVERIFIABLE.
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({
+                "check_ip_block_status": _tool_result_error("provider down"),
+            }),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert result.overall_status == VerificationOverallStatus.FAILED
+        assert result.need_manual_resolution is True
+
+    async def test_mixed_verified_and_unverifiable_not_failed(self):
+        """When at least one action VERIFIED and others UNVERIFIABLE,
+        overall_status must NOT be FAILED (only partial systemic issue)."""
+        action1 = _action(
+            action_id="act-verified",
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        action2 = _action(
+            action_id="act-unverifiable",
+            tool_name="block_domain",
+            target_type="domain",
+            target="evil.com",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0002",
+        )
+        job1 = _job(job_id="job-0001", action_id="act-verified")
+        job2 = _job(job_id="job-0002", action_id="act-unverifiable")
+
+        # action1: verified OK, action2: tool error → UNVERIFIABLE.
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({
+                "check_ip_block_status": _tool_result_success(True),
+                "check_domain_block_status": _tool_result_error("observation down"),
+            }),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=(
+                [action1, action2],
+                {"job-0001": job1, "job-0002": job2},
+                {},
+            )
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id="evt-20260725-00000001", actions=[action1, action2])
+        )
+
+        # NOT all UNVERIFIABLE → not systemic → not FAILED.
+        assert result.overall_status != VerificationOverallStatus.FAILED
+        # But the unverifiable action still escalates to manual.
+        assert result.need_manual_resolution is True
+
+
+class TestShouldFixFixes:
+    """Tests for Should-Fix items identified in PR#7 review."""
+
+    # ── Provider override applied during agent execution ─────────────────
+
+    async def test_provider_override_applied_in_agent_execution(self):
+        """Provider manifest override is passed to resolve_verification_tool
+        during actual VerifyAgent execution."""
+        action = _action(
+            tool_name="create_ticket",
+            action_name="ticket_action",
+            target_type="ticket",
+            target="ticket-1",
+            status=ActionStatus.SUCCESS,
+            action_level=ActionLevel.L1,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        # Override: create_ticket normally maps to None (non-verifiable),
+        # but with a provider override it should map to check_ticket_status.
+        overrides = {"create_ticket": {"ticket": "check_ticket_status"}}
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({
+                "check_ticket_status": _tool_result_success(True),
+            }),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            provider_manifest_overrides=overrides,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # With the override, create_ticket should be VERIFIED (not SKIPPED).
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.VERIFIED
+        assert r.detail == "effect_verified"
+
+    async def test_provider_override_without_override_stays_skipped(self):
+        """Without override, create_ticket stays SKIPPED (baseline behavior)."""
+        action = _action(
+            tool_name="create_ticket",
+            action_name="ticket_action",
+            target_type="ticket",
+            target="ticket-1",
+            status=ActionStatus.SUCCESS,
+            action_level=ActionLevel.L1,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        # No override passed.
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # Without override, create_ticket is non-verifiable → SKIPPED.
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.SKIPPED
+        assert r.detail == "non_verifiable_action"
+
+    # ── Writeback routing: PARTIAL/FAILED retry detection ────────────────
+
+    async def test_writeback_routing_table_symmetry(self):
+        """_WRITEBACK_STATUS_ROUTING covers all WritebackStatus members."""
+        all_statuses = set(WritebackStatus)
+        # None is also a valid key (no status yet).
+        covered = set(_WRITEBACK_STATUS_ROUTING.keys())
+        covered.discard(None)
+        assert covered == all_statuses, (
+            f"Missing writeback statuses: {all_statuses - covered}"
+        )
+
+    async def test_failed_writeback_status_routes_to_recovery(self):
+        """FAILED writeback → recovery (not success, not manual)."""
+        confirmed, recovery, manual, _detail = _WRITEBACK_STATUS_ROUTING[
+            WritebackStatus.FAILED
+        ]
+        assert confirmed is False
+        assert recovery is True
+        assert manual is False
+
+    async def test_partial_writeback_status_routes_to_recovery(self):
+        """PARTIAL writeback → recovery (not success, not manual)."""
+        confirmed, recovery, manual, _detail = _WRITEBACK_STATUS_ROUTING[
+            WritebackStatus.PARTIAL
+        ]
+        assert confirmed is False
+        assert recovery is True
+        assert manual is False
+
+
+class TestBoundaryFixes:
+    """Boundary condition tests suggested in PR#7 review."""
+
+    async def test_no_job_no_executor_graceful(self):
+        """Action with no execution_job_id and tool_executor=None →
+        graceful UNVERIFIABLE without crashing."""
+        action = _action(
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id=None,  # no job
+        )
+        agent = VerifyAgent(
+            tool_executor=None,  # no executor
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # Must not crash, must produce UNVERIFIABLE.
+        assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert result.overall_status == VerificationOverallStatus.FAILED
+
+    async def test_concurrent_verification_idempotent(self):
+        """Multiple concurrent verifications of the same action produce
+        consistent results (same verification_action_id)."""
+        action = _action(
+            action_id="act-concurrent-src",
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        event_id = "evt-20260725-00000001"
+
+        # Simulate three concurrent verification runs.
+        vids: list[str | None] = []
+        for _ in range(3):
+            agent = VerifyAgent(
+                tool_executor=_mock_executor({
+                    "check_ip_block_status": _tool_result_success(True),
+                }),
+                working_memory=FakeWorkingMemory(),
+                trace_service=FakeTraceService(),
+                event_bus=FakeEventBus(),
+            )
+            agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+                return_value=([action], {"job-0001": job}, {})
+            )
+            agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+                return_value=DispositionPolicy.NOT_REQUIRED,
+            )
+            result = await agent.execute(
+                _input(event_id=event_id, actions=[action])
+            )
+            vids.append(result.results[0].verification_action_id)
+
+        # All runs produce the same deterministic verification_action_id.
+        assert all(v is not None for v in vids)
+        assert len(set(vids)) == 1
+
+
 
 
 def _mock_executor(results: dict[str, ToolResult]) -> Any:
