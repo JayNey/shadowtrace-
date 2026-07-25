@@ -337,6 +337,12 @@ class VerificationActionResult(BaseModel):
     writeback_ids: list[str] = Field(default_factory=list)
     verification_action_id: str | None = None
     detail: str | None = None
+    # True when _finalize_verification_action() itself failed during
+    # exception handling, leaving the verification Action in an unknown
+    # state (potentially stuck as EXECUTING zombie).  Downstream consumers
+    # should check this flag instead of parsing the detail string.
+    # (ISSUE-060 review Nit-2)
+    verification_action_dirty: bool = False
     # Which verification phase produced this result.  Phase 1 (effect)
     # verifies the entity-level effect of an IMMEDIATE action; phase 2
     # (disposition) evaluates writeback receipts after disposition
