@@ -604,7 +604,7 @@ class TestBoundaryInputs:
         assert result.overall_status == VerificationOverallStatus.SUCCESS
 
     async def test_action_with_none_target_type(self):
-        """Action with target_type=None → mapping resolves to first available."""
+        """Action with target_type=None → mapping returns None (no guess)."""
         action = _action(
             tool_name="block_ip",
             target_type=None,
@@ -626,7 +626,10 @@ class TestBoundaryInputs:
         )
 
         result = await agent.execute(_input(actions=[action]))
-        assert result.results[0].effect_status == EffectStatus.VERIFIED
+        # target_type=None → resolve_verification_tool returns None (no
+        # guess) → action is skipped as unverifiable.
+        assert result.results[0].effect_status == EffectStatus.SKIPPED
+        assert result.results[0].detail == "no_verification_tool_registered"
 
     async def test_unknown_tool_maps_to_none(self):
         """Tool not in mapping → resolve_verification_tool returns None."""
@@ -1216,6 +1219,15 @@ class TestVerificationMapping:
             == "check_file_quarantine_status"
         )
 
+    async def test_provider_override_can_un_skip(self):
+        """Provider manifest can override a None baseline to enable verification."""
+        # create_ticket baseline is {"ticket": None} — skipped by default.
+        result = resolve_verification_tool(
+            "create_ticket", "ticket",
+            provider_manifest_overrides={"create_ticket": {"ticket": "check_ticket_status"}},
+        )
+        assert result == "check_ticket_status"
+
     async def test_resolve_unknown_target_type_returns_none(self):
         """Unknown target_type → resolve_verification_tool returns None (no guess)."""
         # check_traffic_drop maps ip and host — "process" is not registered.
@@ -1610,17 +1622,33 @@ class TestSuggestedBoundary:
     """Tests for boundary conditions identified in PR#7 review."""
 
     async def test_unknowable_action_status_direct_manual(self):
-        """Action UNKNOWN → need_manual_resolution (no guess at effect)."""
+        """Action UNKNOWN → direct to manual resolution, no verification tool call.
+
+        UNKNOWN is intentionally excluded from _EXECUTED_STATUSES.
+        Running a verification tool could return a false-positive
+        is_verified that masks the fact that the Action's actual
+        execution state is unknown, producing a contradictory
+        (UNKNOWN execution + VERIFIED effect) pair that would cause
+        downstream consumers to wrongly assume no manual intervention
+        is needed.
+        """
         action = _action(
             tool_name="block_ip",
             status=ActionStatus.UNKNOWN,
             execution_job_id="job-0001",
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # Capture whether the verification tool is called — it should NOT be.
+        tool_called = False
+
+        async def record_call(tool_name, params, event_id, **kw):
+            nonlocal tool_called
+            tool_called = True
+            return _tool_result_success(True)
+
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=MagicMock(call=AsyncMock(side_effect=record_call)),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
         )
@@ -1635,11 +1663,12 @@ class TestSuggestedBoundary:
             _input(event_id=action.event_id, actions=[action])
         )
 
-        # The verification tool is called (action is in _EXECUTED_STATUSES),
-        # but the tool returns SUCCESS(is_verified=True), so the effect is
-        # VERIFIED not UNVERIFIABLE.  The key invariant is that the agent
-        # does NOT crash on UNKNOWN action status — it proceeds to verify.
-        assert result.results[0].effect_status == EffectStatus.VERIFIED
+        # The verification tool must NOT be called for UNKNOWN actions.
+        assert not tool_called
+        # UNKNOWN → UNVERIFIABLE effect, escalating to manual resolution.
+        assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert result.results[0].detail == "action_execution_unknown"
+        assert result.need_manual_resolution is True
 
     async def test_phase2_activation_exception_handling(self):
         """EDS.activate_and_submit exception → need_manual=True."""
@@ -2214,6 +2243,52 @@ class TestPR7ReviewFixes:
         # Self-mapping tools should NOT be in the skip set.
         assert "check_new_alerts" not in skip
         assert "check_traffic_drop" not in skip
+
+    # ── Should-Fix 3: domain/DB consistency ─────────────────────────────
+
+    async def test_finalize_commit_failure_does_not_update_domain(self):
+        """_finalize_verification_action commit failure → domain status
+        must NOT be updated, preventing memory/DB inconsistency."""
+        from contextlib import asynccontextmanager
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,  # current status
+        )
+        original_status = action.status
+
+        class _MockRow:
+            status: str | None = None
+            updated_at: Any = None
+
+        class _FailingCommitSession:
+            def __init__(self) -> None:
+                self.row = _MockRow()
+
+            async def get(self, *args: Any, **kwargs: Any) -> _MockRow | None:
+                return self.row
+
+            @asynccontextmanager
+            async def begin(self):
+                yield
+                raise RuntimeError("commit failed — connection lost")
+
+        @asynccontextmanager
+        async def _session_ctx():
+            yield _FailingCommitSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+
+        agent = VerifyAgent(session_factory=mock_factory)
+        await agent._finalize_verification_action(
+            action, target_status=ActionStatus.SUCCESS
+        )
+
+        # Domain object status must NOT have been updated — the DB
+        # commit failed, so the in-memory Action must stay at its
+        # original status to avoid inconsistency.
+        assert action.status == original_status
+        assert action.status == ActionStatus.EXECUTING
 
 # --------------------------------------------------------------------------- #
 # Helpers

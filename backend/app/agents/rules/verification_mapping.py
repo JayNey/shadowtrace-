@@ -89,9 +89,10 @@ def resolve_verification_tool(
         # entity type, e.g. returning check_traffic_drop for
         # target_type="process" when only ip/host are registered).
         return None
-    # Fallback: target_type is None → return the first mapping.
-    if inner:
-        return next(iter(inner.values()))
+    # Fallback: target_type is None → unknown target type; return None
+    # rather than guessing from the first mapping, which could observe the
+    # wrong entity type (e.g. returning check_traffic_drop for an unspecified
+    # target when only ip/host are registered).
     return None
 
 
