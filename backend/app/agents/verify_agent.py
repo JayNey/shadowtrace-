@@ -17,6 +17,7 @@ action replan; writeback problems stay in the writeback/recovery path.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -46,7 +47,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.execution import ActionExecutionJob
-from app.models.ids import new_action_id
+
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.services.working_memory import BoundWorkingMemory
 
@@ -85,9 +86,12 @@ _TERMINAL_JOB_STATUSES: frozenset[ExecutionJobStatus] = frozenset(
 )
 
 # Effect‑side action execution statuses the VerifyAgent considers.
+# ActionStatus.EXECUTING is deliberately excluded — asynchronous actions
+# that are still running must not be prematurely verified (their effect
+# may not have materialised yet, which would produce false FAILED results
+# and trigger unnecessary re-planning).
 _EXECUTED_STATUSES: frozenset[ActionStatus] = frozenset(
     {
-        ActionStatus.EXECUTING,
         ActionStatus.SUCCESS,
         ActionStatus.PARTIAL_SUCCESS,
         ActionStatus.FAILED,
@@ -281,6 +285,22 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 continue
 
             # Actions without execution phase = IMMEDIATE implicitly.
+            # Still executing → skip (don't verify prematurely; the async
+            # effect may not have materialised yet).
+            if action.status is ActionStatus.EXECUTING:
+                results.append(
+                    VerificationActionResult(
+                        action_id=action.action_id,
+                        effect_status=EffectStatus.SKIPPED,
+                        writeback_required=action.writeback_required,
+                        writeback_readiness=action.writeback_readiness,
+                        writeback_status=action.writeback_status,
+                        writeback_ids=[],
+                        detail="pending_execution",
+                    )
+                )
+                continue
+
             # Not executed yet → skip (not an error).
             if action.status not in _EXECUTED_STATUSES:
                 results.append(
@@ -418,7 +438,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 exc,
             )
             effect_status = EffectStatus.UNVERIFIABLE
-            detail = f"verification_exception: {exc}"
+            # Sanitise: only expose the exception type name, not the full
+            # message (which may contain IPs, paths, or provider internals).
+            # The full traceback is logged above for debugging.
+            detail = f"verification_exception: {type(exc).__name__}"
             try:
                 if verification_action is not None:
                     await self._finalize_verification_action(
@@ -426,7 +449,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         target_status=ActionStatus.FAILED,
                     )
             except Exception:
-                pass
+                logger.warning(
+                    "Failed to finalize verification action %s during exception"
+                    " handling for source action %s",
+                    verification_action_id,
+                    action.action_id,
+                    exc_info=True,
+                )
 
         # Build writeback fields for this action.
         wb_required = action.writeback_required
@@ -434,7 +463,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         wb_status = action.writeback_status
 
         if effect_status is EffectStatus.UNVERIFIABLE:
-            wb_required = False
+            # writeback_required preserves the business obligation — it must
+            # never be reversed by technical unavailability (§4.5 item 6).
+            # The model validator on VerificationActionResult permits
+            # writeback_required=True + writeback_readiness=NOT_REQUIRED
+            # + writeback_status=None when effect_status=UNVERIFIABLE.
             wb_readiness = WritebackReadiness.NOT_REQUIRED
             wb_status = None
 
@@ -540,7 +573,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
 
         # Evaluate writeback statuses for all applicable required actions.
-        if terminal_activated or disposition_policy is DispositionPolicy.REQUIRED:
+        # Only do this when activation succeeded — if activation failed we
+        # are already in MANUAL_RESOLUTION and evaluating "stale" writeback
+        # receipts would produce misleading routing decisions.
+        if terminal_activated:
             wb_eval = await self._evaluate_writeback_statuses(
                 event_id=event_id,
                 actions=actions,
@@ -759,14 +795,20 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
     async def _load_disposition_policy(
         self, event_id: str
     ) -> DispositionPolicy | None:
-        """Read disposition_policy from working memory or the event row."""
-        # Try working memory first.
+        """Read disposition_policy from the event row or working memory."""
+        # Attempt reading from working memory first.  disposition_policy is
+        # stored on the SecurityEvent row, not on triage_result — but some
+        # codepaths may cache it in working memory under the event key.
         if self.working_memory is not None:
             try:
-                triage = await self.working_memory.read(event_id, "triage_result")
-                if triage and isinstance(triage, dict):
-                    # disposition_policy is stored on the event, not triage.
-                    pass
+                policy_raw = await self.working_memory.read(
+                    event_id, "disposition_policy"
+                )
+                if policy_raw is not None:
+                    if isinstance(policy_raw, DispositionPolicy):
+                        return policy_raw
+                    if isinstance(policy_raw, str):
+                        return DispositionPolicy(policy_raw)
             except Exception:
                 pass
 
@@ -789,7 +831,9 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         wb_ids: list[str] = []
         outboxes = outbox_map.get(action.action_id, [])
         for ob in outboxes:
-            wb_id = getattr(ob, "writeback_id", None)
+            # Direct attribute access — getattr(ob, "writeback_id", None)
+            # silently returns [] on field renames, masking refactor bugs.
+            wb_id = ob.writeback_id
             if wb_id:
                 wb_ids.append(wb_id)
         return wb_ids
@@ -810,7 +854,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         Verification actions: action_category=verification,
         execution_owner=null, writeback_required=false.
         """
-        action_id = new_action_id()
+        action_id = _deterministic_verification_action_id(
+            event_id=event_id,
+            source_action_id=source_action.action_id,
+            verify_tool=verify_tool,
+        )
         verification_action = Action(
             action_id=action_id,
             event_id=event_id,
@@ -1101,3 +1149,24 @@ def _job_from_row(row: orm.ActionExecutionJob) -> ActionExecutionJob:
 __all__ = [
     "VerifyAgent",
 ]
+
+
+def _deterministic_verification_action_id(
+    *,
+    event_id: str,
+    source_action_id: str,
+    verify_tool: str,
+) -> str:
+    """Derive a deterministic action_id for a verification Action.
+
+    Uses SHA-256(event_id + source_action_id + verify_tool) so that if
+    VerifyAgent crashes after writing the verification_result to
+    WorkingMemory but before the trace record completes, re-execution
+    produces the SAME action_id — the ORM insert becomes an idempotent
+    upsert (the database layer must treat duplicate-action-id as a
+    no-op or use INSERT … ON CONFLICT DO NOTHING).
+    """
+    digest = hashlib.sha256(
+        f"verify:{event_id}:{source_action_id}:{verify_tool}".encode("utf-8")
+    ).hexdigest()[:8]
+    return f"act-{digest}"

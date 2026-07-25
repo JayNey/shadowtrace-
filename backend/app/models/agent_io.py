@@ -348,8 +348,15 @@ class VerificationActionResult(BaseModel):
             if self.writeback_status is not None:
                 raise ValueError("writeback_required=false requires writeback_status=null")
         elif self.writeback_readiness is WritebackReadiness.NOT_REQUIRED:
-            # required must never be silently downgraded to "not required".
-            raise ValueError("writeback_required=true forbids writeback_readiness=NOT_REQUIRED")
+            # UNVERIFIABLE means the verification tool was unavailable — the
+            # business obligation (writeback_required) stays intact but we
+            # cannot observe writeback readiness/status.  The rule in 方案
+            # §4.5 item 6: "writeback_required 只表达业务义务，禁止由技术能力
+            # 反向改写".
+            if self.effect_status is not EffectStatus.UNVERIFIABLE:
+                raise ValueError(
+                    "writeback_required=true forbids writeback_readiness=NOT_REQUIRED"
+                )
         return self
 
 
