@@ -229,7 +229,12 @@ class GraphResponse(BaseModel):
 
 class DecisionTraceResponse(BaseModel):
     event_id: str
-    steps: list[dict[str, Any]] = Field(default_factory=list)
+    entries: list[dict[str, Any]] = Field(default_factory=list)
+    summary: dict[str, Any] = Field(default_factory=dict)
+    missing_sources: list[str] = Field(default_factory=list)
+    page: int = 1
+    page_size: int = 50
+    total: int = 0
 
 
 class ActionListResponse(PageMeta):

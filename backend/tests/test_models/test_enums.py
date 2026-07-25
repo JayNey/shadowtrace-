@@ -50,6 +50,7 @@ EXPECTED_ENUM_NAMES = {
     "GuardRailDimension",
     "BudgetScope",
     "QualityVerdict",
+    "DecisionTraceEntryType",
 }
 
 
@@ -209,6 +210,16 @@ EXPECTED_ENUM_VALUES: dict[str, set[str]] = {
     "GuardRailDimension": {"schema", "grounding", "policy", "sanitization"},
     "BudgetScope": {"system", "event", "agent"},
     "QualityVerdict": {"pass", "warn", "fail"},
+    "DecisionTraceEntryType": {
+        "agent_execution",
+        "tool_call",
+        "llm_call",
+        "state_transition",
+        "approval",
+        "action_execution",
+        "disposition",
+        "writeback",
+    },
 }
 
 

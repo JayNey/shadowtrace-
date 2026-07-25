@@ -10,7 +10,7 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -50,6 +50,7 @@ from app.models.action import Action as ActionModel
 from app.models.disposition import SourceObjectLocator
 from app.models.enums import (
     ActionStatus,
+    DecisionTraceEntryType,
     DispositionPolicy,
     EventStatus,
     EventType,
@@ -60,6 +61,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.workflow import TransitionContext
+from app.services.decision_trace_service import DecisionTraceService
 
 if TYPE_CHECKING:
     from app.services.event_service import EventService
@@ -1298,7 +1300,7 @@ async def get_graph(
 
 
 # --------------------------------------------------------------------------- #
-# GET /events/{event_id}/decision-trace (stub, real implementation deferred)
+# GET /events/{event_id}/decision-trace (ISSUE-063)
 # --------------------------------------------------------------------------- #
 
 
@@ -1306,12 +1308,57 @@ async def get_graph(
 async def get_decision_trace(
     event_id: str,
     principal: CurrentPrincipal,
+    entry_type: Annotated[list[str] | None, Query()] = None,
+    page: int = 1,
+    page_size: int = 50,
     event_service: EventService = Depends(get_event_service),
 ) -> s.DecisionTraceResponse:
+    """Aggregated decision trace aggregating agent, tool, LLM, state,
+    approval, action, disposition, and writeback entries into a single
+    timestamp-ordered timeline (ISSUE-063)."""
     event = await event_service.get_event(event_id)
     if event is None:
         raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
-    return s.DecisionTraceResponse(event_id=event_id, steps=[])
+
+    sf = _try_get_session_factory()
+    if sf is None:
+        return s.DecisionTraceResponse(
+            event_id=event_id,
+            missing_sources=["all (database unavailable)"],
+        )
+
+    page = max(1, page)
+    page_size = min(max(1, page_size), 200)
+
+    try:
+        service = DecisionTraceService(sf)
+        trace = await service.get_decision_trace(event_id)
+    except (sa_exc.SQLAlchemyError, OSError) as exc:
+        logger.warning("Decision trace unavailable for %s: %s", event_id, exc, exc_info=True)
+        return s.DecisionTraceResponse(
+            event_id=event_id,
+            missing_sources=["all (database unavailable)"],
+        )
+
+    entries = trace.entries
+    if entry_type:
+        valid_types = {item.value for item in DecisionTraceEntryType}
+        allowed = {value for value in entry_type if value in valid_types}
+        entries = [e for e in entries if e.entry_type.value in allowed]
+
+    total = len(entries)
+    start = (page - 1) * page_size
+    page_entries = entries[start : start + page_size]
+
+    return s.DecisionTraceResponse(
+        event_id=trace.event_id,
+        entries=[e.model_dump(mode="json") for e in page_entries],
+        summary=trace.summary.model_dump(),
+        missing_sources=trace.missing_sources,
+        page=page,
+        page_size=page_size,
+        total=total,
+    )
 
 
 # --------------------------------------------------------------------------- #
