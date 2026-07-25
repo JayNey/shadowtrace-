@@ -3926,6 +3926,82 @@ class TestIssue060ReviewNewTests:
         result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.wm_persisted is True
 
+    # ── Blocker: Phase 2 results must have DISPOSITION phase ──────────────
+
+    async def test_phase2_writeback_not_applicable_has_disposition_phase(self):
+        """Blocker fix: writeback_not_applicable results from Phase 2
+        must have verification_phase=DISPOSITION, not EFFECT.
+
+        Uses status=PENDING so Phase 1 produces SKIPPED (action_not_executed)
+        which allows writeback_required=True + writeback_readiness=NOT_REQUIRED
+        per the VerificationActionResult validator.  Phase 2 then evaluates
+        writeback_applicable=False and must produce DISPOSITION phase."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.PENDING,
+            writeback_required=True,
+            writeback_applicable=False,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+        )
+        ed_svc = FakeEventDispositionService(activated=True)
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        wb_not_applicable = [
+            r for r in result.results if r.detail == "writeback_not_applicable"
+        ]
+        assert len(wb_not_applicable) == 1
+        assert wb_not_applicable[0].verification_phase == VerificationPhase.DISPOSITION
+
+    async def test_phase2_writeback_blocked_has_disposition_phase(self):
+        """Blocker fix: writeback_blocked_* results from Phase 2
+        must have verification_phase=DISPOSITION, not EFFECT."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.CAPABILITY_UNSUPPORTED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        ed_svc = FakeEventDispositionService(activated=True)
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        wb_blocked = [
+            r
+            for r in result.results
+            if r.detail and r.detail.startswith("writeback_blocked_")
+        ]
+        assert len(wb_blocked) == 1
+        assert wb_blocked[0].verification_phase == VerificationPhase.DISPOSITION
+
 
 def _mock_executor(results: dict[str, ToolResult]) -> Any:
     """Return a MagicMock tool_executor that returns predefined results per tool."""
