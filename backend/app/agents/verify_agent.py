@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -36,9 +36,11 @@ from app.models.agent_io import (
     VerificationResult,
     VerifyAgentInput,
 )
+from app.models.disposition import SourceObjectLocator
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
+    ActionLevel,
     ActionStatus,
     DispositionPolicy,
     ExecutionJobStatus,
@@ -47,7 +49,6 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.execution import ActionExecutionJob
-
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.services.working_memory import BoundWorkingMemory
 
@@ -126,6 +127,17 @@ class _ActivateResult:
         self.error_detail = error_detail
 
 
+class _EventDispositionServiceProtocol(Protocol):
+    """Structural interface for EventDispositionService (ISSUE-059A).
+
+    Using Protocol instead of ``Any`` lets mypy catch mismatched
+    injection objects at import/type-check time rather than at
+    runtime inside the except-Exception handler.
+    """
+
+    async def activate_and_submit(self, *, event_id: str) -> _ActivateResult: ...
+
+
 # --------------------------------------------------------------------------- #
 # VerifyAgent
 # --------------------------------------------------------------------------- #
@@ -149,7 +161,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         event_bus: Any | None = None,
         # VerifyAgent‑specific dependencies
         session_factory: async_sessionmaker[AsyncSession] | None = None,
-        event_disposition_service: Any | None = None,
+        event_disposition_service: _EventDispositionServiceProtocol | None = None,
         disposition_sync_service: Any | None = None,
     ) -> None:
         super().__init__(
@@ -162,9 +174,15 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             audit_service=audit_service,
             event_bus=event_bus,
         )
-        self._session_factory = session_factory
-        self._event_disposition_service = event_disposition_service
-        self._disposition_sync_service = disposition_sync_service
+        self._session_factory: async_sessionmaker[AsyncSession] | None = (
+            session_factory
+        )
+        self._event_disposition_service: (
+            _EventDispositionServiceProtocol | None
+        ) = event_disposition_service
+        self._disposition_sync_service: Any | None = (
+            disposition_sync_service
+        )
 
     # ------------------------------------------------------------------ #
     # _run
@@ -1231,7 +1249,7 @@ def _action_from_row(row: orm.Action) -> Action:
         action_category=ActionCategory(row.action_category),
         action_name=row.action_name,
         tool_name=row.tool_name,
-        action_level=row.action_level,
+        action_level=ActionLevel(row.action_level),
         execution_phase=(
             ActionExecutionPhase(row.execution_phase)
             if row.execution_phase
@@ -1268,7 +1286,11 @@ def _action_from_row(row: orm.Action) -> Action:
             if row.writeback_status
             else None
         ),
-        disposition_source_ref=row.disposition_source_ref,
+        disposition_source_ref=(
+            SourceObjectLocator.model_validate(row.disposition_source_ref)
+            if row.disposition_source_ref
+            else None
+        ),
         superseded_by_revision=row.superseded_by_revision,
         executed_at=row.executed_at,
         effect_verification_status=row.effect_verification_status,
@@ -1327,6 +1349,6 @@ def _deterministic_verification_action_id(
     no-op or use INSERT … ON CONFLICT DO NOTHING).
     """
     digest = hashlib.sha256(
-        f"verify:{event_id}:{source_action_id}:{verify_tool}".encode("utf-8")
+        f"verify:{event_id}:{source_action_id}:{verify_tool}".encode()
     ).hexdigest()[:8]
     return f"act-{digest}"

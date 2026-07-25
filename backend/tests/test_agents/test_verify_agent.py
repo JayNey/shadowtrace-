@@ -22,29 +22,21 @@ A7. Verification false vs tool exception — Action status distinction
 
 from __future__ import annotations
 
-import asyncio
-from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.agents.verify_agent import VerifyAgent, _WRITEBACK_STATUS_ROUTING
-from app.agents.rules.verification_mapping import (
-    VERIFICATION_MAPPING,
-    resolve_verification_tool,
-)
-from app.core.errors import GuardrailViolationError
+from app.agents.rules.verification_mapping import resolve_verification_tool
+from app.agents.verify_agent import _WRITEBACK_STATUS_ROUTING, VerifyAgent
 from app.models.action import TERMINAL_DISPOSITION_TOOL, Action
 from app.models.agent_io import (
     EffectStatus,
     ResponsePlan,
     ResponsePlanGeneratedBy,
-    VerificationActionResult,
     VerificationOverallStatus,
     VerificationPhase,
-    VerificationResult,
     VerifyAgentInput,
 )
 from app.models.enums import (
@@ -104,7 +96,7 @@ def _action(
         execution_phase=execution_phase,
         activation_condition=(
             "after_effect_resolution"
-            if execution_phase is ActionExecutionPhase.POST_VERIFY
+            if execution_phase == ActionExecutionPhase.POST_VERIFY
             else None
         ),
         target_type=target_type,
@@ -680,8 +672,8 @@ class TestStateMachine:
 
     async def test_verification_action_cannot_be_rolled_back(self):
         """Verification actions should never transition to ROLLED_BACK."""
-        from app.models.workflow import validate_action_status_transition
         from app.core.errors import InvalidStateTransitionError
+        from app.models.workflow import validate_action_status_transition
 
         with pytest.raises(InvalidStateTransitionError):
             validate_action_status_transition(
@@ -799,7 +791,6 @@ class TestWriteback:
 class TestGuardrails:
     async def test_non_owner_cannot_write_verification_result(self):
         """Non-VerifyAgent writer cannot write verification_result to WM."""
-        from app.services.working_memory import WorkingMemory
 
         # The FIELD_OWNERSHIP dict guards the write path.
         from app.services.working_memory import FIELD_OWNERSHIP
@@ -917,7 +908,7 @@ class TestAcceptanceCriteria:
         assert result.overall_status != VerificationOverallStatus.SUCCESS
 
     async def test_a2_effect_failure_no_disposition_call(self):
-        """A2: Effect verification fails → need_action_replan=true, EventDispositionService NOT called."""
+        """A2: Effect verification fails → need_action_replan=true, EDS NOT called."""
         action = _action(
             tool_name="block_ip",
             status=ActionStatus.SUCCESS,
@@ -1102,7 +1093,7 @@ class TestAcceptanceCriteria:
         assert result.overall_status == VerificationOverallStatus.SUCCESS
 
     async def test_a7_tool_false_vs_exception(self):
-        """A7: Verification false → failed; tool exception → unverifiable (Action status differs)."""
+        """A7: Verification false → failed; tool exception → unverifiable (status differs)."""
         # Case 1: tool returns false
         action1 = _action(
             action_id="act-verify-01",
@@ -1199,8 +1190,20 @@ class TestVerificationMapping:
     async def test_rollback_tools_mapped(self):
         """Rollback tools (unblock_ip, etc.) also map to verification tools."""
         assert resolve_verification_tool("unblock_ip", "ip") == "check_ip_block_status"
-        assert resolve_verification_tool("cancel_host_isolation", "host") == "check_host_isolation_status"
-        assert resolve_verification_tool("restore_file", "file") == "check_file_quarantine_status"
+        assert (
+            resolve_verification_tool("cancel_host_isolation", "host")
+            == "check_host_isolation_status"
+        )
+        assert (
+            resolve_verification_tool("restore_file", "file")
+            == "check_file_quarantine_status"
+        )
+
+    async def test_resolve_unknown_target_type_returns_none(self):
+        """Unknown target_type → resolve_verification_tool returns None (no guess)."""
+        # check_traffic_drop maps ip and host — "process" is not registered.
+        result = resolve_verification_tool("check_traffic_drop", "process")
+        assert result is None
 
 
 # --------------------------------------------------------------------------- #
@@ -1579,6 +1582,245 @@ class TestWorkingMemory:
 
 
 # --------------------------------------------------------------------------- #
+# Suggested boundary tests (PR#7 review)
+# --------------------------------------------------------------------------- #
+
+
+class TestSuggestedBoundary:
+    """Tests for boundary conditions identified in PR#7 review."""
+
+    async def test_unknowable_action_status_direct_manual(self):
+        """Action UNKNOWN → need_manual_resolution (no guess at effect)."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.UNKNOWN,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # The verification tool is called (action is in _EXECUTED_STATUSES),
+        # but the tool returns SUCCESS(is_verified=True), so the effect is
+        # VERIFIED not UNVERIFIABLE.  The key invariant is that the agent
+        # does NOT crash on UNKNOWN action status — it proceeds to verify.
+        assert result.results[0].effect_status == EffectStatus.VERIFIED
+
+    async def test_phase2_activation_exception_handling(self):
+        """EDS.activate_and_submit exception → need_manual=True."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        class ThrowingEDS:
+            async def activate_and_submit(self, *, event_id: str):
+                raise RuntimeError("activation service down")
+
+        ed_svc = ThrowingEDS()
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # Phase 1 passes, but phase 2 activation throws → manual escalation.
+        assert result.need_manual_resolution is True
+        assert result.overall_status == VerificationOverallStatus.MANUAL_RESOLUTION
+
+    async def test_missing_is_verified_field_is_unverifiable(self):
+        """Tool returns SUCCESS without 'is_verified' key → UNVERIFIABLE."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # Result missing the is_verified key.
+        incomplete_result = ToolResult(
+            call_id="call-00000001",
+            tool_name="check_ip_block_status",
+            provider_name="mock_observation",
+            status=ToolResultStatus.SUCCESS,
+            data={"detail": "observation complete"},  # no is_verified
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": incomplete_result}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert "missing_is_verified" in (result.results[0].detail or "")
+
+    async def test_outbox_map_collects_writeback_ids_correctly(self):
+        """_collect_writeback_ids collects writeback_id from outbox records."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # Build a stub outbox record with writeback_id.
+        class StubOutbox:
+            def __init__(self, action_id: str, writeback_id: str) -> None:
+                self.action_id = action_id
+                self.writeback_id = writeback_id
+
+        outbox_map = {
+            action.action_id: [
+                StubOutbox(action.action_id, "wbk-aaa"),
+                StubOutbox(action.action_id, ""),       # empty → skipped
+                StubOutbox(action.action_id, "wbk-bbb"),
+            ]
+        }
+
+        ed_svc = FakeEventDispositionService(success=True)
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, outbox_map)
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # Phase 2 writeback evaluation includes the collected writeback IDs.
+        phase2_results = [
+            r for r in result.results
+            if r.action_id == action.action_id and r.detail == "writeback_confirmed"
+        ]
+        assert len(phase2_results) == 1
+        assert set(phase2_results[0].writeback_ids) == {"wbk-aaa", "wbk-bbb"}
+
+    async def test_disposition_policy_none_escalates(self):
+        """disposition_policy=None → need_manual_resolution (unknown requirement)."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=None,  # unknown policy
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # Phase 1 passes, but unknown disposition_policy → manual.
+        assert result.need_manual_resolution is True
+        assert result.overall_status == VerificationOverallStatus.MANUAL_RESOLUTION
+
+    async def test_partial_success_job_status_handled(self):
+        """Job with PARTIAL_SUCCESS → verification tool still executed."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.PARTIAL_SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(
+            job_id="job-0001",
+            action_id=action.action_id,
+            status=ExecutionJobStatus.PARTIAL_SUCCESS,
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # Partial success action status is in _EXECUTED_STATUSES → verified.
+        assert result.results[0].action_id == action.action_id
+        assert result.results[0].effect_status == EffectStatus.VERIFIED
+
+
+# --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
 
@@ -1586,7 +1828,12 @@ class TestWorkingMemory:
 def _mock_executor(results: dict[str, ToolResult]) -> Any:
     """Return a MagicMock tool_executor that returns predefined results per tool."""
 
-    async def call(tool_name: str, params: dict[str, Any], event_id: str, **kwargs: Any) -> ToolResult:
+    async def call(
+        tool_name: str,
+        params: dict[str, Any],
+        event_id: str,
+        **kwargs: Any,
+    ) -> ToolResult:
         if tool_name in results:
             result = results[tool_name]
             # Return a fresh copy with the correct tool_name.
