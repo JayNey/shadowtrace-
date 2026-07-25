@@ -520,7 +520,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 logger.warning(
                     "Failed to finalize verification action %s during exception"
                     " handling for source action %s",
-                    verification_action_id,
+                    verification_action_id or "N/A",
                     action.action_id,
                     exc_info=True,
                 )
@@ -631,11 +631,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
             return results, failed_wb, blocked_wb, overall_status, need_wb_recovery, need_manual
 
-        # disposition_policy is REQUIRED:
+        # disposition_policy is REQUIRED (NOT_REQUIRED and None are
+        # already handled above):
         # Attempt to activate deferred terminal writeback.
         terminal_activated = False
         has_ed_svc = self._event_disposition_service is not None
-        if disposition_policy == DispositionPolicy.REQUIRED and has_ed_svc:
+        if has_ed_svc:
             try:
                 activate_result: _ActivateResult = (
                     await self._event_disposition_service.activate_and_submit(
@@ -663,7 +664,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 )
                 need_manual = True
                 overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
-        elif disposition_policy == DispositionPolicy.REQUIRED:
+        else:
             # No EventDispositionService available → manual resolution.
             logger.warning(
                 "Phase 2 activation unavailable: no EventDispositionService event=%s",
@@ -1437,5 +1438,5 @@ def _deterministic_verification_action_id(
     """
     digest = hashlib.sha256(
         f"verify:{event_id}:{source_action_id}:{verify_tool}".encode()
-    ).hexdigest()[:16]
+    ).hexdigest()[:8]
     return f"act-{digest}"
