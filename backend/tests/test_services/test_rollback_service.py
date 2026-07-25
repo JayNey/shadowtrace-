@@ -207,11 +207,11 @@ async def _seed_response_action(
     writeback_required: bool = False,
     writeback_applicable: bool = False,
     executed_at: datetime | None = None,
-    parameters: dict | None = None,
+    parameters: dict[str, Any] | None = None,
     source_action_id: str | None = None,
     rollback_status: str | None = None,
     effect_verification_status: str | None = "verified",
-    disposition_source_ref: dict | None = None,
+    disposition_source_ref: dict[str, Any] | None = None,
 ) -> ActionModel:
     action_id = new_action_id()
     async with session_factory() as session:
@@ -341,7 +341,7 @@ class _MockDispositionSync:
 
     def __init__(self) -> None:
         self.call_count = 0
-        self.commands: list = []
+        self.commands: list[Any] = []
 
     async def enqueue_command(
         self,
@@ -462,6 +462,7 @@ async def test_rollback_action_success_verification_rolls_back_original(
         )
         log_entries = list(logs)
         assert len(log_entries) >= 1
+        assert log_entries[0].reason is not None
         assert "rollback" in log_entries[0].reason.lower()
 
 
@@ -497,10 +498,12 @@ async def test_rollback_action_execution_failure_keeps_original_status(
 
     async with session_factory() as session:
         original_row = await session.get(orm.Action, original.action_id)
+        assert original_row is not None
         assert ActionStatus(original_row.status) is ActionStatus.SUCCESS
         assert original_row.rollback_status != "completed"
 
         rb_row = await session.get(orm.Action, result.rollback_action_id)
+        assert rb_row is not None
         assert ActionStatus(rb_row.status) is ActionStatus.FAILED
 
 
@@ -534,6 +537,7 @@ async def test_rollback_non_rollbackable_action_returns_warning(
 
     async with session_factory() as session:
         original_row = await session.get(orm.Action, original.action_id)
+        assert original_row is not None
         assert ActionStatus(original_row.status) is ActionStatus.SUCCESS
 
 
@@ -1105,6 +1109,7 @@ async def test_rollback_action_partial_success_rejected(
     )
 
     assert result.rolled_back is False
+    assert result.warning is not None
     assert "partial_success" in result.warning
 
 
