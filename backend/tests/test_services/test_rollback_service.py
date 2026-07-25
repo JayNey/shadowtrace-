@@ -179,17 +179,15 @@ async def _seed_source_object(
             session.add(
                 orm.SourceObject(
                     source_record_id=srid,
-                    event_id=event_id,
                     source_product="mock_xdr",
                     source_tenant_id="tenant-test",
                     connector_id="conn-test",
                     source_kind=SourceObjectKind.INCIDENT.value,
                     source_object_type="incident",
                     source_object_id=f"incident-{_sfx()}",
-                    current_concurrency_token=f"token-{_sfx()}",
+                    source_concurrency_token=f"token-{_sfx()}",
                     source_status_raw="contained",
                     source_disposition=SourceDisposition.CONTAINED.value,
-                    source_data={"id": f"incident-{_sfx()}"},
                 )
             )
             await session.flush()
