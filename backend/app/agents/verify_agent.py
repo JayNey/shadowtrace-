@@ -49,6 +49,7 @@ from app.models.enums import (
     ActionExecutionPhase,
     ActionLevel,
     ActionStatus,
+    ConfirmationEvidence,
     DispositionPolicy,
     ExecutionJobStatus,
     ExecutionOwner,
@@ -97,6 +98,20 @@ _WRITEBACK_STATUS_ROUTING: dict[WritebackStatus, tuple[bool, bool, bool, str]] =
     # explicitly before consulting this table.  See _evaluate_writeback_statuses
     # for the explicit None check.
 }
+
+# Defensive check: when a new WritebackStatus value is added to the enum
+# but this routing table is not updated, the .get() fallback silently
+# routes the unknown value to recovery.  This assertion fails fast at
+# import time so the developer is forced to make an explicit routing
+# decision for the new enum member.
+# (ISSUE-060 review Nit-1)
+_WRITEBACK_STATUS_ROUTING_COVERS_ALL = set(_WRITEBACK_STATUS_ROUTING.keys())
+_WRITEBACK_STATUS_ENUM_VALUES = set(WritebackStatus)
+assert _WRITEBACK_STATUS_ROUTING_COVERS_ALL == _WRITEBACK_STATUS_ENUM_VALUES, (
+    f"_WRITEBACK_STATUS_ROUTING is out of sync with WritebackStatus enum. "
+    f"Missing: {_WRITEBACK_STATUS_ENUM_VALUES - _WRITEBACK_STATUS_ROUTING_COVERS_ALL}. "
+    f"Extra: {_WRITEBACK_STATUS_ROUTING_COVERS_ALL - _WRITEBACK_STATUS_ENUM_VALUES}."
+)
 
 
 # Maximum number of UNKNOWN writeback lookup attempts before escalating
@@ -627,6 +642,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         """Run one verification tool observation and classify the result."""
         verification_action_id: str | None = None
         verification_action: Action | None = None
+        detail: str = "verification_pending"
+        verification_action_dirty: bool = False
 
         try:
             # Persist a verification Action.
@@ -640,6 +657,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             params: dict[str, Any] = {
                 "target_type": action.target_type or "",
                 "target": action.target or "",
+                "event_id": event_id,
             }
             if job is not None:
                 params["parameters"] = {"job_id": job.job_id}
@@ -740,11 +758,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             except Exception:
                 # The verification Action may be left in EXECUTING status
                 # (stuck as a zombie) because _finalize_verification_action
-                # itself failed.  Attach a distinguishing marker so
-                # downstream consumers can tell "verification action
-                # correctly finalized" from "verification action state
-                # unknown" — the latter may need manual cleanup.
-                detail = f"{detail};verification_action_dirty"
+                # itself failed.  Set the structured flag so downstream
+                # consumers can distinguish "correctly finalized" from
+                # "state unknown" without parsing the detail string.
+                # (ISSUE-060 review Nit-2)
+                verification_action_dirty = True
                 logger.warning(
                     "Failed to finalize verification action %s during exception"
                     " handling for source action %s",
@@ -782,6 +800,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             verification_action_id=verification_action_id,
             detail=detail,
             verification_phase=VerificationPhase.EFFECT,
+            verification_action_dirty=verification_action_dirty,
         )
 
     # ------------------------------------------------------------------ #
@@ -1367,6 +1386,20 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         }
         terminal_wb_id = activate_result.writeback_id
         if terminal_wb_id is None:
+            # Contract anomaly: activate_and_submit returned activated=True
+            # but no writeback_id — we cannot verify a writeback receipt
+            # that has no identifier.  Escalate to manual resolution so an
+            # operator can inspect the disposition state directly.
+            # (ISSUE-060 review SF-2)
+            if activate_result.activated:
+                logger.error(
+                    "Contract anomaly: terminal disposition activated "
+                    "(activated=True) but writeback_id is None — "
+                    "escalating to manual resolution event=%s",
+                    event_id,
+                )
+                empty["need_manual"] = True
+                blocked_wb_set.add(f"terminal_wb_{event_id}")
             return empty
         if self._session_factory is None:
             logger.warning(
@@ -1418,6 +1451,36 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     (False, True, False, "writeback_status_unknown"),
                 )
                 confirmed, rec, man, detail_suffix = routing
+
+                # Evidence-tier evaluation: per §4.6.16 the UI/statistics
+                # must distinguish strong evidence (readback_verified,
+                # manual_confirmed) from medium (status_queried) and weak
+                # (adapter_acknowledged).  A CONFIRMED receipt backed only
+                # by adapter_acknowledged should not be treated as equally
+                # trustworthy as one with readback_verified.
+                # (ISSUE-060 review SF-3)
+                if confirmed:
+                    evidence_raw: str | None = getattr(
+                        receipt_row, "confirmation_evidence", None
+                    )
+                    if evidence_raw is not None:
+                        try:
+                            evidence = ConfirmationEvidence(evidence_raw)
+                        except ValueError:
+                            evidence = None
+                        if evidence is ConfirmationEvidence.ADAPTER_ACKNOWLEDGED:
+                            detail_suffix = "writeback_confirmed_weak_evidence"
+                            logger.info(
+                                "Terminal writeback %s CONFIRMED but evidence_tier=weak"
+                                " (adapter_acknowledged) event=%s",
+                                terminal_wb_id,
+                                event_id,
+                            )
+                        # Expose evidence_tier in the result so downstream
+                        # consumers can make tier-aware decisions.
+                        empty["evidence_tier"] = evidence.value if evidence else evidence_raw
+                    else:
+                        empty["evidence_tier"] = None
 
                 # CONFIRMED is the happy path — the terminal writeback
                 # receipt was persisted synchronously by activate_and_submit
@@ -1881,4 +1944,10 @@ def _deterministic_verification_action_id(
     digest = hashlib.sha256(
         f"verify:{event_id}:{source_action_id}:{verify_tool}".encode()
     ).hexdigest()
-    return f"act-{digest}"
+    # Per ISSUE-002 ID spec: Action IDs follow act-{8hex} format.
+    # We truncate to the first 8 hex characters of the SHA-256 digest
+    # while preserving the full input for deterministic derivation.
+    # Collision probability across verification actions within one
+    # event (≤50 actions, ≤20 verify tools each) is negligible with
+    # 8 hex chars (32 bits, ~1 in 4 billion per pair).
+    return f"act-{digest[:8]}"

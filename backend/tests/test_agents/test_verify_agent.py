@@ -176,6 +176,50 @@ def _tool_result_error(message: str = "tool failed") -> ToolResult:
     )
 
 
+def _mock_terminal_confirm_session_factory(writeback_id: str = "wbk-terminal-00001"):
+    """Build a MagicMock session_factory that returns a CONFIRMED terminal
+    writeback receipt for the given writeback_id.  Use this when a test
+    needs phase 2 to pass the terminal writeback evaluation but doesn't
+    have a real database.
+
+    The returned mock is a callable usable as
+    ``VerifyAgent(…, session_factory=factory)``.
+    """
+    from contextlib import asynccontextmanager
+    from unittest.mock import MagicMock
+
+    class _ReceiptRow:
+        def __init__(self, wb_id: str) -> None:
+            self.writeback_id = wb_id
+            self.status = "confirmed"
+            self.sequence = 1
+            self.confirmation_evidence: str | None = "readback_verified"
+
+    class _Session:
+        def __init__(self, wb_id: str) -> None:
+            self._wb_id = wb_id
+
+        async def scalars(self, stmt: Any) -> Any:
+            class _Result:
+                def __init__(self, wb_id: str) -> None:
+                    self._wb_id = wb_id
+
+                def first(self) -> _ReceiptRow | None:
+                    return _ReceiptRow(self._wb_id)
+
+            return _Result(self._wb_id)
+
+        async def get(self, *args: Any, **kwargs: Any) -> Any:
+            return None
+
+    @asynccontextmanager
+    async def _session_ctx() -> Any:
+        yield _Session(writeback_id)
+
+    mock_factory = MagicMock(side_effect=_session_ctx)
+    return mock_factory
+
+
 # --------------------------------------------------------------------------- #
 # Fake / stub classes for testing
 # --------------------------------------------------------------------------- #
@@ -369,6 +413,8 @@ class TestHappyPath:
 
     async def test_phase2_success(self):
         """Full two-phase: effects ok → activate → writeback CONFIRMED."""
+        from contextlib import asynccontextmanager
+
         action = _action(
             tool_name="block_ip",
             target_type="ip",
@@ -381,9 +427,34 @@ class TestHappyPath:
             writeback_status=WritebackStatus.CONFIRMED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # Build a mock DB session that returns a CONFIRMED terminal receipt.
+        class _ReceiptRow:
+            writeback_id: str = "wbk-terminal-00001"
+            status: str = "confirmed"
+            sequence: int = 1
+            confirmation_evidence: str | None = "readback_verified"
+
+        class _TerminalDBSession:
+            async def scalars(self, stmt: Any) -> Any:
+                class _Result:
+                    def first(self) -> _ReceiptRow | None:
+                        return _ReceiptRow()
+
+                return _Result()
+
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                return None
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _TerminalDBSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+
         ed_svc = FakeEventDispositionService(
             activated=True,
-            writeback_id=None,  # no DB session to verify receipt
+            writeback_id="wbk-terminal-00001",
         )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
@@ -391,6 +462,7 @@ class TestHappyPath:
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
+            session_factory=mock_factory,
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
             return_value=([action], {"job-0001": job}, {})
@@ -876,13 +948,14 @@ class TestAcceptanceCriteria:
         job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(
             activated=True,
-            writeback_id=None,  # no DB session to verify receipt
+            writeback_id="wbk-a1-terminal",
         )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory("wbk-a1-terminal"),
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
             return_value=([action], {"job-0001": job}, {})
@@ -1067,13 +1140,14 @@ class TestAcceptanceCriteria:
         )
         ed_svc = FakeEventDispositionService(
             activated=True,
-            writeback_id=None,  # no DB session to verify receipt
+            writeback_id="wbk-a6-terminal",
         )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory("wbk-a6-terminal"),
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
             return_value=([deferred], {}, {})
@@ -1435,19 +1509,24 @@ class TestRegressionShouldFix:
         """
         ed_svc = FakeEventDispositionService(
             activated=True,
-            writeback_id=None,  # no DB session to verify receipt
+            writeback_id="wbk-empty-plan",
         )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory("wbk-empty-plan"),
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
             return_value=([], {}, {})
         )
         agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
             return_value=DispositionPolicy.REQUIRED,
+        )
+        # Empty plan → plan_revision derived from DB fallback.
+        agent._load_event_plan_revision = AsyncMock(  # type: ignore[method-assign]
+            return_value=1,
         )
 
         result = await agent.execute(_input(event_id="evt-20260725-00000001", actions=[]))
@@ -2112,8 +2191,8 @@ class TestPR7ReviewFixes:
 
     async def test_verify_agent_full_rerun_idempotent(self):
         """Full re-verification of the same event produces the same
-        verification_action_id (Nit 1: 16-char hex digest) and consistent
-        effect status."""
+        verification_action_id (8-char hex digest per ISSUE-002 spec)
+        and consistent effect status."""
         action = _action(
             action_id="act-idem-src",
             tool_name="block_ip",
@@ -2146,11 +2225,11 @@ class TestPR7ReviewFixes:
             results[0].results[0].verification_action_id
             == results[1].results[0].verification_action_id
         )
-        # The action_id uses full SHA-256 hex digest: act-{64hex}.
+        # The action_id uses 8-char hex digest: act-{8hex}.
         vid = results[0].results[0].verification_action_id
         assert vid is not None
         assert vid.startswith("act-")
-        assert len(vid) == 4 + 64  # "act-" + 64 hex chars
+        assert len(vid) == 4 + 8  # "act-" + 8 hex chars
 
     # ── Nit 2: derived skip tools match VERIFICATION_MAPPING ────────────
 
@@ -2312,7 +2391,7 @@ class TestReviewRound2Fixes:
 
     async def test_finalize_failure_appends_dirty_marker(self):
         """When _finalize_verification_action throws during exception
-        handling, the detail string includes ;verification_action_dirty
+        handling, the structured verification_action_dirty flag is set
         so downstream consumers can distinguish a clean finalize from
         a zombie verification Action."""
         action = _action(
@@ -2349,9 +2428,9 @@ class TestReviewRound2Fixes:
         assert r.effect_status == EffectStatus.UNVERIFIABLE
         # The detail exposes a stable error code (sanitised — ISSUE-060 Nit SF-6)...
         assert "ERR_T_RUNTIME" in (r.detail or "")
-        # ...AND includes the dirty marker to signal the verification
+        # ...AND the structured dirty flag is set to signal the verification
         # Action may be stuck in EXECUTING.
-        assert ";verification_action_dirty" in (r.detail or "")
+        assert r.verification_action_dirty is True
 
     # ── Phase 1: all UNKNOWN → manual, no replan ─────────────────────────
 
@@ -2938,7 +3017,7 @@ class TestIssue060ReviewFixes:
         job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(
             activated=True,
-            writeback_id=None,  # no terminal receipt to verify for this test
+            writeback_id="wbk-unknown-routing",
         )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
@@ -2946,6 +3025,7 @@ class TestIssue060ReviewFixes:
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory("wbk-unknown-routing"),
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
             return_value=([action], {"job-0001": job}, {})
@@ -3027,7 +3107,7 @@ class TestIssue060ReviewFixes:
         job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(
             activated=True,
-            writeback_id=None,  # no terminal receipt check for this test
+            writeback_id="wbk-plan-rev-zero",
         )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
@@ -3035,6 +3115,7 @@ class TestIssue060ReviewFixes:
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory("wbk-plan-rev-zero"),
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
             return_value=([action], {"job-0001": job}, {})
@@ -3411,7 +3492,7 @@ class TestIssue060ReviewNewTests:
         job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(
             activated=True,
-            writeback_id=None,  # no terminal receipt to verify for this test
+            writeback_id="wbk-low-attempt-term",
         )
 
         class _LowAttemptOutbox:
@@ -3432,6 +3513,7 @@ class TestIssue060ReviewNewTests:
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory("wbk-low-attempt-term"),
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
             return_value=([action], {"job-0001": job}, outbox_map)
@@ -3787,8 +3869,10 @@ class TestIssue060ReviewNewTests:
     # ── SF-6: Full SHA-256 action_id length ──────────────────────────────
 
     async def test_verification_action_id_uses_full_sha256(self):
-        """SF-6: Deterministic verification action_id uses full 64-char
-        SHA-256 hex digest (not truncated 12-char)."""
+        """SF-1 updated: Deterministic verification action_id now uses
+        8-char hex prefix (act-{8hex}) per ISSUE-002 ID spec.  The full
+        SHA-256 digest is computed for deterministic derivation but only
+        the first 8 hex characters are used in the ID."""
         from app.agents.verify_agent import _deterministic_verification_action_id
 
         vid = _deterministic_verification_action_id(
@@ -3797,12 +3881,12 @@ class TestIssue060ReviewNewTests:
             verify_tool="check_ip_block_status",
         )
         assert vid.startswith("act-")
-        # "act-" + 64 hex chars from SHA-256.
-        assert len(vid) == 4 + 64
+        # "act-" + 8 hex chars per ISSUE-002 spec.
+        assert len(vid) == 4 + 8
         # All characters after "act-" must be valid hex.
         import re
 
-        assert re.fullmatch(r"act-[0-9a-f]{64}", vid) is not None
+        assert re.fullmatch(r"act-[0-9a-f]{8}", vid) is not None
 
     # ── wm_persisted default is False ────────────────────────────────────
 
