@@ -77,7 +77,13 @@ def resolve_verification_tool(
         return None
     if target_type is not None and target_type in inner:
         return inner[target_type]
-    # Fallback: try the first mapping when target_type is missing or unknown.
+    if target_type is not None:
+        # Unknown target_type → no precise mapping; return None rather
+        # than guessing via fallback (which could observe the wrong
+        # entity type, e.g. returning check_traffic_drop for
+        # target_type="process" when only ip/host are registered).
+        return None
+    # Fallback: target_type is None → return the first mapping.
     if inner:
         return next(iter(inner.values()))
     return None
