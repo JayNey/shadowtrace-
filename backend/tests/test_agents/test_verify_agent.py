@@ -220,30 +220,51 @@ class FakeTraceService:
 
 
 class FakeEventDispositionService:
-    """Stub EventDispositionService (ISSUE-059A)."""
+    """Stub EventDispositionService (ISSUE-059A).
+
+    Mirrors the real ``EventDispositionService.activate_and_submit``
+    signature and returns ``_ActivateResult`` with field names matching
+    ``DispositionActivationResult``.
+    """
 
     def __init__(
         self,
         *,
-        success: bool = True,
-        terminal_writeback_id: str | None = "wbk-00000001",
+        activated: bool = True,
+        writeback_id: str | None = "wbk-00000001",
+        disposition_id: str | None = "dis-00000001",
+        skipped_reason: str | None = None,
     ) -> None:
-        self.success = success
-        self._terminal_writeback_id = terminal_writeback_id
+        self.activated = activated
+        self._writeback_id = writeback_id
+        self._disposition_id = disposition_id
+        self._skipped_reason = skipped_reason
         self.calls: list[dict[str, Any]] = []
 
-    async def activate_and_submit(self, *, event_id: str) -> Any:
-        self.calls.append({"event_id": event_id})
+    async def activate_and_submit(
+        self, *, event_id: str, plan_revision: int, principal_or_system: str
+    ) -> Any:
+        self.calls.append(
+            {
+                "event_id": event_id,
+                "plan_revision": plan_revision,
+                "principal_or_system": principal_or_system,
+            }
+        )
         from app.agents.verify_agent import _ActivateResult
 
         return _ActivateResult(
-            success=self.success,
-            terminal_writeback_id=(
-                self._terminal_writeback_id if self.success else None
+            activated=self.activated,
+            action_id="act-terminal-00001",
+            skipped_reason=(
+                self._skipped_reason if not self.activated else None
             ),
-            terminal_disposition_id="dis-00000001" if self.success else None,
-            error_code=None if self.success else "capability_blocked",
-            error_detail=None if self.success else "test injection",
+            disposition_id=(
+                self._disposition_id if self.activated else None
+            ),
+            writeback_id=(
+                self._writeback_id if self.activated else None
+            ),
         )
 
 
@@ -372,8 +393,8 @@ class TestHappyPath:
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(
-            success=True,
-            terminal_writeback_id=None,  # no DB session to verify receipt
+            activated=True,
+            writeback_id=None,  # no DB session to verify receipt
         )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
@@ -742,7 +763,7 @@ class TestWriteback:
             writeback_status=WritebackStatus.FAILED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
@@ -872,8 +893,8 @@ class TestAcceptanceCriteria:
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
         ed_svc = FakeEventDispositionService(
-            success=True,
-            terminal_writeback_id=None,  # no DB session to verify receipt
+            activated=True,
+            writeback_id=None,  # no DB session to verify receipt
         )
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
@@ -905,7 +926,7 @@ class TestAcceptanceCriteria:
             writeback_status=WritebackStatus.FAILED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
@@ -936,7 +957,7 @@ class TestAcceptanceCriteria:
             writeback_status=WritebackStatus.CONFIRMED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
             tool_executor=_mock_executor(
                 {"check_ip_block_status": _tool_result_success(False, "not blocked")}
@@ -970,7 +991,7 @@ class TestAcceptanceCriteria:
             writeback_status=WritebackStatus.PENDING,  # not confirmed
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
@@ -1075,8 +1096,8 @@ class TestAcceptanceCriteria:
             writeback_required=True,
         )
         ed_svc = FakeEventDispositionService(
-            success=True,
-            terminal_writeback_id=None,  # no DB session to verify receipt
+            activated=True,
+            writeback_id=None,  # no DB session to verify receipt
         )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
@@ -1423,7 +1444,7 @@ class TestRegressionShouldFix:
             writeback_status=WritebackStatus.FAILED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
             tool_executor=_mock_executor(
                 {"check_ip_block_status": _tool_result_success(True)}
@@ -1458,8 +1479,8 @@ class TestRegressionShouldFix:
         EventDispositionService.activate_and_submit.
         """
         ed_svc = FakeEventDispositionService(
-            success=True,
-            terminal_writeback_id=None,  # no DB session to verify receipt
+            activated=True,
+            writeback_id=None,  # no DB session to verify receipt
         )
         agent = VerifyAgent(
             working_memory=FakeWorkingMemory(),
@@ -1553,7 +1574,7 @@ class TestRegressionShouldFix:
             writeback_status=WritebackStatus.CONFIRMED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        ed_svc = FakeEventDispositionService(success=False)
+        ed_svc = FakeEventDispositionService(activated=False, skipped_reason="capability_blocked")
         agent = VerifyAgent(
             tool_executor=_mock_executor(
                 {"check_ip_block_status": _tool_result_success(True)}
@@ -1684,7 +1705,9 @@ class TestSuggestedBoundary:
         job = _job(job_id="job-0001", action_id=action.action_id)
 
         class ThrowingEDS:
-            async def activate_and_submit(self, *, event_id: str):
+            async def activate_and_submit(
+                self, *, event_id: str, plan_revision: int, principal_or_system: str
+            ):
                 raise RuntimeError("activation service down")
 
         ed_svc = ThrowingEDS()
@@ -1776,7 +1799,7 @@ class TestSuggestedBoundary:
             ]
         }
 
-        ed_svc = FakeEventDispositionService(success=True)
+        ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
             tool_executor=_mock_executor(
                 {"check_ip_block_status": _tool_result_success(True)}
@@ -2046,11 +2069,11 @@ class TestPR7ReviewFixes:
             writeback_status=WritebackStatus.CONFIRMED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
-        # EDS returns a terminal_writeback_id but there is no session_factory
+        # EDS returns a writeback_id but there is no session_factory
         # to verify the receipt → must escalate to manual.
         ed_svc = FakeEventDispositionService(
-            success=True,
-            terminal_writeback_id="wbk-needs-db-verify",
+            activated=True,
+            writeback_id="wbk-needs-db-verify",
         )
         agent = VerifyAgent(
             tool_executor=_mock_executor(

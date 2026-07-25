@@ -116,33 +116,45 @@ _VERIFY_OPERATOR = "VerifyAgent"
 
 
 class _ActivateResult:
-    """Minimal result envelope from EventDispositionService.activate_and_submit."""
+    """Result envelope matching EventDispositionService.DispositionActivationResult.
+
+    Mirrors the canonical ``DispositionActivationResult`` from
+    ``app.services.event_disposition_service`` so the VerifyAgent stays
+    decoupled from the service module at import time.  The Protocol below
+    enforces structural compatibility with the real service.
+    """
 
     def __init__(
         self,
         *,
-        success: bool,
-        terminal_writeback_id: str | None = None,
-        terminal_disposition_id: str | None = None,
-        error_code: str | None = None,
-        error_detail: str | None = None,
+        activated: bool,
+        action_id: str | None = None,
+        skipped_reason: str | None = None,
+        derived_disposition: Any | None = None,
+        disposition_id: str | None = None,
+        writeback_id: str | None = None,
     ) -> None:
-        self.success = success
-        self.terminal_writeback_id = terminal_writeback_id
-        self.terminal_disposition_id = terminal_disposition_id
-        self.error_code = error_code
-        self.error_detail = error_detail
+        self.activated = activated
+        self.action_id = action_id
+        self.skipped_reason = skipped_reason
+        self.derived_disposition = derived_disposition
+        self.disposition_id = disposition_id
+        self.writeback_id = writeback_id
 
 
 class _EventDispositionServiceProtocol(Protocol):
     """Structural interface for EventDispositionService (ISSUE-059A).
 
-    Using Protocol instead of ``Any`` lets mypy catch mismatched
-    injection objects at import/type-check time rather than at
-    runtime inside the except-Exception handler.
+    Signature matches the real ``EventDispositionService.activate_and_submit``
+    (ISSUE-059A) so that injection of the concrete service satisfies the
+    Protocol without adapters.  Using Protocol instead of ``Any`` lets mypy
+    catch mismatched injection objects at import/type-check time rather than
+    at runtime inside the except-Exception handler.
     """
 
-    async def activate_and_submit(self, *, event_id: str) -> _ActivateResult: ...
+    async def activate_and_submit(
+        self, *, event_id: str, plan_revision: int, principal_or_system: str
+    ) -> _ActivateResult: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -695,22 +707,32 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         terminal_activated = False
         has_ed_svc = self._event_disposition_service is not None
         if has_ed_svc:
+            # Derive plan_revision from the response plan's actions.
+            # All actions in a single ResponsePlan share the same revision;
+            # fall back to 1 when the plan is empty (defensive).
+            _plan_revision = 1
+            for a in actions:
+                if a.plan_revision:
+                    _plan_revision = a.plan_revision
+                    break
             try:
                 activate_result: _ActivateResult = (
                     await self._event_disposition_service.activate_and_submit(
                         event_id=event_id,
+                        plan_revision=_plan_revision,
+                        principal_or_system=_VERIFY_OPERATOR,
                     )
                 )
-                terminal_activated = activate_result.success
+                terminal_activated = activate_result.activated
                 if not terminal_activated:
                     logger.warning(
-                        "Phase 2 activation failed: %s event=%s",
-                        activate_result.error_code,
+                        "Phase 2 activation skipped: %s event=%s",
+                        activate_result.skipped_reason,
                         event_id,
                     )
                     need_manual = True
                     blocked_wb.add(
-                        activate_result.terminal_writeback_id
+                        activate_result.writeback_id
                         or f"terminal_wb_{event_id}"
                     )
                     overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
@@ -1061,7 +1083,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             "need_recovery": False,
             "need_manual": False,
         }
-        terminal_wb_id = activate_result.terminal_writeback_id
+        terminal_wb_id = activate_result.writeback_id
         if terminal_wb_id is None:
             return empty
         if self._session_factory is None:
