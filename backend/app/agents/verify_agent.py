@@ -170,6 +170,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         event_disposition_service: _EventDispositionServiceProtocol | None = None,
         disposition_sync_service: Any | None = None,
+        provider_manifest_overrides: dict[str, dict[str, str]] | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -189,6 +190,9 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         ) = event_disposition_service
         self._disposition_sync_service: Any | None = (
             disposition_sync_service
+        )
+        self._provider_manifest_overrides: dict[str, dict[str, str]] | None = (
+            provider_manifest_overrides
         )
 
     # ------------------------------------------------------------------ #
@@ -241,6 +245,26 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         need_action_replan = phase1_need_replan
         need_writeback_recovery = need_wb_recovery
         need_manual_resolution = phase1_need_manual or need_manual
+
+        # ── Systemic tool unavailability check (PR#7 Blocker #2) ──────────
+        # When ALL Phase 1 actions are UNVERIFIABLE with zero FAILED, the
+        # verification tooling is systemically unavailable (e.g. Provider
+        # completely down, tool_executor=None, every check_* call returned
+        # None).  Per ISSUE-060 degradation spec this must produce
+        # overall_status=FAILED — not MANUAL_RESOLUTION — so that
+        # route_after_verify triggers an alert rather than quietly queuing
+        # for manual triage.
+        all_phase1_unverifiable = (
+            len(phase1_results) > 0
+            and all(
+                r.effect_status == EffectStatus.UNVERIFIABLE
+                for r in phase1_results
+            )
+            and len(phase1_failed) == 0
+        )
+        if all_phase1_unverifiable and phase1_need_manual:
+            overall_status = VerificationOverallStatus.FAILED
+            # need_manual_resolution stays True per spec (escalated=true).
 
         # None of the routing flags may be set when overall_status=success.
         if overall_status == VerificationOverallStatus.SUCCESS:
@@ -397,13 +421,31 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             verify_tool = resolve_verification_tool(
                 action.tool_name,
                 action.target_type,
+                provider_manifest_overrides=self._provider_manifest_overrides,
             )
 
             # No verification tool registered → treat as non-verifiable (skipped).
             if verify_tool is None:
-                detail = "no_verification_tool_registered"
-                if action.tool_name in _SKIP_VERIFICATION_TOOLS:
-                    detail = "non_verifiable_action"
+                # Live lookup avoids the stale _SKIP_VERIFICATION_TOOLS
+                # module-level cache (PR#7 Should-Fix: provider manifest
+                # runtime extension could change mappings).
+                # Match the original _derive_skip_verification_tools logic:
+                # "non_verifiable_action" only when ALL target_type entries
+                # for this tool resolve to None (i.e. the tool is known but
+                # inherently unobservable).
+                from app.agents.rules.verification_mapping import VERIFICATION_MAPPING
+
+                tool_mapping = VERIFICATION_MAPPING.get(action.tool_name)
+                is_non_verifiable = (
+                    tool_mapping is not None
+                    and len(tool_mapping) > 0
+                    and all(v is None for v in tool_mapping.values())
+                )
+                detail = (
+                    "non_verifiable_action"
+                    if is_non_verifiable
+                    else "no_verification_tool_registered"
+                )
                 results.append(
                     _make_skipped_result(action, detail=detail)
                 )
@@ -903,17 +945,31 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
         async with self._session_factory() as session:
             # Load persisted Actions for this event's current plan revision.
-            action_ids = [a.action_id for a in _plan_actions(response_plan)]
-            actions: list[Action] = []
-            if action_ids:
+            # Baseline from plan — DB rows patch on top so that actions
+            # present in the plan but not yet persisted are NOT silently
+            # dropped (PR#7 Blocker #1: partial DB hit → dropped actions).
+            plan_actions_list = _plan_actions(response_plan)
+            if not plan_actions_list:
+                actions = []
+            else:
+                plan_actions_map = {a.action_id: a for a in plan_actions_list}
+                action_ids = list(plan_actions_map)
                 rows = (
                     await session.scalars(
                         select(orm.Action).where(orm.Action.action_id.in_(action_ids))
                     )
                 ).all()
-                actions = [_action_from_row(r) for r in rows]
-            if not actions:
-                actions = _plan_actions(response_plan)
+                db_actions = {r.action_id: _action_from_row(r) for r in rows}
+                missing = set(plan_actions_map) - set(db_actions)
+                if missing:
+                    logger.warning(
+                        "Actions in plan but not in DB for event=%s: %s",
+                        event_id,
+                        missing,
+                    )
+                # DB-persisted state takes priority over plan defaults.
+                final = {**plan_actions_map, **db_actions}
+                actions = list(final.values())
 
             # Load jobs.
             job_ids = [a.execution_job_id for a in actions if a.execution_job_id]
@@ -930,11 +986,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
             # Load outbox records.
             outbox_map: dict[str, list[Any]] = {}
-            if action_ids:
+            action_ids_for_outbox = [a.action_id for a in actions]
+            if action_ids_for_outbox:
                 outbox_rows = (
                     await session.scalars(
                         select(orm.DispositionOutbox).where(
-                            orm.DispositionOutbox.action_id.in_(action_ids)
+                            orm.DispositionOutbox.action_id.in_(action_ids_for_outbox)
                         )
                     )
                 ).all()
@@ -1269,7 +1326,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     },
                 )
             except Exception:
-                logger.debug(
+                logger.warning(
                     "event_bus action_verified failed event=%s action=%s",
                     event_id,
                     item.action_id,
