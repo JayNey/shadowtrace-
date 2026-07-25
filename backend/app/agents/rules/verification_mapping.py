@@ -70,6 +70,13 @@ VERIFICATION_MAPPING: dict[str, dict[str, str | None]] = {
 # means params["parameters"]["job_id"]).  This is checked before calling the
 # verification tool so that missing required params are caught early with a
 # clear diagnostic rather than surfacing as an opaque Provider-side error.
+#
+# NOTE: The current baseline maps all 9 verification tools to the same
+# ["target_type", "target"] parameter set.  This is acceptable as the initial
+# baseline — differentiated parameters (e.g. "scan_id" for
+# check_virus_scan_status, "alert_id" for check_new_alerts) will be added
+# when tools in the mapping diverge.  The dot-notation resolver below already
+# supports nested key access for forward compatibility.
 VERIFICATION_TOOL_EXPECTED_PARAMS: dict[str, list[str]] = {
     "check_ip_block_status": ["target_type", "target"],
     "check_domain_block_status": ["target_type", "target"],
@@ -168,8 +175,16 @@ def resolve_verification_tool(
     """
     # 1. Check provider overrides first (live capability extension).
     if provider_manifest_overrides:
-        override = provider_manifest_overrides.get(tool_name, {}).get(target_type or "")
-        if override is not None:
+        tool_overrides = provider_manifest_overrides.get(tool_name, {})
+        lookup_key = target_type or ""
+        if lookup_key in tool_overrides:
+            # The key exists — the Provider has an explicit opinion about
+            # this (tool_name, target_type) pair.
+            override = tool_overrides[lookup_key]
+            if override is None:
+                # Value is None → Provider explicitly disabled verification
+                # for this pair.  Do NOT fall through to the baseline.
+                return None
             # Whitelist validation: the override value must be a known
             # verification tool name — either registered in the baseline
             # mapping values or listed in VERIFICATION_TOOL_EXPECTED_PARAMS.
@@ -194,11 +209,9 @@ def resolve_verification_tool(
                 )
                 return None
             return cast(str, override)
-        # When the override dict has an entry for this (tool_name, target_type)
-        # whose value is explicitly None, the .get() above returns None and we
-        # intentionally skip the baseline fallback below — the Provider has
-        # signalled "verification unavailable for this tool+target."  See the
-        # docstring §3 for the design rationale.
+        # If the tool_overrides dict has no entry for lookup_key, fall
+        # through to baseline — the Provider hasn't expressed an opinion
+        # about this specific (tool_name, target_type) pair.
 
     # 2. Baseline mapping.
     inner = VERIFICATION_MAPPING.get(tool_name)

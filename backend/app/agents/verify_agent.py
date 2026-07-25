@@ -17,6 +17,7 @@ action replan; writeback problems stay in the writeback/recovery path.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -92,6 +93,21 @@ _WRITEBACK_STATUS_ROUTING: dict[WritebackStatus, tuple[bool, bool, bool, str]] =
 }
 
 
+# Maximum number of UNKNOWN writeback lookup attempts before escalating
+# to manual resolution.  When a required writeback status is UNKNOWN,
+# _evaluate_writeback_statuses consults the ``attempt`` field on the
+# action's DispositionOutbox records to determine how many times the
+# writeback has been queried.  After VERIFY_UNKNOWN_MAX_LOOKUPS attempts
+# without a conclusive status, the writeback is escalated to
+# need_manual=True with detail "writeback_unknown_exhausted_lookups_manual".
+#
+# Per ISSUE-060 spec §4.5: "UNKNOWN→先查证、无法查证时 need_manual=true".
+# Before this constant was introduced, UNKNOWN was hardcoded to
+# need_recovery=True, need_manual=False with no path to manual escalation,
+# which would trap the event in an infinite recovery loop if the Provider
+# never returned a conclusive writeback status.
+VERIFY_UNKNOWN_MAX_LOOKUPS: int = 3
+
 # Exception types that indicate transient infrastructure failures rather
 # than permanent logic errors.  Used by _finalize_verification_action to
 # distinguish retry-eligible failures from zombie-creating ones.
@@ -117,6 +133,7 @@ _EXC_ERROR_CODES: dict[type[BaseException], str] = {
     OSError: "ERR_T_OS",
     RuntimeError: "ERR_T_RUNTIME",
     AssertionError: "ERR_T_ASSERT",
+    asyncio.CancelledError: "ERR_T_CANCEL",
 }
 
 
@@ -148,6 +165,14 @@ _EXECUTED_STATUSES: frozenset[ActionStatus] = frozenset(
         ActionStatus.FAILED,
     }
 )
+
+# Maximum duration in seconds an Action may remain in EXECUTING status
+# before it is treated as a zombie and escalated to manual resolution.
+# When the Action's execution job started_at exceeds this threshold,
+# the effect_status is set to UNVERIFIABLE with detail "execution_timeout"
+# and need_manual=True.  Within the threshold, the Action is skipped with
+# detail "pending_execution" so the caller can wait for it to complete.
+_EXECUTING_TIMEOUT_SECONDS: int = 300
 
 _VERIFY_OPERATOR = "VerifyAgent"
 
@@ -338,7 +363,16 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             and all(r.effect_status == EffectStatus.UNVERIFIABLE for r in phase1_results)
             and len(phase1_failed) == 0
         )
-        if all_phase1_unverifiable and phase1_need_manual:
+        if all_phase1_unverifiable:
+            # Per line ~548, every UNVERIFIABLE result sets need_manual=True,
+            # so phase1_need_manual is guaranteed True here.  The assertion
+            # guards against a future refactor that changes UNVERIFIABLE's
+            # routing without updating this block.
+            assert phase1_need_manual, (
+                "Invariant violated: all Phase 1 results are UNVERIFIABLE "
+                "but phase1_need_manual is False — UNVERIFIABLE routing must "
+                "set need_manual"
+            )
             overall_status = VerificationOverallStatus.FAILED
             # need_manual_resolution stays True per spec (escalated=true).
 
@@ -410,9 +444,42 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 continue
 
             # Actions without execution phase = IMMEDIATE implicitly.
-            # Still executing → skip (don't verify prematurely; the async
-            # effect may not have materialised yet).
+            # Still executing → check for zombie timeout before skipping.
+            # EXECUTING may mean: (a) in progress → wait; (b) stuck/zombie → escalate.
             if action.status == ActionStatus.EXECUTING:
+                job = jobs_map.get(action.action_id)
+                timeout_s = _EXECUTING_TIMEOUT_SECONDS
+                now_utc = datetime.now(UTC)
+                if (
+                    job is not None
+                    and job.started_at is not None
+                    and (now_utc - job.started_at).total_seconds() > timeout_s
+                ):
+                    # Zombie Action — stuck in EXECUTING past the timeout.
+                    # The execution job may have completed but the Action
+                    # status was never CAS-synced (or the runner crashed).
+                    logger.warning(
+                        "Action %s stuck in EXECUTING for >%ss (started_at=%s) "
+                        "event=%s — escalating to manual resolution",
+                        action.action_id,
+                        timeout_s,
+                        job.started_at.isoformat(),
+                        event_id,
+                    )
+                    results.append(
+                        VerificationActionResult(
+                            action_id=action.action_id,
+                            effect_status=EffectStatus.UNVERIFIABLE,
+                            writeback_required=action.writeback_required,
+                            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                            writeback_status=action.writeback_status,
+                            writeback_ids=[],
+                            detail="execution_timeout",
+                        )
+                    )
+                    need_manual = True
+                    continue
+                # Within timeout or no job metadata → skip, wait for completion.
                 results.append(
                     VerificationActionResult(
                         action_id=action.action_id,
@@ -500,13 +567,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
             # No verification tool registered → treat as non-verifiable (skipped).
             if verify_tool is None:
-                # Determine skip reason via live lookup — avoids stale
-                # provider manifest mappings.
-                tool_mapping = VERIFICATION_MAPPING.get(action.tool_name)
+                # Determine skip reason via _derive_skip_verification_tools
+                # so the inline logic stays in sync with the derived set
+                # that the test suite independently validates.
                 is_non_verifiable = (
-                    tool_mapping is not None
-                    and len(tool_mapping) > 0
-                    and all(v is None for v in tool_mapping.values())
+                    action.tool_name in _derive_skip_verification_tools()
                 )
                 detail = (
                     "non_verifiable_action"
@@ -587,6 +652,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 )
 
             if tool_result is None:
+                logger.warning(
+                    "Verification tool %s unavailable for action %s (tool_executor=%s) event=%s",
+                    verify_tool,
+                    action.action_id,
+                    "available" if self.tool_executor is not None else "None",
+                    event_id,
+                )
                 effect_status = EffectStatus.UNVERIFIABLE
                 detail = "verification_tool_unavailable_degraded"
                 await self._finalize_verification_action(
@@ -958,6 +1030,30 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 confirmed, rec, man, detail_suffix = (
                     False, True, False, "writeback_no_status_waiting"
                 )
+            elif wb_status == WritebackStatus.UNKNOWN:
+                # UNKNOWN → need_recovery (not manual) on first lookup.
+                # After VERIFY_UNKNOWN_MAX_LOOKUPS attempts without a
+                # conclusive status, escalate to need_manual=True so the
+                # event doesn't get trapped in an infinite recovery loop.
+                # Lookup count is derived from the max ``attempt`` field
+                # across the action's DispositionOutbox records — each
+                # delivery attempt increments the counter, and each
+                # recovery cycle triggers at least one delivery attempt.
+                max_attempt = 0
+                ob_records = outbox_map.get(action.action_id, [])
+                for ob in ob_records:
+                    ob_attempt = getattr(ob, "attempt", 0) or 0
+                    if ob_attempt > max_attempt:
+                        max_attempt = ob_attempt
+                if max_attempt >= VERIFY_UNKNOWN_MAX_LOOKUPS:
+                    confirmed, rec, man, detail_suffix = (
+                        False, False, True,
+                        "writeback_unknown_exhausted_lookups_manual",
+                    )
+                else:
+                    confirmed, rec, man, detail_suffix = (
+                        False, True, False, "writeback_unknown_requires_lookup"
+                    )
             else:
                 routing = _WRITEBACK_STATUS_ROUTING.get(
                     wb_status,
@@ -1084,8 +1180,21 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 # DB-persisted state takes priority over plan defaults.
                 # Merge preserves plan order — downstream consumers
                 # may rely on results[0] being the first planned action.
-                final = {**plan_actions_map, **db_actions}
-                actions = [final[aid] for aid in plan_actions_map if aid in final]
+                #
+                # Rather than unconditionally merging two full Action
+                # objects (which makes field provenance opaque), the plan
+                # provides identity fields (action_id, target_type, …)
+                # while all state fields (status, writeback_status,
+                # execution_owner, …) are taken exclusively from the DB
+                # row.  Actions present in the plan but missing from the
+                # DB keep their plan-level defaults; a warning is logged
+                # for each such gap above.
+                actions = []
+                for aid in plan_actions_map:
+                    if aid in db_actions:
+                        actions.append(db_actions[aid])
+                    else:
+                        actions.append(plan_actions_map[aid])
 
             # Load jobs.
             job_ids = [a.execution_job_id for a in actions if a.execution_job_id]
@@ -1731,5 +1840,5 @@ def _deterministic_verification_action_id(
     """
     digest = hashlib.sha256(
         f"verify:{event_id}:{source_action_id}:{verify_tool}".encode()
-    ).hexdigest()[:12]
+    ).hexdigest()
     return f"act-{digest}"

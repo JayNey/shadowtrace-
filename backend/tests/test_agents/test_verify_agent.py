@@ -22,6 +22,7 @@ A7. Verification false vs tool exception — Action status distinction
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -2145,11 +2146,11 @@ class TestPR7ReviewFixes:
             results[0].results[0].verification_action_id
             == results[1].results[0].verification_action_id
         )
-        # The action_id uses 8 hex chars: act-{8hex}.
+        # The action_id uses full SHA-256 hex digest: act-{64hex}.
         vid = results[0].results[0].verification_action_id
         assert vid is not None
         assert vid.startswith("act-")
-        assert len(vid) == 4 + 12  # "act-" + 12 hex chars
+        assert len(vid) == 4 + 64  # "act-" + 64 hex chars
 
     # ── Nit 2: derived skip tools match VERIFICATION_MAPPING ────────────
 
@@ -3327,6 +3328,519 @@ class TestIssue060ReviewFixes:
 
         result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.wm_persisted is False
+
+
+# --------------------------------------------------------------------------- #
+# ISSUE-060 审查报告 — 新增回归测试
+# --------------------------------------------------------------------------- #
+
+
+class TestIssue060ReviewNewTests:
+    """Tests added per the ISSUE-060 review report covering the Blocker,
+    Should-Fix, and Nit items."""
+
+    # ── Blocker: UNKNOWN writeback exhausted lookups ──────────────────────
+
+    async def test_unknown_writeback_exhausted_lookups_escalates_to_manual(self):
+        """Blocker: After VERIFY_UNKNOWN_MAX_LOOKUPS attempts, UNKNOWN
+        writeback status escalates to need_manual=True."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.UNKNOWN,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        ed_svc = FakeEventDispositionService(activated=True)
+
+        # Build outbox records with attempt >= VERIFY_UNKNOWN_MAX_LOOKUPS (3).
+        class _ExhaustedOutbox:
+            def __init__(self, action_id: str, attempt: int) -> None:
+                self.action_id = action_id
+                self.writeback_id = f"wbk-attempt-{attempt}"
+                self.attempt = attempt
+
+        outbox_map = {
+            action.action_id: [
+                _ExhaustedOutbox(action.action_id, 3),
+                _ExhaustedOutbox(action.action_id, 4),
+            ]
+        }
+
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, outbox_map)
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        # After exhausted lookups, need_manual should be True.
+        assert result.need_manual_resolution is True
+        # Verify the detail suffix.
+        phase2_exhausted = [
+            r
+            for r in result.results
+            if r.detail == "writeback_unknown_exhausted_lookups_manual"
+        ]
+        assert len(phase2_exhausted) == 1
+
+    async def test_unknown_writeback_below_max_no_escalation(self):
+        """UNKNOWN writeback with attempt < VERIFY_UNKNOWN_MAX_LOOKUPS
+        still routes to recovery (not manual)."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.UNKNOWN,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        ed_svc = FakeEventDispositionService(
+            activated=True,
+            writeback_id=None,  # no terminal receipt to verify for this test
+        )
+
+        class _LowAttemptOutbox:
+            def __init__(self, action_id: str, attempt: int) -> None:
+                self.action_id = action_id
+                self.writeback_id = "wbk-low-attempt"
+                self.attempt = attempt
+
+        outbox_map = {
+            action.action_id: [
+                _LowAttemptOutbox(action.action_id, 1),
+            ]
+        }
+
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, outbox_map)
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        # Below max → still recovery, not manual.
+        assert result.need_writeback_recovery is True
+        assert result.need_manual_resolution is False
+        # Detail should be the normal UNKNOWN lookup.
+        phase2_unknown = [
+            r
+            for r in result.results
+            if r.detail == "writeback_unknown_requires_lookup"
+        ]
+        assert len(phase2_unknown) == 1
+
+    # ── SF-3: EXECUTING timeout escalation ───────────────────────────────
+
+    async def test_executing_action_timeout_escalates_to_manual(self):
+        """SF-3: EXECUTING action with started_at > 300s ago → UNVERIFIABLE
+        + need_manual=True (zombie Action escalation)."""
+        from datetime import timedelta
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-0001",
+        )
+        # Started 400s ago → exceeds _EXECUTING_TIMEOUT_SECONDS (300).
+        stale_start = datetime.now(UTC) - timedelta(seconds=400)
+        job = _job(
+            job_id="job-0001",
+            action_id=action.action_id,
+            started_at=stale_start,
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert r.detail == "execution_timeout"
+        assert result.need_manual_resolution is True
+        assert result.need_action_replan is False
+
+    async def test_executing_action_within_timeout_skipped(self):
+        """SF-3: EXECUTING action with started_at < 300s ago → SKIPPED
+        (still within timeout window)."""
+        from datetime import timedelta
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-0001",
+        )
+        # Started 60s ago → within timeout.
+        recent_start = datetime.now(UTC) - timedelta(seconds=60)
+        job = _job(
+            job_id="job-0001",
+            action_id=action.action_id,
+            started_at=recent_start,
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {action.action_id: job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.SKIPPED
+        assert r.detail == "pending_execution"
+        assert result.need_manual_resolution is False
+
+    async def test_executing_action_no_job_skipped(self):
+        """SF-3: EXECUTING action with no job → SKIPPED (no timeout data)."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.EXECUTING,
+            execution_job_id="job-0001",
+        )
+        # No job in jobs_map.
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.SKIPPED
+        assert r.detail == "pending_execution"
+
+    # ── SF-4: Provider override None disables baseline ───────────────────
+
+    async def test_provider_override_none_disables_baseline(self):
+        """SF-4: Provider manifest override with None value disables
+        the baseline mapping — no fallback to baseline."""
+        # block_ip baseline maps {"ip": "check_ip_block_status"}.
+        # Override {"block_ip": {"ip": None}} should return None,
+        # NOT fall through to the baseline.
+        overrides: dict[str, dict[str, str | None]] = {"block_ip": {"ip": None}}
+        result = resolve_verification_tool(
+            "block_ip", "ip", provider_manifest_overrides=overrides
+        )
+        assert result is None
+
+    async def test_provider_override_none_disables_baseline_in_agent(self):
+        """SF-4: When provider override is None, the action is SKIPPED
+        during actual agent execution (baseline disabled)."""
+        action = _action(
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        # Override disables block_ip verification.
+        overrides: dict[str, dict[str, str | None]] = {"block_ip": {"ip": None}}
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            provider_manifest_overrides=overrides,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        # Baseline is disabled → action is SKIPPED (no verification tool).
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.SKIPPED
+        assert r.detail == "no_verification_tool_registered"
+
+    # ── SF-5: DB/plan merge boundary ─────────────────────────────────────
+
+    async def test_db_action_missing_status_field_preserves_default(self):
+        """SF-5: Action in plan but not in DB keeps plan identity fields;
+        state fields use safe defaults.  This test validates that the
+        merge boundary doesn't silently drop actions or mix Pydantic
+        defaults from plan with DB state."""
+        from app.agents.verify_agent import _plan_actions
+
+        plan_action = _action(
+            action_id="act-plan-only",
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+        )
+        plan = _plan([plan_action])
+
+        # Mock DB session with zero actions → action is plan-only.
+        from contextlib import asynccontextmanager
+
+        class _EmptyDBSession:
+            async def scalars(self, stmt: Any) -> Any:
+                class _Result:
+                    def all(self) -> list[Any]:
+                        return []
+
+                return _Result()
+
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                return None
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _EmptyDBSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+
+        agent = VerifyAgent(
+            session_factory=mock_factory,
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+
+        actions, _jobs_map, _outbox_map = await agent._load_execution_state(
+            event_id="evt-20260725-00000001",
+            response_plan=plan,
+        )
+
+        # Plan-only action is preserved (not dropped).
+        assert len(actions) == 1
+        assert actions[0].action_id == "act-plan-only"
+        # State field preserves plan default.
+        assert actions[0].status == ActionStatus.SUCCESS
+
+    # ── Disposition policy edge cases ────────────────────────────────────
+
+    async def test_disposition_policy_invalid_value_returns_none(self):
+        """Invalid disposition_policy value → _load_disposition_policy
+        returns None (not crash)."""
+        from contextlib import asynccontextmanager
+
+        class _BadPolicyRow:
+            disposition_policy: str | None = "invalid_policy_name"
+
+        class _BadPolicySession:
+            async def get(self, model: type[Any], ident: Any, **kwargs: Any) -> _BadPolicyRow | None:
+                return _BadPolicyRow()
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _BadPolicySession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+
+        agent = VerifyAgent(
+            session_factory=mock_factory,
+            working_memory=FakeWorkingMemory(),
+        )
+        result = await agent._load_disposition_policy("evt-20260725-00000001")
+        # Invalid policy → None (graceful).
+        assert result is None
+
+    async def test_empty_actions_loads_plan_revision_from_db(self):
+        """actions=[] → plan_revision loaded from DB (not defaulted to 1)."""
+        from contextlib import asynccontextmanager
+
+        class _RevisionSession:
+            async def scalars(self, stmt: Any) -> Any:
+                class _Result:
+                    def first(self) -> int | None:
+                        return 5  # scalars on a column returns scalar, not row
+
+                return _Result()
+
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                return None
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _RevisionSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+
+        agent = VerifyAgent(
+            session_factory=mock_factory,
+            working_memory=FakeWorkingMemory(),
+        )
+        revision = await agent._load_event_plan_revision("evt-20260725-00000001")
+        assert revision == 5
+
+    # ── SF-2: tool unavailable log context ───────────────────────────────
+
+    async def test_tool_unavailable_logs_action_and_tool(self):
+        """SF-2: When tool_result is None, the warning log includes
+        action_id, tool_name, and tool_executor state."""
+        action = _action(
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        agent = VerifyAgent(
+            tool_executor=None,  # unavailable
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        # Must not crash — the warning is logged internally.
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+        assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert result.results[0].detail == "verification_tool_unavailable_degraded"
+
+    # ── Nit-3: CancelledError error code ─────────────────────────────────
+
+    async def test_cancelled_error_maps_to_err_t_cancel(self):
+        """Nit-3: asyncio.CancelledError maps to ERR_T_CANCEL."""
+        from app.agents.verify_agent import _error_code_for_exception
+
+        code = _error_code_for_exception(asyncio.CancelledError())
+        assert code == "ERR_T_CANCEL"
+
+    async def test_cancelled_error_used_in_verification_detail(self):
+        """Nit-3: When tool_executor raises RuntimeError, the detail
+        string uses ERR_T_RUNTIME.  CancelledError inherits from
+        BaseException (not Exception) so it cannot be caught by
+        except Exception — it must propagate.  The ERR_T_CANCEL code
+        is verified in test_cancelled_error_maps_to_err_t_cancel."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        failing_executor = MagicMock()
+        failing_executor.call = AsyncMock(side_effect=RuntimeError("tool call failed"))
+
+        agent = VerifyAgent(
+            tool_executor=failing_executor,
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        assert "ERR_T_RUNTIME" in (r.detail or "")
+
+    # ── SF-6: Full SHA-256 action_id length ──────────────────────────────
+
+    async def test_verification_action_id_uses_full_sha256(self):
+        """SF-6: Deterministic verification action_id uses full 64-char
+        SHA-256 hex digest (not truncated 12-char)."""
+        from app.agents.verify_agent import _deterministic_verification_action_id
+
+        vid = _deterministic_verification_action_id(
+            event_id="evt-test",
+            source_action_id="act-src",
+            verify_tool="check_ip_block_status",
+        )
+        assert vid.startswith("act-")
+        # "act-" + 64 hex chars from SHA-256.
+        assert len(vid) == 4 + 64
+        # All characters after "act-" must be valid hex.
+        import re
+
+        assert re.fullmatch(r"act-[0-9a-f]{64}", vid) is not None
+
+    # ── wm_persisted default is False ────────────────────────────────────
+
+    async def test_wm_persisted_defaults_to_false(self):
+        """VerificationResult.wm_persisted defaults to False so that
+        callers not going through _write_verification_result don't
+        incorrectly assume persistence."""
+        from app.models.agent_io import VerificationResult, VerificationOverallStatus, VerificationPhase
+
+        # Construct a result without explicitly setting wm_persisted.
+        result = VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+        assert result.wm_persisted is False
+
+    async def test_wm_persist_success_sets_flag_true(self):
+        """When working_memory.write succeeds, result.wm_persisted=True."""
+        action = _action(
+            tool_name="create_ticket",
+            action_level=ActionLevel.L1,
+            status=ActionStatus.SUCCESS,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        wm = FakeWorkingMemory()
+        agent = VerifyAgent(
+            working_memory=wm,
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+        assert result.wm_persisted is True
 
 
 def _mock_executor(results: dict[str, ToolResult]) -> Any:
