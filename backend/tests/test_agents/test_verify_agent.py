@@ -3266,13 +3266,11 @@ class TestIssue060ReviewFixes:
         # But it returned activated=False → manual escalation.
         assert result.need_manual_resolution is True
         assert result.overall_status == VerificationOverallStatus.MANUAL_RESOLUTION
-        # The blocked writeback_id or fallback is recorded.
-        # When activated=False, FakeEventDispositionService returns
-        # writeback_id=None, so the code falls back to f"terminal_wb_{event_id}".
-        assert (
-            "wbk-blocked" in result.blocked_writebacks
-            or f"terminal_wb_{action.event_id}" in result.blocked_writebacks
-        )
+        # The blocked reference is the deferred action_id (not a synthetic
+        # f"terminal_wb_{event_id}" which violates the wbk-{8hex} format).
+        # FakeEventDispositionService always returns action_id="act-terminal-00001".
+        # (ISSUE-060 review SF-3)
+        assert "act-terminal-00001" in result.blocked_writebacks
 
     # ── Terminal receipt non-CONFIRMED → recovery ─────────────────────────
 
@@ -4001,6 +3999,235 @@ class TestIssue060ReviewNewTests:
         ]
         assert len(wb_blocked) == 1
         assert wb_blocked[0].verification_phase == VerificationPhase.DISPOSITION
+
+
+# --------------------------------------------------------------------------- #
+# ISSUE-060 review Should-Fix tests
+# --------------------------------------------------------------------------- #
+
+
+class TestShouldFixRegression:
+    """Tests added per ISSUE-060 review Should-Fix recommendations."""
+
+    # ── SF-1: wb_status=None + no outbox → writeback_not_yet_dispatched ─────
+
+    async def test_writeback_status_none_no_outbox_routes_recovery(self):
+        """SF-1: When wb_status=None, wb_readiness=READY, and no outbox
+        records exist, the detail suffix must be writeback_not_yet_dispatched
+        (not writeback_no_status_waiting) to distinguish "command not yet
+        created by DSS" from "command created but no receipt yet"."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=None,  # no status recorded
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        ed_svc = FakeEventDispositionService(
+            activated=True,
+            writeback_id="wbk-sf1-terminal",
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory("wbk-sf1-terminal"),
+        )
+        # outbox_map is empty (third element of the tuple).
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # The action should appear in results with writeback_not_yet_dispatched.
+        wb_results = [
+            r
+            for r in result.results
+            if r.action_id == action.action_id
+            and r.verification_phase == VerificationPhase.DISPOSITION
+        ]
+        assert len(wb_results) == 1
+        assert wb_results[0].detail == "writeback_not_yet_dispatched"
+        assert result.need_writeback_recovery is True
+
+    async def test_writeback_status_none_with_outbox_routes_recovery(self):
+        """SF-1 counter-case: When wb_status=None but outbox records DO exist,
+        the detail must remain writeback_no_status_waiting (command was
+        created, we're waiting for a receipt)."""
+        from unittest.mock import MagicMock
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=None,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # Build a mock outbox record with a writeback_id.
+        _mock_ob = MagicMock()
+        _mock_ob.writeback_id = "wbk-existing-00001"
+        _mock_ob.attempt = 0
+        outbox_map = {action.action_id: [_mock_ob]}
+
+        ed_svc = FakeEventDispositionService(
+            activated=True,
+            writeback_id="wbk-sf1b-terminal",
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+            session_factory=_mock_terminal_confirm_session_factory(
+                "wbk-sf1b-terminal"
+            ),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, outbox_map)
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        wb_results = [
+            r
+            for r in result.results
+            if r.action_id == action.action_id
+            and r.verification_phase == VerificationPhase.DISPOSITION
+        ]
+        assert len(wb_results) == 1
+        assert wb_results[0].detail == "writeback_no_status_waiting"
+        assert result.need_writeback_recovery is True
+
+    # ── SF-2: terminal writeback MANUAL overrides WAITING ───────────────────
+
+    async def test_terminal_writeback_manual_overrides_recovery_waiting(self):
+        """SF-2: When main writeback evaluation routes to WAITING (recovery)
+        but the terminal writeback receipt is permanently missing,
+        overall_status MUST be MANUAL_RESOLUTION, not WAITING.
+
+        Constructs:
+        - Main action wb_status=PENDING → need_wb_recovery=True (WAITING)
+        - Terminal: activated=True but writeback_id=None → need_manual=True
+        Expected: overall_status=MANUAL_RESOLUTION (higher priority wins).
+        """
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.PENDING,  # → recovery
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        # activated=True but writeback_id=None triggers the contract-anomaly
+        # path in _evaluate_terminal_writeback_status → need_manual=True
+        ed_svc = FakeEventDispositionService(
+            activated=True,
+            writeback_id=None,  # triggers terminal need_manual
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # MANUAL_RESOLUTION must take priority over WAITING.
+        assert result.overall_status == VerificationOverallStatus.MANUAL_RESOLUTION
+        assert result.need_writeback_recovery is True
+        assert result.need_manual_resolution is True
+
+    # ── SF-3: activation failure → no synthetic wb-id in blocked ────────────
+
+    async def test_activation_failure_no_synthetic_wb_id_in_blocked(self):
+        """SF-3: When activate_and_submit returns activated=False and
+        writeback_id=None, blocked_writebacks must NOT contain a synthetic
+        f"terminal_wb_{event_id}" string (which violates the wbk-{8hex}
+        format and fails downstream resolve/retry path-parameter matching).
+        Instead it should contain the deferred action_id."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        ed_svc = FakeEventDispositionService(
+            activated=False,
+            skipped_reason="capability_blocked",
+            writeback_id="wbk-should-not-appear",
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_success(True)}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # Must NOT contain the old synthetic ID format.
+        synthetic = f"terminal_wb_{action.event_id}"
+        assert synthetic not in result.blocked_writebacks
+        # The writeback_id was not returned (activated=False) so it shouldn't
+        # appear either.
+        assert "wbk-should-not-appear" not in result.blocked_writebacks
+        # The deferred action_id from FakeEventDispositionService should be present.
+        assert "act-terminal-00001" in result.blocked_writebacks
+        assert result.need_manual_resolution is True
 
 
 def _mock_executor(results: dict[str, ToolResult]) -> Any:
