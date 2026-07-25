@@ -152,7 +152,7 @@ async def test_decision_trace_pagination(
 
     resp = client.get(
         f"/api/v1/events/{event_id}/decision-trace",
-        params={"page": 2, "page_size": 50},
+        params={"page": 2, "page_size": 50, "entry_type": "tool_call"},
         headers=_hdr(),
     )
     assert resp.status_code == 200, resp.text
