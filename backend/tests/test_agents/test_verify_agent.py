@@ -2223,11 +2223,11 @@ class TestPR7ReviewFixes:
             results[0].results[0].verification_action_id
             == results[1].results[0].verification_action_id
         )
-        # The action_id uses 16 hex chars, not 8.
+        # The action_id uses 8 hex chars: act-{8hex}.
         vid = results[0].results[0].verification_action_id
         assert vid is not None
         assert vid.startswith("act-")
-        assert len(vid) == 4 + 16  # "act-" + 16 hex chars
+        assert len(vid) == 4 + 8  # "act-" + 8 hex chars
 
     # ── Nit 2: derived skip tools match VERIFICATION_MAPPING ────────────
 
@@ -2290,9 +2290,267 @@ class TestPR7ReviewFixes:
         assert action.status == original_status
         assert action.status == ActionStatus.EXECUTING
 
+
 # --------------------------------------------------------------------------- #
-# Helpers
+# Review Round 2 — tests for Should-Fix and Nit fixes
 # --------------------------------------------------------------------------- #
+
+
+class TestReviewRound2Fixes:
+    """Tests added to cover the Should-Fix and Nit items from the second
+    review round."""
+
+    # ── Should-Fix #1: tool unavailable finalizes verification action ─────
+
+    async def test_verification_action_finalized_when_tool_unavailable(self):
+        """When tool_executor returns None, the verification Action is
+        finalized to UNKNOWN status, not left stuck in EXECUTING."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # Simulate tool_executor returning None (Provider degraded).
+        async def _return_none(tool_name, params, event_id, **kw):
+            return None
+
+        # Capture the target_status passed to _finalize_verification_action.
+        captured_statuses: list[ActionStatus] = []
+
+        async def _capture_finalize(verification_action, *, target_status):
+            captured_statuses.append(target_status)
+
+        agent = VerifyAgent(
+            tool_executor=MagicMock(call=AsyncMock(side_effect=_return_none)),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._finalize_verification_action = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_capture_finalize
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        # The tool was unavailable → UNVERIFIABLE.
+        assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert result.results[0].detail == "verification_tool_unavailable_degraded"
+        # The verification Action MUST have been finalized (not left EXECUTING).
+        assert len(captured_statuses) == 1
+        assert captured_statuses[0] == ActionStatus.UNKNOWN
+
+    # ── Should-Fix #1 variant: tool_executor=None produces same behavior ─
+
+    async def test_tool_executor_none_finalizes_verification_action(self):
+        """When tool_executor is None (not injected), the verification
+        Action is still finalized — same codepath as tool_executor.call()
+        returning None."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        captured_statuses: list[ActionStatus] = []
+
+        async def _capture_finalize(verification_action, *, target_status):
+            captured_statuses.append(target_status)
+
+        agent = VerifyAgent(
+            tool_executor=None,  # not injected
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        agent._finalize_verification_action = AsyncMock(  # type: ignore[method-assign]
+            side_effect=_capture_finalize
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        assert result.results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert len(captured_statuses) == 1
+        assert captured_statuses[0] == ActionStatus.UNKNOWN
+
+    # ── Should-Fix #2: dirty marker on double-failure ────────────────────
+
+    async def test_finalize_failure_appends_dirty_marker(self):
+        """When _finalize_verification_action throws during exception
+        handling, the detail string includes ;verification_action_dirty
+        so downstream consumers can distinguish a clean finalize from
+        a zombie verification Action."""
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        # Simulate tool_executor.call throwing.
+        failing_executor = MagicMock()
+        failing_executor.call = AsyncMock(
+            side_effect=RuntimeError("tool exploded")
+        )
+
+        agent = VerifyAgent(
+            tool_executor=failing_executor,
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+        )
+        # _finalize_verification_action also throws — double failure.
+        agent._finalize_verification_action = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("db connection lost during finalize")
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        # The detail exposes the exception type (sanitised)...
+        assert "RuntimeError" in (r.detail or "")
+        # ...AND includes the dirty marker to signal the verification
+        # Action may be stuck in EXECUTING.
+        assert ";verification_action_dirty" in (r.detail or "")
+
+    # ── Phase 1: all UNKNOWN → manual, no replan ─────────────────────────
+
+    async def test_phase1_all_actions_unknown(self):
+        """All Actions are UNKNOWN → all go to need_manual, no replan
+        triggered (UNKNOWN ≠ FAILED)."""
+        actions = [
+            _action(
+                action_id="act-unk-01",
+                tool_name="block_ip",
+                status=ActionStatus.UNKNOWN,
+                execution_job_id="job-0001",
+            ),
+            _action(
+                action_id="act-unk-02",
+                tool_name="block_domain",
+                status=ActionStatus.UNKNOWN,
+                execution_job_id="job-0002",
+            ),
+        ]
+        jobs = {
+            "job-0001": _job(job_id="job-0001", action_id="act-unk-01"),
+            "job-0002": _job(job_id="job-0002", action_id="act-unk-02"),
+        }
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=(actions, jobs, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id="evt-20260725-00000001", actions=actions)
+        )
+
+        # All UNKNOWN → all UNVERIFIABLE.
+        assert all(r.effect_status == EffectStatus.UNVERIFIABLE for r in result.results)
+        # UNKNOWN ≠ FAILED → no replan.
+        assert result.need_action_replan is False
+        # All escalate to manual.
+        assert result.need_manual_resolution is True
+        assert len(result.failed_actions) == 0
+
+    # ── Enhanced: UNVERIFIABLE preserves writeback_status ────────────────
+
+    async def test_unverifiable_preserves_writeback_status_value(self):
+        """UNVERIFIABLE effect must preserve the original writeback_status
+        (e.g. PENDING) rather than overwriting to None.
+
+        This is an enhanced version of the existing
+        test_unverifiable_preserves_writeback_obligation — it additionally
+        asserts that writeback_readiness is set to NOT_REQUIRED (per the
+        UNVERIFIABLE path contract) while writeback_required stays True
+        and writeback_status is preserved.
+        """
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.PENDING,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        agent = VerifyAgent(
+            tool_executor=_mock_executor(
+                {"check_ip_block_status": _tool_result_error("observation down")}
+            ),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=action.event_id, actions=[action])
+        )
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.UNVERIFIABLE
+        # Business obligation preserved.
+        assert r.writeback_required is True
+        # Readiness demoted to NOT_REQUIRED (technical inability).
+        assert r.writeback_readiness == WritebackReadiness.NOT_REQUIRED
+        # writeback_status preserved (PENDING), not wiped to None.
+        assert r.writeback_status == WritebackStatus.PENDING
+
+    # ── _SKIP_VERIFICATION_TOOLS module-level cache is correct ───────────
+
+    async def test_skip_verification_tools_module_cache(self):
+        """The module-level _SKIP_VERIFICATION_TOOLS cache matches
+        _derive_skip_verification_tools() output."""
+        from app.agents.verify_agent import (
+            _SKIP_VERIFICATION_TOOLS,
+            _derive_skip_verification_tools,
+        )
+
+        fresh = _derive_skip_verification_tools()
+        assert _SKIP_VERIFICATION_TOOLS == fresh
+        assert "create_ticket" in _SKIP_VERIFICATION_TOOLS
+        assert "notify_security_team" in _SKIP_VERIFICATION_TOOLS
+
+
 
 
 def _mock_executor(results: dict[str, ToolResult]) -> Any:
