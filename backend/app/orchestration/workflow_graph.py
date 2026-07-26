@@ -104,6 +104,7 @@ ROUTE_INVESTIGATE = "investigate"
 ROUTE_RESPONSE = "response"
 ROUTE_EVIDENCE = "evidence"
 ROUTE_EXECUTE = "execute"
+ROUTE_TO_APPROVAL = "execute"  # ISSUE-062 Nit: response → approval (not execute)
 ROUTE_WAIT = "wait"
 ROUTE_REPORT = "report"
 ROUTE_REPLAN = "replan"
@@ -260,7 +261,7 @@ def route_after_replan(state: InvestigationState) -> str:
 
 
 def _route_after_response(state: InvestigationState) -> str:
-    return ROUTE_HALT if state.get("halted") else ROUTE_EXECUTE
+    return ROUTE_HALT if state.get("halted") else ROUTE_TO_APPROVAL
 
 
 def _trace(node_name: str) -> InvestigationState:
@@ -1152,7 +1153,7 @@ def build_investigation_graph(
         _route_after_response,
         {
             ROUTE_HALT: NODE_HALT,
-            ROUTE_EXECUTE: NODE_APPROVAL,
+            ROUTE_TO_APPROVAL: NODE_APPROVAL,
         },
     )
     graph.add_conditional_edges(

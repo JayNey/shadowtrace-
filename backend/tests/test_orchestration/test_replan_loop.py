@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.core.errors import InvalidStateTransitionError
+from app.core.errors import InvalidStateTransitionError, ReplanCountExceededError
 from app.models.enums import (
     DispositionPolicy,
     EventStatus,
@@ -234,32 +234,38 @@ class TestReplanHandlerExecute:
 
 
 class TestReplanHandlerEscalate:
-    """Tests for ReplanHandler.escalate()."""
+    """Tests for ReplanHandler.escalate().
+
+    ISSUE-062 Should-Fix #1: escalate() now raises ReplanCountExceededError
+    after persisting the state-machine transition (dual-write pattern).
+    """
 
     async def test_escalate_with_partial_success(self):
-        """Partial success → CONTAINED."""
+        """Partial success → CONTAINED (raises ReplanCountExceededError)."""
         sm = FakeStateMachine()
         handler = ReplanHandler(state_machine=sm, runtime=FakeRuntime())
-        result = await handler.escalate(
-            "evt-001",
-            has_partial_success=True,
-            failed_actions=["act-001"],
-        )
-        assert result.escalated is True
-        assert result.target_status == EventStatus.CONTAINED
+        with pytest.raises(ReplanCountExceededError) as exc_info:
+            await handler.escalate(
+                "evt-001",
+                has_partial_success=True,
+                failed_actions=["act-001"],
+            )
+        assert exc_info.value.target_status == EventStatus.CONTAINED
+        assert exc_info.value.error_code == "replan_count_exceeded"
         assert sm.transitions[-1][1] == EventStatus.CONTAINED
 
     async def test_escalate_with_all_failed(self):
-        """All failed → FAILED."""
+        """All failed → FAILED (raises ReplanCountExceededError)."""
         sm = FakeStateMachine()
         handler = ReplanHandler(state_machine=sm, runtime=FakeRuntime())
-        result = await handler.escalate(
-            "evt-001",
-            has_partial_success=False,
-            failed_actions=["act-001", "act-002"],
-        )
-        assert result.escalated is True
-        assert result.target_status == EventStatus.FAILED
+        with pytest.raises(ReplanCountExceededError) as exc_info:
+            await handler.escalate(
+                "evt-001",
+                has_partial_success=False,
+                failed_actions=["act-001", "act-002"],
+            )
+        assert exc_info.value.target_status == EventStatus.FAILED
+        assert exc_info.value.error_code == "replan_count_exceeded"
         assert sm.transitions[-1][1] == EventStatus.FAILED
 
 

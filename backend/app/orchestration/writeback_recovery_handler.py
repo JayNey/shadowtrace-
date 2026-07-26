@@ -35,6 +35,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
+from app.core.errors import (
+    WritebackManualResolutionRequiredError,
+    WritebackRecoveryExhaustedError,
+)
 from app.models.enums import (
     EventStatus,
     ExecutionSubstate,
@@ -61,6 +65,9 @@ def _backoff_with_jitter(retry_count: int) -> float:
     """Jittered exponential backoff for writeback retries.
 
     Returns a delay in seconds: ``min(base * 2^count, max) * (1 ± jitter)``.
+
+    @internal — usable by ISSUE-064 e2e tests when constructing boundary
+    writeback recovery scenarios that need deterministic backoff timing.
     """
     delay = min(_BACKOFF_BASE_S * (2 ** (retry_count - 1)), _BACKOFF_MAX_S)
     jitter = delay * _JITTER_FACTOR * (2 * random.random() - 1)
@@ -68,7 +75,11 @@ def _backoff_with_jitter(retry_count: int) -> float:
 
 
 def _parse_writeback_status(raw: Any) -> WritebackStatus | None:
-    """Safely parse a writeback status string, returning None on invalid input."""
+    """Safely parse a writeback status string, returning None on invalid input.
+
+    @internal — usable by ISSUE-064 e2e tests when constructing boundary
+    writeback status values that exercise the recovery evaluation matrix.
+    """
     if raw is None:
         return None
     try:
@@ -402,7 +413,7 @@ class WritebackRecoveryHandler:
                     writeback.writeback_id,
                     readiness.value,
                 )
-                return await self._escalate(event_id, writeback, result, op)
+                return await self._handle_escalate(event_id, writeback, result, op)
             try:
                 looked_up = await self._disposition_sync.lookup_writeback_status(
                     writeback.writeback_id,
@@ -413,6 +424,25 @@ class WritebackRecoveryHandler:
                         writeback.writeback_id,
                         looked_up.value,
                     )
+                    # Persist the resolved status back to the outbox so the
+                    # next verify cycle reads the terminal status instead of
+                    # re-querying (ISSUE-062 Should-Fix #2).  This is a
+                    # best-effort write — the primary durability mechanism is
+                    # the async receipt from the provider; the lookup resolution
+                    # bridges the gap when the receipt is delayed.
+                    try:
+                        await self._disposition_sync.resolve_writeback(
+                            writeback.writeback_id,
+                            resolution=f"status_queried:{looked_up.value}",
+                            principal="WritebackRecoveryHandler",
+                            comment="lookup_resolved_status",
+                        )
+                    except Exception:
+                        logger.debug(
+                            "writeback %s: unable to persist lookup-resolved "
+                            "status to outbox — relying on async receipt",
+                            writeback.writeback_id,
+                        )
                     return WritebackRecoveryResult(
                         action=WritebackRecoveryAction.NOOP,
                         writeback_id=writeback.writeback_id,
@@ -423,7 +453,7 @@ class WritebackRecoveryHandler:
                 # Still UNKNOWN after lookup — increment counter
                 writeback.lookup_count = result.lookup_attempt
                 if writeback.lookup_count >= writeback.max_lookups:
-                    return await self._escalate(event_id, writeback, result, op)
+                    return await self._handle_escalate(event_id, writeback, result, op)
                 # Wait before next cycle to avoid tight looping.
                 # Use a short fixed delay (1.0s) rather than exponential
                 # backoff — the external state (provider receipt) is the
@@ -440,7 +470,7 @@ class WritebackRecoveryHandler:
                 logger.exception("writeback lookup failed for %s", writeback.writeback_id)
                 writeback.lookup_count += 1
                 if writeback.lookup_count >= writeback.max_lookups:
-                    return await self._escalate(event_id, writeback, result, op)
+                    return await self._handle_escalate(event_id, writeback, result, op)
                 return result
 
         if result.action is WritebackRecoveryAction.RETRY:
@@ -473,7 +503,7 @@ class WritebackRecoveryHandler:
                     writeback.writeback_id,
                     readiness.value,
                 )
-                return await self._escalate(event_id, writeback, result, op)
+                return await self._handle_escalate(event_id, writeback, result, op)
 
             # Jittered exponential backoff before retry (ISSUE-062).
             backoff_s = _backoff_with_jitter(result.retry_attempt)
@@ -502,13 +532,39 @@ class WritebackRecoveryHandler:
                 logger.exception("writeback retry failed for %s", writeback.writeback_id)
                 writeback.retry_count += 1
                 if writeback.retry_count >= writeback.max_retries:
-                    return await self._escalate(event_id, writeback, result, op)
+                    return await self._handle_escalate(event_id, writeback, result, op)
                 return result
 
         if result.action is WritebackRecoveryAction.MANUAL:
-            return await self._escalate(event_id, writeback, result, op)
+            return await self._handle_escalate(event_id, writeback, result, op)
 
         return result
+
+    async def _handle_escalate(
+        self,
+        event_id: str,
+        writeback: WritebackState,
+        result: WritebackRecoveryResult,
+        operator: str,
+    ) -> WritebackRecoveryResult:
+        """Call ``_escalate`` and convert its exception to a result.
+
+        ``_escalate`` raises an appropriate ``ShadowTraceError`` subclass
+        after persisting MANUAL_RESOLUTION substate (dual-write: state +
+        exception for diagnostics).  This wrapper catches the exception and
+        returns a ``WritebackRecoveryResult`` so the graph node can route on
+        ``escalated=True`` without unwinding through the exception path.
+        """
+        try:
+            return await self._escalate(event_id, writeback, result, operator)
+        except (WritebackRecoveryExhaustedError, WritebackManualResolutionRequiredError):
+            return WritebackRecoveryResult(
+                action=WritebackRecoveryAction.MANUAL,
+                writeback_id=writeback.writeback_id,
+                writeback_status=writeback.current_status,
+                reason=result.reason,
+                escalated=True,
+            )
 
     async def _escalate(
         self,
@@ -517,7 +573,17 @@ class WritebackRecoveryHandler:
         result: WritebackRecoveryResult,
         operator: str,
     ) -> WritebackRecoveryResult:
-        """Persist MANUAL_RESOLUTION substate and return escalated result."""
+        """Persist MANUAL_RESOLUTION substate and raise the appropriate error.
+
+        Raises
+        ------
+        WritebackRecoveryExhaustedError
+            When retry or lookup counters are exhausted (automated recovery
+            was attempted but hit its limit).
+        WritebackManualResolutionRequiredError
+            When the writeback status is CONFLICT or the recovery evaluation
+            returns MANUAL directly (automated recovery is not applicable).
+        """
         await self._runtime.set_execution_substate(
             event_id,
             ExecutionSubstate.MANUAL_RESOLUTION,
@@ -528,12 +594,30 @@ class WritebackRecoveryHandler:
             writeback.writeback_id,
             result.reason,
         )
-        return WritebackRecoveryResult(
-            action=WritebackRecoveryAction.MANUAL,
+
+        # Distinguish "recovery exhausted" from "manual required from the start"
+        # based on the result reason (ISSUE-062 Should-Fix #1).
+        reason = result.reason
+        if "exhausted" in reason:
+            raise WritebackRecoveryExhaustedError(
+                f"writeback recovery exhausted for {writeback.writeback_id}: {reason}",
+                writeback_id=writeback.writeback_id,
+                details={
+                    "event_id": event_id,
+                    "reason": reason,
+                    "lookup_count": writeback.lookup_count,
+                    "retry_count": writeback.retry_count,
+                },
+            )
+        raise WritebackManualResolutionRequiredError(
+            f"writeback requires manual resolution for {writeback.writeback_id}: {reason}",
             writeback_id=writeback.writeback_id,
-            writeback_status=writeback.current_status,
-            reason=result.reason,
-            escalated=True,
+            details={
+                "event_id": event_id,
+                "reason": reason,
+                "lookup_count": writeback.lookup_count,
+                "retry_count": writeback.retry_count,
+            },
         )
 
     @staticmethod
@@ -650,8 +734,9 @@ async def writeback_recovery_graph_node(
         # negligible because the current graph only passes a single scalar
         # verify_writeback_status per cycle and counter precision across
         # multiple heterogeneous writebacks is inherently approximate.
-        # ISSUE-062 follow-up: persist per-writeback counters when the
-        # InvestigationState schema supports it.
+        # ISSUE-062-FOLLOWUP: persist per-writeback counters and per-writeback
+        # status tracking when the InvestigationState schema supports it.
+        # See also the data-model limitation comment in the node entry point.
         return {
             "verify_need_writeback_recovery": False,
             "verify_need_manual_resolution": True,

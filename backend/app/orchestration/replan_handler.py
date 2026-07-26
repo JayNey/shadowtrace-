@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
+from app.core.errors import ReplanCountExceededError
 from app.models.enums import EventStatus
 from app.models.workflow import MAX_REPLAN_COUNT, TransitionContext
 
@@ -226,6 +227,13 @@ class ReplanHandler:
         a mandatory human-escalation section.
 
         Callers must subsequently route to ``report_node``.
+
+        Raises
+        ------
+        ReplanCountExceededError
+            After the state-machine transition is persisted.  Callers in
+            graph nodes should catch this and convert to state patches
+            (dual-write: state + exception for diagnostics).
         """
         target = EventStatus.CONTAINED if has_partial_success else EventStatus.FAILED
         reason = (
@@ -246,10 +254,15 @@ class ReplanHandler:
             target.value,
             has_partial_success,
         )
-        return EscalationResult(
-            escalated=True,
+        raise ReplanCountExceededError(
+            reason,
             target_status=target,
-            reason=reason,
+            details={
+                "event_id": event_id,
+                "has_partial_success": has_partial_success,
+                "failed_actions": failed_actions or [],
+                "max_replan_count": MAX_REPLAN_COUNT,
+            },
         )
 
     @staticmethod
@@ -320,6 +333,18 @@ async def replan_graph_node(
         )
         failed_actions = []
 
+    # Carry forward existing degraded_flags so callers can append.
+    existing_degraded = list(state.get("degraded_flags") or [])
+
+    def _build_escalate_patches(target_status: EventStatus, *, halted: bool) -> dict[str, Any]:
+        """Build state patches for an escalated replan result."""
+        return {
+            "event_status": target_status.value,
+            "replan_count": current_count,
+            "escalated": True,
+            "halted": halted,
+        }
+
     # Record replan step in convergence guard (ISSUE-062) and check
     # whether any stop condition (global_max_steps, oscillation, etc.)
     # has been hit.  When the guard orders a stop the replan is aborted
@@ -337,22 +362,28 @@ async def replan_graph_node(
                     stop.detail,
                 )
                 has_partial = bool(state.get("verify_has_partial_success"))
-                esc = await handler.escalate(
-                    event_id,
-                    has_partial_success=has_partial,
-                    failed_actions=failed_actions,
-                )
-                return {
-                    "event_status": esc.target_status.value,
-                    "replan_count": current_count,
-                    "escalated": True,
-                    "halted": True,
-                }
+                try:
+                    await handler.escalate(
+                        event_id,
+                        has_partial_success=has_partial,
+                        failed_actions=failed_actions,
+                    )
+                except ReplanCountExceededError as exc:
+                    return _build_escalate_patches(exc.target_status, halted=True)
+        except ReplanCountExceededError:
+            # Escalate exception already raised by handler.escalate() above;
+            # caught at the outer level → handled by the caller's catch block.
+            raise
         except Exception:
             logger.exception(
                 "ConvergenceGuard.record_step/should_stop failed for event=%s",
                 event_id,
             )
+            # Attach degraded flag so operators can observe the guard failure
+            # even though replan continues (ISSUE-062 Nit #2).
+            degraded_entry = "convergence_guard_degraded"
+            if degraded_entry not in existing_degraded:
+                existing_degraded.append(degraded_entry)
 
     result = await handler.execute_replan(
         event_id,
@@ -362,31 +393,34 @@ async def replan_graph_node(
 
     if result.decision is ReplanDecision.ESCALATE:
         has_partial = bool(state.get("verify_has_partial_success"))
-        esc = await handler.escalate(
-            event_id,
-            has_partial_success=has_partial,
-            failed_actions=failed_actions,
-        )
-        # NOTE: replan_count is NOT incremented on escalate — the over-limit
-        # detection happens in evaluate_replan() which checks "would the next
-        # attempt exceed MAX_REPLAN_COUNT?" before the increment is committed.
-        # Returning current_count (not current_count + 1) is correct: no
-        # successful replan consumed this count.  The CONTINUE path below
-        # returns result.replan_count which IS incremented.
-        return {
-            "event_status": esc.target_status.value,
-            "replan_count": current_count,
-            "escalated": True,
-            "halted": False,
-        }
+        try:
+            await handler.escalate(
+                event_id,
+                has_partial_success=has_partial,
+                failed_actions=failed_actions,
+            )
+        except ReplanCountExceededError as exc:
+            # NOTE: replan_count is NOT incremented on escalate — the over-limit
+            # detection happens in evaluate_replan() which checks "would the next
+            # attempt exceed MAX_REPLAN_COUNT?" before the increment is committed.
+            # Returning current_count (not current_count + 1) is correct: no
+            # successful replan consumed this count.  The CONTINUE path below
+            # returns result.replan_count which IS incremented.
+            patches = _build_escalate_patches(exc.target_status, halted=False)
+            if existing_degraded:
+                patches["degraded_flags"] = existing_degraded
+            return patches
 
     # Continue: the graph edge NODE_REPLAN → NODE_PLANNER takes over.
-    return {
+    patches: dict[str, Any] = {
         "event_status": EventStatus.REPLANNING.value,
         "replan_count": result.replan_count,
         "escalated": False,
         "halted": False,
     }
+    if existing_degraded:
+        patches["degraded_flags"] = existing_degraded
+    return patches
 
 
 __all__ = [

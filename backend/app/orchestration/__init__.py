@@ -1,5 +1,10 @@
 """Orchestration package — ReAct engine, ConvergenceGuard, EventLease, SuperAgent, etc."""
 
+from app.core.errors import (
+    ReplanCountExceededError,
+    WritebackManualResolutionRequiredError,
+    WritebackRecoveryExhaustedError,
+)
 from app.orchestration.convergence_guard import (
     ConvergenceGuard,
     ConvergenceState,
@@ -49,13 +54,16 @@ __all__ = [
     "ReActActionExecutor",
     "ReActEngine",
     "ReActTraceSink",
+    "ReplanCountExceededError",
     "ReplanDecision",
     "ReplanHandler",
     "ReplanResult",
     "StopDecision",
     "StopReason",
     "VERIFY_UNKNOWN_MAX_LOOKUPS",
+    "WritebackManualResolutionRequiredError",
     "WritebackRecoveryAction",
+    "WritebackRecoveryExhaustedError",
     "WritebackRecoveryHandler",
     "WritebackRecoveryResult",
     "WritebackState",
