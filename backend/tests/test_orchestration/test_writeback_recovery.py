@@ -831,8 +831,73 @@ class TestMultipleWritebackProcessing:
         result3 = await writeback_recovery_graph_node(state3, handler=handler)
         assert result3["verify_failed_writebacks"] == []
 
+    # ── Tests: LOOKUP/RETRY halt prevention (Should-Fix #2) ───────────────────────
 
-# ── Tests: LOOKUP/RETRY halt prevention (Should-Fix #2) ───────────────────────
+    @pytest.mark.xfail(
+        reason=(
+            "ISSUE-092: verify_writeback_status is a per-cycle scalar — when "
+            "multiple writebacks fail with heterogeneous statuses, the second "
+            "writeback inherits the first writeback's scalar status, causing "
+            "misrouting. Tracked for resolution in ISSUE-092."
+        ),
+        strict=True,
+    )
+    async def test_heterogeneous_multi_writeback_does_not_silently_misroute(self):
+        """Two writebacks with different statuses: verify routing correctness.
+
+        Scenario: wbk-001 is UNKNOWN, wbk-002 is CONFLICT.  With only a
+        scalar ``verify_writeback_status``, the second cycle still sees
+        ``"unknown"`` (the first writeback's status), so the CONFLICT
+        writeback is misrouted to LOOKUP instead of escalated to MANUAL.
+
+        This test wires a disposition_sync that returns UNKNOWN from LOOKUP
+        so that the UNKNOWN path does **not** escalate — only the correct
+        CONFLICT path would escalate immediately.  The test asserts the
+        **correct** behavior (CONFLICT → MANUAL), which fails today because
+        the scalar status ``"unknown"`` routes wbk-002 through LOOKUP instead.
+
+        After ISSUE-092 introduces per-writeback status tracking, wbk-002's
+        actual ``"conflict"`` status will be used and this test will pass —
+        at which point the ``strict=True`` xfail will alert the developer
+        to remove the marker.
+        """
+        ds = FakeDispositionSync()
+        ds._lookup_result = WritebackStatus.UNKNOWN  # LOOKUP stays unresolved
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+            disposition_sync=ds,
+        )
+
+        # Cycle 1: two failed writebacks; scalar status covers only the first.
+        state1 = _base_state(
+            verify_failed_writebacks=["wbk-001", "wbk-002"],
+            verify_writeback_status="unknown",
+        )
+        result1 = await writeback_recovery_graph_node(state1, handler=handler)
+        assert result1["verify_failed_writebacks"] == ["wbk-002"]
+        # wbk-001 (UNKNOWN): LOOKUP → still UNKNOWN → stays in recovery, NOT escalated.
+
+        # Cycle 2: wbk-002's actual status is CONFLICT, but the scalar in
+        # InvestigationState still reads "unknown" because the current schema
+        # has no per-writeback status field.
+        #
+        # CORRECT behavior (post-ISSUE-092): wbk-002 is CONFLICT → MANUAL immediately.
+        # ACTUAL behavior (today): wbk-002 is processed as "unknown" → LOOKUP → stays
+        # in recovery, silently missing the CONFLICT escalation.
+        state2 = _base_state(
+            verify_failed_writebacks=["wbk-002"],
+            verify_writeback_status="unknown",
+        )
+        result2 = await writeback_recovery_graph_node(state2, handler=handler)
+        # This assertion FAILS today: the scalar "unknown" causes LOOKUP path
+        # instead of the correct CONFLICT → MANUAL escalation.
+        assert result2["verify_need_manual_resolution"] is True, (
+            "CONFLICT writeback (wbk-002) should escalate to MANUAL, but "
+            "scalar verify_writeback_status='unknown' from first writeback "
+            "caused misrouting to LOOKUP path. Fix: ISSUE-092 per-writeback "
+            "status map."
+        )
 
 
 class TestWritebackRecoverySpinPrevention:

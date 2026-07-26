@@ -52,7 +52,8 @@ class InvestigationState(TypedDict, total=False):
     writeback_lookup_count: int
     writeback_retry_count: int
     verify_has_partial_success: bool
-    execution_ok: bool  # consumed by verify_node: when False and no verify_failed_actions → MANUAL_RESOLUTION
+    # When False and no verify_failed_actions → MANUAL_RESOLUTION
+    execution_ok: bool
     include_rag: bool
     evidence_output: dict[str, Any] | None
     rag_output: dict[str, Any] | None

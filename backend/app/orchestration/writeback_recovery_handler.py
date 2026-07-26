@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio  # used for jittered backoff sleep in RETRY path (asyncio.sleep)
 import logging
+import os
 import random
 from dataclasses import dataclass
 from enum import StrEnum
@@ -69,7 +70,7 @@ _JITTER_FACTOR = 0.3
 # DB pressure from polling.  For provider-specific tuning, override via the
 # ``SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S`` environment variable.
 _LOOKUP_POLL_INTERVAL_S: float = float(
-    __import__("os").environ.get("SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S", "1.0")
+    os.environ.get("SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S", "1.0")
 )
 
 
