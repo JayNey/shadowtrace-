@@ -894,11 +894,43 @@ def build_investigation_graph(
         disposition_only = bool(state.get("disposition_only_intent"))
         policy_required = state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
 
+        # Should-Fix: when disposition_policy=required and no response_plan
+        # exists, escalate to MANUAL_RESOLUTION instead of constructing a
+        # placeholder that would silently swallow the missing plan.  A
+        # required-policy event must have a concrete response plan before
+        # verification can proceed.
+        if policy_required and state.get("response_plan") is None:
+            flags = apply_flag_to_list(
+                list(state.get("degraded_flags") or []),
+                "missing_response_plan_for_required_policy",
+                True,
+            )
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=EventStatus.VERIFYING,
+            )
+            return _patch_state(
+                _trace(NODE_VERIFY),
+                {
+                    "degraded_flags": flags,
+                    "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+                    "verify_need_action_replan": False,
+                    "verify_need_writeback_recovery": False,
+                    "verify_need_manual_resolution": True,
+                },
+            )
+
         # Build ResponsePlan from state for VerifyAgent input.
+        # The fallback placeholder (plan_id="") is only reached for
+        # non-required-policy events where the planner didn't produce a
+        # response_plan — the empty plan is acceptable here because
+        # VerifyAgent only uses it for context; the policy won't enforce
+        # disposition writeback.
         response_plan = (
             ResponsePlan.model_validate(state["response_plan"])
             if state.get("response_plan") is not None
-            else ResponsePlan(plan_id="", actions=[], strategy_summary="", generated_by="template")  # type: ignore[arg-type]
+            else ResponsePlan(plan_id="", actions=[], strategy_summary="", generated_by="template")  # type: ignore[arg-type]  # acceptable: only reached for non-required policies (see guard above)
         )
 
         verification_result: VerificationResult | None = None
@@ -1045,6 +1077,39 @@ def build_investigation_graph(
             "verify_failed_writebacks": verification_result.failed_writebacks,
             "verify_has_partial_success": verification_result.overall_status.value == "partial",
         }
+
+        # Should-Fix: when execution_ok is False but VerifyAgent didn't report
+        # any specific failures, the execution layer itself failed without a
+        # corresponding verification signal.  This is an anomalous state —
+        # route to MANUAL_RESOLUTION instead of silently proceeding to
+        # REPORTING with a false sense of success.
+        if (
+            not state.get("execution_ok", True)
+            and not verification_result.need_action_replan
+            and not verification_result.need_writeback_recovery
+            and not verification_result.need_manual_resolution
+        ):
+            flags = apply_flag_to_list(
+                list(state.get("degraded_flags") or []),
+                "execution_failed_unverified",
+                True,
+            )
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=EventStatus.VERIFYING,
+            )
+            return _patch_state(
+                _trace(NODE_VERIFY),
+                {
+                    **update,
+                    "degraded_flags": flags,
+                    "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+                    "verify_need_action_replan": False,
+                    "verify_need_writeback_recovery": False,
+                    "verify_need_manual_resolution": True,
+                },
+            )
 
         # Transition to the appropriate status based on verification outcome.
         if verification_result.need_action_replan:

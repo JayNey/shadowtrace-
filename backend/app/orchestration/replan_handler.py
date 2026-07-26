@@ -33,6 +33,7 @@ from app.core.errors import (
 from app.models.enums import EventStatus
 from app.models.workflow import MAX_REPLAN_COUNT, TransitionContext
 from app.orchestration.graph_state import InvestigationState
+from app.orchestration.ports import StateMachinePort
 
 logger = logging.getLogger(__name__)
 
@@ -42,18 +43,6 @@ _REPLAN_OPERATOR = "ReplanHandler"
 # --------------------------------------------------------------------------- #
 # Ports
 # --------------------------------------------------------------------------- #
-
-
-class _StateMachinePort(Protocol):
-    async def transition(
-        self,
-        event_id: str,
-        target: EventStatus,
-        *,
-        context: Any | None = None,
-        operator: str | None = None,
-        reason: str | None = None,
-    ) -> Any: ...
 
 
 class _WorkflowRuntimePort(Protocol):
@@ -132,7 +121,7 @@ class ReplanHandler:
     def __init__(
         self,
         *,
-        state_machine: _StateMachinePort,
+        state_machine: StateMachinePort,
         runtime: _WorkflowRuntimePort,
     ) -> None:
         self._state_machine = state_machine

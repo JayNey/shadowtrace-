@@ -393,48 +393,54 @@ async def test_not_required_short_circuit_generates_report_and_closes() -> None:
 async def test_required_threat_never_enters_disposition_only() -> None:
     """REQUIRED non-FP threat does not take the disposition-only shortcut.
 
-    With ISSUE-062, the verify_node for required policy without a verify_agent
-    degrades through the normal degraded path (→ REPORTING) rather than halting
-    at VERIFYING.  The event reaches REPORTING then fails at CLOSED gate
-    because stub agents don't create writeback actions — the close_node wrapper
-    transitions to FAILED and re-raises.  We assert the disposition-only path
-    was not taken and the report ran.
+    With ISSUE-062 Should-Fix #2, the verify_node for required policy
+    without a response_plan escalates to MANUAL_RESOLUTION instead of
+    silently proceeding with a placeholder plan.  The graph reaches
+    manual_hold_node with verify_need_manual_resolution=True and halts.
+    We assert the disposition-only path was not taken and the event is
+    routed to manual hold.
     """
     runtime = FakeRuntime(WritebackReadiness.READY)
-    with pytest.raises(InvalidStateTransitionError, match="CLOSED gate"):
-        await build_investigation_graph(
-            _agents(),
-            _services(runtime=runtime),
-        ).ainvoke(
-            _base_state(
-                disposition_policy=DispositionPolicy.REQUIRED.value,
-                event_status_update_readiness=WritebackReadiness.READY.value,
-            ),
-            {"configurable": {"thread_id": "evt-threat"}},
-        )
+    final = await build_investigation_graph(
+        _agents(),
+        _services(runtime=runtime),
+    ).ainvoke(
+        _base_state(
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            event_status_update_readiness=WritebackReadiness.READY.value,
+        ),
+        {"configurable": {"thread_id": "evt-threat"}},
+    )
     assert runtime.begun == []
+    assert final["halted"] is True
+    assert final["verify_need_manual_resolution"] is True
+    assert any(
+        "missing_response_plan_for_required_policy" in f
+        for f in final.get("degraded_flags", [])
+    )
 
 
 @pytest.mark.asyncio
 async def test_required_golden_path_order_halts_at_verify() -> None:
-    """P0 main-chain order through verify, then REPORTING (ISSUE-062).
+    """P0 main-chain order through verify, then MANUAL_RESOLUTION (ISSUE-062).
 
-    With ISSUE-062, the verify_node for required policy degrades through
-    REPORTING rather than HALTing at VERIFYING.  The CLOSED gate fails
-    because stub agents don't create writeback actions.  We verify that
-    the event reached REPORTING.
+    With ISSUE-062 Should-Fix #2, when disposition_policy=REQUIRED and no
+    response_plan exists, verify_node escalates to MANUAL_RESOLUTION rather
+    than constructing a placeholder and proceeding to REPORTING.  The graph
+    ends at manual_hold_node with halted=True.
     """
-    with pytest.raises(InvalidStateTransitionError, match="CLOSED gate"):
-        await build_investigation_graph(
-            _agents(),
-            _services(runtime=FakeRuntime(WritebackReadiness.READY)),
-        ).ainvoke(
-            _base_state(
-                disposition_policy=DispositionPolicy.REQUIRED.value,
-                event_status_update_readiness=WritebackReadiness.READY.value,
-            ),
-            {"configurable": {"thread_id": "evt-required-golden"}},
-        )
+    final = await build_investigation_graph(
+        _agents(),
+        _services(runtime=FakeRuntime(WritebackReadiness.READY)),
+    ).ainvoke(
+        _base_state(
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            event_status_update_readiness=WritebackReadiness.READY.value,
+        ),
+        {"configurable": {"thread_id": "evt-required-golden"}},
+    )
+    assert final["halted"] is True
+    assert final["verify_need_manual_resolution"] is True
 
 
 @pytest.mark.asyncio

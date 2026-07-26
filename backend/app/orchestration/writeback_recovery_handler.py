@@ -48,6 +48,7 @@ from app.models.enums import (
 )
 from app.models.workflow import WRITEBACK_MAX_RETRIES
 from app.orchestration.graph_state import InvestigationState
+from app.orchestration.ports import StateMachinePort
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,15 @@ VERIFY_UNKNOWN_MAX_LOOKUPS = 3
 _BACKOFF_BASE_S = 1.0
 _BACKOFF_MAX_S = 60.0
 _JITTER_FACTOR = 0.3
+
+# Fixed poll interval (seconds) between UNKNOWN-status LOOKUP attempts.
+# A short fixed delay is sufficient for passive status queries — the external
+# provider receipt is the primary pacing mechanism; a minimum interval prevents
+# DB pressure from polling.  For provider-specific tuning, override via the
+# ``SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S`` environment variable.
+_LOOKUP_POLL_INTERVAL_S: float = float(
+    __import__("os").environ.get("SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S", "1.0")
+)
 
 
 def _backoff_with_jitter(retry_count: int) -> float:
@@ -94,20 +104,6 @@ def _parse_writeback_status(raw: Any) -> WritebackStatus | None:
 # --------------------------------------------------------------------------- #
 # Ports
 # --------------------------------------------------------------------------- #
-
-
-class _StateMachinePort(Protocol):
-    async def transition(
-        self,
-        event_id: str,
-        target: EventStatus,
-        *,
-        context: Any | None = None,
-        operator: str | None = None,
-        reason: str | None = None,
-    ) -> Any: ...
-
-    async def get_current_status(self, event_id: str) -> EventStatus: ...
 
 
 class _RuntimePort(Protocol):
@@ -202,7 +198,7 @@ class WritebackRecoveryHandler:
     def __init__(
         self,
         *,
-        state_machine: _StateMachinePort,
+        state_machine: StateMachinePort,
         runtime: _RuntimePort,
         disposition_sync: _DispositionSyncPort | None = None,
     ) -> None:
@@ -474,12 +470,12 @@ class WritebackRecoveryHandler:
                 if writeback.lookup_count >= writeback.max_lookups:
                     return await self._handle_escalate(event_id, writeback, result, op)
                 # Wait before next cycle to avoid tight looping.
-                # Use a short fixed delay (1.0s) rather than the jittered
-                # exponential backoff applied in the RETRY path.  LOOKUP is a
-                # passive status query — the external provider receipt is the
-                # primary pacing mechanism; a minimum interval is sufficient
-                # to prevent DB pressure from polling.
-                await asyncio.sleep(1.0)
+                # Use a short fixed delay (_LOOKUP_POLL_INTERVAL_S) rather than
+                # the jittered exponential backoff applied in the RETRY path.
+                # LOOKUP is a passive status query — the external provider
+                # receipt is the primary pacing mechanism; a minimum interval
+                # is sufficient to prevent DB pressure from polling.
+                await asyncio.sleep(_LOOKUP_POLL_INTERVAL_S)
                 await self._runtime.set_execution_substate(
                     event_id,
                     ExecutionSubstate.WAITING_WRITEBACK,

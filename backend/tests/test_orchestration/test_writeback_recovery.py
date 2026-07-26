@@ -144,6 +144,12 @@ class FakeDispositionSync:
             raise self._lookup_raises
         return self._lookup_result
 
+    async def update_writeback_status_from_lookup(
+        self, writeback_id: str, status: WritebackStatus
+    ) -> None:
+        """Persist lookup-resolved status to the outbox (best-effort write)."""
+        self._lookup_result = status
+
 
 # ── Tests: WritebackRecoveryHandler.evaluate ─────────────────────────────────
 
