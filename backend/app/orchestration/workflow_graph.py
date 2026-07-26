@@ -128,6 +128,8 @@ class _StateMachinePort(Protocol):
         reason: str | None = None,
     ) -> Any: ...
 
+    async def get_current_status(self, event_id: str) -> EventStatus: ...
+
 
 class _DispositionSyncPort(Protocol):
     async def retry_writeback(
@@ -1096,12 +1098,29 @@ def build_investigation_graph(
                 risk_assessment=RiskAssessment.model_validate(state["risk_assessment"]),
             )
         )
+        # ISSUE-062 B2: When the writeback recovery path routes to report_node,
+        # the DB status may still be VERIFYING (verify_node stayed in VERIFYING
+        # for writeback recovery; writeback_recovery_node does not transition).
+        # Without the transition here, close_node would attempt VERIFYING→CLOSED
+        # which is an illegal state transition.
+        #
+        # The transition is guarded against the state dict (not the DB) to keep
+        # this call cheap — when verify_node already persisted REPORTING the
+        # state dict also carries "reporting" and we skip the redundant DB write.
+        current = EventStatus(state.get("event_status", EventStatus.VERIFYING.value))
+        if current is not EventStatus.REPORTING:
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.REPORTING,
+                reason="investigation:report",
+            )
+        else:
+            status = cast(InvestigationState, {})
         return _patch_state(
             _trace(NODE_REPORT),
-            {
-                "event_status": EventStatus.REPORTING.value,
-                "report_generated": report is not None,
-            },
+            status,
+            {"report_generated": report is not None},
         )
 
     async def halt_node(state: InvestigationState) -> InvestigationState:
@@ -1197,8 +1216,22 @@ def build_investigation_graph(
             ROUTE_HALT: NODE_HALT,
         },
     )
-    # Writeback recovery loops back to verify for re-evaluation on WAIT/LOOKUP/RETRY,
-    # or goes to manual_hold when escalated.
+    # Writeback recovery routing (ISSUE-062 S2):
+    #
+    # NODE_WRITEBACK_RECOVERY deliberately reuses ``route_after_verify`` because
+    # its state output produces the same routing flags (verify_need_* / halted)
+    # that the verify→{report, replan, manual, writeback, halt} truth table
+    # consumes.  This is an intentional contract — not an oversight:
+    #
+    #   writeback_recovery_graph_node sets:
+    #     verify_need_writeback_recovery → ROUTE_WRITEBACK (loop back here)
+    #     verify_need_manual_resolution    → ROUTE_MANUAL  (manual_hold_node)
+    #     (neither flag)                   → ROUTE_REPORT  (report_node)
+    #     halted                           → ROUTE_HALT    (halt_node)
+    #
+    # If writeback recovery ever needs to send a signal beyond this set (e.g.
+    # "waiting but don't halt the graph"), define a dedicated route function
+    # rather than adding a new flag that route_after_verify must also handle.
     graph.add_conditional_edges(
         NODE_WRITEBACK_RECOVERY,
         route_after_verify,

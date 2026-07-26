@@ -16,7 +16,7 @@ from app.models.enums import (
     Severity,
     WritebackReadiness,
 )
-from app.models.workflow import MAX_REPLAN_COUNT
+from app.models.workflow import MAX_REPLAN_COUNT, validate_transition
 from app.orchestration.graph_state import InvestigationState
 from app.orchestration.replan_handler import (
     ReplanDecision,
@@ -89,12 +89,17 @@ class FakeRuntime:
 
 
 class FakeStateMachine:
-    """Fake StateMachineService for tests."""
+    """Fake StateMachineService for tests.
 
-    def __init__(self) -> None:
+    When ``validate=True``, every ``transition()`` call runs through the
+    real ``validate_transition`` gate so illegal state moves are caught.
+    """
+
+    def __init__(self, *, validate: bool = False) -> None:
         self.transitions: list[tuple[str, EventStatus, str]] = []
         self._replan_count = 0
         self._current_status: dict[str, EventStatus] = {}
+        self._validate = validate
 
     async def transition(
         self,
@@ -105,6 +110,9 @@ class FakeStateMachine:
         operator: str | None = None,
         reason: str | None = None,
     ) -> Any:
+        current = self._current_status.get(event_id, EventStatus.VERIFYING)
+        if self._validate:
+            validate_transition(current, target)
         # Simulate replan_count enforcement from StateMachineService
         if target is EventStatus.REPLANNING:
             self._replan_count += 1

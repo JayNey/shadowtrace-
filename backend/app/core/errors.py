@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models.enums import ErrorCategory
+from app.models.enums import ErrorCategory, EventStatus
 
 # --------------------------------------------------------------------------- #
 # Category → default retryability (简介 §4.9)
@@ -449,10 +449,10 @@ class ReplanCountExceededError(ShadowTraceError):
         self,
         message: str = "",
         *,
-        target_status: Any | None = None,
+        target_status: EventStatus,
         details: dict[str, Any] | None = None,
     ) -> None:
-        self.target_status = target_status
+        self.target_status: EventStatus = target_status
         super().__init__(message, details=details)
 
 

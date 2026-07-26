@@ -47,6 +47,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.workflow import WRITEBACK_MAX_RETRIES
+from app.orchestration.graph_state import InvestigationState
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ def _backoff_with_jitter(retry_count: int) -> float:
     @internal — usable by ISSUE-064 e2e tests when constructing boundary
     writeback recovery scenarios that need deterministic backoff timing.
     """
-    delay = min(_BACKOFF_BASE_S * (2 ** (retry_count - 1)), _BACKOFF_MAX_S)
+    delay = min(_BACKOFF_BASE_S * (2.0 ** (retry_count - 1)), _BACKOFF_MAX_S)
     jitter = delay * _JITTER_FACTOR * (2 * random.random() - 1)
     return max(0.0, delay + jitter)
 
@@ -685,10 +686,10 @@ class WritebackRecoveryHandler:
 
 
 async def writeback_recovery_graph_node(
-    state: dict[str, Any],
+    state: InvestigationState,
     *,
     handler: WritebackRecoveryHandler,
-) -> dict[str, Any]:
+) -> InvestigationState:
     """Graph node entry point for writeback recovery (replaces placeholder).
 
     Evaluates the current writeback state from ``verify_failed_writebacks``

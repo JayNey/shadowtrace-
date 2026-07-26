@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol, cast
 
 from app.core.errors import (
     DependencyUnavailableError,
@@ -32,6 +32,7 @@ from app.core.errors import (
 )
 from app.models.enums import EventStatus
 from app.models.workflow import MAX_REPLAN_COUNT, TransitionContext
+from app.orchestration.graph_state import InvestigationState
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +240,7 @@ class ReplanHandler:
         *,
         has_partial_success: bool = False,
         failed_actions: list[str] | None = None,
-    ) -> EscalationResult:
+    ) -> NoReturn:
         """Escalate after replan_count exhausted.
 
         Sets ``escalated=true`` on the event row and transitions through
@@ -305,11 +306,11 @@ class ReplanHandler:
 
 
 async def replan_graph_node(
-    state: dict[str, Any],
+    state: InvestigationState,
     *,
     handler: ReplanHandler,
     convergence_guard: _ConvergenceGuardPort | None = None,
-) -> dict[str, Any]:
+) -> InvestigationState:
     """Graph node entry point for ``NODE_REPLAN``.
 
     This replaces the ISSUE-048 placeholder ``replan_node``.  It evaluates
@@ -388,10 +389,10 @@ async def replan_graph_node(
                         failed_actions=failed_actions,
                     )
                 except ReplanCountExceededError as exc:
-                    patches = _build_escalate_patches(exc.target_status, halted=True)
+                    escalate_patches = _build_escalate_patches(exc.target_status, halted=True)
                     if existing_degraded:
-                        patches["degraded_flags"] = existing_degraded
-                    return patches
+                        escalate_patches["degraded_flags"] = existing_degraded
+                    return cast(InvestigationState, escalate_patches)
         except DependencyUnavailableError:
             logger.warning(
                 "ConvergenceGuard unavailable for event=%s — replan continues degraded",
@@ -436,10 +437,10 @@ async def replan_graph_node(
             # Returning current_count (not current_count + 1) is correct: no
             # successful replan consumed this count.  The CONTINUE path below
             # returns result.replan_count which IS incremented.
-            patches = _build_escalate_patches(exc.target_status, halted=False)
+            escalate_patches = _build_escalate_patches(exc.target_status, halted=False)
             if existing_degraded:
-                patches["degraded_flags"] = existing_degraded
-            return patches
+                escalate_patches["degraded_flags"] = existing_degraded
+            return cast(InvestigationState, escalate_patches)
 
     # Continue: the graph edge NODE_REPLAN → NODE_PLANNER takes over.
     patches: dict[str, Any] = {
@@ -450,7 +451,7 @@ async def replan_graph_node(
     }
     if existing_degraded:
         patches["degraded_flags"] = existing_degraded
-    return patches
+    return cast(InvestigationState, patches)
 
 
 __all__ = [
