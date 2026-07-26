@@ -940,7 +940,8 @@ def build_investigation_graph(
         # verification can proceed.
         if policy_required and state.get("response_plan") is None:
             flags = _append_degraded_flag(
-                state, "missing_response_plan_for_required_policy",
+                state,
+                "missing_response_plan_for_required_policy",
                 event_id=state["event_id"],
             )
             await runtime.set_execution_substate(
@@ -1060,7 +1061,8 @@ def build_investigation_graph(
             # disposition_activation_failed is not in the allowlist).
             if degraded and disposition_activation_failed:
                 flags = _append_degraded_flag(
-                    state, "disposition_activation_failed",
+                    state,
+                    "disposition_activation_failed",
                     event_id=state["event_id"],
                 )
                 await runtime.set_execution_substate(
@@ -1090,7 +1092,8 @@ def build_investigation_graph(
             # (verify_node is not a trusted caller and verify_degraded is
             # not in the allowlist).
             flags = _append_degraded_flag(
-                state, "verify_degraded",
+                state,
+                "verify_degraded",
                 event_id=state["event_id"],
             )
             await runtime.set_execution_substate(
@@ -1131,7 +1134,8 @@ def build_investigation_graph(
             and not verification_result.need_manual_resolution
         ):
             flags = _append_degraded_flag(
-                state, "execution_failed_unverified",
+                state,
+                "execution_failed_unverified",
                 event_id=state["event_id"],
             )
             await runtime.set_execution_substate(
