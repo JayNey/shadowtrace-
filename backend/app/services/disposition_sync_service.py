@@ -27,6 +27,7 @@ from app.db import models as orm
 from app.models.disposition import DispositionCommand, DispositionOutboxRecord, DispositionReceipt
 from app.models.enums import (
     ConfirmationEvidence,
+    DispositionIntentKind,
     ExecutionSubstate,
     OutboxDeliveryStatus,
     WritebackStatus,
@@ -208,6 +209,44 @@ class DispositionSyncService:
                     )
                 )
         return WritebackStatus.PENDING
+
+    async def activate_deferred_disposition(
+        self, event_id: str, *, operator: str
+    ) -> WritebackStatus:
+        """Re-enqueue the deferred disposition writeback for *event_id*.
+
+        Used by ``verify_node`` when ``disposition_only=True`` or
+        ``disposition_policy=required`` but no ``verify_agent`` is wired:
+        instead of passing an ``event_id`` where a ``writeback_id`` is expected
+        (the bug fixed in ISSUE-062 Blocker #1), this method resolves the
+        actual ``writeback_id`` from the most recent
+        ``intent_kind=EVENT_STATUS_UPDATE`` outbox for the event and then
+        delegates to :meth:`retry_writeback`.
+        """
+        async with self._session_factory() as session:
+            outbox = await session.scalar(
+                select(orm.DispositionOutbox)
+                .where(
+                    orm.DispositionOutbox.event_id == event_id,
+                    orm.DispositionOutbox.intent_kind
+                    == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                )
+                .order_by(orm.DispositionOutbox.created_at.desc())
+                .limit(1)
+            )
+            if outbox is None:
+                raise EventNotFoundError(
+                    f"no disposition outbox found for event: {event_id}",
+                    details={"event_id": event_id},
+                )
+            writeback_id = outbox.writeback_id
+            logger.debug(
+                "activate_deferred_disposition: resolved event=%s → writeback=%s",
+                event_id,
+                writeback_id,
+            )
+
+        return await self.retry_writeback(writeback_id, operator=operator)
 
     async def resolve_writeback(
         self,

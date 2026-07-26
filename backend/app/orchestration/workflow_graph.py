@@ -888,17 +888,21 @@ def build_investigation_graph(
             # if available.  When disposition_sync is not wired, fall
             # through to the degraded path with writeback recovery flagged
             # so the writeback recovery handler can pick it up.
+            disposition_activation_failed = False
             if disposition_sync is not None:
                 try:
                     logger.info(
                         "verify_node: activating deferred disposition for event=%s",
                         state["event_id"],
                     )
-                    # Attempt to write the deferred disposition command.
-                    # If the writeback needs waiting, flag it for recovery.
-                    await disposition_sync.retry_writeback(
+                    # Resolve the actual writeback_id from the disposition
+                    # outbox and re-enqueue it for delivery.
+                    # NOTE: retry_writeback expects a writeback_id (wbk-…),
+                    # NOT an event_id (evt-…).  activate_deferred_disposition
+                    # resolves the correct id before delegating.
+                    await disposition_sync.activate_deferred_disposition(
                         state["event_id"],
-                        "verify_node:disposition_activation",
+                        operator="verify_node:disposition_activation",
                     )
                 except Exception:
                     logger.exception(
@@ -906,8 +910,37 @@ def build_investigation_graph(
                         state["event_id"],
                     )
                     degraded = True
+                    disposition_activation_failed = True
             else:
                 degraded = True
+
+            # When disposition activation itself fails, route into writeback
+            # recovery so the event can be retried with backoff rather than
+            # silently falling through to REPORTING with zero applicable
+            # writeback Actions (which produces a misleading "zero applicable
+            # writeback Actions" error at the CLOSED gate).
+            if degraded and disposition_activation_failed:
+                flags = await degraded_flags.set_flag(
+                    state["event_id"],
+                    "disposition_activation_failed",
+                    True,
+                    writer="verify_node",
+                )
+                await runtime.set_execution_substate(
+                    state["event_id"],
+                    ExecutionSubstate.WAITING_WRITEBACK,
+                    event_status=EventStatus.VERIFYING,
+                )
+                return _patch_state(
+                    _trace(NODE_VERIFY),
+                    {
+                        "degraded_flags": flags,
+                        "verify_need_action_replan": False,
+                        "verify_need_writeback_recovery": True,
+                        "verify_need_manual_resolution": False,
+                        "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+                    },
+                )
         else:
             degraded = True
 

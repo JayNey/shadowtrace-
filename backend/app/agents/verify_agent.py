@@ -72,25 +72,22 @@ _WRITEBACK_STATUS_ROUTING: dict[WritebackStatus, tuple[bool, bool, bool, str]] =
     WritebackStatus.ACCEPTED: (False, True, False, "writeback_accepted_waiting"),
     # UNKNOWN → recovery (not manual). Per ISSUE-060 spec §4.5:
     # "UNKNOWN→先查证、无法查证时 need_manual_resolution=true".
-    # WritebackRecoveryHandler (ISSUE-062) will attempt a provider-side
-    # lookup first; manual resolution is the fallback only when lookup
-    # is infeasible.  Before ISSUE-062 lands, the recovery flag still
-    # correctly signals "don't give up yet" — the caller can poll the
-    # writeback status or escalate after a timeout.
-    #
-    # TODO(ISSUE-062): The current routing maps UNKNOWN → need_recovery=True,
-    # need_manual=False, which sends the writeback into an infinite recovery
-    # loop with no timeout or retry-exhaustion guard.  ISSUE-062
-    # (WritebackRecoveryHandler) must implement the second half of §4.5:
-    # when provider-side lookup is infeasible, set need_manual_resolution=True
-    # so the writeback is promoted to an operator-facing resolution path.
-    # Until then, callers that observe UNKNOWN writebacks should impose their
-    # own timeout (e.g. 3 recovery cycles → escalate to need_manual=True).
+    # WritebackRecoveryHandler (ISSUE-062) implements the provider-side
+    # lookup and retry loop: it first queries the provider for the actual
+    # writeback status (up to VERIFY_UNKNOWN_MAX_LOOKUPS attempts), then
+    # retries the writeback if the status is recoverable (up to
+    # WRITEBACK_MAX_RETRIES).  When provider-side lookup is infeasible or
+    # the retry budget is exhausted, WritebackRecoveryHandler escalates to
+    # need_manual_resolution=True so the writeback enters the
+    # operator-facing resolution path.  The recovery flag here correctly
+    # signals "don't give up yet" — the handler owns the timeout guard.
     WritebackStatus.UNKNOWN: (False, True, False, "writeback_unknown_requires_lookup"),
-    # TODO(ISSUE-062): PARTIAL 写回当前无条件走 recovery，但部分子目标
-    # 因权限问题永久失败时重试无法改善且可能产生重复副作用。
-    # ISSUE-062 实现后应按逐目标结果区分可重试/不可重试 PARTIAL 子状态，
-    # 将不可重试部分升级为 need_manual_resolution=True。
+    # PARTIAL writebacks are routed to recovery by default.
+    # WritebackRecoveryHandler (ISSUE-062) handles these with the same
+    # query/retry guard: it retries sub-targets that are still recoverable
+    # and escalates permanently-failed sub-targets (e.g. permission errors
+    # that retries cannot fix) to need_manual_resolution=True, avoiding
+    # duplicate side effects from unbounded retry loops.
     WritebackStatus.PARTIAL: (False, True, False, "writeback_partial_recovery"),
     WritebackStatus.FAILED: (False, True, False, "writeback_failed_recovery"),
     WritebackStatus.CONFLICT: (False, False, True, "writeback_conflict_manual"),

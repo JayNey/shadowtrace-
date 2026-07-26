@@ -28,7 +28,7 @@ Constraints
 
 from __future__ import annotations
 
-import asyncio
+import asyncio  # used for jittered backoff sleep in RETRY path (asyncio.sleep)
 import logging
 import random
 from dataclasses import dataclass
@@ -560,6 +560,21 @@ async def writeback_recovery_graph_node(
     # Process the first failed writeback; others are handled in subsequent
     # verify cycles.
     wb_id = failed_writebacks[0]
+    # ISSUE-060 data-model limitation: ``verify_writeback_status`` is a
+    # single scalar in InvestigationState, but ``verify_failed_writebacks``
+    # is a list.  When multiple writebacks share the same status value the
+    # status of writeback N+1 may be misapplied to writeback N.
+    # WritebackRecoveryHandler processes them one at a time across verify
+    # cycles, which mitigates but does not eliminate the risk.
+    if len(failed_writebacks) > 1:
+        logger.warning(
+            "writeback_recovery_node: %d failed writebacks share "
+            "verify_writeback_status=%s — subsequent writebacks may be "
+            "misrouted; event=%s",
+            len(failed_writebacks),
+            state.get("verify_writeback_status"),
+            event_id,
+        )
     wb_state = WritebackState(
         writeback_id=wb_id,
         current_status=_parse_writeback_status(state.get("verify_writeback_status")),

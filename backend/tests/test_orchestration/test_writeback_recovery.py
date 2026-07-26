@@ -509,10 +509,10 @@ class TestWritebackRecoveryBoundary:
         assert result.escalated is True
 
 
-# ── Tests: WritebackReoveryHandler never enters REPLANNING ──────────────────
+# ── Tests: WritebackRecoveryHandler never enters REPLANNING ──────────────────
 
 
-class TestWritebackNeverReplans:
+class TestWritebackRecoveryNeverReplans:
     """Verify writeback recovery NEVER transitions to REPLANNING."""
 
     @pytest.mark.parametrize(
