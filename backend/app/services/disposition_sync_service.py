@@ -305,6 +305,17 @@ class DispositionSyncService:
         actual ``writeback_id`` from the most recent
         ``intent_kind=EVENT_STATUS_UPDATE`` outbox for the event and then
         delegates to :meth:`retry_writeback`.
+
+        NOTE: The query filters by ``event_id`` and
+        ``intent_kind=EVENT_STATUS_UPDATE`` ordered by ``created_at DESC LIMIT 1``.
+        In multi-replan scenarios where a single event produces multiple
+        ``EVENT_STATUS_UPDATE`` outbox rows across different plan revisions,
+        this may resolve to a non-current revision's disposition.  The current
+        single-disposition-per-event flow is unaffected.
+
+        TODO(ISSUE-092): accept ``plan_revision`` from the caller (verify_node)
+        and add a ``closure_cycle`` / ``plan_revision`` filter to the query so
+        the correct revision's writeback is always activated.
         """
         async with self._session_factory() as session:
             outbox = await session.scalar(

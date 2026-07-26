@@ -34,7 +34,7 @@ import os
 import random
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, NoReturn, Protocol
+from typing import Any, NoReturn, Protocol, cast
 
 from app.core.errors import (
     ShadowTraceError,
@@ -69,6 +69,10 @@ _JITTER_FACTOR = 0.3
 # provider receipt is the primary pacing mechanism; a minimum interval prevents
 # DB pressure from polling.  For provider-specific tuning, override via the
 # ``SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S`` environment variable.
+#
+# TODO(ISSUE-062 Nit #3): migrate to BaseSettings for consistency with other
+# configuration values (e.g. WRITEBACK_MAX_RETRIES).  The module-level os.environ
+# read is acceptable for now but diverges from the project convention.
 _LOOKUP_POLL_INTERVAL_S: float = float(
     os.environ.get("SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S", "1.0")
 )
@@ -708,12 +712,17 @@ async def writeback_recovery_graph_node(
 
     if not failed_writebacks:
         logger.debug("writeback_recovery_node: no failed writebacks for event=%s", event_id)
-        return {
-            "verify_need_writeback_recovery": False,
-            "execution_substate": ExecutionSubstate.NONE.value,
-            "writeback_lookup_count": 0,
-            "writeback_retry_count": 0,
-        }
+        return cast(
+            InvestigationState,
+            {
+                "verify_need_writeback_recovery": False,
+                "verify_need_action_replan": False,
+                "verify_need_manual_resolution": False,
+                "execution_substate": ExecutionSubstate.NONE.value,
+                "writeback_lookup_count": 0,
+                "writeback_retry_count": 0,
+            },
+        )
 
     # Process the first failed writeback; others are handled in subsequent
     # verify cycles.
@@ -771,24 +780,33 @@ async def writeback_recovery_graph_node(
         # status tracking when the InvestigationState schema supports it
         # (verify_writeback_status_map: dict[str, str]).  See also the
         # data-model limitation comment in the node entry point.
-        return {
-            "verify_need_writeback_recovery": False,
-            "verify_need_manual_resolution": True,
-            "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
-            "verify_failed_writebacks": failed_writebacks[1:],
-            "writeback_lookup_count": 0,
-            "writeback_retry_count": 0,
-        }
+        return cast(
+            InvestigationState,
+            {
+                "verify_need_writeback_recovery": False,
+                "verify_need_action_replan": False,
+                "verify_need_manual_resolution": True,
+                "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+                "verify_failed_writebacks": failed_writebacks[1:],
+                "writeback_lookup_count": 0,
+                "writeback_retry_count": 0,
+            },
+        )
 
     if result.action is WritebackRecoveryAction.WAIT:
-        return {
-            "verify_need_writeback_recovery": True,
-            "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
-            "halted": True,
-            "verify_failed_writebacks": failed_writebacks[1:],
-            "writeback_lookup_count": wb_state.lookup_count,
-            "writeback_retry_count": wb_state.retry_count,
-        }
+        return cast(
+            InvestigationState,
+            {
+                "verify_need_writeback_recovery": True,
+                "verify_need_action_replan": False,
+                "verify_need_manual_resolution": False,
+                "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+                "halted": True,
+                "verify_failed_writebacks": failed_writebacks[1:],
+                "writeback_lookup_count": wb_state.lookup_count,
+                "writeback_retry_count": wb_state.retry_count,
+            },
+        )
 
     # LOOKUP / RETRY: stay in recovery until resolved.
     # NOOP / MANUAL: terminal for this writeback; pop it and check
@@ -798,14 +816,19 @@ async def writeback_recovery_graph_node(
         if result.action in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
         else failed_writebacks
     )
-    return {
-        "verify_need_writeback_recovery": len(remaining) > 0,
-        "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
-        "halted": False,
-        "verify_failed_writebacks": remaining,
-        "writeback_lookup_count": wb_state.lookup_count,
-        "writeback_retry_count": wb_state.retry_count,
-    }
+    return cast(
+        InvestigationState,
+        {
+            "verify_need_writeback_recovery": len(remaining) > 0,
+            "verify_need_action_replan": False,
+            "verify_need_manual_resolution": False,
+            "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+            "halted": False,
+            "verify_failed_writebacks": remaining,
+            "writeback_lookup_count": wb_state.lookup_count,
+            "writeback_retry_count": wb_state.retry_count,
+        },
+    )
 
 
 __all__ = [

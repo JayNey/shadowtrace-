@@ -23,6 +23,7 @@ from app.models.agent_io import (
     ReportAgentInput,
     ResponseAgentInput,
     ResponsePlan,
+    ResponsePlanGeneratedBy,
     RiskAgentInput,
     RiskAssessment,
     ScoringMode,
@@ -930,7 +931,7 @@ def build_investigation_graph(
         response_plan = (
             ResponsePlan.model_validate(state["response_plan"])
             if state.get("response_plan") is not None
-            else ResponsePlan(plan_id="", actions=[], strategy_summary="", generated_by="template")  # type: ignore[arg-type]  # acceptable: only reached for non-required policies (see guard above)
+            else ResponsePlan(plan_id="", actions=[], strategy_summary="", generated_by=ResponsePlanGeneratedBy.TEMPLATE)
         )
 
         verification_result: VerificationResult | None = None
