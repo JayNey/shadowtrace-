@@ -26,7 +26,10 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
 
-from app.core.errors import ReplanCountExceededError
+from app.core.errors import (
+    DependencyUnavailableError,
+    ReplanCountExceededError,
+)
 from app.models.enums import EventStatus
 from app.models.workflow import MAX_REPLAN_COUNT, TransitionContext
 
@@ -60,6 +63,25 @@ class _WorkflowRuntimePort(Protocol):
         *,
         event_status: EventStatus,
     ) -> None: ...
+
+
+class _ConvergenceGuardPort(Protocol):
+    """Protocol for the optional convergence guard injected into replan_graph_node.
+
+    Matches the ``record_step`` / ``should_stop`` interface used by
+    ``ConvergenceGuard`` (convergence_guard.py) and its test doubles.
+    """
+
+    async def record_step(
+        self,
+        event_id: str,
+        step_type: str,
+        *,
+        signature: str | None = None,
+        **kwargs: Any,
+    ) -> None: ...
+
+    async def should_stop(self, event_id: str) -> Any: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -142,6 +164,10 @@ class ReplanHandler:
             ``decision=CONTINUE`` when another cycle is allowed;
             ``decision=ESCALATE`` when the limit has been reached.
         """
+        if current_replan_count < 0:
+            raise ValueError(
+                f"replan_count must be >= 0, got {current_replan_count}"
+            )
         next_count = current_replan_count + 1
         if next_count > MAX_REPLAN_COUNT:
             logger.warning(
@@ -287,7 +313,7 @@ async def replan_graph_node(
     state: dict[str, Any],
     *,
     handler: ReplanHandler,
-    convergence_guard: Any | None = None,
+    convergence_guard: _ConvergenceGuardPort | None = None,
 ) -> dict[str, Any]:
     """Graph node entry point for ``NODE_REPLAN``.
 
@@ -373,13 +399,26 @@ async def replan_graph_node(
                     if existing_degraded:
                         patches["degraded_flags"] = existing_degraded
                     return patches
-        except Exception:
-            logger.exception(
-                "ConvergenceGuard.record_step/should_stop failed for event=%s",
+        except DependencyUnavailableError:
+            logger.warning(
+                "ConvergenceGuard unavailable for event=%s — "
+                "replan continues degraded",
                 event_id,
             )
             # Attach degraded flag so operators can observe the guard failure
-            # even though replan continues (ISSUE-062 Nit #2).
+            # even though replan continues.
+            degraded_entry = "convergence_guard_degraded"
+            if degraded_entry not in existing_degraded:
+                existing_degraded.append(degraded_entry)
+        except Exception:
+            logger.exception(
+                "ConvergenceGuard unexpected error for event=%s",
+                event_id,
+            )
+            # Attach degraded flag so operators can observe the guard failure
+            # even though replan continues (ISSUE-062 Nit #2).  The guard
+            # failure does not block replan — the convergence check is a
+            # safeguard, not a hard gate.
             degraded_entry = "convergence_guard_degraded"
             if degraded_entry not in existing_degraded:
                 existing_degraded.append(degraded_entry)

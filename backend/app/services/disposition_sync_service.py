@@ -267,6 +267,20 @@ class DispositionSyncService:
                         writeback_id,
                     )
                     return
+                # ISSUE-062 Blocker #1 fix: validate the state transition
+                # before writing the provider-resolved status.  The lookup
+                # result is accepted as evidence_adjudication because it comes
+                # from a provider-side query (not a fallible local guess).
+                current_status = (
+                    WritebackStatus(outbox.latest_writeback_status)
+                    if outbox.latest_writeback_status
+                    else WritebackStatus.PENDING
+                )
+                validate_writeback_status_transition(
+                    current_status,
+                    status,
+                    evidence_adjudication=True,
+                )
                 outbox.latest_writeback_status = status.value
                 outbox.updated_at = datetime.now(UTC)
                 action = await session.get(

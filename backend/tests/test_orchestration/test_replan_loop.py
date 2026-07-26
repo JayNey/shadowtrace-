@@ -365,14 +365,13 @@ class TestReplanBoundaryInputs:
     """Boundary input tests for ReplanHandler."""
 
     def test_negative_replan_count(self):
-        """Negative replan_count is treated as 0 + 1."""
+        """Negative replan_count raises ValueError — it is a caller bug."""
         handler = ReplanHandler(
             state_machine=FakeStateMachine(),
             runtime=FakeRuntime(),
         )
-        result = handler.evaluate_replan(-1)
-        assert result.decision == ReplanDecision.CONTINUE
-        assert result.replan_count == 0  # -1 + 1 = 0
+        with pytest.raises(ValueError, match="replan_count must be >= 0"):
+            handler.evaluate_replan(-1)
 
     def test_none_failed_actions(self):
         """None failed_actions is handled gracefully."""

@@ -977,11 +977,13 @@ def build_investigation_graph(
             else:
                 degraded = True
 
-            # When disposition activation itself fails, route into writeback
-            # recovery so the event can be retried with backoff rather than
-            # silently falling through to REPORTING with zero applicable
-            # writeback Actions (which produces a misleading "zero applicable
-            # writeback Actions" error at the CLOSED gate).
+            # When disposition activation itself fails, route directly to
+            # REPORTING.  The writeback was never created (the activation is
+            # what creates the outbox record), so there is nothing for
+            # WritebackRecoveryHandler to recover — sending it there would be
+            # a no-op round-trip (verify_failed_writebacks is empty → recovery
+            # node returns immediately → route_after_verify sends to REPORT).
+            # ISSUE-062 Should-Fix #1: skip the useless recovery node hop.
             if degraded and disposition_activation_failed:
                 flags = await degraded_flags.set_flag(
                     state["event_id"],
@@ -989,19 +991,20 @@ def build_investigation_graph(
                     True,
                     writer="verify_node",
                 )
-                await runtime.set_execution_substate(
-                    state["event_id"],
-                    ExecutionSubstate.WAITING_WRITEBACK,
-                    event_status=EventStatus.VERIFYING,
+                status = await _transition_status(
+                    services,
+                    state,
+                    EventStatus.REPORTING,
+                    reason="investigation:disposition_activation_failed",
                 )
                 return _patch_state(
                     _trace(NODE_VERIFY),
+                    status,
                     {
                         "degraded_flags": flags,
                         "verify_need_action_replan": False,
-                        "verify_need_writeback_recovery": True,
+                        "verify_need_writeback_recovery": False,
                         "verify_need_manual_resolution": False,
-                        "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
                     },
                 )
         else:

@@ -36,6 +36,7 @@ from enum import StrEnum
 from typing import Any, NoReturn, Protocol
 
 from app.core.errors import (
+    ShadowTraceError,
     WritebackManualResolutionRequiredError,
     WritebackRecoveryExhaustedError,
 )
@@ -591,6 +592,21 @@ class WritebackRecoveryHandler:
                 reason=result.reason,
                 escalated=True,
             )
+        except ShadowTraceError:
+            logger.critical(
+                "_escalate raised unexpected error type for event=%s "
+                "writeback=%s — escalating as best-effort",
+                event_id,
+                writeback.writeback_id,
+                exc_info=True,
+            )
+            return WritebackRecoveryResult(
+                action=WritebackRecoveryAction.MANUAL,
+                writeback_id=writeback.writeback_id,
+                writeback_status=writeback.current_status,
+                reason=result.reason,
+                escalated=True,
+            )
 
     async def _escalate(
         self,
@@ -712,12 +728,15 @@ async def writeback_recovery_graph_node(
     # Process the first failed writeback; others are handled in subsequent
     # verify cycles.
     wb_id = failed_writebacks[0]
-    # ISSUE-060 data-model limitation: ``verify_writeback_status`` is a
-    # single scalar in InvestigationState, but ``verify_failed_writebacks``
-    # is a list.  When multiple writebacks share the same status value the
-    # status of writeback N+1 may be misapplied to writeback N.
-    # WritebackRecoveryHandler processes them one at a time across verify
-    # cycles, which mitigates but does not eliminate the risk.
+    # ISSUE-060 / TODO(ISSUE-092): data-model limitation —
+    # ``verify_writeback_status`` is a single scalar in InvestigationState,
+    # but ``verify_failed_writebacks`` is a list.  When multiple writebacks
+    # share the same status value the status of writeback N+1 may be
+    # misapplied to writeback N.  WritebackRecoveryHandler processes them
+    # one at a time across verify cycles, which mitigates but does not
+    # eliminate the risk.
+    # ISSUE-092 will replace the scalar with
+    # ``verify_writeback_status_map: dict[str, str]`` keyed by writeback_id.
     if len(failed_writebacks) > 1:
         logger.warning(
             "writeback_recovery_node: %d failed writebacks share "
@@ -760,9 +779,10 @@ async def writeback_recovery_graph_node(
         # negligible because the current graph only passes a single scalar
         # verify_writeback_status per cycle and counter precision across
         # multiple heterogeneous writebacks is inherently approximate.
-        # TODO(ISSUE-062): persist per-writeback counters and per-writeback
-        # status tracking when the InvestigationState schema supports it.
-        # See also the data-model limitation comment in the node entry point.
+        # TODO(ISSUE-092): persist per-writeback counters and per-writeback
+        # status tracking when the InvestigationState schema supports it
+        # (verify_writeback_status_map: dict[str, str]).  See also the
+        # data-model limitation comment in the node entry point.
         return {
             "verify_need_writeback_recovery": False,
             "verify_need_manual_resolution": True,
@@ -782,12 +802,15 @@ async def writeback_recovery_graph_node(
             "writeback_retry_count": wb_state.retry_count,
         }
 
-    # LOOKUP / RETRY / NOOP: stay in recovery until resolved
-    is_terminal = result.action in (
-        WritebackRecoveryAction.NOOP,
-        WritebackRecoveryAction.MANUAL,
+    # LOOKUP / RETRY: stay in recovery until resolved.
+    # NOOP / MANUAL: terminal for this writeback; pop it and check
+    # whether more failed_writebacks remain.
+    remaining = (
+        failed_writebacks[1:]
+        if result.action
+        in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
+        else failed_writebacks
     )
-    remaining = failed_writebacks[1:] if is_terminal else failed_writebacks
     return {
         "verify_need_writeback_recovery": len(remaining) > 0,
         "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
