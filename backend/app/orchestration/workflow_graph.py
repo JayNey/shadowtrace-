@@ -63,7 +63,12 @@ from app.services.state_machine_service import StateMachineService
 logger = logging.getLogger(__name__)
 
 
-def _append_degraded_flag(state: InvestigationState, flag_name: str) -> list[str]:
+def _append_degraded_flag(
+    state: InvestigationState,
+    flag_name: str,
+    *,
+    event_id: str,
+) -> list[str]:
     """Append *flag_name* directly into the ``degraded_flags`` list.
 
     This helper concentrates the FIELD_OWNERSHIP bypass that verify_node
@@ -73,7 +78,19 @@ def _append_degraded_flag(state: InvestigationState, flag_name: str) -> list[str
     through this single function so the bypass surface is visible,
     grep-able, and easy to replace when ISSUE-014 is extended to recognize
     verify_node's writer identity.
+
+    A structured warning is logged on every call to maintain audit-trail
+    parity with :meth:`DegradedFlagService.set_flag` (which leaves a DB
+    audit record via the ORM write).  This log is the minimum viable
+    substitute until ISSUE-014 registers verify_node as a trusted writer
+    or a dedicated audit-log write path is added to the bypass.
     """
+    logger.warning(
+        "degraded_flag bypass: flag=%s event=%s (ISSUE-014 FIELD_OWNERSHIP "
+        "bypass — verify_node is not a DegradedFlagService trusted caller)",
+        flag_name,
+        event_id,
+    )
     return apply_flag_to_list(
         list(state.get("degraded_flags") or []),
         flag_name,
@@ -922,7 +939,10 @@ def build_investigation_graph(
         # required-policy event must have a concrete response plan before
         # verification can proceed.
         if policy_required and state.get("response_plan") is None:
-            flags = _append_degraded_flag(state, "missing_response_plan_for_required_policy")
+            flags = _append_degraded_flag(
+                state, "missing_response_plan_for_required_policy",
+                event_id=state["event_id"],
+            )
             await runtime.set_execution_substate(
                 state["event_id"],
                 ExecutionSubstate.MANUAL_RESOLUTION,
@@ -1039,7 +1059,10 @@ def build_investigation_graph(
             # (verify_node is not a trusted caller and
             # disposition_activation_failed is not in the allowlist).
             if degraded and disposition_activation_failed:
-                flags = _append_degraded_flag(state, "disposition_activation_failed")
+                flags = _append_degraded_flag(
+                    state, "disposition_activation_failed",
+                    event_id=state["event_id"],
+                )
                 await runtime.set_execution_substate(
                     state["event_id"],
                     ExecutionSubstate.MANUAL_RESOLUTION,
@@ -1066,7 +1089,10 @@ def build_investigation_graph(
             # DegradedFlagService.set_flag to avoid the ISSUE-014 guardrail
             # (verify_node is not a trusted caller and verify_degraded is
             # not in the allowlist).
-            flags = _append_degraded_flag(state, "verify_degraded")
+            flags = _append_degraded_flag(
+                state, "verify_degraded",
+                event_id=state["event_id"],
+            )
             await runtime.set_execution_substate(
                 state["event_id"],
                 ExecutionSubstate.MANUAL_RESOLUTION,
@@ -1104,7 +1130,10 @@ def build_investigation_graph(
             and not verification_result.need_writeback_recovery
             and not verification_result.need_manual_resolution
         ):
-            flags = _append_degraded_flag(state, "execution_failed_unverified")
+            flags = _append_degraded_flag(
+                state, "execution_failed_unverified",
+                event_id=state["event_id"],
+            )
             await runtime.set_execution_substate(
                 state["event_id"],
                 ExecutionSubstate.MANUAL_RESOLUTION,

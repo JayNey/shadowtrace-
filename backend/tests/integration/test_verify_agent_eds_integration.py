@@ -60,7 +60,10 @@ from app.services.context_service import EventContextStore, event_summary_from_s
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService
 from app.services.working_memory import WorkingMemory
-from tests.test_services._mock_xdr_test_helpers import SCENARIO_INCIDENT_ID
+from tests.test_services._mock_xdr_test_helpers import (
+    SCENARIO_INCIDENT_ID,
+    fetch_mock_concurrency_token,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -101,12 +104,10 @@ async def _seed_connector_and_source(
 ) -> str:
     connector_id = "conn-disposition"
     source_record_id = f"src-{object_id}"
-    token = await mock_xdr_client.get(
-        f"/api/v1/incidents/{object_id}",
-        headers={"Authorization": "Bearer mock-read-token"},
+    concurrency_token = await fetch_mock_concurrency_token(
+        mock_xdr_client,
+        object_id=object_id,
     )
-    token.raise_for_status()
-    concurrency_token = token.json().get("concurrency_token", "tok-initial")
     async with session_factory() as session:
         async with session.begin():
             if await session.get(orm.SourceConnector, connector_id) is None:
