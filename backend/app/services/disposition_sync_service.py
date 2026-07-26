@@ -294,7 +294,11 @@ class DispositionSyncService:
             )
 
     async def activate_deferred_disposition(
-        self, event_id: str, *, operator: str
+        self,
+        event_id: str,
+        *,
+        operator: str,
+        plan_revision: str | None = None,
     ) -> WritebackStatus:
         """Re-enqueue the deferred disposition writeback for *event_id*.
 
@@ -313,10 +317,19 @@ class DispositionSyncService:
         this may resolve to a non-current revision's disposition.  The current
         single-disposition-per-event flow is unaffected.
 
-        TODO(ISSUE-092): accept ``plan_revision`` from the caller (verify_node)
-        and add a ``closure_cycle`` / ``plan_revision`` filter to the query so
-        the correct revision's writeback is always activated.
+        TODO(ISSUE-092): persist ``plan_revision`` / ``closure_cycle`` on the
+        ``DispositionOutbox`` row so this method can add a WHERE filter on the
+        current revision rather than relying on ``created_at DESC LIMIT 1``
+        ordering alone.
         """
+        if plan_revision is None:
+            logger.warning(
+                "activate_deferred_disposition: plan_revision not provided "
+                "for event=%s — LIMIT 1 query may resolve to a non-current "
+                "revision's writeback in multi-replan scenarios; see ISSUE-092",
+                event_id,
+            )
+
         async with self._session_factory() as session:
             outbox = await session.scalar(
                 select(orm.DispositionOutbox)

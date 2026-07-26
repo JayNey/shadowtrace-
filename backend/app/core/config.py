@@ -48,6 +48,9 @@ class Settings(BaseSettings):
         alias="WRITEBACK_FIELD_ALLOWLIST",
     )
     writeback_max_retries: int = Field(default=5, alias="WRITEBACK_MAX_RETRIES")
+    writeback_lookup_poll_interval_s: float = Field(
+        default=1.0, alias="WRITEBACK_LOOKUP_POLL_INTERVAL_S"
+    )
     simulation_enabled: bool = Field(default=True, alias="SIMULATION_ENABLED")
 
     llm_mode: str = Field(default="mock", alias="LLM_MODE")

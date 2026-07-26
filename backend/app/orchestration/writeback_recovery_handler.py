@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import asyncio  # used for jittered backoff sleep in RETRY path (asyncio.sleep)
 import logging
-import os
 import random
 from dataclasses import dataclass
 from enum import StrEnum
@@ -70,12 +69,12 @@ _JITTER_FACTOR = 0.3
 # DB pressure from polling.  For provider-specific tuning, override via the
 # ``SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S`` environment variable.
 #
-# TODO(ISSUE-062 Nit #3): migrate to BaseSettings for consistency with other
-# configuration values (e.g. WRITEBACK_MAX_RETRIES).  The module-level os.environ
-# read is acceptable for now but diverges from the project convention.
-_LOOKUP_POLL_INTERVAL_S: float = float(
-    os.environ.get("SHADOWTRACE_WRITEBACK_LOOKUP_POLL_INTERVAL_S", "1.0")
-)
+# Default poll interval for UNKNOWN writeback LOOKUP attempts.  This value is
+# now sourced from Settings.writeback_lookup_poll_interval_s and passed via the
+# WritebackRecoveryHandler constructor (ISSUE-062 Should-Fix S1).  The
+# module-level constant is kept as a fallback for callers that construct the
+# handler outside the DI container.
+_LOOKUP_POLL_INTERVAL_S_DEFAULT: float = 1.0
 
 
 def _backoff_with_jitter(retry_count: int) -> float:
@@ -206,10 +205,12 @@ class WritebackRecoveryHandler:
         state_machine: StateMachinePort,
         runtime: _RuntimePort,
         disposition_sync: _DispositionSyncPort | None = None,
+        lookup_poll_interval_s: float = _LOOKUP_POLL_INTERVAL_S_DEFAULT,
     ) -> None:
         self._state_machine = state_machine
         self._runtime = runtime
         self._disposition_sync = disposition_sync
+        self._lookup_poll_interval_s = lookup_poll_interval_s
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -475,12 +476,12 @@ class WritebackRecoveryHandler:
                 if writeback.lookup_count >= writeback.max_lookups:
                     return await self._handle_escalate(event_id, writeback, result, op)
                 # Wait before next cycle to avoid tight looping.
-                # Use a short fixed delay (_LOOKUP_POLL_INTERVAL_S) rather than
-                # the jittered exponential backoff applied in the RETRY path.
-                # LOOKUP is a passive status query — the external provider
-                # receipt is the primary pacing mechanism; a minimum interval
-                # is sufficient to prevent DB pressure from polling.
-                await asyncio.sleep(_LOOKUP_POLL_INTERVAL_S)
+                # Use a short fixed delay rather than the jittered exponential
+                # backoff applied in the RETRY path.  LOOKUP is a passive status
+                # query — the external provider receipt is the primary pacing
+                # mechanism; a minimum interval is sufficient to prevent DB
+                # pressure from polling.
+                await asyncio.sleep(self._lookup_poll_interval_s)
                 await self._runtime.set_execution_substate(
                     event_id,
                     ExecutionSubstate.WAITING_WRITEBACK,

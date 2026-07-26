@@ -12,6 +12,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
+from app.core.config import get_settings
 from app.core.errors import InvalidStateTransitionError
 from app.models.agent_io import (
     CollectionStatus,
@@ -60,6 +61,25 @@ from app.services.degraded_flag_service import DegradedFlagService, apply_flag_t
 from app.services.state_machine_service import StateMachineService
 
 logger = logging.getLogger(__name__)
+
+
+def _append_degraded_flag(state: InvestigationState, flag_name: str) -> list[str]:
+    """Append *flag_name* directly into the ``degraded_flags`` list.
+
+    This helper concentrates the FIELD_OWNERSHIP bypass that verify_node
+    relies on.  verify_node is not a trusted caller for
+    :class:`DegradedFlagService` (ISSUE-014 guardrail), so it writes
+    degraded flags directly into state.  All direct state writes are routed
+    through this single function so the bypass surface is visible,
+    grep-able, and easy to replace when ISSUE-014 is extended to recognize
+    verify_node's writer identity.
+    """
+    return apply_flag_to_list(
+        list(state.get("degraded_flags") or []),
+        flag_name,
+        True,
+    )
+
 
 CompiledInvestigationGraph = CompiledStateGraph[
     InvestigationState, None, InvestigationState, InvestigationState
@@ -447,6 +467,7 @@ def build_investigation_graph(
         state_machine=_state_machine_port,
         runtime=runtime,
         disposition_sync=services.get("disposition_sync"),
+        lookup_poll_interval_s=get_settings().writeback_lookup_poll_interval_s,
     )
     _convergence_guard = services.get("convergence_guard")
 
@@ -901,11 +922,7 @@ def build_investigation_graph(
         # required-policy event must have a concrete response plan before
         # verification can proceed.
         if policy_required and state.get("response_plan") is None:
-            flags = apply_flag_to_list(
-                list(state.get("degraded_flags") or []),
-                "missing_response_plan_for_required_policy",
-                True,
-            )
+            flags = _append_degraded_flag(state, "missing_response_plan_for_required_policy")
             await runtime.set_execution_substate(
                 state["event_id"],
                 ExecutionSubstate.MANUAL_RESOLUTION,
@@ -931,7 +948,12 @@ def build_investigation_graph(
         response_plan = (
             ResponsePlan.model_validate(state["response_plan"])
             if state.get("response_plan") is not None
-            else ResponsePlan(plan_id="", actions=[], strategy_summary="", generated_by=ResponsePlanGeneratedBy.TEMPLATE)
+            else ResponsePlan(
+                plan_id="",
+                actions=[],
+                strategy_summary="",
+                generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+            )
         )
 
         verification_result: VerificationResult | None = None
@@ -1017,11 +1039,7 @@ def build_investigation_graph(
             # (verify_node is not a trusted caller and
             # disposition_activation_failed is not in the allowlist).
             if degraded and disposition_activation_failed:
-                flags = apply_flag_to_list(
-                    list(state.get("degraded_flags") or []),
-                    "disposition_activation_failed",
-                    True,
-                )
+                flags = _append_degraded_flag(state, "disposition_activation_failed")
                 await runtime.set_execution_substate(
                     state["event_id"],
                     ExecutionSubstate.MANUAL_RESOLUTION,
@@ -1048,11 +1066,7 @@ def build_investigation_graph(
             # DegradedFlagService.set_flag to avoid the ISSUE-014 guardrail
             # (verify_node is not a trusted caller and verify_degraded is
             # not in the allowlist).
-            flags = apply_flag_to_list(
-                list(state.get("degraded_flags") or []),
-                "verify_degraded",
-                True,
-            )
+            flags = _append_degraded_flag(state, "verify_degraded")
             await runtime.set_execution_substate(
                 state["event_id"],
                 ExecutionSubstate.MANUAL_RESOLUTION,
@@ -1090,11 +1104,7 @@ def build_investigation_graph(
             and not verification_result.need_writeback_recovery
             and not verification_result.need_manual_resolution
         ):
-            flags = apply_flag_to_list(
-                list(state.get("degraded_flags") or []),
-                "execution_failed_unverified",
-                True,
-            )
+            flags = _append_degraded_flag(state, "execution_failed_unverified")
             await runtime.set_execution_substate(
                 state["event_id"],
                 ExecutionSubstate.MANUAL_RESOLUTION,
