@@ -1,4 +1,4 @@
-"""LangGraph investigation workflow skeleton (ISSUE-048/ISSUE-049)."""
+"""LangGraph investigation workflow (ISSUE-048/ISSUE-049/ISSUE-062)."""
 
 from __future__ import annotations
 
@@ -22,11 +22,15 @@ from app.models.agent_io import (
     RAGOutput,
     ReportAgentInput,
     ResponseAgentInput,
+    ResponsePlan,
     RiskAgentInput,
     RiskAssessment,
     ScoringMode,
     TriageAgentInput,
     TriageResult,
+    VerificationPhase,
+    VerificationResult,
+    VerifyAgentInput,
 )
 from app.models.context import EventContext
 from app.models.enums import (
@@ -41,6 +45,14 @@ from app.models.enums import (
 from app.models.security_event import EventSummary
 from app.models.workflow import TransitionContext
 from app.orchestration.graph_state import InvestigationState
+from app.orchestration.replan_handler import (
+    ReplanHandler,
+    replan_graph_node,
+)
+from app.orchestration.writeback_recovery_handler import (
+    WritebackRecoveryHandler,
+    writeback_recovery_graph_node,
+)
 from app.services.analysis_only_pipeline import run_rag_stage
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService
@@ -68,6 +80,7 @@ NODE_APPROVAL_WAIT = "approval_wait_node"
 NODE_EXECUTE = "execute_node"
 NODE_VERIFY = "verify_node"
 NODE_REPLAN = "replan_node"
+NODE_WRITEBACK_RECOVERY = "writeback_recovery_node"
 NODE_REPORT = "report_node"
 NODE_HALT = "halt_node"
 
@@ -101,6 +114,39 @@ ROUTE_HALT = "halt"
 
 class _AgentLike(Protocol):
     async def execute(self, input: Any) -> Any: ...
+
+
+class _StateMachinePort(Protocol):
+    async def transition(
+        self,
+        event_id: str,
+        target: EventStatus,
+        *,
+        context: TransitionContext | None = None,
+        operator: str | None = None,
+        reason: str | None = None,
+    ) -> Any: ...
+
+
+class _DispositionSyncPort(Protocol):
+    async def retry_writeback(
+        self,
+        writeback_id: str,
+        operator: str,
+    ) -> Any: ...
+
+    async def resolve_writeback(
+        self,
+        writeback_id: str,
+        resolution: str,
+        principal: str,
+        comment: str,
+    ) -> Any: ...
+
+    async def lookup_writeback_status(
+        self,
+        writeback_id: str,
+    ) -> Any: ...
 
 
 class _WorkflowRuntimeLike(Protocol):
@@ -196,6 +242,13 @@ def route_after_verify(state: InvestigationState) -> str:
     ):
         return ROUTE_HALT
     return ROUTE_REPORT
+
+
+def route_after_replan(state: InvestigationState) -> str:
+    """After replan_node: if escalated, go to report; otherwise loop to planner."""
+    if state.get("escalated"):
+        return ROUTE_REPORT
+    return ROUTE_INVESTIGATE  # goes back to planner_node
 
 
 def _route_after_response(state: InvestigationState) -> str:
@@ -732,19 +785,46 @@ def build_investigation_graph(
         )
 
     async def approval_wait_node(state: InvestigationState) -> InvestigationState:
+        # Persist WAITING_APPROVAL substate and pause graph execution.
+        # The graph halts here; resume_investigation() is called after
+        # approve/reject API endpoints complete their decision cycle.
+        await runtime.set_execution_substate(
+            state["event_id"],
+            ExecutionSubstate.WAITING_APPROVAL,
+            event_status=EventStatus.WAITING_APPROVAL,
+        )
+        logger.info(
+            "approval_wait: event=%s paused for human approval",
+            state["event_id"],
+        )
         return _patch_state(
             _trace(NODE_APPROVAL_WAIT),
-            {"halted": True},
+            {
+                "halted": True,
+                "execution_substate": ExecutionSubstate.WAITING_APPROVAL.value,
+            },
         )
 
     async def execute_node(state: InvestigationState) -> InvestigationState:
         action_execution = services.get("action_execution")
+        execution_ok = True
         if action_execution is not None:
             plan_revision = _plan_revision_from_state(state)
-            await action_execution.execute_plan(
-                state["event_id"],
-                plan_revision=plan_revision,
-            )
+            try:
+                summary = await action_execution.execute_plan(
+                    state["event_id"],
+                    plan_revision=plan_revision,
+                )
+                # Track whether any IMMEDIATE actions were executed.
+                execution_ok = summary is not None
+            except Exception:
+                logger.exception(
+                    "execute_plan failed for event=%s revision=%d",
+                    state["event_id"],
+                    plan_revision,
+                )
+                execution_ok = False
+
         status = await _transition_status(
             services,
             state,
@@ -755,30 +835,154 @@ def build_investigation_graph(
                 else "investigation:execute_stub"
             ),
         )
-        return _patch_state(_trace(NODE_EXECUTE), status)
+        return _patch_state(
+            _trace(NODE_EXECUTE),
+            status,
+            {"execution_ok": execution_ok},
+        )
 
     async def verify_node(state: InvestigationState) -> InvestigationState:
-        if (
-            state.get("disposition_only_intent")
-            or state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
-        ):
-            return _trace(NODE_VERIFY)
-        status = await _transition_status(
-            services,
-            state,
-            EventStatus.REPORTING,
-            reason="investigation:verify_stub",
+        verify_agent = cast(_AgentLike | None, agents.get("verify_agent"))
+        disposition_only = bool(state.get("disposition_only_intent"))
+        policy_required = (
+            state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
         )
-        return _patch_state(_trace(NODE_VERIFY), status)
+
+        # Disposition-only path: skip verification, route to halt/report.
+        if disposition_only or policy_required:
+            # For disposition-only or required policy, verify_node is only
+            # reached after phase-2 activation. If we have no verify agent,
+            # default to halting for manual review.
+            if verify_agent is None:
+                logger.warning(
+                    "verify_node: no verify_agent for required event=%s; halting",
+                    state["event_id"],
+                )
+                return _patch_state(
+                    _trace(NODE_VERIFY),
+                    {"halted": True},
+                )
+
+        # Build ResponsePlan from state for VerifyAgent input.
+        response_plan = (
+            ResponsePlan.model_validate(state["response_plan"])
+            if state.get("response_plan") is not None
+            else ResponsePlan(plan_id="", actions=[], strategy_summary="", generated_by="template")  # type: ignore[arg-type]
+        )
+
+        verification_result: VerificationResult | None = None
+        degraded = False
+
+        if verify_agent is not None:
+            try:
+                result = await verify_agent.execute(
+                    VerifyAgentInput(
+                        event_id=state["event_id"],
+                        response_plan=response_plan,
+                        verification_phase=VerificationPhase.EFFECT,
+                    )
+                )
+                if isinstance(result, VerificationResult):
+                    verification_result = result
+                else:
+                    degraded = True
+                    logger.warning(
+                        "verify_agent returned non-VerificationResult for event=%s",
+                        state["event_id"],
+                    )
+            except Exception:
+                degraded = True
+                logger.exception("verify_agent failed for event=%s", state["event_id"])
+        else:
+            degraded = True
+
+        if degraded or verification_result is None:
+            # Degradation: assume verification passed so we can proceed to report.
+            # Mark degraded flag.
+            flags = await degraded_flags.set_flag(
+                state["event_id"],
+                "verify_degraded",
+                True,
+                writer="verify_node",
+            )
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.REPORTING,
+                reason="investigation:verify_degraded",
+            )
+            return _patch_state(
+                _trace(NODE_VERIFY),
+                status,
+                {
+                    "degraded_flags": flags,
+                    "verify_need_action_replan": False,
+                    "verify_need_writeback_recovery": False,
+                    "verify_need_manual_resolution": False,
+                },
+            )
+
+        # Extract routing flags from VerificationResult.
+        update: dict[str, Any] = {
+            "verify_need_action_replan": verification_result.need_action_replan,
+            "verify_need_writeback_recovery": verification_result.need_writeback_recovery,
+            "verify_need_manual_resolution": verification_result.need_manual_resolution,
+            "verify_failed_actions": verification_result.failed_actions,
+            "verify_failed_writebacks": verification_result.failed_writebacks,
+            "verify_has_partial_success": verification_result.overall_status.value == "partial",
+        }
+
+        # Transition to the appropriate status based on verification outcome.
+        if verification_result.need_action_replan:
+            # Don't transition here — replan_node handles REPLANNING transition.
+            pass
+        elif verification_result.need_writeback_recovery:
+            # Stay in VERIFYING with WAITING_WRITEBACK substate.
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.WAITING_WRITEBACK,
+                event_status=EventStatus.VERIFYING,
+            )
+            update["execution_substate"] = ExecutionSubstate.WAITING_WRITEBACK.value
+        elif verification_result.need_manual_resolution:
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=EventStatus.VERIFYING,
+            )
+            update["execution_substate"] = ExecutionSubstate.MANUAL_RESOLUTION.value
+        else:
+            # Overall success — advance to REPORTING.
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.REPORTING,
+                reason="investigation:verify_success",
+            )
+            update.update(status)
+
+        return _patch_state(_trace(NODE_VERIFY), update)
 
     async def replan_node(state: InvestigationState) -> InvestigationState:
-        status = await _transition_status(
-            services,
-            state,
-            EventStatus.REPLANNING,
-            reason="investigation:replan_stub",
+        replan_handler = ReplanHandler(
+            state_machine=cast(_StateMachinePort, services["state_machine"]),
+            runtime=runtime,
         )
-        return _patch_state(_trace(NODE_REPLAN), status)
+        return await replan_graph_node(
+            state,
+            handler=replan_handler,
+        )
+
+    async def writeback_recovery_node(state: InvestigationState) -> InvestigationState:
+        wb_handler = WritebackRecoveryHandler(
+            state_machine=cast(_StateMachinePort, services["state_machine"]),
+            runtime=runtime,
+            disposition_sync=services.get("disposition_sync"),
+        )
+        return await writeback_recovery_graph_node(
+            state,
+            handler=wb_handler,
+        )
 
     async def report_node(state: InvestigationState) -> InvestigationState:
         report = await report_agent.execute(
@@ -823,6 +1027,7 @@ def build_investigation_graph(
     register(NODE_EXECUTE, execute_node)
     register(NODE_VERIFY, verify_node)
     register(NODE_REPLAN, replan_node)
+    register(NODE_WRITEBACK_RECOVERY, writeback_recovery_node)
     register(NODE_REPORT, report_node)
     register(NODE_HALT, halt_node)
     if rag_agent is not None:
@@ -884,12 +1089,32 @@ def build_investigation_graph(
             ROUTE_REPORT: NODE_REPORT,
             ROUTE_REPLAN: NODE_REPLAN,
             ROUTE_MANUAL: NODE_MANUAL_HOLD,
-            # P0 placeholder: writeback recovery shares manual_hold until ISSUE-062.
-            ROUTE_WRITEBACK: NODE_MANUAL_HOLD,
+            ROUTE_WRITEBACK: NODE_WRITEBACK_RECOVERY,
             ROUTE_HALT: NODE_HALT,
         },
     )
-    graph.add_edge(NODE_REPLAN, NODE_PLANNER)
+    # Writeback recovery loops back to verify for re-evaluation on WAIT/LOOKUP/RETRY,
+    # or goes to manual_hold when escalated.
+    graph.add_conditional_edges(
+        NODE_WRITEBACK_RECOVERY,
+        route_after_verify,
+        {
+            ROUTE_REPORT: NODE_REPORT,
+            ROUTE_REPLAN: NODE_REPLAN,
+            ROUTE_MANUAL: NODE_MANUAL_HOLD,
+            ROUTE_WRITEBACK: NODE_WRITEBACK_RECOVERY,
+            ROUTE_HALT: NODE_HALT,
+        },
+    )
+    # Replan: escalate→report, continue→back to planner for revise.
+    graph.add_conditional_edges(
+        NODE_REPLAN,
+        route_after_replan,
+        {
+            ROUTE_REPORT: NODE_REPORT,
+            ROUTE_INVESTIGATE: NODE_PLANNER,
+        },
+    )
     graph.add_edge(NODE_REPORT, NODE_CLOSE)
     graph.add_edge(NODE_CLOSE, END)
     graph.add_edge(NODE_HALT, END)
@@ -1036,11 +1261,13 @@ __all__ = [
     "NODE_MANUAL_HOLD",
     "NODE_PLANNER",
     "NODE_RAG",
+    "NODE_REPLAN",
     "NODE_REPORT",
     "NODE_RESPONSE",
     "NODE_RISK",
     "NODE_TRIAGE",
     "NODE_VERIFY",
+    "NODE_WRITEBACK_RECOVERY",
     "P0_NODE_SEQUENCE",
     "build_investigation_graph",
     "invoke_investigation_graph",
@@ -1048,6 +1275,7 @@ __all__ = [
     "rag_node",
     "route_after_approval",
     "route_after_planner",
+    "route_after_replan",
     "route_after_risk",
     "route_after_triage",
     "route_after_verify",

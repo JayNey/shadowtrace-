@@ -133,6 +133,10 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "adapter_validation_error": ErrorCategory.USER_INPUT,
     # Startup / runtime configuration (ISSUE-093 §5)
     "configuration_error": ErrorCategory.SYSTEM,
+    # Replan / writeback recovery (ISSUE-062)
+    "replan_count_exceeded": ErrorCategory.PERMANENT,
+    "writeback_recovery_exhausted": ErrorCategory.PERMANENT,
+    "writeback_manual_resolution_required": ErrorCategory.PERMANENT,
 }
 
 
