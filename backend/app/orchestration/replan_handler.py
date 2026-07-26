@@ -254,7 +254,14 @@ class ReplanHandler:
 
     @staticmethod
     def needs_replan(state: dict[str, Any]) -> bool:
-        """Return True when the verification result signals need_action_replan."""
+        """Return True when the verification result signals need_action_replan.
+
+        This is a convenience function for external callers that need to
+        check whether a replan is required without importing the full graph
+        routing logic.  Internal graph routing is handled by
+        ``route_after_verify``, which is the single source of truth for the
+        verify → replan / writeback / report decision.
+        """
         return bool(state.get("verify_need_action_replan"))
 
 
@@ -291,7 +298,12 @@ async def replan_graph_node(
         ``event_status`` so the conditional edge after this node can route
         to PLANNER (continue) or REPORT (escalated).
     """
-    event_id = str(state.get("event_id", "unknown"))
+    raw_event_id = state.get("event_id")
+    if not raw_event_id:
+        raise ValueError(
+            "InvestigationState missing required field: event_id"
+        )
+    event_id = str(raw_event_id)
     current_count = int(state.get("replan_count", 0))
 
     # Type-safe extraction of failed_actions (ISSUE-062: guard against
@@ -308,13 +320,37 @@ async def replan_graph_node(
         )
         failed_actions = []
 
-    # Record replan step in convergence guard (ISSUE-062).
+    # Record replan step in convergence guard (ISSUE-062) and check
+    # whether any stop condition (global_max_steps, oscillation, etc.)
+    # has been hit.  When the guard orders a stop the replan is aborted
+    # and the event is escalated immediately — the convergence_state is
+    # already persisted by the guard.
     if convergence_guard is not None:
         try:
             await convergence_guard.record_step(event_id, "replan")
+            stop = await convergence_guard.should_stop(event_id)
+            if stop:
+                logger.warning(
+                    "ConvergenceGuard ordered stop for event=%s reason=%s detail=%s",
+                    event_id,
+                    stop.reason.value,
+                    stop.detail,
+                )
+                has_partial = bool(state.get("verify_has_partial_success"))
+                esc = await handler.escalate(
+                    event_id,
+                    has_partial_success=has_partial,
+                    failed_actions=failed_actions,
+                )
+                return {
+                    "event_status": esc.target_status.value,
+                    "replan_count": current_count,
+                    "escalated": True,
+                    "halted": True,
+                }
         except Exception:
             logger.exception(
-                "ConvergenceGuard.record_step('replan') failed for event=%s",
+                "ConvergenceGuard.record_step/should_stop failed for event=%s",
                 event_id,
             )
 
@@ -331,6 +367,12 @@ async def replan_graph_node(
             has_partial_success=has_partial,
             failed_actions=failed_actions,
         )
+        # NOTE: replan_count is NOT incremented on escalate — the over-limit
+        # detection happens in evaluate_replan() which checks "would the next
+        # attempt exceed MAX_REPLAN_COUNT?" before the increment is committed.
+        # Returning current_count (not current_count + 1) is correct: no
+        # successful replan consumed this count.  The CONTINUE path below
+        # returns result.replan_count which IS incremented.
         return {
             "event_status": esc.target_status.value,
             "replan_count": current_count,

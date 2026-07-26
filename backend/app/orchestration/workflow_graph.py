@@ -430,6 +430,22 @@ def build_investigation_graph(
     event_service = cast(_EventServiceLike, services["event_service"])
     degraded_flags = cast(DegradedFlagService, services["degraded_flags"])
 
+    # Hoist handler creation to closure — ReplanHandler and
+    # WritebackRecoveryHandler are stateless (no accumulated state between
+    # calls), so sharing a single instance per graph invocation avoids
+    # unnecessary allocations on every node execution.
+    _state_machine_port = cast(_StateMachinePort, services["state_machine"])
+    _replan_handler = ReplanHandler(
+        state_machine=_state_machine_port,
+        runtime=runtime,
+    )
+    _wb_handler = WritebackRecoveryHandler(
+        state_machine=_state_machine_port,
+        runtime=runtime,
+        disposition_sync=services.get("disposition_sync"),
+    )
+    _convergence_guard = services.get("convergence_guard")
+
     async def triage_graph_node(state: InvestigationState) -> InvestigationState:
         result = await triage_agent.execute(
             TriageAgentInput(event_id=state["event_id"], raw_event_summary="")
@@ -1039,25 +1055,16 @@ def build_investigation_graph(
         return _patch_state(_trace(NODE_VERIFY), update)
 
     async def replan_node(state: InvestigationState) -> InvestigationState:
-        replan_handler = ReplanHandler(
-            state_machine=cast(_StateMachinePort, services["state_machine"]),
-            runtime=runtime,
-        )
         return await replan_graph_node(
             state,
-            handler=replan_handler,
-            convergence_guard=services.get("convergence_guard"),
+            handler=_replan_handler,
+            convergence_guard=_convergence_guard,
         )
 
     async def writeback_recovery_node(state: InvestigationState) -> InvestigationState:
-        wb_handler = WritebackRecoveryHandler(
-            state_machine=cast(_StateMachinePort, services["state_machine"]),
-            runtime=runtime,
-            disposition_sync=services.get("disposition_sync"),
-        )
         return await writeback_recovery_graph_node(
             state,
-            handler=wb_handler,
+            handler=_wb_handler,
         )
 
     async def report_node(state: InvestigationState) -> InvestigationState:

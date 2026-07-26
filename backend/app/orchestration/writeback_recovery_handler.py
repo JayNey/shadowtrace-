@@ -377,6 +377,8 @@ class WritebackRecoveryHandler:
                 if readiness is WritebackReadiness.CAPABILITY_UNKNOWN:
                     # Live Adapter capability not yet probed — stay in
                     # WAITING_WRITEBACK rather than prematurely escalating.
+                    # Return action=WAIT so the graph node sets halted=True
+                    # and prevents a verify ↔ writeback_recovery tight loop.
                     logger.info(
                         "writeback %s: disposition_sync not wired, "
                         "readiness=CAPABILITY_UNKNOWN — staying in WAIT",
@@ -387,7 +389,13 @@ class WritebackRecoveryHandler:
                         ExecutionSubstate.WAITING_WRITEBACK,
                         event_status=EventStatus.VERIFYING,
                     )
-                    return result
+                    return WritebackRecoveryResult(
+                        action=WritebackRecoveryAction.WAIT,
+                        writeback_id=writeback.writeback_id,
+                        writeback_status=writeback.current_status,
+                        reason=f"waiting_lookup_blocked:{writeback.current_status.value if writeback.current_status else 'none'}",
+                        lookup_attempt=result.lookup_attempt,
+                    )
                 logger.warning(
                     "writeback %s: no disposition_sync port, "
                     "readiness=%s — escalating",
@@ -438,6 +446,10 @@ class WritebackRecoveryHandler:
         if result.action is WritebackRecoveryAction.RETRY:
             if self._disposition_sync is None:
                 if readiness is WritebackReadiness.CAPABILITY_UNKNOWN:
+                    # Live Adapter capability not yet probed — stay in
+                    # WAITING_WRITEBACK rather than prematurely escalating.
+                    # Return action=WAIT so the graph node sets halted=True
+                    # and prevents a verify ↔ writeback_recovery tight loop.
                     logger.info(
                         "writeback %s: disposition_sync not wired, "
                         "readiness=CAPABILITY_UNKNOWN — staying in WAIT",
@@ -448,7 +460,13 @@ class WritebackRecoveryHandler:
                         ExecutionSubstate.WAITING_WRITEBACK,
                         event_status=EventStatus.VERIFYING,
                     )
-                    return result
+                    return WritebackRecoveryResult(
+                        action=WritebackRecoveryAction.WAIT,
+                        writeback_id=writeback.writeback_id,
+                        writeback_status=writeback.current_status,
+                        reason=f"waiting_retry_blocked:{writeback.current_status.value if writeback.current_status else 'none'}",
+                        retry_attempt=result.retry_attempt,
+                    )
                 logger.warning(
                     "writeback %s: no disposition_sync port, "
                     "readiness=%s — escalating",
@@ -520,12 +538,24 @@ class WritebackRecoveryHandler:
 
     @staticmethod
     def needs_recovery(state: dict[str, Any]) -> bool:
-        """Return True when the verification result signals need_writeback_recovery."""
+        """Return True when the verification result signals need_writeback_recovery.
+
+        This is a convenience function for external callers that need to
+        check whether writeback recovery is required without importing the
+        full graph routing logic.  Internal graph routing is handled by
+        ``route_after_verify``, which is the single source of truth.
+        """
         return bool(state.get("verify_need_writeback_recovery"))
 
     @staticmethod
     def needs_manual(state: dict[str, Any]) -> bool:
-        """Return True when the verification result signals need_manual_resolution."""
+        """Return True when the verification result signals need_manual_resolution.
+
+        This is a convenience function for external callers that need to
+        check whether manual resolution is required without importing the
+        full graph routing logic.  Internal graph routing is handled by
+        ``route_after_verify``, which is the single source of truth.
+        """
         return bool(state.get("verify_need_manual_resolution"))
 
 
@@ -552,7 +582,12 @@ async def writeback_recovery_graph_node(
     dict
         State patches with updated ``execution_substate`` and routing flags.
     """
-    event_id = str(state.get("event_id", "unknown"))
+    raw_event_id = state.get("event_id")
+    if not raw_event_id:
+        raise ValueError(
+            "InvestigationState missing required field: event_id"
+        )
+    event_id = str(raw_event_id)
     failed_writebacks: list[str] = list(state.get("verify_failed_writebacks") or [])
 
     if not failed_writebacks:
@@ -609,6 +644,14 @@ async def writeback_recovery_graph_node(
     )
 
     if result.escalated:
+        # NOTE: Resetting lookup/retry counters to 0 on escalate.  When
+        # failed_writebacks has multiple entries the first escalate discards
+        # any accumulated counters for the remaining writebacks.  Impact is
+        # negligible because the current graph only passes a single scalar
+        # verify_writeback_status per cycle and counter precision across
+        # multiple heterogeneous writebacks is inherently approximate.
+        # ISSUE-062 follow-up: persist per-writeback counters when the
+        # InvestigationState schema supports it.
         return {
             "verify_need_writeback_recovery": False,
             "verify_need_manual_resolution": True,

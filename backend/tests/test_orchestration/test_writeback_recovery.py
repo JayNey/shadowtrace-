@@ -350,7 +350,9 @@ class TestWritebackRecoveryExecute:
         assert result.escalated is True
 
     async def test_execute_no_disposition_sync_unknown_stays_waiting(self):
-        """No disposition_sync port + CAPABILITY_UNKNOWN → stays in WAIT."""
+        """No disposition_sync port + CAPABILITY_UNKNOWN → stays in WAIT.
+        Returns action=WAIT so the graph node sets halted=True and prevents
+        a verify ↔ writeback_recovery tight loop (ISSUE-062 Should-Fix #2)."""
         rt = FakeRuntime()
         handler = WritebackRecoveryHandler(
             state_machine=FakeStateMachine(),
@@ -360,7 +362,7 @@ class TestWritebackRecoveryExecute:
         wb = WritebackState(writeback_id="wbk-001", current_status=WritebackStatus.UNKNOWN)
         result = await handler.execute("evt-001", wb)  # defaults to CAPABILITY_UNKNOWN
         assert result.escalated is False
-        assert result.action is WritebackRecoveryAction.LOOKUP
+        assert result.action is WritebackRecoveryAction.WAIT
         assert rt.substate_calls[-1][1] == ExecutionSubstate.WAITING_WRITEBACK
 
 
@@ -458,7 +460,8 @@ class TestWritebackRecoveryDegradation:
         assert result.escalated is True
 
     async def test_retry_without_port_unknown_stays_waiting(self):
-        """RETRY without disposition_sync + CAPABILITY_UNKNOWN → stays in WAIT."""
+        """RETRY without disposition_sync + CAPABILITY_UNKNOWN → stays in WAIT.
+        Returns action=WAIT so the graph node sets halted=True (ISSUE-062 Should-Fix #2)."""
         rt = FakeRuntime()
         handler = WritebackRecoveryHandler(
             state_machine=FakeStateMachine(),
@@ -468,7 +471,7 @@ class TestWritebackRecoveryDegradation:
         wb = WritebackState(writeback_id="wbk-001", current_status=WritebackStatus.FAILED)
         result = await handler.execute("evt-001", wb)  # defaults to CAPABILITY_UNKNOWN
         assert result.escalated is False
-        assert result.action is WritebackRecoveryAction.RETRY
+        assert result.action is WritebackRecoveryAction.WAIT
         assert rt.substate_calls[-1][1] == ExecutionSubstate.WAITING_WRITEBACK
 
 
@@ -798,3 +801,98 @@ class TestMultipleWritebackProcessing:
         )
         result3 = await writeback_recovery_graph_node(state3, handler=handler)
         assert result3["verify_failed_writebacks"] == []
+
+
+# ── Tests: LOOKUP/RETRY halt prevention (Should-Fix #2) ───────────────────────
+
+
+class TestWritebackRecoverySpinPrevention:
+    """Verify writeback_recovery_graph_node halts when LOOKUP/RETRY cannot
+    act due to no disposition_sync + CAPABILITY_UNKNOWN, preventing a
+    verify ↔ writeback_recovery tight loop."""
+
+    async def test_lookup_no_port_unknown_halts_in_graph_node(self):
+        """Graph node: LOOKUP without disposition_sync + CAPABILITY_UNKNOWN
+        → handler returns action=WAIT → graph node sets halted=True."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+            disposition_sync=None,
+        )
+        state = _base_state(
+            verify_failed_writebacks=["wbk-001"],
+            verify_writeback_status="unknown",
+            event_status_update_readiness=WritebackReadiness.CAPABILITY_UNKNOWN.value,
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        assert result["halted"] is True, (
+            "LOOKUP without port + CAPABILITY_UNKNOWN must set halted=True "
+            "to prevent verify ↔ writeback_recovery tight loop"
+        )
+        assert result["verify_need_writeback_recovery"] is True
+
+    async def test_retry_no_port_unknown_halts_in_graph_node(self):
+        """Graph node: RETRY without disposition_sync + CAPABILITY_UNKNOWN
+        → handler returns action=WAIT → graph node sets halted=True."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+            disposition_sync=None,
+        )
+        state = _base_state(
+            verify_failed_writebacks=["wbk-001"],
+            verify_writeback_status="failed",
+            event_status_update_readiness=WritebackReadiness.CAPABILITY_UNKNOWN.value,
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        assert result["halted"] is True, (
+            "RETRY without port + CAPABILITY_UNKNOWN must set halted=True "
+            "to prevent verify ↔ writeback_recovery tight loop"
+        )
+        assert result["verify_need_writeback_recovery"] is True
+
+    async def test_lookup_with_port_no_halt(self):
+        """Graph node: LOOKUP with disposition_sync wired → normal flow, no forced halt."""
+        ds = FakeDispositionSync()
+        ds._lookup_result = WritebackStatus.UNKNOWN
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+            disposition_sync=ds,
+        )
+        state = _base_state(
+            verify_failed_writebacks=["wbk-001"],
+            verify_writeback_status="unknown",
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        # With disposition_sync wired, LOOKUP proceeds normally (still
+        # UNKNOWN → stays in recovery, halted=False for next cycle).
+        assert result["halted"] is False
+
+    async def test_retry_with_port_no_halt(self):
+        """Graph node: RETRY with disposition_sync wired → normal flow, no forced halt."""
+        ds = FakeDispositionSync()
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+            disposition_sync=ds,
+        )
+        state = _base_state(
+            verify_failed_writebacks=["wbk-001"],
+            verify_writeback_status="failed",
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        # With disposition_sync wired, RETRY enqueues normally
+        assert result["halted"] is False
+
+    async def test_missing_event_id_raises_in_graph_node(self):
+        """Graph node raises ValueError when event_id is missing."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+        state: dict[str, Any] = {
+            "verify_failed_writebacks": ["wbk-001"],
+        }
+        with pytest.raises(ValueError, match="missing required field: event_id"):
+            await writeback_recovery_graph_node(state, handler=handler)

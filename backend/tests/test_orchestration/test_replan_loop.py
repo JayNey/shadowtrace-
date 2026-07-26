@@ -406,3 +406,117 @@ class TestReplanStateMachineErrors:
         handler = ReplanHandler(state_machine=sm, runtime=FakeRuntime())
         with pytest.raises(InvalidStateTransitionError):
             await handler.execute_replan("evt-001", current_replan_count=0)
+
+
+# ── Tests: convergence guard blocks replan (Should-Fix #1) ────────────────────
+
+
+class TestConvergenceGuardBlocksReplan:
+    """Verify convergence_guard.should_stop() prevents replan from proceeding."""
+
+    async def test_should_stop_blocks_replan_and_escalates(self):
+        """When convergence guard returns stop=True, replan is aborted and
+        the event escalates directly without entering REPLANNING."""
+        from app.orchestration.convergence_guard import StopDecision, StopReason
+
+        sm = FakeStateMachine()
+        handler = ReplanHandler(state_machine=sm, runtime=FakeRuntime())
+
+        # Simulate a convergence guard that records steps and then orders stop
+        guard = MagicMock()
+        guard.record_step = AsyncMock()
+        guard.should_stop = AsyncMock(
+            return_value=StopDecision(
+                stop=True,
+                reason=StopReason.GLOBAL_MAX_STEPS,
+                detail="total_steps=100 >= GLOBAL_MAX_STEPS=100",
+            )
+        )
+
+        state = _base_state(
+            replan_count=0,
+            verify_failed_actions=["act-001"],
+            verify_has_partial_success=False,
+        )
+        result = await replan_graph_node(
+            state, handler=handler, convergence_guard=guard,
+        )
+
+        # Must have called record_step AND should_stop
+        guard.record_step.assert_awaited_once()
+        guard.should_stop.assert_awaited_once()
+
+        # Must be escalated, not continuing to replan
+        assert result["escalated"] is True
+        assert result["halted"] is True
+
+        # Must NOT have attempted a REPLANNING transition
+        replan_transitions = [
+            t for t in sm.transitions if t[1] == EventStatus.REPLANNING
+        ]
+        assert len(replan_transitions) == 0, (
+            "Convergence guard stop must prevent REPLANNING transition"
+        )
+
+    async def test_should_stop_false_allows_replan(self):
+        """When convergence guard returns stop=False, replan proceeds normally."""
+        from app.orchestration.convergence_guard import StopDecision, StopReason
+
+        sm = FakeStateMachine()
+        handler = ReplanHandler(state_machine=sm, runtime=FakeRuntime())
+
+        guard = MagicMock()
+        guard.record_step = AsyncMock()
+        guard.should_stop = AsyncMock(
+            return_value=StopDecision(stop=False, reason=StopReason.NONE)
+        )
+
+        state = _base_state(
+            replan_count=0,
+            verify_failed_actions=["act-001"],
+        )
+        result = await replan_graph_node(
+            state, handler=handler, convergence_guard=guard,
+        )
+
+        guard.record_step.assert_awaited_once()
+        guard.should_stop.assert_awaited_once()
+
+        # Should continue to replan
+        assert result["escalated"] is False
+        assert result["replan_count"] == 1
+
+
+# ── Tests: missing event_id raises (Should-Fix #4) ────────────────────────────
+
+
+class TestReplanGraphNodeValidation:
+    """Verify replan_graph_node validates required state fields."""
+
+    async def test_missing_event_id_raises(self):
+        """Missing event_id in InvestigationState raises ValueError."""
+        sm = FakeStateMachine()
+        handler = ReplanHandler(state_machine=sm, runtime=FakeRuntime())
+        # State without event_id key
+        state: dict[str, Any] = {
+            "replan_count": 0,
+            "verify_failed_actions": ["act-001"],
+        }
+        with pytest.raises(ValueError, match="missing required field: event_id"):
+            await replan_graph_node(state, handler=handler)
+
+    async def test_none_event_id_raises(self):
+        """None event_id in InvestigationState raises ValueError."""
+        sm = FakeStateMachine()
+        handler = ReplanHandler(state_machine=sm, runtime=FakeRuntime())
+        state = _base_state(event_id=None, replan_count=0)
+        with pytest.raises(ValueError, match="missing required field: event_id"):
+            await replan_graph_node(state, handler=handler)
+
+    async def test_empty_string_event_id_raises(self):
+        """Empty string event_id raises ValueError."""
+        sm = FakeStateMachine()
+        handler = ReplanHandler(state_machine=sm, runtime=FakeRuntime())
+        state = _base_state(event_id="", replan_count=0)
+        with pytest.raises(ValueError, match="missing required field: event_id"):
+            await replan_graph_node(state, handler=handler)
