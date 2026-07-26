@@ -431,8 +431,7 @@ async def test_fp_matcher_required_disposition_false_positive_no_auto_close(
     # Verdict must be FALSE_POSITIVE (from VerdictResolver priority 1:
     # false_positive_match.recommendation == close_as_fp).
     assert result.final_verdict == FinalVerdict.FALSE_POSITIVE, (
-        f"Expected FALSE_POSITIVE (close_as_fp beats risk_score), "
-        f"got {result.final_verdict}"
+        f"Expected FALSE_POSITIVE (close_as_fp beats risk_score), got {result.final_verdict}"
     )
 
     # Event must stay at REPORTING (NOT auto-closed) — the disposition
@@ -449,8 +448,7 @@ async def test_fp_matcher_required_disposition_false_positive_no_auto_close(
         row = await session.get(orm.SecurityEvent, event_id)
     assert row is not None
     assert row.status == EventStatus.REPORTING, (
-        f"DB status is {row.status}, expected REPORTING — "
-        "disposition-only path must not auto-close"
+        f"DB status is {row.status}, expected REPORTING — disposition-only path must not auto-close"
     )
 
     # false_positive_match must still be readable.
