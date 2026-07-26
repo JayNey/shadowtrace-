@@ -97,7 +97,7 @@ VERIFICATION_TOOL_EXPECTED_PARAMS: dict[str, list[str]] = {
 # Uses a dedicated type (not a bare ``object()``) so that ``is`` comparisons
 # survive pickle / multiprocessing fork boundaries — type identity is
 # preserved across process boundaries where object identity is not.
-_MISSING_SENTINEL_TYPE = type('_MissingSentinel', (), {})
+_MISSING_SENTINEL_TYPE = type("_MissingSentinel", (), {})
 _MISSING: Any = _MISSING_SENTINEL_TYPE()
 
 

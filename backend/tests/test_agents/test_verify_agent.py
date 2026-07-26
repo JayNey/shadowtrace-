@@ -195,26 +195,39 @@ def _mock_terminal_confirm_session_factory(writeback_id: str = "wbk-terminal-000
             self.sequence = 1
             self.confirmation_evidence: str | None = "readback_verified"
 
+    def _receipt_writeback_id_from_stmt(stmt: Any) -> str | None:
+        try:
+            wc = stmt.whereclause
+            if wc is not None and hasattr(wc, "right"):
+                right = wc.right
+                val = right.value if hasattr(right, "value") else right
+                return str(val) if val is not None else None
+        except Exception:
+            return None
+        return None
+
     class _Session:
-        def __init__(self, wb_id: str) -> None:
-            self._wb_id = wb_id
-
         async def scalars(self, stmt: Any) -> Any:
+            queried_id = _receipt_writeback_id_from_stmt(stmt)
+
             class _Result:
-                def __init__(self, wb_id: str) -> None:
-                    self._wb_id = wb_id
-
                 def first(self) -> _ReceiptRow | None:
-                    return _ReceiptRow(self._wb_id)
+                    if queried_id == writeback_id:
+                        return _ReceiptRow(writeback_id)
+                    return None
 
-            return _Result(self._wb_id)
+            return _Result()
 
         async def get(self, *args: Any, **kwargs: Any) -> Any:
             return None
 
+        @asynccontextmanager
+        async def begin(self) -> Any:
+            yield self
+
     @asynccontextmanager
     async def _session_ctx() -> Any:
-        yield _Session(writeback_id)
+        yield _Session()
 
     mock_factory = MagicMock(side_effect=_session_ctx)
     return mock_factory
@@ -914,7 +927,10 @@ class TestWritebackTruthTable:
         if wb_status is None:
             # None is handled before the dict lookup (ISSUE-060 SF1).
             confirmed, recovery, manual, _detail = (
-                False, True, False, "writeback_no_status_waiting"
+                False,
+                True,
+                False,
+                "writeback_no_status_waiting",
             )
         else:
             confirmed, recovery, manual, _detail = _WRITEBACK_STATUS_ROUTING.get(
@@ -3074,17 +3090,13 @@ class TestIssue060ReviewFixes:
         result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Phase 1 result: VERIFIED (effect confirmed).
-        phase1_results = [
-            r for r in result.results if r.detail == "effect_verified"
-        ]
+        phase1_results = [r for r in result.results if r.detail == "effect_verified"]
         assert len(phase1_results) == 1
         assert phase1_results[0].effect_status == EffectStatus.VERIFIED
 
         # Phase 2 result: UNKNOWN writeback → recovery (not manual, not failed).
         phase2_results = [
-            r
-            for r in result.results
-            if r.detail == "writeback_unknown_requires_lookup"
+            r for r in result.results if r.detail == "writeback_unknown_requires_lookup"
         ]
         assert len(phase2_results) == 1
         assert phase2_results[0].effect_status == EffectStatus.VERIFIED
@@ -3338,6 +3350,126 @@ class TestIssue060ReviewFixes:
         assert result.need_writeback_recovery is True
         assert result.overall_status != VerificationOverallStatus.SUCCESS
 
+    async def test_terminal_writeback_missing_receipt_routes_recovery(self):
+        """After EDS activate, receipt may not exist yet → waiting/recovery."""
+        from contextlib import asynccontextmanager
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        ed_svc = FakeEventDispositionService(
+            activated=True,
+            writeback_id="wbk-terminal-no-receipt",
+        )
+
+        class _EmptyReceiptSession:
+            async def scalars(self, stmt: Any) -> Any:
+                class _Result:
+                    def first(self) -> None:
+                        return None
+
+                return _Result()
+
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                return None
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _EmptyReceiptSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+            session_factory=mock_factory,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        assert result.need_writeback_recovery is True
+        assert result.need_manual_resolution is False
+        assert result.overall_status == VerificationOverallStatus.WAITING
+
+    async def test_terminal_writeback_weak_evidence_routes_recovery(self):
+        """CONFIRMED + adapter_acknowledged must not yield overall success."""
+        from contextlib import asynccontextmanager
+
+        action = _action(
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+        ed_svc = FakeEventDispositionService(
+            activated=True,
+            writeback_id="wbk-terminal-weak",
+        )
+
+        class _WeakEvidenceReceipt:
+            writeback_id: str = "wbk-terminal-weak"
+            status: str = "confirmed"
+            sequence: int = 1
+            confirmation_evidence: str = "adapter_acknowledged"
+
+        class _WeakEvidenceSession:
+            async def scalars(self, stmt: Any) -> Any:
+                class _Result:
+                    def first(self) -> _WeakEvidenceReceipt:
+                        return _WeakEvidenceReceipt()
+
+                return _Result()
+
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                return None
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _WeakEvidenceSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+            session_factory=mock_factory,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        assert result.need_writeback_recovery is True
+        assert result.overall_status == VerificationOverallStatus.WAITING
+        assert result.overall_status != VerificationOverallStatus.SUCCESS
+
     # ── CAPABILITY_UNSUPPORTED detail ─────────────────────────────────────
 
     async def test_blocked_writeback_capability_unsupported_detail(self):
@@ -3372,9 +3504,7 @@ class TestIssue060ReviewFixes:
 
         # Should find a blocked writeback with the right detail.
         phase2_blocked = [
-            r
-            for r in result.results
-            if r.detail == "writeback_blocked_capability_unsupported"
+            r for r in result.results if r.detail == "writeback_blocked_capability_unsupported"
         ]
         assert len(phase2_blocked) == 1
         assert action.action_id in result.blocked_writebacks
@@ -3469,9 +3599,7 @@ class TestIssue060ReviewNewTests:
         assert result.need_manual_resolution is True
         # Verify the detail suffix.
         phase2_exhausted = [
-            r
-            for r in result.results
-            if r.detail == "writeback_unknown_exhausted_lookups_manual"
+            r for r in result.results if r.detail == "writeback_unknown_exhausted_lookups_manual"
         ]
         assert len(phase2_exhausted) == 1
 
@@ -3527,9 +3655,7 @@ class TestIssue060ReviewNewTests:
         assert result.need_manual_resolution is False
         # Detail should be the normal UNKNOWN lookup.
         phase2_unknown = [
-            r
-            for r in result.results
-            if r.detail == "writeback_unknown_requires_lookup"
+            r for r in result.results if r.detail == "writeback_unknown_requires_lookup"
         ]
         assert len(phase2_unknown) == 1
 
@@ -3640,9 +3766,7 @@ class TestIssue060ReviewNewTests:
         # Override {"block_ip": {"ip": None}} should return None,
         # NOT fall through to the baseline.
         overrides: dict[str, dict[str, str | None]] = {"block_ip": {"ip": None}}
-        result = resolve_verification_tool(
-            "block_ip", "ip", provider_manifest_overrides=overrides
-        )
+        result = resolve_verification_tool("block_ip", "ip", provider_manifest_overrides=overrides)
         assert result is None
 
     async def test_provider_override_none_disables_baseline_in_agent(self):
@@ -3685,8 +3809,6 @@ class TestIssue060ReviewNewTests:
         state fields use safe defaults.  This test validates that the
         merge boundary doesn't silently drop actions or mix Pydantic
         defaults from plan with DB state."""
-        from app.agents.verify_agent import _plan_actions
-
         plan_action = _action(
             action_id="act-plan-only",
             tool_name="block_ip",
@@ -3744,7 +3866,12 @@ class TestIssue060ReviewNewTests:
             disposition_policy: str | None = "invalid_policy_name"
 
         class _BadPolicySession:
-            async def get(self, model: type[Any], ident: Any, **kwargs: Any) -> _BadPolicyRow | None:
+            async def get(
+                self,
+                model: type[Any],
+                ident: Any,
+                **kwargs: Any,
+            ) -> _BadPolicyRow | None:
                 return _BadPolicyRow()
 
         @asynccontextmanager
@@ -3866,7 +3993,7 @@ class TestIssue060ReviewNewTests:
 
     # ── SF-6: Full SHA-256 action_id length ──────────────────────────────
 
-    async def test_verification_action_id_uses_full_sha256(self):
+    async def test_verification_action_id_uses_act_8hex_format(self):
         """SF-1 updated: Deterministic verification action_id now uses
         8-char hex prefix (act-{8hex}) per ISSUE-002 ID spec.  The full
         SHA-256 digest is computed for deterministic derivation but only
@@ -3892,7 +4019,11 @@ class TestIssue060ReviewNewTests:
         """VerificationResult.wm_persisted defaults to False so that
         callers not going through _write_verification_result don't
         incorrectly assume persistence."""
-        from app.models.agent_io import VerificationResult, VerificationOverallStatus, VerificationPhase
+        from app.models.agent_io import (
+            VerificationOverallStatus,
+            VerificationPhase,
+            VerificationResult,
+        )
 
         # Construct a result without explicitly setting wm_persisted.
         result = VerificationResult(
@@ -3957,9 +4088,7 @@ class TestIssue060ReviewNewTests:
 
         result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
-        wb_not_applicable = [
-            r for r in result.results if r.detail == "writeback_not_applicable"
-        ]
+        wb_not_applicable = [r for r in result.results if r.detail == "writeback_not_applicable"]
         assert len(wb_not_applicable) == 1
         assert wb_not_applicable[0].verification_phase == VerificationPhase.DISPOSITION
 
@@ -3993,9 +4122,7 @@ class TestIssue060ReviewNewTests:
         result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         wb_blocked = [
-            r
-            for r in result.results
-            if r.detail and r.detail.startswith("writeback_blocked_")
+            r for r in result.results if r.detail and r.detail.startswith("writeback_blocked_")
         ]
         assert len(wb_blocked) == 1
         assert wb_blocked[0].verification_phase == VerificationPhase.DISPOSITION
@@ -4031,9 +4158,7 @@ class TestShouldFixRegression:
             writeback_id="wbk-sf1-terminal",
         )
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -4048,9 +4173,7 @@ class TestShouldFixRegression:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # The action should appear in results with writeback_not_yet_dispatched.
         wb_results = [
@@ -4091,16 +4214,12 @@ class TestShouldFixRegression:
             writeback_id="wbk-sf1b-terminal",
         )
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
             event_disposition_service=ed_svc,
-            session_factory=_mock_terminal_confirm_session_factory(
-                "wbk-sf1b-terminal"
-            ),
+            session_factory=_mock_terminal_confirm_session_factory("wbk-sf1b-terminal"),
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
             return_value=([action], {"job-0001": job}, outbox_map)
@@ -4109,9 +4228,7 @@ class TestShouldFixRegression:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         wb_results = [
             r
@@ -4152,9 +4269,7 @@ class TestShouldFixRegression:
             writeback_id=None,  # triggers terminal need_manual
         )
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -4167,9 +4282,7 @@ class TestShouldFixRegression:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # MANUAL_RESOLUTION must take priority over WAITING.
         assert result.overall_status == VerificationOverallStatus.MANUAL_RESOLUTION
@@ -4200,9 +4313,7 @@ class TestShouldFixRegression:
             writeback_id="wbk-should-not-appear",
         )
         agent = VerifyAgent(
-            tool_executor=_mock_executor(
-                {"check_ip_block_status": _tool_result_success(True)}
-            ),
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
             working_memory=FakeWorkingMemory(),
             trace_service=FakeTraceService(),
             event_bus=FakeEventBus(),
@@ -4215,9 +4326,7 @@ class TestShouldFixRegression:
             return_value=DispositionPolicy.REQUIRED,
         )
 
-        result = await agent.execute(
-            _input(event_id=action.event_id, actions=[action])
-        )
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
 
         # Must NOT contain the old synthetic ID format.
         synthetic = f"terminal_wb_{action.event_id}"

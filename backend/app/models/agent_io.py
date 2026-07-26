@@ -351,6 +351,9 @@ class VerificationActionResult(BaseModel):
     # "effect_status=VERIFIED" (writeback receipt confirmed) as an
     # entity-effect verification.
     verification_phase: VerificationPhase | None = None
+    # Confirmation evidence tier from the latest DispositionReceipt when
+    # available (readback_verified, manual_confirmed, adapter_acknowledged, …).
+    confirmation_evidence: str | None = None
 
     @model_validator(mode="after")
     def _writeback_fields_are_consistent(self) -> VerificationActionResult:

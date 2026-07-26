@@ -135,8 +135,8 @@ VERIFY_UNKNOWN_MAX_LOOKUPS: int = 3
 _TRANSIENT_EXC_TYPES = (
     ConnectionError,
     TimeoutError,
-    OperationalError,   # deadlocks, server gone away
-    InternalError,       # serialization failures
+    OperationalError,  # deadlocks, server gone away
+    InternalError,  # serialization failures
 )
 
 # Error codes for exception type classification in verification detail
@@ -238,7 +238,14 @@ class _ActivateResult:
 # adds a required field or renames an existing one, this assertion fails
 # at import time rather than surfacing as a silent AttributeError at
 # runtime inside the phase-2 except-Exception handler (ISSUE-060 SF-2).
-_EXPECTED_EDS_FIELDS = {"action_id", "activated", "skipped_reason", "derived_disposition", "disposition_id", "writeback_id"}
+_EXPECTED_EDS_FIELDS = {
+    "action_id",
+    "activated",
+    "skipped_reason",
+    "derived_disposition",
+    "disposition_id",
+    "writeback_id",
+}
 _ACTUAL_EDS_FIELDS = set(DispositionActivationResult.model_fields)
 assert _EXPECTED_EDS_FIELDS.issubset(_ACTUAL_EDS_FIELDS), (
     f"DispositionActivationResult field contract changed — "
@@ -249,9 +256,7 @@ assert _EXPECTED_EDS_FIELDS.issubset(_ACTUAL_EDS_FIELDS), (
 # required fields that _ActivateResult doesn't cover (extra fields
 # with defaults are safe — they won't cause AttributeError).
 _EDS_REQUIRED = {
-    name
-    for name, field in DispositionActivationResult.model_fields.items()
-    if field.is_required()
+    name for name, field in DispositionActivationResult.model_fields.items() if field.is_required()
 }
 _UNCOVERED_REQUIRED = _EDS_REQUIRED - _EXPECTED_EDS_FIELDS
 assert not _UNCOVERED_REQUIRED, (
@@ -344,6 +349,21 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             actions=actions,
             jobs_map=jobs_map,
         )
+
+        # EventDispositionService.after_effect_resolution_ready reads
+        # verification_result from EventContext.  Persist phase-1 outcome
+        # before phase-2 activation so the first verify pass can activate
+        # deferred terminal writeback (ISSUE-059A × ISSUE-060).
+        if (
+            not phase1_need_replan
+            and not phase1_need_manual
+            and disposition_policy == DispositionPolicy.REQUIRED
+        ):
+            await self._persist_phase1_for_eds_gate(
+                event_id=event_id,
+                phase1_results=phase1_results,
+                phase1_failed=phase1_failed,
+            )
 
         # 3. Phase 2 — terminal writeback activation & verification.
         (
@@ -598,9 +618,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 # Determine skip reason via _derive_skip_verification_tools
                 # so the inline logic stays in sync with the derived set
                 # that the test suite independently validates.
-                is_non_verifiable = (
-                    action.tool_name in _derive_skip_verification_tools()
-                )
+                is_non_verifiable = action.tool_name in _derive_skip_verification_tools()
                 detail = (
                     "non_verifiable_action"
                     if is_non_verifiable
@@ -827,13 +845,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
     ]:
         """Phase 2: activate deferred terminal writeback, then verify receipts.
 
-        Contract with EventDispositionService (ISSUE-059A):
-        ``activate_and_submit`` MUST synchronously persist the terminal
-        writeback receipt with status CONFIRMED before returning
-        ``_ActivateResult(success=True)``.  This method independently
-        verifies the receipt via ``_evaluate_terminal_writeback_status``
-        so that a PENDING/FAILED terminal writeback is never reported
-        as SUCCESS.
+        ``EventDispositionService.activate_and_submit`` (ISSUE-059A) enqueues
+        the terminal ``EVENT_STATUS_UPDATE`` outbox and returns immediately;
+        DispositionSyncService delivers the command and persists receipts
+        asynchronously.  This method reads the latest receipt and routes
+        non-CONFIRMED or missing receipts to ``need_writeback_recovery``
+        (overall ``waiting``), never to overall success.
         """
         results: list[VerificationActionResult] = []
         failed_wb: set[str] = set()
@@ -921,10 +938,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     # parameter.  The synthetic f"terminal_wb_{event_id}"
                     # does not conform to the wbk-{8hex} format and would
                     # always fail lookup.  (ISSUE-060 review SF-3)
-                    _blocked_ref = (
-                        activate_result.action_id
-                        or activate_result.writeback_id
-                    )
+                    _blocked_ref = activate_result.action_id or activate_result.writeback_id
                     if _blocked_ref is not None:
                         blocked_wb.add(_blocked_ref)
                     overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
@@ -961,11 +975,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             need_wb_recovery = wb_eval["need_recovery"]
             need_manual_from_wb = wb_eval["need_manual"]
 
-            # Additionally verify the terminal disposition writeback receipt
-            # that activate_and_submit just submitted (ISSUE-059A contract:
-            # the service is expected to synchronously persist a CONFIRMED
-            # receipt before returning).  If the receipt is not yet CONFIRMED
-            # we surface it via the same routing flags.
+            # Verify the terminal disposition writeback receipt that
+            # activate_and_submit just enqueued.  Receipts may not exist yet
+            # (outbox not delivered) or may be non-CONFIRMED — both route to
+            # need_writeback_recovery rather than overall success.
             terminal_wb_eval = await self._evaluate_terminal_writeback_status(
                 event_id=event_id,
                 activate_result=activate_result,
@@ -980,9 +993,9 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # Evaluate writeback recovery first (lower priority), then
             # manual resolution (higher priority).  When both the main
             # writeback evaluation and the terminal writeback evaluation
-            # flag issues, MANUAL_RESOLUTION must win over WAITING:
-            # a terminal writeback receipt that is missing or permanently
-            # failed requires operator intervention, not a polling loop.
+            # flag issues, MANUAL_RESOLUTION must win over WAITING for
+            # permanent failures (CONFLICT, exhausted UNKNOWN); missing or
+            # in-flight receipts stay on the recovery/waiting path.
             if need_wb_recovery:
                 if overall_status == VerificationOverallStatus.SUCCESS:
                     overall_status = VerificationOverallStatus.WAITING
@@ -1033,9 +1046,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             if action.execution_phase == ActionExecutionPhase.POST_VERIFY:
                 continue
 
-            wb_status = action.writeback_status
             wb_readiness = action.writeback_readiness
             wb_ids = await self._collect_writeback_ids(event_id, action, outbox_map)
+            wb_status, evidence_raw = await self._resolve_effective_writeback_status(
+                action=action,
+                wb_ids=wb_ids,
+            )
 
             if not action.writeback_applicable:
                 # Obligation exists at the event level but doesn't land on
@@ -1093,11 +1109,17 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 ob_records = outbox_map.get(action.action_id, [])
                 if ob_records:
                     confirmed, rec, man, detail_suffix = (
-                        False, True, False, "writeback_no_status_waiting"
+                        False,
+                        True,
+                        False,
+                        "writeback_no_status_waiting",
                     )
                 else:
                     confirmed, rec, man, detail_suffix = (
-                        False, True, False, "writeback_not_yet_dispatched"
+                        False,
+                        True,
+                        False,
+                        "writeback_not_yet_dispatched",
                     )
             elif wb_status == WritebackStatus.UNKNOWN:
                 # UNKNOWN → need_recovery (not manual) on first lookup.
@@ -1116,12 +1138,17 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         max_attempt = ob_attempt
                 if max_attempt >= VERIFY_UNKNOWN_MAX_LOOKUPS:
                     confirmed, rec, man, detail_suffix = (
-                        False, False, True,
+                        False,
+                        False,
+                        True,
                         "writeback_unknown_exhausted_lookups_manual",
                     )
                 else:
                     confirmed, rec, man, detail_suffix = (
-                        False, True, False, "writeback_unknown_requires_lookup"
+                        False,
+                        True,
+                        False,
+                        "writeback_unknown_requires_lookup",
                     )
             else:
                 routing = _WRITEBACK_STATUS_ROUTING.get(
@@ -1129,6 +1156,16 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     (False, True, False, "writeback_status_unknown"),
                 )
                 confirmed, rec, man, detail_suffix = routing
+
+            confirmed, rec, man, detail_suffix, evidence_tier = (
+                self._adjust_routing_for_weak_evidence(
+                    confirmed=confirmed,
+                    rec=rec,
+                    man=man,
+                    detail_suffix=detail_suffix,
+                    evidence_raw=evidence_raw,
+                )
+            )
 
             if confirmed:
                 # Phase 2 writeback receipt confirmed — effect_status=VERIFIED
@@ -1147,6 +1184,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_ids=wb_ids,
                         detail=detail_suffix,
                         verification_phase=VerificationPhase.DISPOSITION,
+                        confirmation_evidence=evidence_tier,
                     )
                 )
             elif man:
@@ -1162,6 +1200,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_ids=wb_ids,
                         detail=detail_suffix,
                         verification_phase=VerificationPhase.DISPOSITION,
+                        confirmation_evidence=evidence_tier,
                     )
                 )
             else:
@@ -1179,6 +1218,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         writeback_ids=wb_ids,
                         detail=detail_suffix,
                         verification_phase=VerificationPhase.DISPOSITION,
+                        confirmation_evidence=evidence_tier,
                     )
                 )
 
@@ -1392,18 +1432,81 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 wb_ids.append(wb_id)
         return wb_ids
 
+    async def _load_latest_writeback_receipt(
+        self,
+        writeback_id: str,
+    ) -> orm.DispositionReceipt | None:
+        if self._session_factory is None:
+            return None
+        async with self._session_factory() as session:
+            return (
+                await session.scalars(
+                    select(orm.DispositionReceipt)
+                    .where(orm.DispositionReceipt.writeback_id == writeback_id)
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+            ).first()
+
+    async def _resolve_effective_writeback_status(
+        self,
+        *,
+        action: Action,
+        wb_ids: list[str],
+    ) -> tuple[WritebackStatus | None, str | None]:
+        """Prefer latest DispositionReceipt over denormalized Action.writeback_status."""
+        if wb_ids and self._session_factory is not None:
+            for wb_id in wb_ids:
+                receipt = await self._load_latest_writeback_receipt(wb_id)
+                if receipt is not None:
+                    try:
+                        status = WritebackStatus(receipt.status)
+                    except ValueError:
+                        status = WritebackStatus.UNKNOWN
+                    evidence = getattr(receipt, "confirmation_evidence", None)
+                    return status, evidence
+        return action.writeback_status, None
+
+    @staticmethod
+    def _adjust_routing_for_weak_evidence(
+        *,
+        confirmed: bool,
+        rec: bool,
+        man: bool,
+        detail_suffix: str,
+        evidence_raw: str | None,
+    ) -> tuple[bool, bool, bool, str, str | None]:
+        evidence_tier: str | None = evidence_raw
+        if not confirmed:
+            return confirmed, rec, man, detail_suffix, evidence_tier
+        if evidence_raw is None:
+            return confirmed, rec, man, detail_suffix, None
+        try:
+            evidence = ConfirmationEvidence(evidence_raw)
+        except ValueError:
+            return confirmed, rec, man, detail_suffix, evidence_raw
+        evidence_tier = evidence.value
+        if evidence is ConfirmationEvidence.ADAPTER_ACKNOWLEDGED:
+            return (
+                False,
+                True,
+                False,
+                "writeback_confirmed_weak_evidence",
+                evidence_tier,
+            )
+        return confirmed, rec, man, detail_suffix, evidence_tier
+
     async def _evaluate_terminal_writeback_status(
         self,
         *,
         event_id: str,
         activate_result: _ActivateResult,
     ) -> dict[str, Any]:
-        """Evaluate the terminal disposition's writeback receipt after activation.
+        """Evaluate the terminal disposition writeback receipt after activation.
 
-        ISSUE-059A contract: ``EventDispositionService.activate_and_submit``
-        is expected to synchronously persist the terminal writeback receipt
-        with status CONFIRMED before returning.  This method independently
-        verifies that the receipt was persisted and evaluates its status.
+        ``activate_and_submit`` only guarantees outbox enqueue; receipt rows
+        appear after DispositionSyncService delivery.  Missing or non-CONFIRMED
+        receipts route to ``need_recovery`` per ISSUE-060 §4.5.
 
         Returns a dict with the same shape as ``_evaluate_writeback_statuses``
         so phase 2 can merge the terminal writeback evaluation into its
@@ -1438,10 +1541,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 # conform to the wbk-{8hex} format and would fail downstream
                 # resolve/retry path-parameter matching.
                 # (ISSUE-060 review SF-3)
-                _blocked_ref = (
-                    activate_result.action_id
-                    or activate_result.writeback_id
-                )
+                _blocked_ref = activate_result.action_id or activate_result.writeback_id
                 if _blocked_ref is not None:
                     blocked_wb_set.add(_blocked_ref)
             return empty
@@ -1469,13 +1569,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 ).first()
 
                 if receipt_row is None:
-                    logger.warning(
-                        "Terminal writeback receipt not found: wb_id=%s event=%s",
+                    logger.info(
+                        "Terminal writeback receipt not yet available: wb_id=%s"
+                        " event=%s — awaiting DispositionSync delivery",
                         terminal_wb_id,
                         event_id,
                     )
-                    blocked_wb_set.add(terminal_wb_id)
-                    empty["need_manual"] = True
+                    empty["need_recovery"] = True
                     return empty
 
                 # Map the receipt status string to a WritebackStatus enum value.
@@ -1496,43 +1596,28 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 )
                 confirmed, rec, man, detail_suffix = routing
 
-                # Evidence-tier evaluation: per §4.6.16 the UI/statistics
-                # must distinguish strong evidence (readback_verified,
-                # manual_confirmed) from medium (status_queried) and weak
-                # (adapter_acknowledged).  A CONFIRMED receipt backed only
-                # by adapter_acknowledged should not be treated as equally
-                # trustworthy as one with readback_verified.
-                # (ISSUE-060 review SF-3)
-                if confirmed:
-                    evidence_raw: str | None = getattr(
-                        receipt_row, "confirmation_evidence", None
+                evidence_raw = getattr(receipt_row, "confirmation_evidence", None)
+                confirmed, rec, man, detail_suffix, evidence_tier = (
+                    self._adjust_routing_for_weak_evidence(
+                        confirmed=confirmed,
+                        rec=rec,
+                        man=man,
+                        detail_suffix=detail_suffix,
+                        evidence_raw=evidence_raw,
                     )
-                    if evidence_raw is not None:
-                        try:
-                            evidence = ConfirmationEvidence(evidence_raw)
-                        except ValueError:
-                            evidence = None
-                        if evidence is ConfirmationEvidence.ADAPTER_ACKNOWLEDGED:
-                            detail_suffix = "writeback_confirmed_weak_evidence"
-                            logger.info(
-                                "Terminal writeback %s CONFIRMED but evidence_tier=weak"
-                                " (adapter_acknowledged) event=%s",
-                                terminal_wb_id,
-                                event_id,
-                            )
-                        # Expose evidence_tier in the result so downstream
-                        # consumers can make tier-aware decisions.
-                        empty["evidence_tier"] = evidence.value if evidence else evidence_raw
-                    else:
-                        empty["evidence_tier"] = None
+                )
+                if (
+                    evidence_raw is not None
+                    and evidence_tier == ConfirmationEvidence.ADAPTER_ACKNOWLEDGED.value
+                ):
+                    logger.info(
+                        "Terminal writeback %s CONFIRMED but evidence_tier=weak"
+                        " (adapter_acknowledged) event=%s",
+                        terminal_wb_id,
+                        event_id,
+                    )
+                empty["confirmation_evidence"] = evidence_tier
 
-                # CONFIRMED is the happy path — the terminal writeback
-                # receipt was persisted synchronously by activate_and_submit
-                # per the ISSUE-059A contract.  The routing table maps
-                # CONFIRMED → (True, False, False, …), so none of `man`,
-                # `rec`, or `failed_wb` are set.  The empty dict returned
-                # by the CONFIRMED branch is intentional: "no action
-                # needed" is the correct routing decision.
                 if not confirmed:
                     logger.warning(
                         "Terminal writeback %s status=%s → %s event=%s",
@@ -1724,6 +1809,25 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
     # Working memory & event bus
     # ------------------------------------------------------------------ #
 
+    async def _persist_phase1_for_eds_gate(
+        self,
+        *,
+        event_id: str,
+        phase1_results: list[VerificationActionResult],
+        phase1_failed: set[str],
+    ) -> None:
+        """Persist phase-1-only verification so EDS can pass after_effect_resolution_ready."""
+        interim = VerificationResult(
+            results=phase1_results,
+            overall_status=VerificationOverallStatus.SUCCESS,
+            failed_actions=list(phase1_failed),
+            verification_phase=VerificationPhase.EFFECT,
+            need_action_replan=False,
+            need_writeback_recovery=False,
+            need_manual_resolution=False,
+        )
+        await self._write_verification_result(event_id, interim)
+
     async def _write_verification_result(
         self,
         event_id: str,
@@ -1815,9 +1919,7 @@ def _plan_actions(response_plan: Any) -> list[Action]:
         try:
             return list(response_plan.actions)
         except TypeError:
-            logger.warning(
-                "response_plan.actions is not iterable — returning empty list"
-            )
+            logger.warning("response_plan.actions is not iterable — returning empty list")
             return []
     if isinstance(response_plan, dict):
         raw = response_plan.get("actions", [])
