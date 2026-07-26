@@ -730,11 +730,12 @@ async def test_lookup_update_blocks_illegal_transition(
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
     sync = _sync_service(session_factory, store, mock_xdr_client)
     writeback_id = f"wbk-{_sfx()}"
+    outbox_id = f"obx-{_sfx()}"
     async with session_factory() as session:
         async with session.begin():
             session.add(
                 orm.DispositionOutbox(
-                    outbox_id=f"obx-{_sfx()}",
+                    outbox_id=outbox_id,
                     writeback_id=writeback_id,
                     disposition_id=f"disp-{_sfx()}",
                     action_id=action_id,
@@ -757,12 +758,10 @@ async def test_lookup_update_blocks_illegal_transition(
     # FAILED → CONFIRMED with evidence_adjudication=True (provider-side
     # lookup provides the evidence) should be accepted — the validate call
     # must not throw.
-    await sync.update_writeback_status_from_lookup(
-        writeback_id, WritebackStatus.CONFIRMED
-    )
+    await sync.update_writeback_status_from_lookup(writeback_id, WritebackStatus.CONFIRMED)
     # Verify the status was actually written.
     async with session_factory() as session:
-        outbox = await session.get(orm.DispositionOutbox, writeback_id)
+        outbox = await session.get(orm.DispositionOutbox, outbox_id)
         assert outbox is not None
         assert outbox.latest_writeback_status == WritebackStatus.CONFIRMED.value
 
@@ -817,9 +816,7 @@ async def test_lookup_update_blocks_illegal_transition_to_pending(
     # FAILED → PENDING requires adapter_allows_safe_retry=True, which the
     # default validate_writeback_status_transition call does not provide.
     with pytest.raises(InvalidStateTransitionError):
-        await sync.update_writeback_status_from_lookup(
-            writeback_id, WritebackStatus.PENDING
-        )
+        await sync.update_writeback_status_from_lookup(writeback_id, WritebackStatus.PENDING)
 
 
 def factory_build_min_command(

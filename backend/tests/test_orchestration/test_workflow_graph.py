@@ -16,6 +16,9 @@ from app.models.agent_io import (
     RiskAssessment,
     ScoringMode,
     TriageResult,
+    VerificationOverallStatus,
+    VerificationPhase,
+    VerificationResult,
 )
 from app.models.context import EventContext
 from app.models.enums import (
@@ -37,7 +40,6 @@ from app.orchestration.graph_state import InvestigationState
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_APPROVAL_WAIT,
-    NODE_BEGIN_DISPOSITION_ONLY,
     NODE_CLOSE,
     NODE_EXECUTE,
     NODE_HALT,
@@ -52,7 +54,6 @@ from app.orchestration.workflow_graph import (
     ROUTE_DISPOSITION_ONLY,
     ROUTE_EVIDENCE,
     ROUTE_EXECUTE,
-    ROUTE_HALT,
     ROUTE_INVESTIGATE,
     ROUTE_MANUAL,
     ROUTE_MANUAL_HOLD,
@@ -251,6 +252,12 @@ def _agents(*, triage: TriageResult | None = None) -> dict[str, Any]:
             )
         ),
         "report_agent": StubAgent(SimpleNamespace(report_id="rpt-stub")),
+        "verify_agent": StubAgent(
+            VerificationResult(
+                overall_status=VerificationOverallStatus.SUCCESS,
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ),
     }
 
 
@@ -767,7 +774,8 @@ async def test_approval_gate_is_reentrant() -> None:
     )
     config = {"configurable": {"thread_id": "evt-reentrant"}}
     final1 = await graph1.ainvoke(
-        _base_state(event_id="evt-reentrant"), config,
+        _base_state(event_id="evt-reentrant"),
+        config,
     )
     assert NODE_APPROVAL not in final1["node_trace"]
     assert NODE_RESPONSE in final1["node_trace"]

@@ -165,9 +165,7 @@ class ReplanHandler:
             ``decision=ESCALATE`` when the limit has been reached.
         """
         if current_replan_count < 0:
-            raise ValueError(
-                f"replan_count must be >= 0, got {current_replan_count}"
-            )
+            raise ValueError(f"replan_count must be >= 0, got {current_replan_count}")
         next_count = current_replan_count + 1
         if next_count > MAX_REPLAN_COUNT:
             logger.warning(
@@ -225,10 +223,7 @@ class ReplanHandler:
         if result.decision is ReplanDecision.ESCALATE:
             return result
 
-        reason = (
-            f"replan:cycle_{result.replan_count}:"
-            f"{','.join(failed_actions or ['unknown'])}"
-        )
+        reason = f"replan:cycle_{result.replan_count}:{','.join(failed_actions or ['unknown'])}"
         await self._state_machine.transition(
             event_id,
             EventStatus.REPLANNING,
@@ -339,9 +334,7 @@ async def replan_graph_node(
     """
     raw_event_id = state.get("event_id")
     if not raw_event_id:
-        raise ValueError(
-            "InvestigationState missing required field: event_id"
-        )
+        raise ValueError("InvestigationState missing required field: event_id")
     event_id = str(raw_event_id)
     current_count = int(state.get("replan_count", 0))
 
@@ -401,8 +394,7 @@ async def replan_graph_node(
                     return patches
         except DependencyUnavailableError:
             logger.warning(
-                "ConvergenceGuard unavailable for event=%s — "
-                "replan continues degraded",
+                "ConvergenceGuard unavailable for event=%s — replan continues degraded",
                 event_id,
             )
             # Attach degraded flag so operators can observe the guard failure

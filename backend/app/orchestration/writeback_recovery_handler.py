@@ -154,11 +154,11 @@ class _DispositionSyncPort(Protocol):
 class WritebackRecoveryAction(StrEnum):
     """What the handler decided to do."""
 
-    WAIT = "wait"                # stay in WAITING_WRITEBACK, wait for receipt
-    RETRY = "retry"              # re-enqueue same outbox
-    LOOKUP = "lookup"            # query provider for status
-    MANUAL = "manual"            # escalate to manual resolution
-    NOOP = "noop"                # nothing to do (already terminal)
+    WAIT = "wait"  # stay in WAITING_WRITEBACK, wait for receipt
+    RETRY = "retry"  # re-enqueue same outbox
+    LOOKUP = "lookup"  # query provider for status
+    MANUAL = "manual"  # escalate to manual resolution
+    NOOP = "noop"  # nothing to do (already terminal)
 
 
 @dataclass
@@ -413,9 +413,7 @@ class WritebackRecoveryHandler:
                         event_status=EventStatus.VERIFYING,
                     )
                     lookup_status_str = (
-                        writeback.current_status.value
-                        if writeback.current_status
-                        else "none"
+                        writeback.current_status.value if writeback.current_status else "none"
                     )
                     return WritebackRecoveryResult(
                         action=WritebackRecoveryAction.WAIT,
@@ -425,8 +423,7 @@ class WritebackRecoveryHandler:
                         lookup_attempt=result.lookup_attempt,
                     )
                 logger.warning(
-                    "writeback %s: no disposition_sync port, "
-                    "readiness=%s — escalating",
+                    "writeback %s: no disposition_sync port, readiness=%s — escalating",
                     writeback.writeback_id,
                     readiness.value,
                 )
@@ -513,9 +510,7 @@ class WritebackRecoveryHandler:
                         event_status=EventStatus.VERIFYING,
                     )
                     retry_status_str = (
-                        writeback.current_status.value
-                        if writeback.current_status
-                        else "none"
+                        writeback.current_status.value if writeback.current_status else "none"
                     )
                     return WritebackRecoveryResult(
                         action=WritebackRecoveryAction.WAIT,
@@ -525,8 +520,7 @@ class WritebackRecoveryHandler:
                         retry_attempt=result.retry_attempt,
                     )
                 logger.warning(
-                    "writeback %s: no disposition_sync port, "
-                    "readiness=%s — escalating",
+                    "writeback %s: no disposition_sync port, readiness=%s — escalating",
                     writeback.writeback_id,
                     readiness.value,
                 )
@@ -710,9 +704,7 @@ async def writeback_recovery_graph_node(
     """
     raw_event_id = state.get("event_id")
     if not raw_event_id:
-        raise ValueError(
-            "InvestigationState missing required field: event_id"
-        )
+        raise ValueError("InvestigationState missing required field: event_id")
     event_id = str(raw_event_id)
     failed_writebacks: list[str] = list(state.get("verify_failed_writebacks") or [])
 
@@ -760,9 +752,7 @@ async def writeback_recovery_graph_node(
         )
     )
 
-    result = await handler.execute(
-        event_id, wb_state, readiness=readiness
-    )
+    result = await handler.execute(event_id, wb_state, readiness=readiness)
 
     logger.info(
         "writeback_recovery: event=%s wb=%s action=%s escalated=%s",
@@ -807,8 +797,7 @@ async def writeback_recovery_graph_node(
     # whether more failed_writebacks remain.
     remaining = (
         failed_writebacks[1:]
-        if result.action
-        in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
+        if result.action in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
         else failed_writebacks
     )
     return {

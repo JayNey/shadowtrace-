@@ -55,7 +55,7 @@ from app.orchestration.writeback_recovery_handler import (
 )
 from app.services.analysis_only_pipeline import run_rag_stage
 from app.services.context_service import EventContextStore
-from app.services.degraded_flag_service import DegradedFlagService
+from app.services.degraded_flag_service import DegradedFlagService, apply_flag_to_list
 from app.services.state_machine_service import StateMachineService
 
 logger = logging.getLogger(__name__)
@@ -564,9 +564,7 @@ def build_investigation_graph(
         # STATE_TRANSITIONS has CONTAINED→{REPORTING, FAILED} and
         # FAILED→{REPORTING} — no direct edge to CLOSED.  We must first
         # transition through REPORTING to satisfy the state machine.
-        current_event_status = EventStatus(
-            state.get("event_status", EventStatus.REPORTING.value)
-        )
+        current_event_status = EventStatus(state.get("event_status", EventStatus.REPORTING.value))
         if current_event_status in (EventStatus.CONTAINED, EventStatus.FAILED):
             report_status = await _transition_status(
                 services,
@@ -892,9 +890,7 @@ def build_investigation_graph(
         disposition_sync = services.get("disposition_sync")
         event_disposition = services.get("event_disposition")
         disposition_only = bool(state.get("disposition_only_intent"))
-        policy_required = (
-            state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
-        )
+        policy_required = state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
 
         # Build ResponsePlan from state for VerifyAgent input.
         response_plan = (
@@ -950,8 +946,7 @@ def build_investigation_graph(
                     )
                 except Exception:
                     logger.exception(
-                        "verify_node: EventDispositionService activation "
-                        "failed for event=%s",
+                        "verify_node: EventDispositionService activation failed for event=%s",
                         state["event_id"],
                     )
                     degraded = True
@@ -977,62 +972,65 @@ def build_investigation_graph(
             else:
                 degraded = True
 
-            # When disposition activation itself fails, route directly to
-            # REPORTING.  The writeback was never created (the activation is
-            # what creates the outbox record), so there is nothing for
-            # WritebackRecoveryHandler to recover — sending it there would be
-            # a no-op round-trip (verify_failed_writebacks is empty → recovery
-            # node returns immediately → route_after_verify sends to REPORT).
-            # ISSUE-062 Should-Fix #1: skip the useless recovery node hop.
+            # When disposition activation itself fails the writeback was
+            # never created (the activation is what creates the outbox
+            # record), so there is nothing for WritebackRecoveryHandler to
+            # recover.  Route to MANUAL_RESOLUTION so an operator can
+            # decide whether to retry activation or close the event.
+            # We write the flag directly into state rather than through
+            # DegradedFlagService.set_flag to avoid the ISSUE-014 guardrail
+            # (verify_node is not a trusted caller and
+            # disposition_activation_failed is not in the allowlist).
             if degraded and disposition_activation_failed:
-                flags = await degraded_flags.set_flag(
-                    state["event_id"],
+                flags = apply_flag_to_list(
+                    list(state.get("degraded_flags") or []),
                     "disposition_activation_failed",
                     True,
-                    writer="verify_node",
                 )
-                status = await _transition_status(
-                    services,
-                    state,
-                    EventStatus.REPORTING,
-                    reason="investigation:disposition_activation_failed",
+                await runtime.set_execution_substate(
+                    state["event_id"],
+                    ExecutionSubstate.MANUAL_RESOLUTION,
+                    event_status=EventStatus.VERIFYING,
                 )
                 return _patch_state(
                     _trace(NODE_VERIFY),
-                    status,
                     {
                         "degraded_flags": flags,
+                        "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
                         "verify_need_action_replan": False,
                         "verify_need_writeback_recovery": False,
-                        "verify_need_manual_resolution": False,
+                        "verify_need_manual_resolution": True,
                     },
                 )
         else:
             degraded = True
 
         if degraded or verification_result is None:
-            # Degradation: assume verification passed so we can proceed to report.
-            # Mark degraded flag.
-            flags = await degraded_flags.set_flag(
-                state["event_id"],
+            # Degradation: verification could not complete.  Route to
+            # MANUAL_RESOLUTION so an operator can triage rather than
+            # silently assuming success and proceeding to REPORTING.
+            # We write the flag directly into state rather than through
+            # DegradedFlagService.set_flag to avoid the ISSUE-014 guardrail
+            # (verify_node is not a trusted caller and verify_degraded is
+            # not in the allowlist).
+            flags = apply_flag_to_list(
+                list(state.get("degraded_flags") or []),
                 "verify_degraded",
                 True,
-                writer="verify_node",
             )
-            status = await _transition_status(
-                services,
-                state,
-                EventStatus.REPORTING,
-                reason="investigation:verify_degraded",
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=EventStatus.VERIFYING,
             )
             return _patch_state(
                 _trace(NODE_VERIFY),
-                status,
                 {
                     "degraded_flags": flags,
+                    "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
                     "verify_need_action_replan": False,
                     "verify_need_writeback_recovery": False,
-                    "verify_need_manual_resolution": False,
+                    "verify_need_manual_resolution": True,
                 },
             )
 

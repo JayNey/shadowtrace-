@@ -17,17 +17,17 @@ from app.models.enums import (
 )
 from app.models.workflow import WRITEBACK_MAX_RETRIES
 from app.orchestration.graph_state import InvestigationState
+from app.orchestration.workflow_graph import (
+    ROUTE_HALT,
+    ROUTE_WRITEBACK,
+    route_after_verify,
+)
 from app.orchestration.writeback_recovery_handler import (
     VERIFY_UNKNOWN_MAX_LOOKUPS,
     WritebackRecoveryAction,
     WritebackRecoveryHandler,
     WritebackState,
     writeback_recovery_graph_node,
-)
-from app.orchestration.workflow_graph import (
-    ROUTE_HALT,
-    ROUTE_WRITEBACK,
-    route_after_verify,
 )
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -350,7 +350,9 @@ class TestWritebackRecoveryExecute:
         )
         wb = WritebackState(writeback_id="wbk-001", current_status=WritebackStatus.UNKNOWN)
         result = await handler.execute(
-            "evt-001", wb, readiness=WritebackReadiness.CAPABILITY_UNSUPPORTED,
+            "evt-001",
+            wb,
+            readiness=WritebackReadiness.CAPABILITY_UNSUPPORTED,
         )
         assert result.escalated is True
 
@@ -460,7 +462,9 @@ class TestWritebackRecoveryDegradation:
         )
         wb = WritebackState(writeback_id="wbk-001", current_status=WritebackStatus.FAILED)
         result = await handler.execute(
-            "evt-001", wb, readiness=WritebackReadiness.CAPABILITY_UNSUPPORTED,
+            "evt-001",
+            wb,
+            readiness=WritebackReadiness.CAPABILITY_UNSUPPORTED,
         )
         assert result.escalated is True
 
@@ -586,9 +590,7 @@ class TestRouteAfterVerifyHaltDetection:
             "verify_failed_writebacks": ["wbk-001"],
         }
         route = route_after_verify(state)
-        assert route == ROUTE_HALT, (
-            f"Expected ROUTE_HALT when halted=True, got {route}"
-        )
+        assert route == ROUTE_HALT, f"Expected ROUTE_HALT when halted=True, got {route}"
         assert route != ROUTE_WRITEBACK, (
             "Must not route to WRITEBACK when halted — this would cause a tight loop"
         )

@@ -444,7 +444,9 @@ class TestConvergenceGuardBlocksReplan:
             verify_has_partial_success=False,
         )
         result = await replan_graph_node(
-            state, handler=handler, convergence_guard=guard,
+            state,
+            handler=handler,
+            convergence_guard=guard,
         )
 
         # Must have called record_step AND should_stop
@@ -456,9 +458,7 @@ class TestConvergenceGuardBlocksReplan:
         assert result["halted"] is True
 
         # Must NOT have attempted a REPLANNING transition
-        replan_transitions = [
-            t for t in sm.transitions if t[1] == EventStatus.REPLANNING
-        ]
+        replan_transitions = [t for t in sm.transitions if t[1] == EventStatus.REPLANNING]
         assert len(replan_transitions) == 0, (
             "Convergence guard stop must prevent REPLANNING transition"
         )
@@ -472,16 +472,16 @@ class TestConvergenceGuardBlocksReplan:
 
         guard = MagicMock()
         guard.record_step = AsyncMock()
-        guard.should_stop = AsyncMock(
-            return_value=StopDecision(stop=False, reason=StopReason.NONE)
-        )
+        guard.should_stop = AsyncMock(return_value=StopDecision(stop=False, reason=StopReason.NONE))
 
         state = _base_state(
             replan_count=0,
             verify_failed_actions=["act-001"],
         )
         result = await replan_graph_node(
-            state, handler=handler, convergence_guard=guard,
+            state,
+            handler=handler,
+            convergence_guard=guard,
         )
 
         guard.record_step.assert_awaited_once()

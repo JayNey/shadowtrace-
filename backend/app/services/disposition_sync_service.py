@@ -210,9 +210,7 @@ class DispositionSyncService:
                 )
         return WritebackStatus.PENDING
 
-    async def lookup_writeback_status(
-        self, writeback_id: str
-    ) -> WritebackStatus | None:
+    async def lookup_writeback_status(self, writeback_id: str) -> WritebackStatus | None:
         """Look up the current writeback status from the outbox by writeback_id.
 
         Used by WritebackRecoveryHandler (ISSUE-062) when a writeback is in
@@ -262,8 +260,7 @@ class DispositionSyncService:
                 )
                 if outbox is None:
                     logger.warning(
-                        "update_writeback_status_from_lookup: outbox not found "
-                        "for writeback_id=%s",
+                        "update_writeback_status_from_lookup: outbox not found for writeback_id=%s",
                         writeback_id,
                     )
                     return
@@ -283,9 +280,7 @@ class DispositionSyncService:
                 )
                 outbox.latest_writeback_status = status.value
                 outbox.updated_at = datetime.now(UTC)
-                action = await session.get(
-                    orm.Action, outbox.action_id, with_for_update=True
-                )
+                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
                 if action is not None:
                     action.writeback_status = status.value
                 event_id = outbox.event_id
