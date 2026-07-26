@@ -237,6 +237,53 @@ class DispositionSyncService:
                 )
                 return WritebackStatus.UNKNOWN
 
+    async def update_writeback_status_from_lookup(
+        self, writeback_id: str, status: WritebackStatus
+    ) -> None:
+        """Update outbox writeback status from a provider-side lookup (ISSUE-062).
+
+        This bypasses the :meth:`resolve_writeback` validation gate because
+        the status comes from a provider-side query, not a human adjudication.
+        Only call this when the provider has confirmed the actual writeback
+        status via :meth:`lookup_writeback_status`.
+
+        Should-Fix #1: the previous implementation called ``resolve_writeback``
+        with ``resolution="status_queried:..."``, which was always rejected by
+        the validation gate (only ``manual_confirmed`` / ``mark_failed`` /
+        ``abandon`` are accepted).  This method writes the resolved status
+        directly without the adjudication gate.
+        """
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.writeback_id == writeback_id)
+                    .with_for_update()
+                )
+                if outbox is None:
+                    logger.warning(
+                        "update_writeback_status_from_lookup: outbox not found "
+                        "for writeback_id=%s",
+                        writeback_id,
+                    )
+                    return
+                outbox.latest_writeback_status = status.value
+                outbox.updated_at = datetime.now(UTC)
+                action = await session.get(
+                    orm.Action, outbox.action_id, with_for_update=True
+                )
+                if action is not None:
+                    action.writeback_status = status.value
+                event_id = outbox.event_id
+        await self._sync_writeback_summary(event_id)
+        await self._maybe_resume(event_id)
+        if self._bus is not None:
+            await self._bus.publish_event(
+                event_id,
+                "writeback_updated",
+                {"writeback_id": writeback_id, "status": status.value},
+            )
+
     async def activate_deferred_disposition(
         self, event_id: str, *, operator: str
     ) -> WritebackStatus:

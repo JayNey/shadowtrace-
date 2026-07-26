@@ -138,6 +138,12 @@ class _DispositionSyncPort(Protocol):
         writeback_id: str,
     ) -> WritebackStatus | None: ...
 
+    async def update_writeback_status_from_lookup(
+        self,
+        writeback_id: str,
+        status: WritebackStatus,
+    ) -> None: ...
+
 
 # --------------------------------------------------------------------------- #
 # Types
@@ -225,11 +231,16 @@ class WritebackRecoveryHandler:
         status = writeback.current_status
 
         if status is None:
+            # Invalid / unparseable writeback_status — don't silently drop
+            # the writeback (NOOP is terminal).  Route to LOOKUP so the
+            # provider can be queried for the actual status; if no port is
+            # available execute() will escalate to MANUAL.
+            # See ISSUE-062 Should-Fix #2.
             return WritebackRecoveryResult(
-                action=WritebackRecoveryAction.NOOP,
+                action=WritebackRecoveryAction.LOOKUP,
                 writeback_id=writeback.writeback_id,
                 writeback_status=None,
-                reason="no_writeback_status",
+                reason="unknown_status_needs_lookup",
             )
 
         # Terminal states — nothing to recover.
@@ -400,11 +411,16 @@ class WritebackRecoveryHandler:
                         ExecutionSubstate.WAITING_WRITEBACK,
                         event_status=EventStatus.VERIFYING,
                     )
+                    lookup_status_str = (
+                        writeback.current_status.value
+                        if writeback.current_status
+                        else "none"
+                    )
                     return WritebackRecoveryResult(
                         action=WritebackRecoveryAction.WAIT,
                         writeback_id=writeback.writeback_id,
                         writeback_status=writeback.current_status,
-                        reason=f"waiting_lookup_blocked:{writeback.current_status.value if writeback.current_status else 'none'}",
+                        reason=f"waiting_lookup_blocked:{lookup_status_str}",
                         lookup_attempt=result.lookup_attempt,
                     )
                 logger.warning(
@@ -430,18 +446,22 @@ class WritebackRecoveryHandler:
                     # best-effort write — the primary durability mechanism is
                     # the async receipt from the provider; the lookup resolution
                     # bridges the gap when the receipt is delayed.
+                    #
+                    # Uses update_writeback_status_from_lookup (not
+                    # resolve_writeback) because resolve_writeback's validation
+                    # gate only accepts manual adjudication resolutions
+                    # (manual_confirmed / mark_failed / abandon).
                     try:
-                        await self._disposition_sync.resolve_writeback(
+                        await self._disposition_sync.update_writeback_status_from_lookup(
                             writeback.writeback_id,
-                            resolution=f"status_queried:{looked_up.value}",
-                            principal="WritebackRecoveryHandler",
-                            comment="lookup_resolved_status",
+                            looked_up,
                         )
                     except Exception:
-                        logger.debug(
+                        logger.warning(
                             "writeback %s: unable to persist lookup-resolved "
-                            "status to outbox — relying on async receipt",
+                            "status=%s to outbox — relying on async receipt",
                             writeback.writeback_id,
+                            looked_up.value,
                         )
                     return WritebackRecoveryResult(
                         action=WritebackRecoveryAction.NOOP,
@@ -490,11 +510,16 @@ class WritebackRecoveryHandler:
                         ExecutionSubstate.WAITING_WRITEBACK,
                         event_status=EventStatus.VERIFYING,
                     )
+                    retry_status_str = (
+                        writeback.current_status.value
+                        if writeback.current_status
+                        else "none"
+                    )
                     return WritebackRecoveryResult(
                         action=WritebackRecoveryAction.WAIT,
                         writeback_id=writeback.writeback_id,
                         writeback_status=writeback.current_status,
-                        reason=f"waiting_retry_blocked:{writeback.current_status.value if writeback.current_status else 'none'}",
+                        reason=f"waiting_retry_blocked:{retry_status_str}",
                         retry_attempt=result.retry_attempt,
                     )
                 logger.warning(

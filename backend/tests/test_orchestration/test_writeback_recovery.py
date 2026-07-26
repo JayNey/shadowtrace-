@@ -150,11 +150,16 @@ class TestWritebackRecoveryEvaluate:
         assert result.action == WritebackRecoveryAction.NOOP
         assert result.escalated is False
 
-    def test_none_status_returns_noop(self):
-        """None writeback status → NOOP."""
+    def test_none_status_returns_lookup(self):
+        """None writeback status → LOOKUP (ISSUE-062 Should-Fix #2).
+
+        Invalid / unparseable writeback_status should attempt a provider-side
+        lookup rather than being silently dropped as NOOP.  If no port is
+        available, execute() will escalate to MANUAL.
+        """
         wb = WritebackState(writeback_id="wbk-001", current_status=None)
         result = self._handler().evaluate(wb)
-        assert result.action == WritebackRecoveryAction.NOOP
+        assert result.action == WritebackRecoveryAction.LOOKUP
 
     # ── Waiting states ──
 
