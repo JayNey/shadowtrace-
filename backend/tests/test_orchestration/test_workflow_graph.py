@@ -415,8 +415,7 @@ async def test_required_threat_never_enters_disposition_only() -> None:
     assert final["halted"] is True
     assert final["verify_need_manual_resolution"] is True
     assert any(
-        "missing_response_plan_for_required_policy" in f
-        for f in final.get("degraded_flags", [])
+        "missing_response_plan_for_required_policy" in f for f in final.get("degraded_flags", [])
     )
 
 
