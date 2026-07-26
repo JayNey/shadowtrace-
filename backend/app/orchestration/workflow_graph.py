@@ -559,6 +559,24 @@ def build_investigation_graph(
             )
             report_generated = report is not None
 
+        # ISSUE-062 Blocker: escalated events arrive at close_node with
+        # CONTAINED/FAILED status in the DB (set by ReplanHandler.escalate()).
+        # STATE_TRANSITIONS has CONTAINED→{REPORTING, FAILED} and
+        # FAILED→{REPORTING} — no direct edge to CLOSED.  We must first
+        # transition through REPORTING to satisfy the state machine.
+        current_event_status = EventStatus(
+            state.get("event_status", EventStatus.REPORTING.value)
+        )
+        if current_event_status in (EventStatus.CONTAINED, EventStatus.FAILED):
+            report_status = await _transition_status(
+                services,
+                state,
+                EventStatus.REPORTING,
+                reason="investigation:escalated_to_reporting",
+            )
+            state = _patch_state(state, report_status)
+
+        escalated = bool(state.get("escalated", False))
         status = await _transition_status(
             services,
             state,
@@ -575,6 +593,7 @@ def build_investigation_graph(
                 recommendation=((state.get("false_positive_match") or {}).get("recommendation")),
                 final_verdict=FinalVerdict(final_verdict) if final_verdict else None,
                 report_exists=report_generated,
+                escalated=escalated,
             ),
             reason="investigation:close",
         )

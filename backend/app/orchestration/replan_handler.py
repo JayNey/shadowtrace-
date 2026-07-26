@@ -369,11 +369,10 @@ async def replan_graph_node(
                         failed_actions=failed_actions,
                     )
                 except ReplanCountExceededError as exc:
-                    return _build_escalate_patches(exc.target_status, halted=True)
-        except ReplanCountExceededError:
-            # Escalate exception already raised by handler.escalate() above;
-            # caught at the outer level → handled by the caller's catch block.
-            raise
+                    patches = _build_escalate_patches(exc.target_status, halted=True)
+                    if existing_degraded:
+                        patches["degraded_flags"] = existing_degraded
+                    return patches
         except Exception:
             logger.exception(
                 "ConvergenceGuard.record_step/should_stop failed for event=%s",

@@ -33,7 +33,7 @@ import logging
 import random
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol
+from typing import Any, NoReturn, Protocol
 
 from app.core.errors import (
     WritebackManualResolutionRequiredError,
@@ -475,10 +475,11 @@ class WritebackRecoveryHandler:
                 if writeback.lookup_count >= writeback.max_lookups:
                     return await self._handle_escalate(event_id, writeback, result, op)
                 # Wait before next cycle to avoid tight looping.
-                # Use a short fixed delay (1.0s) rather than exponential
-                # backoff — the external state (provider receipt) is the
-                # primary pacing mechanism and a minimum interval is
-                # sufficient to prevent DB pressure.
+                # Use a short fixed delay (1.0s) rather than the jittered
+                # exponential backoff applied in the RETRY path.  LOOKUP is a
+                # passive status query — the external provider receipt is the
+                # primary pacing mechanism; a minimum interval is sufficient
+                # to prevent DB pressure from polling.
                 await asyncio.sleep(1.0)
                 await self._runtime.set_execution_substate(
                     event_id,
@@ -597,7 +598,7 @@ class WritebackRecoveryHandler:
         writeback: WritebackState,
         result: WritebackRecoveryResult,
         operator: str,
-    ) -> WritebackRecoveryResult:
+    ) -> NoReturn:
         """Persist MANUAL_RESOLUTION substate and raise the appropriate error.
 
         Raises
@@ -759,7 +760,7 @@ async def writeback_recovery_graph_node(
         # negligible because the current graph only passes a single scalar
         # verify_writeback_status per cycle and counter precision across
         # multiple heterogeneous writebacks is inherently approximate.
-        # ISSUE-062-FOLLOWUP: persist per-writeback counters and per-writeback
+        # TODO(ISSUE-062): persist per-writeback counters and per-writeback
         # status tracking when the InvestigationState schema supports it.
         # See also the data-model limitation comment in the node entry point.
         return {

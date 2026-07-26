@@ -44,6 +44,11 @@ class InvestigationState(TypedDict, total=False):
     verify_failed_actions: list[str] | None
     verify_failed_writebacks: list[str] | None
     verify_writeback_status: str | None
+    # NOTE(ISSUE-062-FOLLOWUP): ``verify_writeback_status`` is a per-cycle
+    # scalar — when multiple writebacks fail within the same verification
+    # cycle and each has a distinct status (e.g. "UNKNOWN" + "CONFLICT"),
+    # the scalar may misroute the second writeback.  See the matching
+    # limitation logged in writeback_recovery_handler.py.
     writeback_lookup_count: int
     writeback_retry_count: int
     verify_has_partial_success: bool
