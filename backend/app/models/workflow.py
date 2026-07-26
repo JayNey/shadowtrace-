@@ -525,6 +525,10 @@ class TransitionContext(BaseModel):
     terminal_event_writeback: TerminalEventWritebackView | None = None
     current_plan_revision: int | None = None
     current_closure_cycle: int | None = None
+    # Set to True when replan_count exhausted and event must be escalated
+    # to human review.  Written to security_event.escalated by the state
+    # machine's pre-transition side effects for CONTAINED / FAILED.
+    escalated: bool = False
 
 
 # --------------------------------------------------------------------------- #

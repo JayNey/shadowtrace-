@@ -236,11 +236,10 @@ def route_after_verify(state: InvestigationState) -> str:
         return ROUTE_WRITEBACK
     if state.get("verify_need_action_replan"):
         return ROUTE_REPLAN
-    if (
-        state.get("disposition_only_intent")
-        or state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
-    ):
-        return ROUTE_HALT
+    # ISSUE-062 truth table: when all three flags are false → overall success → REPORT.
+    # Disposition-only / required policy events use the same REPORTING path;
+    # any deferred writeback that still needs waiting is handled via
+    # verify_need_writeback_recovery (checked above), not via HALT.
     return ROUTE_REPORT
 
 
@@ -328,6 +327,7 @@ def _event_context_from_state(state: InvestigationState) -> EventContext:
             )
         ),
         disposition_policy=policy,
+        escalated=bool(state.get("escalated", False)),
     )
     return EventContext(
         event=summary,
@@ -339,6 +339,7 @@ def _event_context_from_state(state: InvestigationState) -> EventContext:
             state.get("execution_substate", ExecutionSubstate.NONE.value)
         ),
         execution_plan=state.get("execution_plan"),
+        replan_count=int(state.get("replan_count", 0)),
     )
 
 
@@ -843,25 +844,11 @@ def build_investigation_graph(
 
     async def verify_node(state: InvestigationState) -> InvestigationState:
         verify_agent = cast(_AgentLike | None, agents.get("verify_agent"))
+        disposition_sync = services.get("disposition_sync")
         disposition_only = bool(state.get("disposition_only_intent"))
         policy_required = (
             state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
         )
-
-        # Disposition-only path: skip verification, route to halt/report.
-        if disposition_only or policy_required:
-            # For disposition-only or required policy, verify_node is only
-            # reached after phase-2 activation. If we have no verify agent,
-            # default to halting for manual review.
-            if verify_agent is None:
-                logger.warning(
-                    "verify_node: no verify_agent for required event=%s; halting",
-                    state["event_id"],
-                )
-                return _patch_state(
-                    _trace(NODE_VERIFY),
-                    {"halted": True},
-                )
 
         # Build ResponsePlan from state for VerifyAgent input.
         response_plan = (
@@ -893,6 +880,32 @@ def build_investigation_graph(
             except Exception:
                 degraded = True
                 logger.exception("verify_agent failed for event=%s", state["event_id"])
+        elif disposition_only or policy_required:
+            # Disposition-only path without verify_agent: activate the
+            # deferred disposition writeback (phase 2) via disposition_sync
+            # if available.  When disposition_sync is not wired, fall
+            # through to the degraded path with writeback recovery flagged
+            # so the writeback recovery handler can pick it up.
+            if disposition_sync is not None:
+                try:
+                    logger.info(
+                        "verify_node: activating deferred disposition for event=%s",
+                        state["event_id"],
+                    )
+                    # Attempt to write the deferred disposition command.
+                    # If the writeback needs waiting, flag it for recovery.
+                    await disposition_sync.retry_writeback(
+                        state["event_id"],
+                        "verify_node:disposition_activation",
+                    )
+                except Exception:
+                    logger.exception(
+                        "verify_node: disposition activation failed for event=%s",
+                        state["event_id"],
+                    )
+                    degraded = True
+            else:
+                degraded = True
         else:
             degraded = True
 
@@ -971,6 +984,7 @@ def build_investigation_graph(
         return await replan_graph_node(
             state,
             handler=replan_handler,
+            convergence_guard=services.get("convergence_guard"),
         )
 
     async def writeback_recovery_node(state: InvestigationState) -> InvestigationState:

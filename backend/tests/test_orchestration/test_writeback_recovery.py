@@ -331,7 +331,7 @@ class TestWritebackRecoveryExecute:
         assert result.escalated is True
 
     async def test_execute_no_disposition_sync_escalates(self):
-        """No disposition_sync port → escalate on LOOKUP."""
+        """No disposition_sync port + known-unsupported readiness → escalate."""
         rt = FakeRuntime()
         handler = WritebackRecoveryHandler(
             state_machine=FakeStateMachine(),
@@ -339,8 +339,24 @@ class TestWritebackRecoveryExecute:
             disposition_sync=None,
         )
         wb = WritebackState(writeback_id="wbk-001", current_status=WritebackStatus.UNKNOWN)
-        result = await handler.execute("evt-001", wb)
+        result = await handler.execute(
+            "evt-001", wb, readiness=WritebackReadiness.CAPABILITY_UNSUPPORTED,
+        )
         assert result.escalated is True
+
+    async def test_execute_no_disposition_sync_unknown_stays_waiting(self):
+        """No disposition_sync port + CAPABILITY_UNKNOWN → stays in WAIT."""
+        rt = FakeRuntime()
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=rt,
+            disposition_sync=None,
+        )
+        wb = WritebackState(writeback_id="wbk-001", current_status=WritebackStatus.UNKNOWN)
+        result = await handler.execute("evt-001", wb)  # defaults to CAPABILITY_UNKNOWN
+        assert result.escalated is False
+        assert result.action is WritebackRecoveryAction.LOOKUP
+        assert rt.substate_calls[-1][1] == ExecutionSubstate.WAITING_WRITEBACK
 
 
 # ── Tests: writeback_recovery_graph_node ─────────────────────────────────────
@@ -423,7 +439,7 @@ class TestWritebackRecoveryDegradation:
     """Tests for WritebackRecoveryHandler degradation paths."""
 
     async def test_retry_without_port_escalates(self):
-        """RETRY without disposition_sync → escalate."""
+        """RETRY without disposition_sync + known-unsupported → escalate."""
         rt = FakeRuntime()
         handler = WritebackRecoveryHandler(
             state_machine=FakeStateMachine(),
@@ -431,9 +447,24 @@ class TestWritebackRecoveryDegradation:
             disposition_sync=None,
         )
         wb = WritebackState(writeback_id="wbk-001", current_status=WritebackStatus.FAILED)
-        result = await handler.execute("evt-001", wb)
+        result = await handler.execute(
+            "evt-001", wb, readiness=WritebackReadiness.CAPABILITY_UNSUPPORTED,
+        )
         assert result.escalated is True
-        assert rt.substate_calls[-1][1] == ExecutionSubstate.MANUAL_RESOLUTION
+
+    async def test_retry_without_port_unknown_stays_waiting(self):
+        """RETRY without disposition_sync + CAPABILITY_UNKNOWN → stays in WAIT."""
+        rt = FakeRuntime()
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=rt,
+            disposition_sync=None,
+        )
+        wb = WritebackState(writeback_id="wbk-001", current_status=WritebackStatus.FAILED)
+        result = await handler.execute("evt-001", wb)  # defaults to CAPABILITY_UNKNOWN
+        assert result.escalated is False
+        assert result.action is WritebackRecoveryAction.RETRY
+        assert rt.substate_calls[-1][1] == ExecutionSubstate.WAITING_WRITEBACK
 
 
 # ── Tests: boundary inputs ──────────────────────────────────────────────────

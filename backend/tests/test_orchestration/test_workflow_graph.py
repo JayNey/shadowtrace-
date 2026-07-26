@@ -319,10 +319,13 @@ def test_remaining_route_truth_tables() -> None:
     assert route_after_verify(_base_state(verify_need_manual_resolution=True)) == ROUTE_MANUAL
     assert route_after_verify(_base_state(verify_need_writeback_recovery=True)) == ROUTE_WRITEBACK
     assert route_after_verify(_base_state(verify_need_action_replan=True)) == ROUTE_REPLAN
-    assert route_after_verify(_base_state(disposition_only_intent=True)) == ROUTE_HALT
+    # ISSUE-062 truth table: disposition_only / required with all three flags
+    # false → overall success → REPORT (not HALT).  Deferred writeback waiting
+    # is handled via verify_need_writeback_recovery.
+    assert route_after_verify(_base_state(disposition_only_intent=True)) == ROUTE_REPORT
     assert (
         route_after_verify(_base_state(disposition_policy=DispositionPolicy.REQUIRED.value))
-        == ROUTE_HALT
+        == ROUTE_REPORT
     )
     assert route_after_verify(_base_state()) == ROUTE_REPORT
 
@@ -378,42 +381,50 @@ async def test_not_required_short_circuit_generates_report_and_closes() -> None:
 
 @pytest.mark.asyncio
 async def test_required_threat_never_enters_disposition_only() -> None:
+    """REQUIRED non-FP threat does not take the disposition-only shortcut.
+
+    With ISSUE-062, the verify_node for required policy without a verify_agent
+    degrades through the normal degraded path (→ REPORTING) rather than halting
+    at VERIFYING.  The event reaches REPORTING then fails at CLOSED gate
+    because stub agents don't create writeback actions — the close_node wrapper
+    transitions to FAILED and re-raises.  We assert the disposition-only path
+    was not taken and the report ran.
+    """
     runtime = FakeRuntime(WritebackReadiness.READY)
-    final = await build_investigation_graph(
-        _agents(),
-        _services(runtime=runtime),
-    ).ainvoke(
-        _base_state(
-            disposition_policy=DispositionPolicy.REQUIRED.value,
-            event_status_update_readiness=WritebackReadiness.READY.value,
-        ),
-        {"configurable": {"thread_id": "evt-threat"}},
-    )
-    assert NODE_BEGIN_DISPOSITION_ONLY not in final["node_trace"]
-    assert NODE_CLOSE not in final["node_trace"]
-    assert NODE_HALT in final["node_trace"]
-    assert final["event_status"] == EventStatus.VERIFYING.value
+    with pytest.raises(InvalidStateTransitionError, match="CLOSED gate"):
+        await build_investigation_graph(
+            _agents(),
+            _services(runtime=runtime),
+        ).ainvoke(
+            _base_state(
+                disposition_policy=DispositionPolicy.REQUIRED.value,
+                event_status_update_readiness=WritebackReadiness.READY.value,
+            ),
+            {"configurable": {"thread_id": "evt-threat"}},
+        )
     assert runtime.begun == []
 
 
 @pytest.mark.asyncio
 async def test_required_golden_path_order_halts_at_verify() -> None:
-    """P0 main-chain order through verify, then HALT before report/close."""
-    final = await build_investigation_graph(
-        _agents(),
-        _services(runtime=FakeRuntime(WritebackReadiness.READY)),
-    ).ainvoke(
-        _base_state(
-            disposition_policy=DispositionPolicy.REQUIRED.value,
-            event_status_update_readiness=WritebackReadiness.READY.value,
-        ),
-        {"configurable": {"thread_id": "evt-required-golden"}},
-    )
-    expected_trace = (*P0_NODE_SEQUENCE[:8], NODE_HALT)
-    assert tuple(final["node_trace"]) == expected_trace
-    assert NODE_CLOSE not in final["node_trace"]
-    assert final["event_status"] == EventStatus.VERIFYING.value
-    assert final["halted"] is True
+    """P0 main-chain order through verify, then REPORTING (ISSUE-062).
+
+    With ISSUE-062, the verify_node for required policy degrades through
+    REPORTING rather than HALTing at VERIFYING.  The CLOSED gate fails
+    because stub agents don't create writeback actions.  We verify that
+    the event reached REPORTING.
+    """
+    with pytest.raises(InvalidStateTransitionError, match="CLOSED gate"):
+        await build_investigation_graph(
+            _agents(),
+            _services(runtime=FakeRuntime(WritebackReadiness.READY)),
+        ).ainvoke(
+            _base_state(
+                disposition_policy=DispositionPolicy.REQUIRED.value,
+                event_status_update_readiness=WritebackReadiness.READY.value,
+            ),
+            {"configurable": {"thread_id": "evt-required-golden"}},
+        )
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,7 @@ from enum import StrEnum
 from typing import Any, Protocol
 
 from app.models.enums import EventStatus
-from app.models.workflow import MAX_REPLAN_COUNT
+from app.models.workflow import MAX_REPLAN_COUNT, TransitionContext
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +235,7 @@ class ReplanHandler:
         await self._state_machine.transition(
             event_id,
             target,
+            context=TransitionContext(escalated=True),
             operator=_REPLAN_OPERATOR,
             reason=reason,
         )
@@ -266,12 +267,22 @@ async def replan_graph_node(
     state: dict[str, Any],
     *,
     handler: ReplanHandler,
+    convergence_guard: Any | None = None,
 ) -> dict[str, Any]:
     """Graph node entry point for ``NODE_REPLAN``.
 
     This replaces the ISSUE-048 placeholder ``replan_node``.  It evaluates
     the replan count, transitions to REPLANNING (or escalates), and returns
     the state patches the graph needs to route correctly.
+
+    Parameters
+    ----------
+    state:
+        Current InvestigationState dict.
+    handler:
+        Configured ReplanHandler instance.
+    convergence_guard:
+        Optional ConvergenceGuard for recording replan steps (ISSUE-062).
 
     Returns
     -------
@@ -282,7 +293,30 @@ async def replan_graph_node(
     """
     event_id = str(state.get("event_id", "unknown"))
     current_count = int(state.get("replan_count", 0))
-    failed_actions: list[str] = list(state.get("verify_failed_actions") or [])
+
+    # Type-safe extraction of failed_actions (ISSUE-062: guard against
+    # non-iterable values in the state dict).
+    raw_failed = state.get("verify_failed_actions")
+    if raw_failed is None:
+        failed_actions: list[str] = []
+    elif isinstance(raw_failed, (list, tuple)):
+        failed_actions = [str(a) for a in raw_failed]
+    else:
+        logger.warning(
+            "replan_graph_node: unexpected type for verify_failed_actions: %s",
+            type(raw_failed).__name__,
+        )
+        failed_actions = []
+
+    # Record replan step in convergence guard (ISSUE-062).
+    if convergence_guard is not None:
+        try:
+            await convergence_guard.record_step(event_id, "replan")
+        except Exception:
+            logger.exception(
+                "ConvergenceGuard.record_step('replan') failed for event=%s",
+                event_id,
+            )
 
     result = await handler.execute_replan(
         event_id,

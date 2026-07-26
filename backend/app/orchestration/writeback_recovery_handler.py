@@ -28,7 +28,9 @@ Constraints
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import random
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Protocol
@@ -36,6 +38,7 @@ from typing import Any, Protocol
 from app.models.enums import (
     EventStatus,
     ExecutionSubstate,
+    WritebackReadiness,
     WritebackStatus,
 )
 from app.models.workflow import WRITEBACK_MAX_RETRIES
@@ -47,6 +50,32 @@ _WR_OPERATOR = "WritebackRecoveryHandler"
 # Maximum number of provider-side lookups for UNKNOWN writebacks before
 # escalating to manual resolution.  Mirrors VerifyAgent.VERIFY_UNKNOWN_MAX_LOOKUPS.
 VERIFY_UNKNOWN_MAX_LOOKUPS = 3
+
+# Exponential backoff parameters for writeback retries.
+_BACKOFF_BASE_S = 1.0
+_BACKOFF_MAX_S = 60.0
+_JITTER_FACTOR = 0.3
+
+
+def _backoff_with_jitter(retry_count: int) -> float:
+    """Jittered exponential backoff for writeback retries.
+
+    Returns a delay in seconds: ``min(base * 2^count, max) * (1 ± jitter)``.
+    """
+    delay = min(_BACKOFF_BASE_S * (2 ** (retry_count - 1)), _BACKOFF_MAX_S)
+    jitter = delay * _JITTER_FACTOR * (2 * random.random() - 1)
+    return max(0.0, delay + jitter)
+
+
+def _parse_writeback_status(raw: Any) -> WritebackStatus | None:
+    """Safely parse a writeback status string, returning None on invalid input."""
+    if raw is None:
+        return None
+    try:
+        return WritebackStatus(raw)
+    except ValueError:
+        logger.warning("invalid writeback status value: %s", raw)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +323,7 @@ class WritebackRecoveryHandler:
         writeback: WritebackState,
         *,
         operator: str | None = None,
+        readiness: WritebackReadiness = WritebackReadiness.CAPABILITY_UNKNOWN,
     ) -> WritebackRecoveryResult:
         """Evaluate and execute the recovery action.
 
@@ -301,10 +331,14 @@ class WritebackRecoveryHandler:
         graph can pause and resume when the receipt arrives.
 
         For LOOKUP: queries the provider via the disposition_sync port and
-        returns the result.  If lookup is infeasible (no port), escalates.
+        returns the result.  If lookup is infeasible (no port) and readiness
+        is known to be unsupported, escalates.  If readiness is still
+        CAPABILITY_UNKNOWN, stays in WAITING_WRITEBACK until the capability
+        is resolved.
 
-        For RETRY: re-enqueues the same outbox via ``retry_writeback``.
-        If the port is unavailable, escalates.
+        For RETRY: re-enqueues the same outbox via ``retry_writeback`` with
+        jittered exponential backoff.  If the port is unavailable and readiness
+        is known unsupported, escalates.
 
         For MANUAL: persists ``MANUAL_RESOLUTION`` execution_substate and
         notifies that human intervention is needed.
@@ -317,6 +351,10 @@ class WritebackRecoveryHandler:
             Current writeback state with counters.
         operator:
             Human-readable operator for audit trails.
+        readiness:
+            The current WritebackReadiness for this event.  When CAPABILITY_UNKNOWN
+            and no disposition_sync port is wired, the handler stays in WAIT
+            rather than escalating prematurely.
         """
         result = self.evaluate(writeback)
         op = operator or _WR_OPERATOR
@@ -336,9 +374,25 @@ class WritebackRecoveryHandler:
 
         if result.action is WritebackRecoveryAction.LOOKUP:
             if self._disposition_sync is None:
+                if readiness is WritebackReadiness.CAPABILITY_UNKNOWN:
+                    # Live Adapter capability not yet probed — stay in
+                    # WAITING_WRITEBACK rather than prematurely escalating.
+                    logger.info(
+                        "writeback %s: disposition_sync not wired, "
+                        "readiness=CAPABILITY_UNKNOWN — staying in WAIT",
+                        writeback.writeback_id,
+                    )
+                    await self._runtime.set_execution_substate(
+                        event_id,
+                        ExecutionSubstate.WAITING_WRITEBACK,
+                        event_status=EventStatus.VERIFYING,
+                    )
+                    return result
                 logger.warning(
-                    "writeback %s: no disposition_sync port, escalating",
+                    "writeback %s: no disposition_sync port, "
+                    "readiness=%s — escalating",
                     writeback.writeback_id,
+                    readiness.value,
                 )
                 return await self._escalate(event_id, writeback, result, op)
             try:
@@ -378,11 +432,36 @@ class WritebackRecoveryHandler:
 
         if result.action is WritebackRecoveryAction.RETRY:
             if self._disposition_sync is None:
+                if readiness is WritebackReadiness.CAPABILITY_UNKNOWN:
+                    logger.info(
+                        "writeback %s: disposition_sync not wired, "
+                        "readiness=CAPABILITY_UNKNOWN — staying in WAIT",
+                        writeback.writeback_id,
+                    )
+                    await self._runtime.set_execution_substate(
+                        event_id,
+                        ExecutionSubstate.WAITING_WRITEBACK,
+                        event_status=EventStatus.VERIFYING,
+                    )
+                    return result
                 logger.warning(
-                    "writeback %s: no disposition_sync port, escalating",
+                    "writeback %s: no disposition_sync port, "
+                    "readiness=%s — escalating",
                     writeback.writeback_id,
+                    readiness.value,
                 )
                 return await self._escalate(event_id, writeback, result, op)
+
+            # Jittered exponential backoff before retry (ISSUE-062).
+            backoff_s = _backoff_with_jitter(result.retry_attempt)
+            logger.debug(
+                "writeback %s: backing off %.2fs before retry %d",
+                writeback.writeback_id,
+                backoff_s,
+                result.retry_attempt,
+            )
+            await asyncio.sleep(backoff_s)
+
             try:
                 await self._disposition_sync.retry_writeback(
                     writeback.writeback_id,
@@ -483,12 +562,19 @@ async def writeback_recovery_graph_node(
     wb_id = failed_writebacks[0]
     wb_state = WritebackState(
         writeback_id=wb_id,
-        current_status=WritebackStatus(state.get("verify_writeback_status"))
-        if state.get("verify_writeback_status")
-        else None,
+        current_status=_parse_writeback_status(state.get("verify_writeback_status")),
     )
 
-    result = await handler.execute(event_id, wb_state)
+    readiness = WritebackReadiness(
+        state.get(
+            "event_status_update_readiness",
+            WritebackReadiness.CAPABILITY_UNKNOWN.value,
+        )
+    )
+
+    result = await handler.execute(
+        event_id, wb_state, readiness=readiness
+    )
 
     logger.info(
         "writeback_recovery: event=%s wb=%s action=%s escalated=%s",

@@ -477,8 +477,10 @@ class StateMachineService:
                 # 3. Validate the edge.
                 validate_transition(current, target, authoritative_ctx)
 
-                # 4. Pre-status-write side effects (e.g. replan_count bump).
-                await self._apply_pre_transition_side_effects(session, row, current, target)
+                # 4. Pre-status-write side effects (e.g. replan_count bump, escalated flag).
+                await self._apply_pre_transition_side_effects(
+                    session, row, current, target, authoritative_ctx
+                )
 
                 # 5. Write the new status.
                 from_status = row.status
@@ -657,6 +659,7 @@ class StateMachineService:
         row: orm.SecurityEvent,
         current: EventStatus,
         target: EventStatus,
+        ctx: TransitionContext | None = None,
     ) -> None:
         """Side effects that must happen BEFORE the status column is written."""
 
@@ -673,6 +676,22 @@ class StateMachineService:
                     },
                 )
             row.replan_count = new_count
+
+        # Escalation persistence (ISSUE-062): when the caller signals that
+        # replan_count is exhausted via TransitionContext.escalated=True
+        # and the target is CONTAINED or FAILED, write the flag to the DB
+        # row so report generation and the UI can surface human-escalation.
+        if (
+            ctx is not None
+            and ctx.escalated
+            and target in (EventStatus.CONTAINED, EventStatus.FAILED)
+        ):
+            row.escalated = True
+            logger.info(
+                "escalated=true written for event=%s target=%s",
+                row.event_id,
+                target.value,
+            )
 
     async def _apply_post_transition_side_effects(
         self,
