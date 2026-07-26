@@ -230,6 +230,8 @@ def route_after_approval(state: InvestigationState) -> str:
 
 
 def route_after_verify(state: InvestigationState) -> str:
+    if state.get("halted"):
+        return ROUTE_HALT
     if state.get("verify_need_manual_resolution"):
         return ROUTE_MANUAL
     if state.get("verify_need_writeback_recovery"):

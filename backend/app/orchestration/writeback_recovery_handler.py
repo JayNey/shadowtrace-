@@ -589,6 +589,7 @@ async def writeback_recovery_graph_node(
             "verify_need_writeback_recovery": False,
             "verify_need_manual_resolution": True,
             "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+            "verify_failed_writebacks": failed_writebacks[1:],
         }
 
     if result.action is WritebackRecoveryAction.WAIT:
@@ -596,14 +597,20 @@ async def writeback_recovery_graph_node(
             "verify_need_writeback_recovery": True,
             "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
             "halted": True,
+            "verify_failed_writebacks": failed_writebacks[1:],
         }
 
     # LOOKUP / RETRY / NOOP: stay in recovery until resolved
+    is_terminal = result.action in (
+        WritebackRecoveryAction.NOOP,
+        WritebackRecoveryAction.MANUAL,
+    )
+    remaining = failed_writebacks[1:] if is_terminal else failed_writebacks
     return {
-        "verify_need_writeback_recovery": result.action
-        not in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL),
+        "verify_need_writeback_recovery": len(remaining) > 0,
         "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
-        "halted": result.action is WritebackRecoveryAction.WAIT,
+        "halted": False,
+        "verify_failed_writebacks": remaining,
     }
 
 

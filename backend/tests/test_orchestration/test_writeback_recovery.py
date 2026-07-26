@@ -24,6 +24,11 @@ from app.orchestration.writeback_recovery_handler import (
     WritebackState,
     writeback_recovery_graph_node,
 )
+from app.orchestration.workflow_graph import (
+    ROUTE_HALT,
+    ROUTE_WRITEBACK,
+    route_after_verify,
+)
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -536,3 +541,260 @@ class TestWritebackNeverReplans:
         assert len(replan_transitions) == 0, (
             f"Writeback status {status.value} must not enter REPLANNING"
         )
+
+
+# ── Tests: route_after_verify halt detection (Should-Fix #1) ──────────────────
+
+
+class TestRouteAfterVerifyHaltDetection:
+    """Verify route_after_verify correctly handles halted state to prevent
+    tight loops between verify ↔ writeback_recovery."""
+
+    def test_writeback_wait_routes_to_halt_not_loop(self):
+        """When writeback recovery sets halted=True + verify_need_writeback_recovery=True,
+        route_after_verify must return ROUTE_HALT, not ROUTE_WRITEBACK."""
+        state: InvestigationState = {
+            "event_id": "evt-test-halt-001",
+            "event_status": EventStatus.VERIFYING.value,
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+            "severity": Severity.HIGH.value,
+            "final_verdict": None,
+            "confidence": 0.0,
+            "need_investigation": True,
+            "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+            "event_status_update_readiness": WritebackReadiness.READY.value,
+            "degraded_flags": [],
+            "node_trace": [],
+            "halted": True,
+            "disposition_only_intent": False,
+            "report_generated": False,
+            "needs_approval_wait": False,
+            "plan_revision": 1,
+            "replan_count": 0,
+            "escalated": False,
+            "verify_need_action_replan": False,
+            "verify_need_writeback_recovery": True,
+            "verify_need_manual_resolution": False,
+            "verify_failed_writebacks": ["wbk-001"],
+        }
+        route = route_after_verify(state)
+        assert route == ROUTE_HALT, (
+            f"Expected ROUTE_HALT when halted=True, got {route}"
+        )
+        assert route != ROUTE_WRITEBACK, (
+            "Must not route to WRITEBACK when halted — this would cause a tight loop"
+        )
+
+    def test_halt_overrides_writeback_recovery(self):
+        """halted=True takes priority over verify_need_writeback_recovery=True."""
+        state: InvestigationState = {
+            "event_id": "evt-test-halt-002",
+            "event_status": EventStatus.VERIFYING.value,
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+            "severity": Severity.HIGH.value,
+            "final_verdict": None,
+            "confidence": 0.0,
+            "need_investigation": True,
+            "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+            "event_status_update_readiness": WritebackReadiness.READY.value,
+            "degraded_flags": [],
+            "node_trace": [],
+            "halted": True,
+            "disposition_only_intent": False,
+            "report_generated": False,
+            "needs_approval_wait": False,
+            "plan_revision": 1,
+            "replan_count": 0,
+            "escalated": False,
+            "verify_need_action_replan": True,
+            "verify_need_writeback_recovery": True,
+            "verify_need_manual_resolution": False,
+            "verify_failed_writebacks": ["wbk-001"],
+        }
+        route = route_after_verify(state)
+        assert route == ROUTE_HALT, (
+            f"halted=True must take priority over all verify flags, got {route}"
+        )
+
+    def test_halt_overrides_manual_resolution(self):
+        """halted=True takes priority over verify_need_manual_resolution=True."""
+        state: InvestigationState = {
+            "event_id": "evt-test-halt-003",
+            "event_status": EventStatus.VERIFYING.value,
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+            "severity": Severity.HIGH.value,
+            "final_verdict": None,
+            "confidence": 0.0,
+            "need_investigation": True,
+            "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+            "event_status_update_readiness": WritebackReadiness.READY.value,
+            "degraded_flags": [],
+            "node_trace": [],
+            "halted": True,
+            "disposition_only_intent": False,
+            "report_generated": False,
+            "needs_approval_wait": False,
+            "plan_revision": 1,
+            "replan_count": 0,
+            "escalated": False,
+            "verify_need_action_replan": False,
+            "verify_need_writeback_recovery": False,
+            "verify_need_manual_resolution": True,
+            "verify_failed_writebacks": [],
+        }
+        route = route_after_verify(state)
+        assert route == ROUTE_HALT, (
+            f"halted=True must take priority over manual_resolution flag, got {route}"
+        )
+
+    def test_no_halt_normal_routing(self):
+        """When halted=False, normal routing priority applies (existing behavior)."""
+        state: InvestigationState = {
+            "event_id": "evt-test-halt-004",
+            "event_status": EventStatus.VERIFYING.value,
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+            "severity": Severity.HIGH.value,
+            "final_verdict": None,
+            "confidence": 0.0,
+            "need_investigation": True,
+            "execution_substate": ExecutionSubstate.NONE.value,
+            "event_status_update_readiness": WritebackReadiness.READY.value,
+            "degraded_flags": [],
+            "node_trace": [],
+            "halted": False,
+            "disposition_only_intent": False,
+            "report_generated": False,
+            "needs_approval_wait": False,
+            "plan_revision": 1,
+            "replan_count": 0,
+            "escalated": False,
+            "verify_need_action_replan": False,
+            "verify_need_writeback_recovery": True,
+            "verify_need_manual_resolution": False,
+            "verify_failed_writebacks": ["wbk-001"],
+        }
+        route = route_after_verify(state)
+        assert route == ROUTE_WRITEBACK, (
+            f"Without halt, writeback_recovery flag should route to WRITEBACK, got {route}"
+        )
+
+
+# ── Tests: multiple writebacks head-of-line blocking (Should-Fix #2) ──────────
+
+
+class TestMultipleWritebackProcessing:
+    """Verify writeback_recovery_graph_node correctly advances through
+    multiple failed writebacks without head-of-line blocking."""
+
+    async def test_multiple_writebacks_head_wait_tail_processed(self):
+        """When first writeback is WAIT (PENDING), it's popped from the list
+        so the next writeback can be processed on resume."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+
+        # First call: ["wbk-001", "wbk-002"], wbk-001 is PENDING → WAIT
+        state = _base_state(
+            verify_failed_writebacks=["wbk-001", "wbk-002"],
+            verify_writeback_status="pending",
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+
+        # wbk-001 should be popped; wbk-002 remains for next cycle
+        assert result["verify_failed_writebacks"] == ["wbk-002"], (
+            f"WAIT should pop the processed head, got {result.get('verify_failed_writebacks')}"
+        )
+        assert result["halted"] is True
+
+    async def test_multiple_writebacks_head_escalated_tail_processed(self):
+        """When first writeback escalates, it's popped and second can be
+        processed in the next verify cycle."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+
+        # First call: ["wbk-001", "wbk-002"], wbk-001 is CONFLICT → escalated
+        state = _base_state(
+            verify_failed_writebacks=["wbk-001", "wbk-002"],
+            verify_writeback_status="conflict",
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+
+        assert result["verify_need_manual_resolution"] is True
+        assert result["verify_failed_writebacks"] == ["wbk-002"], (
+            f"Escalated item should be popped, got {result.get('verify_failed_writebacks')}"
+        )
+
+    async def test_multiple_writebacks_head_noop_tail_processed(self):
+        """When first writeback is NOOP (already CONFIRMED), it's popped and
+        if there are remaining items, recovery stays active."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+
+        # First call: ["wbk-001", "wbk-002"], wbk-001 is CONFIRMED → NOOP
+        state = _base_state(
+            verify_failed_writebacks=["wbk-001", "wbk-002"],
+            verify_writeback_status="confirmed",
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+
+        assert result["verify_failed_writebacks"] == ["wbk-002"], (
+            f"NOOP should pop the terminal head, got {result.get('verify_failed_writebacks')}"
+        )
+        # Remaining items → recovery should stay active
+        assert result["verify_need_writeback_recovery"] is True, (
+            "Recovery should stay active when remaining items exist"
+        )
+
+    async def test_single_writeback_noop_clears_recovery(self):
+        """When the only writeback is NOOP, recovery is cleared."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+
+        state = _base_state(
+            verify_failed_writebacks=["wbk-001"],
+            verify_writeback_status="confirmed",
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+
+        assert result["verify_failed_writebacks"] == []
+        assert result["verify_need_writeback_recovery"] is False
+
+    async def test_multiple_writebacks_all_wait_sequentially(self):
+        """When processing multiple WAIT writebacks sequentially, each call
+        pops the head until the list is empty."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+
+        # Start with three PENDING writebacks
+        state1 = _base_state(
+            verify_failed_writebacks=["wbk-001", "wbk-002", "wbk-003"],
+            verify_writeback_status="pending",
+        )
+        result1 = await writeback_recovery_graph_node(state1, handler=handler)
+        assert result1["verify_failed_writebacks"] == ["wbk-002", "wbk-003"]
+        assert result1["halted"] is True
+
+        # On resume (simulated), process the next one
+        state2 = _base_state(
+            verify_failed_writebacks=["wbk-002", "wbk-003"],
+            verify_writeback_status="pending",
+        )
+        result2 = await writeback_recovery_graph_node(state2, handler=handler)
+        assert result2["verify_failed_writebacks"] == ["wbk-003"]
+
+        # Last one
+        state3 = _base_state(
+            verify_failed_writebacks=["wbk-003"],
+            verify_writeback_status="pending",
+        )
+        result3 = await writeback_recovery_graph_node(state3, handler=handler)
+        assert result3["verify_failed_writebacks"] == []
