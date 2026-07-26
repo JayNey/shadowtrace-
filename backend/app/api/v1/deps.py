@@ -248,10 +248,14 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.agents.report_agent import ReportAgent
     from app.agents.risk_agent import RiskAgent
     from app.agents.triage_agent import TriageAgent
+    from app.core.embedding.service import EmbeddingService
     from app.core.guardrails import OutputGuard
     from app.core.llm.factory import get_llm_client
     from app.services.agent_trace_service import AgentTraceService
     from app.services.budget_service import BudgetService
+    from app.services.case_kb_service import CaseKBService
+    from app.services.false_positive_matcher import FalsePositiveMatcher
+    from app.services.knowledge_store import KnowledgeStore
     from app.tools.executor import get_tool_executor
 
     settings = get_settings()
@@ -266,12 +270,19 @@ async def _build_investigation_agents() -> dict[str, Any]:
     tool_executor = get_tool_executor()
     tool_executor.budget_service = budget_service
 
+    # ISSUE-078: wire FalsePositiveMatcher for vector-based FP pre-filter.
+    embed_service = EmbeddingService(settings)
+    knowledge_store = KnowledgeStore(session_factory, embed_service)
+    case_kb_service = CaseKBService(knowledge_store, session_factory)
+    fp_matcher = FalsePositiveMatcher(case_kb_service)
+
     triage = TriageAgent(
         llm_client=llm_client,
         working_memory=wm.for_writer("TriageAgent"),
         budget_service=budget_service,
         output_guard=output_guard,
         trace_service=trace_service,
+        fp_matcher=fp_matcher,
     )
     evidence = EvidenceAgent(
         llm_client=llm_client,
