@@ -156,6 +156,7 @@ async def _build_authoritative_context(
         current_closure_cycle=current_closure_cycle,
         need_investigation=caller.need_investigation,
         recommendation=caller.recommendation,
+        escalated=caller.escalated,
     )
 
 

@@ -210,6 +210,33 @@ class DispositionSyncService:
                 )
         return WritebackStatus.PENDING
 
+    async def lookup_writeback_status(
+        self, writeback_id: str
+    ) -> WritebackStatus | None:
+        """Look up the current writeback status from the outbox by writeback_id.
+
+        Used by WritebackRecoveryHandler (ISSUE-062) when a writeback is in
+        UNKNOWN status and the handler needs to query the provider-side state
+        before deciding whether to retry or escalate.
+        """
+        async with self._session_factory() as session:
+            outbox = await session.scalar(
+                select(orm.DispositionOutbox).where(
+                    orm.DispositionOutbox.writeback_id == writeback_id
+                )
+            )
+            if outbox is None or not outbox.latest_writeback_status:
+                return None
+            try:
+                return WritebackStatus(outbox.latest_writeback_status)
+            except ValueError:
+                logger.warning(
+                    "invalid writeback_status in outbox %s: %s",
+                    writeback_id,
+                    outbox.latest_writeback_status,
+                )
+                return WritebackStatus.UNKNOWN
+
     async def activate_deferred_disposition(
         self, event_id: str, *, operator: str
     ) -> WritebackStatus:

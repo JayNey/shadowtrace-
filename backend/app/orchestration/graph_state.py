@@ -44,6 +44,8 @@ class InvestigationState(TypedDict, total=False):
     verify_failed_actions: list[str] | None
     verify_failed_writebacks: list[str] | None
     verify_writeback_status: str | None
+    writeback_lookup_count: int
+    writeback_retry_count: int
     verify_has_partial_success: bool
     execution_ok: bool
     include_rag: bool

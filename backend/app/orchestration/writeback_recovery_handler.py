@@ -416,7 +416,12 @@ class WritebackRecoveryHandler:
                 writeback.lookup_count = result.lookup_attempt
                 if writeback.lookup_count >= writeback.max_lookups:
                     return await self._escalate(event_id, writeback, result, op)
-                # Wait for next cycle
+                # Wait before next cycle to avoid tight looping.
+                # Use a short fixed delay (1.0s) rather than exponential
+                # backoff — the external state (provider receipt) is the
+                # primary pacing mechanism and a minimum interval is
+                # sufficient to prevent DB pressure.
+                await asyncio.sleep(1.0)
                 await self._runtime.set_execution_substate(
                     event_id,
                     ExecutionSubstate.WAITING_WRITEBACK,
@@ -555,6 +560,8 @@ async def writeback_recovery_graph_node(
         return {
             "verify_need_writeback_recovery": False,
             "execution_substate": ExecutionSubstate.NONE.value,
+            "writeback_lookup_count": 0,
+            "writeback_retry_count": 0,
         }
 
     # Process the first failed writeback; others are handled in subsequent
@@ -578,6 +585,8 @@ async def writeback_recovery_graph_node(
     wb_state = WritebackState(
         writeback_id=wb_id,
         current_status=_parse_writeback_status(state.get("verify_writeback_status")),
+        lookup_count=int(state.get("writeback_lookup_count") or 0),
+        retry_count=int(state.get("writeback_retry_count") or 0),
     )
 
     readiness = WritebackReadiness(
@@ -605,6 +614,8 @@ async def writeback_recovery_graph_node(
             "verify_need_manual_resolution": True,
             "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
             "verify_failed_writebacks": failed_writebacks[1:],
+            "writeback_lookup_count": 0,
+            "writeback_retry_count": 0,
         }
 
     if result.action is WritebackRecoveryAction.WAIT:
@@ -613,6 +624,8 @@ async def writeback_recovery_graph_node(
             "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
             "halted": True,
             "verify_failed_writebacks": failed_writebacks[1:],
+            "writeback_lookup_count": wb_state.lookup_count,
+            "writeback_retry_count": wb_state.retry_count,
         }
 
     # LOOKUP / RETRY / NOOP: stay in recovery until resolved
@@ -626,6 +639,8 @@ async def writeback_recovery_graph_node(
         "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
         "halted": False,
         "verify_failed_writebacks": remaining,
+        "writeback_lookup_count": wb_state.lookup_count,
+        "writeback_retry_count": wb_state.retry_count,
     }
 
 

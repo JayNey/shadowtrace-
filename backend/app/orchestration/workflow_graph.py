@@ -148,6 +148,13 @@ class _DispositionSyncPort(Protocol):
         writeback_id: str,
     ) -> Any: ...
 
+    async def activate_deferred_disposition(
+        self,
+        event_id: str,
+        *,
+        operator: str,
+    ) -> Any: ...
+
 
 class _WorkflowRuntimeLike(Protocol):
     async def get_event_status_update_readiness(
@@ -847,6 +854,7 @@ def build_investigation_graph(
     async def verify_node(state: InvestigationState) -> InvestigationState:
         verify_agent = cast(_AgentLike | None, agents.get("verify_agent"))
         disposition_sync = services.get("disposition_sync")
+        event_disposition = services.get("event_disposition")
         disposition_only = bool(state.get("disposition_only_intent"))
         policy_required = (
             state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
@@ -883,23 +891,42 @@ def build_investigation_graph(
                 degraded = True
                 logger.exception("verify_agent failed for event=%s", state["event_id"])
         elif disposition_only or policy_required:
-            # Disposition-only path without verify_agent: activate the
-            # deferred disposition writeback (phase 2) via disposition_sync
-            # if available.  When disposition_sync is not wired, fall
-            # through to the degraded path with writeback recovery flagged
+            # Disposition-only path without verify_agent: activate phase 2
+            # disposition writeback.  Prefer EventDispositionService (ISSUE-059A)
+            # which routes through TerminalDispositionResolver and the
+            # after_effect_resolution_ready gate; fall back to direct
+            # disposition_sync.activate_deferred_disposition when EDS is
+            # not wired.  When neither is available, flag writeback recovery
             # so the writeback recovery handler can pick it up.
             disposition_activation_failed = False
-            if disposition_sync is not None:
+            if event_disposition is not None:
                 try:
                     logger.info(
-                        "verify_node: activating deferred disposition for event=%s",
+                        "verify_node: activating deferred disposition via "
+                        "EventDispositionService for event=%s",
                         state["event_id"],
                     )
-                    # Resolve the actual writeback_id from the disposition
-                    # outbox and re-enqueue it for delivery.
-                    # NOTE: retry_writeback expects a writeback_id (wbk-…),
-                    # NOT an event_id (evt-…).  activate_deferred_disposition
-                    # resolves the correct id before delegating.
+                    plan_revision = _plan_revision_from_state(state)
+                    await event_disposition.activate_and_submit(
+                        state["event_id"],
+                        plan_revision,
+                        principal_or_system="verify_node:disposition_activation",
+                    )
+                except Exception:
+                    logger.exception(
+                        "verify_node: EventDispositionService activation "
+                        "failed for event=%s",
+                        state["event_id"],
+                    )
+                    degraded = True
+                    disposition_activation_failed = True
+            elif disposition_sync is not None:
+                try:
+                    logger.info(
+                        "verify_node: activating deferred disposition via "
+                        "disposition_sync for event=%s",
+                        state["event_id"],
+                    )
                     await disposition_sync.activate_deferred_disposition(
                         state["event_id"],
                         operator="verify_node:disposition_activation",
