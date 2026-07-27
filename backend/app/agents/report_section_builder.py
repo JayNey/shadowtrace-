@@ -448,9 +448,9 @@ class ReportSectionBuilder:
         }:
             fp_pattern = None
             if isinstance(false_positive_match, dict):
-                fp_pattern = false_positive_match.get("matched_pattern") or false_positive_match.get(
-                    "matched_rule"
-                )
+                fp_pattern = false_positive_match.get("matched_pattern")
+                if fp_pattern is None:
+                    fp_pattern = false_positive_match.get("matched_rule")
             if fp_pattern:
                 tips.append(f"误报依据：匹配已知模式「{fp_pattern}」，建议沉淀为检测白名单。")
             else:
