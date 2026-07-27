@@ -897,6 +897,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         # already handled above):
         # Attempt to activate deferred terminal writeback.
         terminal_activated = False
+        terminal_verify_ready = False
+        activate_result: _ActivateResult | None = None
         if self._event_disposition_service is not None:
             # Derive plan_revision from the response plan's actions.
             # All actions in a single ResponsePlan share the same revision.
@@ -915,7 +917,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             if _plan_revision is None:
                 _plan_revision = await self._load_event_plan_revision(event_id)
             try:
-                activate_result: _ActivateResult = (
+                activate_result = (
                     await self._event_disposition_service.activate_and_submit(
                         event_id=event_id,
                         plan_revision=_plan_revision,
@@ -923,7 +925,15 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     )
                 )
                 terminal_activated = activate_result.activated
-                if not terminal_activated:
+                # Idempotent re-verify: a prior pass already enqueued the
+                # terminal outbox — evaluate the existing receipt instead of
+                # treating already_submitted as a hard activation failure.
+                terminal_verify_ready = terminal_activated or (
+                    not terminal_activated
+                    and activate_result.skipped_reason == "already_submitted"
+                    and activate_result.writeback_id is not None
+                )
+                if not terminal_verify_ready:
                     logger.warning(
                         "Phase 2 activation skipped: %s event=%s",
                         activate_result.skipped_reason,
@@ -939,6 +949,16 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     if _blocked_ref is not None:
                         blocked_wb.add(_blocked_ref)
                     overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
+                elif (
+                    not terminal_activated
+                    and activate_result.skipped_reason == "already_submitted"
+                ):
+                    logger.info(
+                        "Phase 2 activation idempotent: already_submitted"
+                        " wb=%s event=%s",
+                        activate_result.writeback_id,
+                        event_id,
+                    )
             except Exception as exc:
                 logger.error(
                     "Phase 2 activation exception event=%s: %s",
@@ -957,10 +977,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
 
         # Evaluate writeback statuses for all applicable required actions.
-        # Only do this when activation succeeded — if activation failed we
-        # are already in MANUAL_RESOLUTION and evaluating "stale" writeback
-        # receipts would produce misleading routing decisions.
-        if terminal_activated:
+        # Run when activation succeeded or when a prior pass already
+        # enqueued the terminal outbox (already_submitted).  Other activation
+        # failures stay on MANUAL_RESOLUTION — evaluating stale receipts
+        # there would produce misleading routing decisions.
+        if terminal_verify_ready:
             wb_eval = await self._evaluate_writeback_statuses(
                 event_id=event_id,
                 actions=actions,

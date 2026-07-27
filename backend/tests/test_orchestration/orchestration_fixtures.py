@@ -29,6 +29,9 @@ from app.models.agent_io import (
     RiskAssessment,
     ScoringMode,
     TriageResult,
+    VerificationOverallStatus,
+    VerificationPhase,
+    VerificationResult,
 )
 from app.models.enums import (
     DispositionPolicy,
@@ -233,6 +236,12 @@ def build_stub_workflow_agents(
             )
         ),
         "report_agent": report_agent,
+        "verify_agent": StubWorkflowAgent(
+            VerificationResult(
+                overall_status=VerificationOverallStatus.SUCCESS,
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ),
     }
 
 

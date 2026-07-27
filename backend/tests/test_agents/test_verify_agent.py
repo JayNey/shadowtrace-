@@ -314,7 +314,11 @@ class FakeEventDispositionService:
             action_id="act-terminal-00001",
             skipped_reason=(self._skipped_reason if not self.activated else None),
             disposition_id=(self._disposition_id if self.activated else None),
-            writeback_id=(self._writeback_id if self.activated else None),
+            writeback_id=(
+                self._writeback_id
+                if self.activated or self._skipped_reason == "already_submitted"
+                else None
+            ),
         )
 
 
@@ -490,6 +494,72 @@ class TestHappyPath:
         assert len(ed_svc.calls) == 1
         assert ed_svc.calls[0]["event_id"] == action.event_id
         assert result.overall_status == VerificationOverallStatus.SUCCESS
+
+    async def test_phase2_already_submitted_reverify_succeeds(self):
+        """Second verify pass: already_submitted still evaluates CONFIRMED receipt."""
+        from contextlib import asynccontextmanager
+
+        action = _action(
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        job = _job(job_id="job-0001", action_id=action.action_id)
+
+        class _ReceiptRow:
+            writeback_id: str = "wbk-terminal-00001"
+            status: str = "confirmed"
+            sequence: int = 1
+            confirmation_evidence: str | None = "readback_verified"
+
+        class _TerminalDBSession:
+            async def scalars(self, stmt: Any) -> Any:
+                class _Result:
+                    def first(self) -> _ReceiptRow | None:
+                        return _ReceiptRow()
+
+                return _Result()
+
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                return None
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _TerminalDBSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+        ed_svc = FakeEventDispositionService(
+            activated=False,
+            skipped_reason="already_submitted",
+            writeback_id="wbk-terminal-00001",
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+            session_factory=mock_factory,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        assert len(ed_svc.calls) == 1
+        assert result.overall_status == VerificationOverallStatus.SUCCESS
+        assert result.need_manual_resolution is False
+        assert result.need_writeback_recovery is False
 
     async def test_create_ticket_skipped(self):
         """create_ticket → effect_status=skipped, verification action writeback_required=false."""

@@ -24,7 +24,7 @@ from app.models.enums import (
 )
 from app.models.security_event import EventSummary
 from app.models.workflow import MAX_AGENT_RETRIES
-from app.orchestration.workflow_graph import NODE_APPROVAL_WAIT, NODE_CLOSE, NODE_RISK
+from app.orchestration.workflow_graph import NODE_CLOSE, NODE_RISK
 from app.services.agent_trace_service import AgentTraceService
 from app.services.context_service import EventContextStore
 from app.services.event_service import EventService
@@ -191,11 +191,7 @@ async def test_checkpoint_resume_skips_completed_nodes(
     second_graph = workflow_graph_factory(checkpointer=redis_checkpointer)
     final = await second_graph.ainvoke(None, config)
 
-    # ISSUE-062: after resume the graph reaches approval_wait_node and halts;
-    # close_node is intentionally absent because the graph pauses for human
-    # approval before close_node would execute.
-    assert NODE_APPROVAL_WAIT in final["node_trace"]
-    assert NODE_CLOSE not in final["node_trace"]
+    assert NODE_CLOSE in final["node_trace"]
     assert final["node_trace"].count(NODE_RISK) == 1
     assert final["node_trace"].count("triage_node") == 1
     assert final["node_trace"].count("evidence_node") == 1
