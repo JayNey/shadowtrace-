@@ -631,6 +631,26 @@ def test_builder_preserves_section_order() -> None:
     assert [s.key for s in sections] == list(SECTION_KEYS)
 
 
+def test_builder_includes_human_escalation_note() -> None:
+    """ISSUE-062 acceptance: escalated events must carry human-escalation text."""
+    builder = ReportSectionBuilder()
+    event_id = "evt-escalated"
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=_main_evidence(event_id),
+        risk_assessment=_high_risk(),
+        triage_result=_main_triage(),
+        escalated=True,
+        replan_count=3,
+    )
+    overview = next(section for section in sections if section.key == "overview")
+    recommendations = next(section for section in sections if section.key == "recommendations")
+    assert "human_escalation:" in overview.content
+    assert "escalated=true" in overview.content
+    assert "人工升级" in recommendations.content
+    assert "replan_count=3" in recommendations.content
+
+
 def test_llm_overview_preserves_false_positive_basis() -> None:
     builder = ReportSectionBuilder()
     event_id = "evt-report-fp-basis"

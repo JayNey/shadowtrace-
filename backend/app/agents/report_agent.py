@@ -110,6 +110,8 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             rag_output=rag,
             final_verdict=final_verdict,
             false_positive_match=fp_match,
+            escalated=input.escalated,
+            replan_count=input.replan_count,
         )
         title = self.section_builder.default_title(triage, input.event_id)
         summary = self.section_builder.default_summary(

@@ -13,6 +13,7 @@ from app.core.errors import InvalidStateTransitionError
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceOutput,
+    ReportAgentInput,
     RiskAssessment,
     ScoringMode,
     TriageResult,
@@ -37,6 +38,7 @@ from app.orchestration.checkpointer import (
     checkpoint_key_for_event,
 )
 from app.orchestration.graph_state import InvestigationState
+from app.orchestration.replan_handler import MAX_REPLAN_COUNT
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_APPROVAL_WAIT,
@@ -128,9 +130,47 @@ class ReplanOnceVerifyAgent:
         )
 
 
+class AlwaysFailVerifyAgent:
+    """Every verify pass requests action replan (ISSUE-062 exhaustion e2e)."""
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    async def execute(self, input: Any) -> VerificationResult:
+        self.calls.append(input)
+        return VerificationResult(
+            overall_status=VerificationOverallStatus.FAILED,
+            verification_phase=VerificationPhase.EFFECT,
+            need_action_replan=True,
+            failed_actions=[f"act-failed-{len(self.calls):03d}"],
+        )
+
+
+class CapturingReportAgent:
+    """Records ReportAgentInput for escalation assertions."""
+
+    def __init__(self) -> None:
+        self.calls: list[ReportAgentInput] = []
+
+    async def execute(self, input: ReportAgentInput) -> SimpleNamespace:
+        self.calls.append(input)
+        return SimpleNamespace(report_id="rpt-capture")
+
+
 def _agents_with_verify(verify_agent: Any, *, triage: TriageResult | None = None) -> dict[str, Any]:
     agents = _agents(triage=triage)
     agents["verify_agent"] = verify_agent
+    return agents
+
+
+def _agents_with_verify_and_report(
+    verify_agent: Any,
+    report_agent: Any,
+    *,
+    triage: TriageResult | None = None,
+) -> dict[str, Any]:
+    agents = _agents_with_verify(verify_agent, triage=triage)
+    agents["report_agent"] = report_agent
     return agents
 
 
@@ -425,6 +465,34 @@ async def test_graph_replan_one_cycle_then_success() -> None:
     assert final["escalated"] is False
     assert NODE_CLOSE in trace
     assert len(verify_agent.calls) == 2
+    assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_graph_replan_exhaustion_escalates() -> None:
+    """ISSUE-062: three replan cycles then escalation → report with human note."""
+    verify_agent = AlwaysFailVerifyAgent()
+    report_agent = CapturingReportAgent()
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(
+        _agents_with_verify_and_report(verify_agent, report_agent),
+        services,
+    ).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-replan-exhaust"}},
+    )
+    trace = final["node_trace"]
+
+    assert trace.count(NODE_VERIFY) == MAX_REPLAN_COUNT + 1
+    assert trace.count(NODE_REPLAN) == MAX_REPLAN_COUNT + 1
+    assert final["replan_count"] == MAX_REPLAN_COUNT
+    assert final["escalated"] is True
+    assert NODE_REPORT in trace
+    assert NODE_CLOSE in trace
+    assert len(report_agent.calls) == 1
+    assert report_agent.calls[0].escalated is True
+    assert report_agent.calls[0].replan_count == MAX_REPLAN_COUNT
     assert machine.status is EventStatus.CLOSED
 
 
