@@ -102,6 +102,25 @@ function CapabilityTags({
   );
 }
 
+const POST_VERIFY_ACTIVATED_STATUSES = new Set([
+  "executing",
+  "partial_success",
+  "success",
+  "failed",
+  "unknown",
+  "rolled_back",
+]);
+
+function isDeferredPostVerifyAction(action: Action): boolean {
+  if (action.execution_phase !== "post_verify") return false;
+  if (POST_VERIFY_ACTIVATED_STATUSES.has(action.status)) return false;
+  return (
+    action.status === "approved" ||
+    action.status === "pending" ||
+    action.status === "waiting_approval"
+  );
+}
+
 function ActionsPanel({ actions }: { actions: Action[] }) {
   const columns: ColumnsType<Action> = [
     { title: "action_id", dataIndex: "action_id", width: 170 },
@@ -112,7 +131,7 @@ function ActionsPanel({ actions }: { actions: Action[] }) {
       dataIndex: "execution_phase",
       width: 190,
       render: (phase: Action["execution_phase"], action) =>
-        phase === "post_verify" && action.status === "pending" ? (
+        isDeferredPostVerifyAction(action) ? (
           <Tag color="gold">待效果验证后激活</Tag>
         ) : (
           <Tag color={phase === "post_verify" ? "purple" : "blue"}>

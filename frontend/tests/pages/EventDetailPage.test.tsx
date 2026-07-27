@@ -355,7 +355,7 @@ describe("EventDetailPage", () => {
             execution_phase: "post_verify",
             activation_condition: "after_effect_resolution",
             parameters: {},
-            status: "pending",
+            status: "approved",
             execution_owner: "xdr_managed",
             updated_at: null,
           },
@@ -412,5 +412,35 @@ describe("EventDetailPage", () => {
     expect(screen.getByTestId("writeback-row-wb-70")).toHaveStyle({
       background: "rgba(82, 196, 26, 0.10)",
     });
+  });
+
+  it("shows POST_VERIFY label after deferred action enters execution", async () => {
+    mockListActions.mockResolvedValue({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 100,
+        items: [
+          {
+            action_id: "action-70",
+            event_id: "evt-70",
+            action_level: "l1",
+            action_category: "response",
+            action_name: "更新外部事件终态",
+            tool_name: "update_source_event_disposition",
+            execution_phase: "post_verify",
+            activation_condition: "after_effect_resolution",
+            parameters: {},
+            status: "executing",
+            execution_owner: "xdr_managed",
+            updated_at: null,
+          },
+        ],
+      },
+    });
+
+    renderPage("/events/evt-70#actions");
+    expect(await screen.findByText("POST_VERIFY")).toBeInTheDocument();
+    expect(screen.queryByText("待效果验证后激活")).not.toBeInTheDocument();
   });
 });
