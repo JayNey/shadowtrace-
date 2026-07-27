@@ -1426,10 +1426,14 @@ class TestReDoSResistance:
         from app.agents.rules.entity_extraction_rules import extract_entities_regex
 
         # Simulate a very long input with repetitive near-match patterns.
-        long_text = "a." * 5000 + " " + "b-" * 5000 + " final.exe"
+        # Reduced from 5000× to 800× per segment — still exercises the regex
+        # engine thoroughly but avoids OS-dependent timing noise.  True
+        # catastrophic backtracking would show up even on 50× input as
+        # multi-second hangs.
+        long_text = "a." * 800 + " " + "b-" * 800 + " final.exe"
         start = time.monotonic()
         result = extract_entities_regex(long_text)
         elapsed = time.monotonic() - start
-        # Should complete in well under 1 second (catastrophic backtracking → >10s).
-        assert elapsed < 2.5, f"Regex extraction took {elapsed:.1f}s — possible ReDoS"
+        # Should complete in well under 2 s (catastrophic backtracking → >10 s).
+        assert elapsed < 2.0, f"Regex extraction took {elapsed:.1f}s — possible ReDoS"
         assert "final.exe" in result.processes

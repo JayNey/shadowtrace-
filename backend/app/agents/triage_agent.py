@@ -4,9 +4,10 @@ LLM primary path + regex fallback. Severity is assigned via deterministic
 ``SEVERITY_RULES``; ``need_investigation`` is ``True`` when severity >= medium.
 Two hook lists (``pre_triage_hooks``, ``post_triage_hooks``) alias the base
 ``pre_hooks`` / ``post_hooks`` lists. The P0 default ``RuleBasedFalsePositiveHook``
-writes ``EventContext.false_positive_match`` for stable fixture signatures via
-its own ``BoundWorkingMemory`` bound to the ``RuleBasedFalsePositiveHook``
-identity (aliased to ``FalsePositiveMatcher`` by ``WRITER_ALIASES``).
+runs as a pre-triage hook; the vector-based ``FalsePositiveMatcherHook`` runs as a
+post-triage hook so it has access to the LLM-extracted entities in ``triage_result``.
+Both write ``EventContext.false_positive_match`` via their own ``BoundWorkingMemory``
+bound to the ``FalsePositiveMatcher`` identity (RuleBased aliased via ``WRITER_ALIASES``).
 """
 
 from __future__ import annotations
@@ -109,6 +110,11 @@ class RuleBasedFalsePositiveHook:
     writes ``EventContext.false_positive_match`` when a known FP pattern is
     detected. Does NOT depend on pgvector or any knowledge base.
 
+    Runs as a pre-triage hook (before the vector-based FalsePositiveMatcherHook).
+    When a signature match is found, the match dict includes ``max_score: 1.0``
+    so downstream consumers (e.g. begin_disposition_only confidence boost) have
+    a score to work with even when only the rule hook matched.
+
     Uses its own ``BoundWorkingMemory`` bound to the ``RuleBasedFalsePositiveHook``
     writer identity (aliased to ``FalsePositiveMatcher`` via ``WRITER_ALIASES``),
     NOT the TriageAgent's memory — fixing the FIELD_OWNERSHIP violation noted
@@ -158,6 +164,7 @@ class RuleBasedFalsePositiveHook:
                 "source": "RuleBasedFalsePositiveHook",
                 "matched_at": datetime.now(UTC).isoformat(),
                 "recommendation": "close_as_fp",
+                "max_score": 1.0,
             }
         elif signature in _FP_SIGNATURES:
             fp_match = {
@@ -166,6 +173,7 @@ class RuleBasedFalsePositiveHook:
                 "source": "RuleBasedFalsePositiveHook",
                 "matched_at": datetime.now(UTC).isoformat(),
                 "recommendation": "close_as_fp",
+                "max_score": 1.0,
             }
 
         if fp_match is None:
@@ -416,6 +424,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         trace_service: Any | None = None,
         audit_service: Any | None = None,
         event_bus: Any | None = None,
+        fp_matcher: Any | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -431,6 +440,25 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         # Convenience aliases matching the Issue-032 naming convention.
         self.pre_triage_hooks = self.pre_hooks
         self.post_triage_hooks = self.post_hooks
+
+        # Install the ISSUE-078 FalsePositiveMatcherHook (vector-based FP matching).
+        # Runs as a POST-triage hook so it has access to the LLM-extracted
+        # (and hint-merged) entities in triage_result — fixing the ISSUE-078
+        # spec requirement that FP matching uses the final EntitySet.
+        # The deterministic RuleBasedFalsePositiveHook runs first (pre-triage)
+        # and vector hook skips when the rule hook already confirmed close_as_fp.
+        # Uses its own BoundWorkingMemory bound to the "FalsePositiveMatcher"
+        # writer identity (same owner as RuleBasedFalsePositiveHook via WRITER_ALIASES).
+        if working_memory is not None and fp_matcher is not None:
+            from app.services.false_positive_matcher import FalsePositiveMatcherHook
+
+            fp_matcher_memory = working_memory.for_writer("FalsePositiveMatcher")
+            self.post_triage_hooks.append(
+                FalsePositiveMatcherHook(
+                    matcher=fp_matcher,
+                    working_memory=fp_matcher_memory,
+                )
+            )
 
         # Install the P0 RuleBasedFalsePositiveHook with its own writer identity.
         # The hook must write to EventContext.false_positive_match via the

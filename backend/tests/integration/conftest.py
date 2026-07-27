@@ -24,6 +24,7 @@ from app.agents.report_agent import ReportAgent
 from app.agents.risk_agent import RiskAgent
 from app.agents.triage_agent import TriageAgent
 from app.core.config import Settings, get_settings
+from app.core.embedding.service import EmbeddingService
 from app.core.guardrails import OutputGuard, WorkingMemoryGuardViolationWriter
 from app.core.llm.base import InMemoryLLMCallAuditRecorder
 from app.core.llm.mock_client import MockLLMClient
@@ -37,11 +38,14 @@ from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.services.agent_trace_service import AgentTraceService
 from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
 from app.services.budget_service import BudgetService, WorkingMemoryBudgetUsageWriter
+from app.services.case_kb_service import CaseKBService
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.event_audit_log_service import EventAuditLogService
 from app.services.event_service import EventService
 from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
+from app.services.false_positive_matcher import FalsePositiveMatcher
+from app.services.knowledge_store import KnowledgeStore
 from app.services.state_machine_service import StateMachineService
 from app.services.working_memory import WorkingMemory
 from tests.test_tools.tool_system_fixtures import new_sfx
@@ -368,12 +372,20 @@ def build_analysis_pipeline(
         if fail_tools:
             effective_executor = FlakyToolExecutor(e2e_tool_executor, fail_tools)
 
+        # ISSUE-078: wire FalsePositiveMatcher so the TriageAgent runs
+        # vector-based FP matching in integration / e2e tests.
+        embed_service = EmbeddingService(e2e_settings)
+        knowledge_store = KnowledgeStore(session_factory, embed_service)
+        case_kb_service = CaseKBService(knowledge_store, session_factory)
+        fp_matcher = FalsePositiveMatcher(case_kb_service)
+
         triage = TriageAgent(
             llm_client=effective_llm,
             working_memory=working_memory.for_writer("TriageAgent"),
             budget_service=budget_service,
             output_guard=output_guard,
             trace_service=agent_trace_service,
+            fp_matcher=fp_matcher,
         )
         evidence = EvidenceAgent(
             llm_client=effective_llm,
@@ -460,12 +472,19 @@ def build_super_agent(
         if fail_tools:
             effective_executor = FlakyToolExecutor(e2e_tool_executor, fail_tools)
 
+        # ISSUE-078: wire FalsePositiveMatcher for vector-based FP matching.
+        embed_service = EmbeddingService(e2e_settings)
+        knowledge_store = KnowledgeStore(session_factory, embed_service)
+        case_kb_service = CaseKBService(knowledge_store, session_factory)
+        fp_matcher = FalsePositiveMatcher(case_kb_service)
+
         triage = TriageAgent(
             llm_client=effective_llm,
             working_memory=working_memory.for_writer("TriageAgent"),
             budget_service=budget_service,
             output_guard=output_guard,
             trace_service=agent_trace_service,
+            fp_matcher=fp_matcher,
         )
         evidence = EvidenceAgent(
             llm_client=effective_llm,
