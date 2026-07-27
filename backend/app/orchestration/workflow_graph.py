@@ -35,6 +35,7 @@ from app.models.agent_io import (
     VerifyAgentInput,
 )
 from app.models.context import EventContext
+from app.models.entities import EntitySet
 from app.models.enums import (
     DispositionPolicy,
     EventStatus,
@@ -262,7 +263,22 @@ def route_after_planner(state: InvestigationState) -> str:
 
 
 def route_after_risk(state: InvestigationState) -> str:
+    """Route to response execution or analysis-completion report."""
+    if state.get("disposition_only_intent"):
+        return ROUTE_RESPONSE
+    if state.get("defer_response_execution"):
+        return ROUTE_REPORT
     return ROUTE_RESPONSE
+
+
+def route_after_report(state: InvestigationState) -> str:
+    """End analysis at REPORTING for required policy; close when not required."""
+    policy = DispositionPolicy(
+        state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
+    )
+    if policy is DispositionPolicy.REQUIRED:
+        return ROUTE_HALT
+    return ROUTE_CLOSE
 
 
 def route_after_approval(state: InvestigationState) -> str:
@@ -447,6 +463,7 @@ async def build_initial_investigation_state(
         ),
         "report_generated": context.report is not None,
         "needs_approval_wait": False,
+        "defer_response_execution": True,
     }
     if context.triage_result is not None:
         state["triage_result"] = context.triage_result
@@ -465,6 +482,58 @@ async def build_initial_investigation_state(
     if context.response_plan is not None:
         state["response_plan"] = context.response_plan
     return state
+
+
+async def _build_triage_agent_input(
+    services: dict[str, Any],
+    event_id: str,
+) -> TriageAgentInput:
+    """Build triage input aligned with ``SuperAgent._build_triage_input``."""
+    raw_summary = ""
+    hint_entities = EntitySet()
+    context_store = services.get("context_store")
+    if context_store is not None:
+        try:
+            context = await context_store.get_full_context(event_id)
+            if context.event is not None:
+                raw_summary = " | ".join(
+                    [
+                        f"title={context.event.title}",
+                        f"type={context.event.event_type.value}",
+                        f"severity={context.event.severity.value}",
+                    ]
+                )
+        except Exception:
+            logger.debug(
+                "triage input: context lookup failed for event=%s",
+                event_id,
+                exc_info=True,
+            )
+
+    event_service = services.get("event_service")
+    if event_service is not None:
+        try:
+            event = await event_service.get_event(event_id)
+        except Exception:
+            event = None
+        if event is not None:
+            if isinstance(event, dict):
+                title = str(event.get("title") or event_id)
+                description = str(event.get("description") or "")
+                raw_summary = f"{title}. {description}".strip(". ")
+            else:
+                title = str(getattr(event, "title", "") or event_id)
+                description = str(getattr(event, "description", "") or "").strip()
+                raw_summary = f"{title}. {description}".strip(". ")
+                entities = getattr(event, "entities", None)
+                if entities is not None:
+                    hint_entities = entities
+
+    return TriageAgentInput(
+        event_id=event_id,
+        raw_event_summary=raw_summary,
+        hint_entities=hint_entities,
+    )
 
 
 async def _hydrate_context(
@@ -553,9 +622,41 @@ def build_investigation_graph(
                 EventStatus.TRIAGING,
                 reason="investigation:triage_start",
             )
-        result = await triage_agent.execute(
-            TriageAgentInput(event_id=state["event_id"], raw_event_summary="")
-        )
+        triage_input = await _build_triage_agent_input(services, state["event_id"])
+        # #region agent log
+        try:
+            import json as _json
+            import time as _time
+
+            with open(
+                "/Users/apple/Desktop/shadowtrace副本/.cursor/debug-d3d7e3.log",
+                "a",
+                encoding="utf-8",
+            ) as _dbg:
+                _dbg.write(
+                    _json.dumps(
+                        {
+                            "sessionId": "d3d7e3",
+                            "hypothesisId": "H1",
+                            "location": "workflow_graph.py:triage_graph_node",
+                            "message": "triage input built",
+                            "data": {
+                                "event_id": state["event_id"],
+                                "raw_summary_len": len(triage_input.raw_event_summary),
+                                "disposition_policy": state.get("disposition_policy"),
+                                "defer_response_execution": state.get(
+                                    "defer_response_execution"
+                                ),
+                            },
+                            "timestamp": int(_time.time() * 1000),
+                        }
+                    )
+                    + "\n"
+                )
+        except OSError:
+            pass
+        # #endregion
+        result = await triage_agent.execute(triage_input)
         if not isinstance(result, TriageResult):
             raise TypeError("triage_agent must return TriageResult")
         update: dict[str, Any] = {
@@ -799,21 +900,28 @@ def build_investigation_graph(
         )
         if not isinstance(result, RiskAssessment):
             raise TypeError("risk_agent must return RiskAssessment")
-        await _transition_status(
-            services,
-            state,
-            EventStatus.PLANNING_RESPONSE,
-            reason="investigation:plan_response",
-        )
+        defer_response = bool(state.get("defer_response_execution"))
+        if defer_response:
+            risk_status = EventStatus.SCORING
+            status_patch: InvestigationState = cast(InvestigationState, {})
+        else:
+            status_patch = await _transition_status(
+                services,
+                state,
+                EventStatus.PLANNING_RESPONSE,
+                reason="investigation:plan_response",
+            )
+            risk_status = EventStatus.PLANNING_RESPONSE
         update: dict[str, Any] = {
-            "event_status": EventStatus.PLANNING_RESPONSE.value,
+            "event_status": risk_status.value,
             "risk_assessment": result.model_dump(mode="json"),
             "severity": result.severity.value,
         }
         await _hydrate_context(services, state["event_id"], update)
-        update["event_status"] = EventStatus.PLANNING_RESPONSE.value
+        update["event_status"] = risk_status.value
         return _patch_state(
             _trace(NODE_RISK),
+            status_patch,
             update,
         )
 
@@ -1363,7 +1471,10 @@ def build_investigation_graph(
     graph.add_conditional_edges(
         NODE_RISK,
         route_after_risk,
-        {ROUTE_RESPONSE: NODE_RESPONSE},
+        {
+            ROUTE_RESPONSE: NODE_RESPONSE,
+            ROUTE_REPORT: NODE_REPORT,
+        },
     )
     graph.add_conditional_edges(
         NODE_RESPONSE,
@@ -1430,7 +1541,14 @@ def build_investigation_graph(
             ROUTE_INVESTIGATE: NODE_PLANNER,
         },
     )
-    graph.add_edge(NODE_REPORT, NODE_CLOSE)
+    graph.add_conditional_edges(
+        NODE_REPORT,
+        route_after_report,
+        {
+            ROUTE_CLOSE: NODE_CLOSE,
+            ROUTE_HALT: NODE_HALT,
+        },
+    )
     graph.add_edge(NODE_CLOSE, END)
     graph.add_edge(NODE_HALT, END)
 
@@ -1592,6 +1710,7 @@ __all__ = [
     "route_after_approval",
     "route_after_planner",
     "route_after_replan",
+    "route_after_report",
     "route_after_risk",
     "route_after_triage",
     "route_after_verify",

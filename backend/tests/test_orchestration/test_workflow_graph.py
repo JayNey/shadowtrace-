@@ -44,6 +44,7 @@ from app.orchestration.workflow_graph import (
     NODE_EXECUTE,
     NODE_HALT,
     NODE_MANUAL_HOLD,
+    NODE_PLANNER,
     NODE_RAG,
     NODE_REPLAN,
     NODE_REPORT,
@@ -55,6 +56,7 @@ from app.orchestration.workflow_graph import (
     ROUTE_DISPOSITION_ONLY,
     ROUTE_EVIDENCE,
     ROUTE_EXECUTE,
+    ROUTE_HALT,
     ROUTE_INVESTIGATE,
     ROUTE_MANUAL,
     ROUTE_MANUAL_HOLD,
@@ -66,6 +68,7 @@ from app.orchestration.workflow_graph import (
     build_investigation_graph,
     route_after_approval,
     route_after_planner,
+    route_after_report,
     route_after_risk,
     route_after_triage,
     route_after_verify,
@@ -347,6 +350,21 @@ def test_remaining_route_truth_tables() -> None:
     assert route_after_planner(_base_state(disposition_only_intent=True)) == ROUTE_RESPONSE
     assert route_after_planner(_base_state()) == ROUTE_EVIDENCE
     assert route_after_risk(_base_state()) == ROUTE_RESPONSE
+    assert route_after_risk(_base_state(defer_response_execution=True)) == ROUTE_REPORT
+    assert (
+        route_after_risk(
+            _base_state(
+                defer_response_execution=True,
+                disposition_only_intent=True,
+            )
+        )
+        == ROUTE_RESPONSE
+    )
+    assert (
+        route_after_report(_base_state(disposition_policy=DispositionPolicy.REQUIRED.value))
+        == ROUTE_HALT
+    )
+    assert route_after_report(_base_state()) == ROUTE_CLOSE
     assert (
         route_after_approval(
             _base_state(execution_substate=ExecutionSubstate.WAITING_APPROVAL.value)
@@ -467,6 +485,50 @@ async def test_not_required_short_circuit_from_new_reaches_closed() -> None:
     assert final["node_trace"] == ["triage_node", NODE_CLOSE]
     assert machine.status is EventStatus.CLOSED
     assert (event_id, EventStatus.TRIAGING, "investigation:triage_start") in machine.transitions
+
+
+@pytest.mark.asyncio
+async def test_deferred_response_not_required_reaches_closed() -> None:
+    """ISSUE-566: HTTP investigate defers response execution and closes."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(defer_response_execution=True),
+        {"configurable": {"thread_id": "evt-defer-not-required"}},
+    )
+    assert final["node_trace"] == [
+        "triage_node",
+        NODE_PLANNER,
+        "evidence_node",
+        NODE_RISK,
+        NODE_REPORT,
+        NODE_CLOSE,
+    ]
+    assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_deferred_response_required_stays_reporting() -> None:
+    """ISSUE-566: required-policy HTTP investigate halts at REPORTING."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            defer_response_execution=True,
+        ),
+        {"configurable": {"thread_id": "evt-defer-required"}},
+    )
+    assert final["node_trace"] == [
+        "triage_node",
+        NODE_PLANNER,
+        "evidence_node",
+        NODE_RISK,
+        NODE_REPORT,
+        NODE_HALT,
+    ]
+    assert machine.status is EventStatus.REPORTING
+    assert final["halted"] is True
 
 
 @pytest.mark.asyncio

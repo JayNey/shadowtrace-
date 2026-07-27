@@ -64,3 +64,7 @@ class InvestigationState(TypedDict, total=False):
     escalated: bool
     report_generated: bool
     needs_approval_wait: bool
+    # ISSUE-566: HTTP investigate defers response/approval/execute/verify until
+    # operator-driven resume; analysis completes at report (REQUIRED→REPORTING,
+    # NOT_REQUIRED→CLOSED). Unit/integration tests omit this flag for full P0.
+    defer_response_execution: bool
