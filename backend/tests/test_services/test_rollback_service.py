@@ -328,6 +328,13 @@ async def _seed_disposition_outbox(
                 delivery_status="ready",
             )
             session.add(outbox)
+            # Keep SourceObject.next_outbox_sequence aligned with manually seeded
+            # outbox rows so real DispositionSyncService.enqueue_command() allocates
+            # the next free (source_record_id, source_sequence) pair (ISSUE-061/#576).
+            source_row = await session.get(orm.SourceObject, source_record_id)
+            if source_row is not None:
+                current = int(source_row.next_outbox_sequence or 0)
+                source_row.next_outbox_sequence = max(current, source_sequence)
             await session.flush()
     return did
 
