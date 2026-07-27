@@ -282,6 +282,10 @@ export interface EventListItem {
   created_at: string | null;
   updated_at: string | null;
   occurred_at: string | null;
+  /** Populated from socket state_change when available (list API omits this). */
+  external_unsynced?: boolean;
+  /** Populated from detail/socket enrichment when available. */
+  confirmation_evidence?: string | null;
 }
 
 export interface EventListResponse {
