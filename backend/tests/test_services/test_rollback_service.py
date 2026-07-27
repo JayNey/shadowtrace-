@@ -29,6 +29,7 @@ from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
     ActionStatus,
+    CapabilityState,
     DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
@@ -50,6 +51,7 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace",
 )
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 
 def _alembic_config() -> Config:
@@ -452,6 +454,7 @@ def _rollback_service(
     verify: Callable[[ActionModel, ActionModel], Awaitable[RollbackEffectStatus]] | None = None,
     disposition_sync: Any = None,
     event_bus: Any = None,
+    adapter_registry: Any = None,
 ) -> RollbackService:
     """Construct RollbackService with default verify hook for happy-path tests."""
     return RollbackService(
@@ -461,6 +464,7 @@ def _rollback_service(
         verify_rollback_effect=verify or _mock_verify_hook(verified=True),
         disposition_sync=disposition_sync,
         event_bus=event_bus,
+        adapter_registry=adapter_registry,
     )
 
 
@@ -669,7 +673,7 @@ async def test_rollback_action_readback_false_keeps_original_success(
 
         rb_row = await session.get(orm.Action, result.rollback_action_id)
         assert rb_row is not None
-        assert ActionStatus(rb_row.status) is ActionStatus.SUCCESS
+        assert ActionStatus(rb_row.status) is ActionStatus.FAILED
 
 
 @pytest.mark.asyncio
@@ -1540,6 +1544,314 @@ async def test_compensate_automated_l2_creates_pending_rollback_action(
         assert rb_row is not None
         assert ActionStatus(rb_row.status) is ActionStatus.PENDING
         assert rb_row.source_action_id == predecessor.action_id
+
+
+class _StubDispositionAdapter:
+    """Minimal adapter for XDR capability gate tests."""
+
+    def __init__(self, *, supported: bool) -> None:
+        self._supported = supported
+
+    def capabilities(self) -> Any:
+        from app.adapters.disposition.base import DispositionAdapterCapabilities
+
+        if self._supported:
+            return DispositionAdapterCapabilities(
+                intents={
+                    DispositionIntentKind.COMPENSATION_RECORD: CapabilityState.SUPPORTED,
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT: CapabilityState.SUPPORTED,
+                },
+                operations={"record_compensation": CapabilityState.SUPPORTED},
+            )
+        return DispositionAdapterCapabilities(
+            intents={
+                DispositionIntentKind.COMPENSATION_RECORD: CapabilityState.UNSUPPORTED,
+                DispositionIntentKind.ENTITY_ACTION_SUBMIT: CapabilityState.UNSUPPORTED,
+            },
+            operations={"record_compensation": CapabilityState.UNSUPPORTED},
+        )
+
+
+class _StubAdapterRegistry:
+    def __init__(self, adapter: _StubDispositionAdapter) -> None:
+        self._adapter = adapter
+
+    def get(self, name: str) -> _StubDispositionAdapter:
+        return self._adapter
+
+
+@pytest.mark.asyncio
+async def test_xdr_managed_original_uses_direct_tool_execution_with_supported_adapter(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+) -> None:
+    """Local rollback executes via DIRECT_TOOL; adapter only gates compensation."""
+    event_id = await _seed_event(
+        session_factory,
+        disposition_policy=DispositionPolicy.REQUIRED,
+    )
+    conn_id = f"conn-{_sfx()}"
+    disposition_source_ref = {
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-test",
+        "connector_id": conn_id,
+        "source_kind": SourceObjectKind.INCIDENT.value,
+        "source_object_id": f"incident-{_sfx()}",
+    }
+    original = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_ip",
+        status=ActionStatus.SUCCESS,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=True,
+        disposition_source_ref=disposition_source_ref,
+    )
+    registry = _StubAdapterRegistry(_StubDispositionAdapter(supported=True))
+    execute = _mock_execute_hook(session_factory, succeed=True)
+    svc = _rollback_service(
+        session_factory,
+        audit,
+        execute=execute,
+        adapter_registry=registry,
+    )
+
+    result = await svc.rollback_action(
+        original.action_id,
+        operator="test-op",
+        reason="xdr supported adapter",
+    )
+
+    assert result.rolled_back is True
+    assert result.compensation_writeback_readiness is WritebackReadiness.READY
+    async with session_factory() as session:
+        rb_row = await session.get(orm.Action, result.rollback_action_id)
+        assert rb_row is not None
+        assert ExecutionOwner(rb_row.execution_owner) is ExecutionOwner.DIRECT_TOOL
+
+
+@pytest.mark.asyncio
+async def test_xdr_managed_original_unsupported_adapter_marks_compensation_blocked(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+) -> None:
+    """When adapter lacks compensation capability, readiness is CAPABILITY_UNSUPPORTED."""
+    event_id = await _seed_event(
+        session_factory,
+        disposition_policy=DispositionPolicy.REQUIRED,
+    )
+    conn_id = f"conn-{_sfx()}"
+    disposition_source_ref = {
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-test",
+        "connector_id": conn_id,
+        "source_kind": SourceObjectKind.INCIDENT.value,
+        "source_object_id": f"incident-{_sfx()}",
+    }
+    original = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_ip",
+        status=ActionStatus.SUCCESS,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=True,
+        disposition_source_ref=disposition_source_ref,
+    )
+    registry = _StubAdapterRegistry(_StubDispositionAdapter(supported=False))
+    execute = _mock_execute_hook(session_factory, succeed=True)
+    svc = _rollback_service(
+        session_factory,
+        audit,
+        execute=execute,
+        adapter_registry=registry,
+    )
+
+    result = await svc.rollback_action(
+        original.action_id,
+        operator="test-op",
+        reason="xdr unsupported adapter",
+    )
+
+    assert result.rolled_back is True
+    assert result.compensation_writeback_readiness is WritebackReadiness.CAPABILITY_UNSUPPORTED
+    async with session_factory() as session:
+        rb_row = await session.get(orm.Action, result.rollback_action_id)
+        assert rb_row is not None
+        assert ExecutionOwner(rb_row.execution_owner) is ExecutionOwner.DIRECT_TOOL
+
+
+@pytest.mark.asyncio
+async def test_rollback_compensation_confirmed_via_mock_xdr(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+) -> None:
+    """COMPENSATION_RECORD delivered via MockXDR reaches CONFIRMED with parent link."""
+    import httpx
+    from httpx import ASGITransport
+
+    from app.adapters.mock_xdr import MockXDRDispositionAdapter
+    from app.adapters.registry import DispositionAdapterRegistry
+    from app.core.guardrails import OutboundDispositionGuard
+    from app.core.redis_client import RedisClient
+    from app.data_generators.scenarios import build_scenario
+    from app.mock_xdr.api import create_app
+    from app.mock_xdr.state import MockXDRState
+    from app.services.context_service import EventContextStore, event_summary_from_security_event
+    from app.services.disposition_sync_service import DispositionSyncService
+    from tests.test_services._mock_xdr_test_helpers import (
+        SCENARIO_INCIDENT_ID,
+        fetch_mock_concurrency_token,
+    )
+
+    try:
+        redis = RedisClient(REDIS_URL)
+        await redis.get_client().ping()
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"Redis not reachable: {exc}")
+
+    state = MockXDRState()
+    state.load_scenario(build_scenario("insider_data_exfiltration", seed=42))
+    app = create_app(state=state)
+    transport = ASGITransport(app=app)
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://mock-xdr",
+        timeout=30.0,
+    ) as mock_xdr_client:
+        store = EventContextStore(redis, session_factory)
+        registry = DispositionAdapterRegistry()
+        adapter = MockXDRDispositionAdapter(
+            client=mock_xdr_client,
+            read_token="mock-read-token",
+            write_token="mock-write-token",
+        )
+        registry.register("mock_xdr", adapter)
+        disposition_sync = DispositionSyncService(
+            session_factory,
+            context_store=store,
+            adapter_registry=registry,
+            outbound_guard=OutboundDispositionGuard(),
+        )
+
+        connector_id = "conn-disposition"
+        source_record_id = f"src-{_sfx()}"
+        object_id = SCENARIO_INCIDENT_ID
+        concurrency_token = await fetch_mock_concurrency_token(
+            mock_xdr_client,
+            object_id=object_id,
+        )
+        disposition_source_ref = {
+            "source_product": "mock_xdr",
+            "source_tenant_id": "tenant-demo",
+            "connector_id": connector_id,
+            "source_kind": SourceObjectKind.INCIDENT.value,
+            "source_object_id": object_id,
+        }
+        event_id = await _seed_event(
+            session_factory,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+        async with session_factory() as session:
+            async with session.begin():
+                session.add(
+                    orm.SourceConnector(
+                        connector_id=connector_id,
+                        source_product="mock_xdr",
+                        display_name="Mock XDR",
+                    )
+                )
+                session.add(
+                    orm.SourceObject(
+                        source_record_id=source_record_id,
+                        source_product="mock_xdr",
+                        source_tenant_id="tenant-demo",
+                        connector_id=connector_id,
+                        source_kind=SourceObjectKind.INCIDENT.value,
+                        source_object_type="incident",
+                        source_object_id=object_id,
+                        source_concurrency_token=concurrency_token,
+                        current_concurrency_token=concurrency_token,
+                        source_status_raw="contained",
+                        source_disposition=SourceDisposition.CONTAINED.value,
+                        next_outbox_sequence=0,
+                    )
+                )
+        async with session_factory() as session:
+            row = await session.get(orm.SecurityEvent, event_id)
+            assert row is not None
+            await store.init_context(event_id, event_summary_from_security_event(row))
+
+        parent_disposition_id = f"disp-parent-{_sfx()}"
+        original = await _seed_response_action(
+            session_factory,
+            event_id=event_id,
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            writeback_required=True,
+            writeback_applicable=True,
+            disposition_source_ref=disposition_source_ref,
+        )
+        await _seed_disposition_outbox(
+            session_factory,
+            action_id=original.action_id,
+            event_id=event_id,
+            source_record_id=source_record_id,
+            intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT,
+            disposition_id=parent_disposition_id,
+        )
+
+        execute = _mock_execute_hook(session_factory, succeed=True)
+        svc = _rollback_service(
+            session_factory,
+            audit,
+            execute=execute,
+            disposition_sync=disposition_sync,
+            adapter_registry=registry,
+        )
+        result = await svc.rollback_action(
+            original.action_id,
+            operator="test-op",
+            reason="mock xdr compensation confirmed",
+        )
+        assert result.rolled_back is True
+        assert len(result.compensation_writebacks) == 1
+
+        delivered = await disposition_sync.process_ready_outboxes(limit=5)
+        assert delivered >= 1
+
+        async with session_factory() as session:
+            comp_outbox = await session.scalar(
+                select(orm.DispositionOutbox)
+                .where(
+                    orm.DispositionOutbox.action_id == result.rollback_action_id,
+                    orm.DispositionOutbox.intent_kind
+                    == DispositionIntentKind.COMPENSATION_RECORD.value,
+                )
+                .order_by(orm.DispositionOutbox.created_at.desc())
+            )
+            assert comp_outbox is not None
+            payload = comp_outbox.command_payload or {}
+            assert payload.get("parent_disposition_id") == parent_disposition_id
+            assert comp_outbox.latest_writeback_status in {
+                WritebackStatus.CONFIRMED.value,
+                WritebackStatus.ACCEPTED.value,
+            }
+            receipt = await session.scalar(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == comp_outbox.writeback_id
+                )
+            )
+            assert receipt is not None
+            assert receipt.status in {
+                WritebackStatus.CONFIRMED.value,
+                WritebackStatus.ACCEPTED.value,
+            }
 
 
 # ---------------------------------------------------------------------------

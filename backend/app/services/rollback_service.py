@@ -16,6 +16,17 @@ Key invariants
   ``warning="not_rollbackable"`` without creating a rollback Action.
 * UNKNOWN / PARTIAL_SUCCESS actions must never be auto-rollbacked.
 * POST_VERIFY deferred Actions are excluded from entity rollback.
+
+Scope boundaries (not in this service)
+------------------------------------
+* **Orchestration wiring**: ``get_rollback_service()`` in deps exposes the
+  service for production injection; LangGraph / SuperAgent / false-positive
+  CLOSED paths do not call ``rollback_event`` yet — that remains a follow-up
+  orchestration Issue.
+* **P1 late false-positive CLOSED gate**: requiring all COMPENSATION_RECORD
+  writebacks to reach CONFIRMED before activating deferred EVENT_STATUS_UPDATE
+  is enforced in EventDispositionService / workflow orchestration, not here.
+  This service never fabricates terminal disposition Actions.
 """
 
 from __future__ import annotations
@@ -372,6 +383,9 @@ class RollbackService:
 
         # --- Verify rollback effect ----------------------------------------------
         effect_status = await self._verify_rollback_effect(original, executed)
+
+        if effect_status not in ("verified", "skipped") and executed.status is ActionStatus.SUCCESS:
+            await self._update_action_status(rollback_action_id, ActionStatus.FAILED)
 
         # --- CAS original Action → ROLLED_BACK ----------------------------------
         if effect_status in ("verified", "skipped"):
@@ -767,11 +781,18 @@ class RollbackService:
                 source_record_id = outbox_rows[0].source_record_id
 
                 writebacks: list[CompensationWritebackItem] = []
+                comp_owner = _compensation_execution_owner(
+                    original_action,
+                    adapter_registry=self._adapter_registry,
+                )
+                rollback_for_comp = rollback_action.model_copy(
+                    update={"execution_owner": comp_owner},
+                )
                 for outbox in outbox_rows:
                     disposition_id = new_disposition_id()
 
                     cmd = self._factory.build_compensation_record(
-                        rollback_action,
+                        rollback_for_comp,
                         source_locator=source_locator,
                         source_concurrency_token=None,
                         operator_id=operator,
@@ -871,14 +892,27 @@ def _resolve_rollback_owner_and_compensation(
     *,
     adapter_registry: Any | None,
 ) -> tuple[ExecutionOwner, bool]:
-    """Pick rollback execution owner; narrow XDR_MANAGED to adapter capability."""
-    original_owner = original.execution_owner or ExecutionOwner.DIRECT_TOOL
-    if original_owner is ExecutionOwner.DIRECT_TOOL:
-        return ExecutionOwner.DIRECT_TOOL, False
+    """Local effect rollback always uses DIRECT_TOOL; adapter gates compensation.
+
+    Issue §实现步骤 point 1: DIRECT_TOOL path executes the rollback tool locally;
+    XDR_MANAGED compensation entity sync is handled separately via
+    COMPENSATION_RECORD when the disposition adapter declares support.
+    """
     adapter_supports = _adapter_supports_xdr_compensation(original, adapter_registry)
-    if adapter_supports:
-        return ExecutionOwner.XDR_MANAGED, True
-    return ExecutionOwner.DIRECT_TOOL, False
+    return ExecutionOwner.DIRECT_TOOL, adapter_supports
+
+
+def _compensation_execution_owner(
+    original: ActionModel,
+    *,
+    adapter_registry: Any | None,
+) -> ExecutionOwner:
+    original_owner = original.execution_owner or ExecutionOwner.DIRECT_TOOL
+    if original_owner is ExecutionOwner.XDR_MANAGED and _adapter_supports_xdr_compensation(
+        original, adapter_registry
+    ):
+        return ExecutionOwner.XDR_MANAGED
+    return ExecutionOwner.DIRECT_TOOL
 
 
 def _resolve_compensation_readiness(
@@ -908,7 +942,13 @@ def _rollback_initial_status(
 
 
 def build_execute_rollback_hook(action_execution: Any) -> ExecuteRollbackHook:
-    """Wire RollbackService execution to ActionExecutionService (production path)."""
+    """Wire RollbackService local effect execution to ActionExecutionService.
+
+    Rollback actions are persisted with ``execution_owner=DIRECT_TOOL`` so
+    ``execute_action`` runs the rollback tool (e.g. unblock_ip) on the device
+    path.  External COMPENSATION_RECORD sync uses XDR_MANAGED separately in
+    ``_create_compensation_writebacks`` when the adapter supports it.
+    """
 
     async def _execute(rollback_action_id: str, operator: str) -> ActionModel:
         executed = await action_execution.execute_action(
