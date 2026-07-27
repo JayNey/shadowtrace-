@@ -44,6 +44,21 @@ def test_build_raw_summary_from_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_build_triage_agent_input_uses_context_when_no_event_service() -> None:
+    context = EventContext(
+        event=_event_summary(event_id="evt-test-003", title="Context-only title"),
+    )
+    triage_input = await build_triage_agent_input(
+        "evt-test-003",
+        event_context=context,
+        event_service=None,
+    )
+    assert triage_input.event_id == "evt-test-003"
+    assert "Context-only title" in triage_input.raw_event_summary
+    assert "insider_threat" in triage_input.raw_event_summary
+
+
+@pytest.mark.asyncio
 async def test_build_triage_agent_input_prefers_event_service_description() -> None:
     class _FakeEvent:
         title = "HTTP investigate test"
