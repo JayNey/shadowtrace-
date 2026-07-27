@@ -917,12 +917,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             if _plan_revision is None:
                 _plan_revision = await self._load_event_plan_revision(event_id)
             try:
-                activate_result = (
-                    await self._event_disposition_service.activate_and_submit(
-                        event_id=event_id,
-                        plan_revision=_plan_revision,
-                        principal_or_system=_VERIFY_OPERATOR,
-                    )
+                activate_result = await self._event_disposition_service.activate_and_submit(
+                    event_id=event_id,
+                    plan_revision=_plan_revision,
+                    principal_or_system=_VERIFY_OPERATOR,
                 )
                 terminal_activated = activate_result.activated
                 # Idempotent re-verify: a prior pass already enqueued the
@@ -950,12 +948,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         blocked_wb.add(_blocked_ref)
                     overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
                 elif (
-                    not terminal_activated
-                    and activate_result.skipped_reason == "already_submitted"
+                    not terminal_activated and activate_result.skipped_reason == "already_submitted"
                 ):
                     logger.info(
-                        "Phase 2 activation idempotent: already_submitted"
-                        " wb=%s event=%s",
+                        "Phase 2 activation idempotent: already_submitted wb=%s event=%s",
                         activate_result.writeback_id,
                         event_id,
                     )
@@ -997,6 +993,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # activate_and_submit just enqueued.  Receipts may not exist yet
             # (outbox not delivered) or may be non-CONFIRMED — both route to
             # need_writeback_recovery rather than overall success.
+            assert activate_result is not None  # terminal_verify_ready implies activation ran
             terminal_wb_eval = await self._evaluate_terminal_writeback_status(
                 event_id=event_id,
                 activate_result=activate_result,
