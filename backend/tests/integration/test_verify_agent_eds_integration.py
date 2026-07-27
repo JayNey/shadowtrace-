@@ -237,6 +237,9 @@ async def _insert_action(
                     writeback_required=action.writeback_required,
                     writeback_applicable=action.writeback_applicable,
                     writeback_readiness=action.writeback_readiness.value,
+                    writeback_status=(
+                        action.writeback_status.value if action.writeback_status else None
+                    ),
                     disposition_source_ref=(
                         action.disposition_source_ref.model_dump(mode="json")
                         if action.disposition_source_ref

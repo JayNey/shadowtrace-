@@ -561,6 +561,84 @@ class TestHappyPath:
         assert result.need_manual_resolution is False
         assert result.need_writeback_recovery is False
 
+    async def test_phase2_immediate_deferred_already_submitted_reverify_succeeds(self):
+        """Immediate CONFIRMED + deferred terminal receipt CONFIRMED → overall SUCCESS."""
+        from contextlib import asynccontextmanager
+
+        immediate = _action(
+            tool_name="block_ip",
+            target_type="ip",
+            target="10.0.0.1",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-0001",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        deferred = _action(
+            action_id="act-deferred-00001",
+            tool_name="update_source_event_disposition",
+            target_type="incident",
+            target="INC-0001",
+            status=ActionStatus.APPROVED,
+            execution_phase=ActionExecutionPhase.POST_VERIFY,
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+        )
+        job = _job(job_id="job-0001", action_id=immediate.action_id)
+
+        class _ReceiptRow:
+            writeback_id: str = "wbk-terminal-00001"
+            status: str = "confirmed"
+            sequence: int = 1
+            confirmation_evidence: str | None = "readback_verified"
+
+        class _TerminalDBSession:
+            async def scalars(self, stmt: Any) -> Any:
+                class _Result:
+                    def first(self) -> _ReceiptRow | None:
+                        return _ReceiptRow()
+
+                return _Result()
+
+            async def get(self, *args: Any, **kwargs: Any) -> Any:
+                return None
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _TerminalDBSession()
+
+        mock_factory = MagicMock(side_effect=_session_ctx)
+        ed_svc = FakeEventDispositionService(
+            activated=False,
+            skipped_reason="already_submitted",
+            writeback_id="wbk-terminal-00001",
+        )
+        agent = VerifyAgent(
+            tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_bus=FakeEventBus(),
+            event_disposition_service=ed_svc,
+            session_factory=mock_factory,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([immediate, deferred], {"job-0001": job}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(event_id=immediate.event_id, actions=[immediate, deferred])
+        )
+
+        assert result.overall_status == VerificationOverallStatus.SUCCESS
+        assert result.need_manual_resolution is False
+        assert result.need_writeback_recovery is False
+
     async def test_create_ticket_skipped(self):
         """create_ticket → effect_status=skipped, verification action writeback_required=false."""
         action = _action(
@@ -2772,6 +2850,101 @@ class TestBlockerFixes:
         # Both jobs should be present.
         assert "act-in-db" in jobs_map
         assert "act-not-in-db" in jobs_map
+
+    async def test_null_db_writeback_status_overlays_plan_confirmed(self):
+        """DB writeback_status=NULL + plan CONFIRMED → merged action is CONFIRMED."""
+        plan_action = _action(
+            action_id="act-wb-merge",
+            tool_name="block_ip",
+            status=ActionStatus.SUCCESS,
+            execution_job_id="job-wb-merge",
+            writeback_required=True,
+            writeback_applicable=True,
+            writeback_readiness=WritebackReadiness.READY,
+            writeback_status=WritebackStatus.CONFIRMED,
+        )
+        plan = _plan([plan_action])
+
+        class _ActionRow:
+            action_id: str
+            event_id: str = "evt-20260725-00000001"
+            plan_revision: int = 1
+            action_fingerprint: str = "fp:block_ip"
+            action_category: str = "response"
+            action_name: str = "block_ip_action"
+            tool_name: str = "block_ip"
+            action_level: str = "l2"
+            execution_phase: str | None = "immediate"
+            activation_condition: str | None = None
+            approved_operation_template_hash: str | None = None
+            approved_terminal_dispositions: list[str] = []
+            target_type: str | None = "ip"
+            target: str | None = "10.0.0.1"
+            parameters: dict[str, Any] = {}
+            status: str = "success"
+            auto_execute: bool = True
+            reason: str | None = None
+            provider_name: str | None = "mock_observation"
+            execution_owner: str | None = "direct_tool"
+            execution_job_id: str | None = "job-wb-merge"
+            tool_call_id: str | None = None
+            idempotency_key: str | None = "idem-act-wb-merge"
+            writeback_required: bool = True
+            writeback_applicable: bool = True
+            writeback_readiness: str | None = "ready"
+            writeback_block_reason: str | None = None
+            writeback_status: str | None = None
+            disposition_source_ref: Any = None
+            superseded_by_revision: int | None = None
+            executed_at: Any = None
+            effect_verification_status: str | None = None
+            rollback_status: str | None = None
+            source_action_id: str | None = None
+            updated_at: Any = None
+
+            def __init__(self, action_id: str) -> None:
+                self.action_id = action_id
+
+        class _Result:
+            def __init__(self, rows: list[Any]) -> None:
+                self._rows = rows
+
+            def all(self) -> list[Any]:
+                return self._rows
+
+        class _MergeDBSession:
+            def __init__(self) -> None:
+                self._scalar_call = 0
+
+            async def scalars(self, stmt: Any) -> _Result:
+                self._scalar_call += 1
+                if self._scalar_call == 1:
+                    return _Result([_ActionRow("act-wb-merge")])
+                return _Result([])
+
+            async def get(self, *args: Any, **kwargs: Any) -> Any | None:
+                return None
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _session_ctx() -> Any:
+            yield _MergeDBSession()
+
+        agent = VerifyAgent(
+            session_factory=MagicMock(side_effect=_session_ctx),
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+
+        actions, _jobs_map, _outbox_map = await agent._load_execution_state(
+            event_id="evt-20260725-00000001",
+            response_plan=plan,
+        )
+
+        assert len(actions) == 1
+        assert actions[0].action_id == "act-wb-merge"
+        assert actions[0].writeback_status is WritebackStatus.CONFIRMED
 
     # ── Blocker #2: all tools unavailable → overall_status=FAILED ────────
 

@@ -1307,22 +1307,27 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         event_id,
                         missing,
                     )
-                # DB-persisted state takes priority over plan defaults.
-                # Merge preserves plan order — downstream consumers
-                # may rely on results[0] being the first planned action.
+                # DB-persisted state takes priority over plan defaults for
+                # non-null fields.  Merge preserves plan order — downstream
+                # consumers may rely on results[0] being the first planned action.
                 #
-                # Rather than unconditionally merging two full Action
-                # objects (which makes field provenance opaque), the plan
-                # provides identity fields (action_id, target_type, …)
-                # while all state fields (status, writeback_status,
-                # execution_owner, …) are taken exclusively from the DB
-                # row.  Actions present in the plan but missing from the
-                # DB keep their plan-level defaults; a warning is logged
-                # for each such gap above.
+                # State fields (status, writeback_status, execution_owner, …)
+                # come from the DB row when present.  The sole exception is
+                # ``writeback_status``: NULL on the row means "not yet
+                # denormalized from DispositionReceipt", not "no writeback".
+                # In that case ``_merge_db_action_with_plan`` overlays the
+                # plan snapshot when it carries a concrete status (ISSUE-564).
+                # Actions present in the plan but missing from the DB keep
+                # their plan-level defaults; a warning is logged for each gap.
                 actions = []
                 for aid in plan_actions_map:
                     if aid in db_actions:
-                        actions.append(db_actions[aid])
+                        actions.append(
+                            _merge_db_action_with_plan(
+                                db_actions[aid],
+                                plan_actions_map[aid],
+                            )
+                        )
                     else:
                         actions.append(plan_actions_map[aid])
 
@@ -2005,6 +2010,20 @@ def _make_self_verifying_result(action: Action) -> VerificationActionResult:
         detail="self_verifying",
         verification_phase=VerificationPhase.EFFECT,
     )
+
+
+def _merge_db_action_with_plan(db_action: Action, plan_action: Action) -> Action:
+    """Overlay plan writeback_status when the DB row has not denormalized it yet.
+
+    ``_load_execution_state`` prefers persisted Action rows over plan defaults.
+    A null ``writeback_status`` on the row means "not synced yet", not
+    "writeback absent".  Re-verify after terminal outbox confirm must still
+    see immediate-action writebacks that were confirmed before the deferred
+    POST_VERIFY path ran (ISSUE-564 / ISSUE-062).
+    """
+    if db_action.writeback_status is not None or plan_action.writeback_status is None:
+        return db_action
+    return db_action.model_copy(update={"writeback_status": plan_action.writeback_status})
 
 
 def _action_from_row(row: orm.Action) -> Action:

@@ -442,6 +442,34 @@ async def test_not_required_short_circuit_generates_report_and_closes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_not_required_short_circuit_from_new_reaches_closed() -> None:
+    """Investigate HTTP path starts at NEW; triage must reach TRIAGING then CLOSED."""
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=False,
+        reasoning="no investigation",
+    )
+    machine = FakeStateMachine()
+    event_id = "evt-short-new"
+    machine.statuses[event_id] = EventStatus.NEW
+    machine.status = EventStatus.NEW
+    services = _services(machine)
+    final = await build_investigation_graph(_agents(triage=triage), services).ainvoke(
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.NEW.value,
+            need_investigation=False,
+            severity=Severity.LOW.value,
+        ),
+        {"configurable": {"thread_id": event_id}},
+    )
+    assert final["node_trace"] == ["triage_node", NODE_CLOSE]
+    assert machine.status is EventStatus.CLOSED
+    assert (event_id, EventStatus.TRIAGING, "investigation:triage_start") in machine.transitions
+
+
+@pytest.mark.asyncio
 async def test_required_threat_never_enters_disposition_only() -> None:
     """REQUIRED non-FP threat does not take the disposition-only shortcut.
 

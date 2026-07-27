@@ -544,6 +544,15 @@ def build_investigation_graph(
     _convergence_guard = services.get("convergence_guard")
 
     async def triage_graph_node(state: InvestigationState) -> InvestigationState:
+        current = EventStatus(state.get("event_status", EventStatus.NEW.value))
+        status_patch: InvestigationState = cast(InvestigationState, {})
+        if current is EventStatus.NEW:
+            status_patch = await _transition_status(
+                services,
+                state,
+                EventStatus.TRIAGING,
+                reason="investigation:triage_start",
+            )
         result = await triage_agent.execute(
             TriageAgentInput(event_id=state["event_id"], raw_event_summary="")
         )
@@ -558,7 +567,7 @@ def build_investigation_graph(
         update["event_status_update_readiness"] = (
             await runtime.get_event_status_update_readiness(state["event_id"])
         ).value
-        return _patch_state(_trace(NODE_TRIAGE), update)
+        return _patch_state(_trace(NODE_TRIAGE), {**status_patch, **update})
 
     async def begin_disposition_only_node(
         state: InvestigationState,
