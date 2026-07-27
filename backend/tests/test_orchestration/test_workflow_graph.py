@@ -12,11 +12,13 @@ from app.agents.planner_agent import PlannerAgent
 from app.core.errors import InvalidStateTransitionError
 from app.models.agent_io import (
     CollectionStatus,
+    EffectStatus,
     EvidenceOutput,
     ReportAgentInput,
     RiskAssessment,
     ScoringMode,
     TriageResult,
+    VerificationActionResult,
     VerificationOverallStatus,
     VerificationPhase,
     VerificationResult,
@@ -30,6 +32,7 @@ from app.models.enums import (
     FinalVerdict,
     Severity,
     WritebackReadiness,
+    WritebackStatus,
 )
 from app.models.workflow import TransitionContext, validate_transition
 from app.orchestration.checkpointer import (
@@ -74,6 +77,7 @@ from app.orchestration.workflow_graph import (
     route_after_risk,
     route_after_triage,
     route_after_verify,
+    _resolve_verify_writeback_status,
 )
 
 
@@ -346,6 +350,53 @@ def _services(
     }
 
 
+class TestResolveVerifyWritebackStatus:
+    def _result(
+        self,
+        *,
+        failed_writebacks: list[str],
+        results: list[VerificationActionResult],
+    ) -> VerificationResult:
+        return VerificationResult(
+            overall_status=VerificationOverallStatus.FAILED,
+            verification_phase=VerificationPhase.EFFECT,
+            failed_writebacks=failed_writebacks,
+            results=results,
+        )
+
+    def _action(
+        self,
+        *,
+        writeback_ids: list[str],
+        writeback_status: WritebackStatus | None,
+    ) -> VerificationActionResult:
+        return VerificationActionResult(
+            action_id="act-001",
+            effect_status=EffectStatus.FAILED,
+            writeback_required=writeback_status is not None,
+            writeback_readiness=(
+                WritebackReadiness.READY if writeback_status is not None else WritebackReadiness.NOT_REQUIRED
+            ),
+            writeback_status=writeback_status,
+            writeback_ids=writeback_ids,
+        )
+
+    def test_matches_failed_writeback_id(self) -> None:
+        result = self._result(
+            failed_writebacks=["wbk-target"],
+            results=[self._action(writeback_ids=["wbk-target"], writeback_status=WritebackStatus.PENDING)],
+        )
+        assert _resolve_verify_writeback_status(result) == "pending"
+
+    def test_no_fallback_when_id_mismatch(self) -> None:
+        """ISSUE-062: do not borrow another writeback's status on ID mismatch."""
+        result = self._result(
+            failed_writebacks=["wbk-target"],
+            results=[self._action(writeback_ids=["wbk-other"], writeback_status=WritebackStatus.CONFLICT)],
+        )
+        assert _resolve_verify_writeback_status(result) is None
+
+
 class TestRouteAfterTriage:
     def test_not_required_no_investigation_closes(self) -> None:
         assert route_after_triage(_base_state(need_investigation=False)) == ROUTE_CLOSE
@@ -493,6 +544,10 @@ async def test_graph_replan_exhaustion_escalates() -> None:
     assert len(report_agent.calls) == 1
     assert report_agent.calls[0].escalated is True
     assert report_agent.calls[0].replan_count == MAX_REPLAN_COUNT
+    failed_transitions = [
+        target for _event_id, target, _reason in machine.transitions if target is EventStatus.FAILED
+    ]
+    assert failed_transitions, "escalation must transition through FAILED before report"
     assert machine.status is EventStatus.CLOSED
 
 

@@ -512,9 +512,6 @@ def _resolve_verify_writeback_status(
     for item in verification_result.results:
         if target in item.writeback_ids and item.writeback_status is not None:
             return item.writeback_status.value
-    for item in verification_result.results:
-        if item.writeback_status is not None:
-            return item.writeback_status.value
     return None
 
 
