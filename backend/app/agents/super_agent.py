@@ -683,7 +683,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             await self._transition(
                 event_id,
                 EventStatus.CLOSED,
-                reason="super_agent:complete_not_required",
+                reason=build_fp_close_reason(
+                    ec.false_positive_match,
+                    default="super_agent:complete_not_required",
+                ),
                 ec=ec,
                 context=TransitionContext(need_investigation=need_inv),
             )
