@@ -629,3 +629,29 @@ def test_builder_preserves_section_order() -> None:
         triage_result=_main_triage(),
     )
     assert [s.key for s in sections] == list(SECTION_KEYS)
+
+
+def test_llm_overview_preserves_false_positive_basis() -> None:
+    builder = ReportSectionBuilder()
+    event_id = "evt-report-fp-basis"
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=_main_evidence(event_id),
+        risk_assessment=_high_risk(),
+        triage_result=_main_triage(),
+        false_positive_match={
+            "matched_case_id": "case-known-fp",
+            "matched_rule": "ops_change_window_bulk_login",
+            "recommendation": "close_as_fp",
+        },
+    )
+
+    merged = ReportAgent(llm_client=None)._merge_sections(
+        sections,
+        {"overview": "LLM-generated analyst summary."},
+    )
+    overview = next(section for section in merged if section.key == "overview")
+
+    assert overview.content.startswith("LLM-generated analyst summary.")
+    assert "fp_matched_case_id: case-known-fp" in overview.content
+    assert "fp_matched_pattern: ops_change_window_bulk_login" in overview.content

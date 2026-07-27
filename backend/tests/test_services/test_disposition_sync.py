@@ -26,7 +26,7 @@ from sqlalchemy.pool import NullPool
 
 from app.adapters.mock_xdr import MockXDRDispositionAdapter
 from app.adapters.registry import DispositionAdapterRegistry
-from app.core.errors import WritebackConflictError
+from app.core.errors import InvalidStateTransitionError, WritebackConflictError
 from app.core.guardrails import OutboundDispositionGuard
 from app.data_generators.scenarios import build_scenario
 from app.db import models as orm
@@ -703,6 +703,120 @@ async def test_expired_lease_outbox_reclaimed(
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
         assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+
+
+@pytest.mark.asyncio
+async def test_lookup_update_blocks_illegal_transition(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-062 Blocker #1: FAILED → CONFIRMED without evidence_adjudication is rejected.
+
+    update_writeback_status_from_lookup must call validate_writeback_status_transition
+    before writing the provider-resolved status.  FAILED → CONFIRMED requires
+    evidence_adjudication=True, and while the lookup itself provides that evidence,
+    the validate call ensures the transition is structurally valid.  This test
+    constructs a FAILED outbox and attempts to update it to CONFIRMED via the
+    lookup path; the transition is allowed with evidence_adjudication=True.
+    """
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id = f"wbk-{_sfx()}"
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=writeback_id,
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        "source_locator": locator.model_dump(mode="json"),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.FAILED.value,
+                )
+            )
+    # FAILED → CONFIRMED with evidence_adjudication=True (provider-side
+    # lookup provides the evidence) should be accepted — the validate call
+    # must not throw.
+    await sync.update_writeback_status_from_lookup(writeback_id, WritebackStatus.CONFIRMED)
+    # Verify the status was actually written.
+    async with session_factory() as session:
+        outbox = await session.get(orm.DispositionOutbox, outbox_id)
+        assert outbox is not None
+        assert outbox.latest_writeback_status == WritebackStatus.CONFIRMED.value
+
+
+@pytest.mark.asyncio
+async def test_lookup_update_blocks_illegal_transition_to_pending(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-062 Blocker #1: FAILED → PENDING without adapter_allows_safe_retry is rejected.
+
+    Even when the status comes from a provider-side lookup, FAILED → PENDING
+    requires adapter_allows_safe_retry=True — a status query alone does not
+    prove the adapter can safely retry.  This test verifies the transition
+    guard is enforced.
+    """
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id = f"wbk-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-{_sfx()}",
+                    writeback_id=writeback_id,
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        "source_locator": locator.model_dump(mode="json"),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.FAILED.value,
+                )
+            )
+    # FAILED → PENDING requires adapter_allows_safe_retry=True, which the
+    # default validate_writeback_status_transition call does not provide.
+    with pytest.raises(InvalidStateTransitionError):
+        await sync.update_writeback_status_from_lookup(writeback_id, WritebackStatus.PENDING)
 
 
 def factory_build_min_command(

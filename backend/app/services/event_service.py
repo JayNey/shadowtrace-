@@ -267,6 +267,12 @@ def _source_snapshot_from_row(row: orm.SecurityEvent) -> dict[str, Any]:
     }
     if row.event_type:
         snapshot["alert_type"] = row.event_type
+    if row.title:
+        snapshot["title"] = row.title
+    if row.description:
+        snapshot["description"] = row.description
+    if row.severity:
+        snapshot["severity"] = row.severity
     return snapshot
 
 
@@ -1593,6 +1599,17 @@ class EventService:
         event_type = source.event_type or EventType.OTHER
         severity = source.severity or Severity.LOW
         raw_alert_ids = [ref.source_object_id] if ref.source_kind is SourceObjectKind.ALERT else []
+        raw_alert_snapshot: dict[str, Any] | None = None
+        normalized = source.normalized or {}
+        fp_meta: dict[str, Any] = {}
+        fp_rule = normalized.get("fp_rule")
+        if isinstance(fp_rule, str) and fp_rule:
+            fp_meta["fp_rule"] = fp_rule
+        scenario_id = normalized.get("scenario")
+        if isinstance(scenario_id, str) and scenario_id:
+            fp_meta["scenario"] = scenario_id
+        if fp_meta:
+            raw_alert_snapshot = fp_meta
 
         row = orm.SecurityEvent(
             event_id=event_id,
@@ -1609,6 +1626,7 @@ class EventService:
             disposition_source_ref=disposition_ref,
             disposition_policy=policy.value,
             raw_alert_ids=raw_alert_ids,
+            raw_alert_snapshot=raw_alert_snapshot,
             source_type=source.source_type or ref.source_product,
             occurred_at=occurred,
         )

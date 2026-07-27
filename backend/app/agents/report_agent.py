@@ -95,6 +95,9 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         rag = await self._read_optional(input.event_id, "rag_output")
         if not isinstance(rag, dict):
             rag = None
+        fp_match = await self._read_optional(input.event_id, "false_positive_match")
+        if not isinstance(fp_match, dict):
+            fp_match = None
         final_verdict = await self._resolve_final_verdict(input.event_id)
 
         draft_sections = self.section_builder.build(
@@ -106,6 +109,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             verification_result=input.verification_result,
             rag_output=rag,
             final_verdict=final_verdict,
+            false_positive_match=fp_match,
         )
         title = self.section_builder.default_title(triage, input.event_id)
         summary = self.section_builder.default_summary(
@@ -244,6 +248,15 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         merged: list[ReportSection] = []
         for section in base:
             content = overrides.get(section.key) or section.content
+            if section.key == "overview" and section.key in overrides:
+                required_fp_lines = [
+                    line for line in section.content.splitlines() if line.startswith("fp_")
+                ]
+                missing_fp_lines = [
+                    line for line in required_fp_lines if line not in content.splitlines()
+                ]
+                if missing_fp_lines:
+                    content = "\n".join([content, *missing_fp_lines])
             merged.append(
                 ReportSection(
                     key=section.key,

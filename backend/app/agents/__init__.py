@@ -13,6 +13,7 @@ from app.agents.response_agent import ResponseAgent
 from app.agents.risk_agent import RiskAgent
 from app.agents.risk_scoring_engine import RiskScoringEngine, severity_from_score
 from app.agents.verdict_resolver import VerdictResolver
+from app.agents.verify_agent import VerifyAgent
 from app.models.agent_io import (
     AGENT_INPUT_MODELS,
     AgentInput,
@@ -57,6 +58,7 @@ __all__ = [
     "ToolAgentInput",
     "TriageAgentInput",
     "VerdictResolver",
+    "VerifyAgent",
     "VerifyAgentInput",
     "calibrate_confidence",
     "severity_from_score",

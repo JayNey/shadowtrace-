@@ -1,4 +1,4 @@
-"""LangGraph investigation workflow skeleton (ISSUE-048/ISSUE-049)."""
+"""LangGraph investigation workflow (ISSUE-048/ISSUE-049/ISSUE-062)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
+from app.core.config import get_settings
 from app.core.errors import InvalidStateTransitionError
 from app.models.agent_io import (
     CollectionStatus,
@@ -22,11 +23,15 @@ from app.models.agent_io import (
     RAGOutput,
     ReportAgentInput,
     ResponseAgentInput,
+    ResponsePlan,
+    ResponsePlanGeneratedBy,
     RiskAgentInput,
     RiskAssessment,
     ScoringMode,
-    TriageAgentInput,
     TriageResult,
+    VerificationPhase,
+    VerificationResult,
+    VerifyAgentInput,
 )
 from app.models.context import EventContext
 from app.models.enums import (
@@ -41,12 +46,51 @@ from app.models.enums import (
 from app.models.security_event import EventSummary
 from app.models.workflow import TransitionContext
 from app.orchestration.graph_state import InvestigationState
+from app.orchestration.replan_handler import (
+    ReplanHandler,
+    replan_graph_node,
+)
+from app.orchestration.triage_input_builder import build_triage_agent_input
+from app.orchestration.writeback_recovery_handler import (
+    WritebackRecoveryHandler,
+    writeback_recovery_graph_node,
+)
 from app.services.analysis_only_pipeline import run_rag_stage
 from app.services.context_service import EventContextStore
-from app.services.degraded_flag_service import DegradedFlagService
+from app.services.degraded_flag_service import DegradedFlagService, apply_flag_to_list
+from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.state_machine_service import StateMachineService
 
 logger = logging.getLogger(__name__)
+
+
+async def _persist_degraded_flag(
+    state: InvestigationState,
+    flag_name: str,
+    *,
+    event_id: str,
+    degraded_flags: DegradedFlagService,
+) -> list[str]:
+    """Persist a verify-node degraded flag to DB + EventContext and graph state."""
+    try:
+        return await degraded_flags.set_flag(
+            event_id,
+            flag_name,
+            True,
+            writer=_GRAPH_OPERATOR,
+        )
+    except Exception:
+        logger.exception(
+            "degraded_flag persistence failed: flag=%s event=%s — falling back to graph state",
+            flag_name,
+            event_id,
+        )
+        return apply_flag_to_list(
+            list(state.get("degraded_flags") or []),
+            flag_name,
+            True,
+        )
+
 
 CompiledInvestigationGraph = CompiledStateGraph[
     InvestigationState, None, InvestigationState, InvestigationState
@@ -68,6 +112,7 @@ NODE_APPROVAL_WAIT = "approval_wait_node"
 NODE_EXECUTE = "execute_node"
 NODE_VERIFY = "verify_node"
 NODE_REPLAN = "replan_node"
+NODE_WRITEBACK_RECOVERY = "writeback_recovery_node"
 NODE_REPORT = "report_node"
 NODE_HALT = "halt_node"
 
@@ -91,6 +136,7 @@ ROUTE_INVESTIGATE = "investigate"
 ROUTE_RESPONSE = "response"
 ROUTE_EVIDENCE = "evidence"
 ROUTE_EXECUTE = "execute"
+ROUTE_TO_APPROVAL = "approval"
 ROUTE_WAIT = "wait"
 ROUTE_REPORT = "report"
 ROUTE_REPLAN = "replan"
@@ -101,6 +147,48 @@ ROUTE_HALT = "halt"
 
 class _AgentLike(Protocol):
     async def execute(self, input: Any) -> Any: ...
+
+
+class _StateMachinePort(Protocol):
+    async def transition(
+        self,
+        event_id: str,
+        target: EventStatus,
+        *,
+        context: TransitionContext | None = None,
+        operator: str | None = None,
+        reason: str | None = None,
+    ) -> Any: ...
+
+    async def get_current_status(self, event_id: str) -> EventStatus: ...
+
+
+class _DispositionSyncPort(Protocol):
+    async def retry_writeback(
+        self,
+        writeback_id: str,
+        operator: str,
+    ) -> Any: ...
+
+    async def resolve_writeback(
+        self,
+        writeback_id: str,
+        resolution: str,
+        principal: str,
+        comment: str,
+    ) -> Any: ...
+
+    async def lookup_writeback_status(
+        self,
+        writeback_id: str,
+    ) -> Any: ...
+
+    async def activate_deferred_disposition(
+        self,
+        event_id: str,
+        *,
+        operator: str,
+    ) -> Any: ...
 
 
 class _WorkflowRuntimeLike(Protocol):
@@ -174,7 +262,22 @@ def route_after_planner(state: InvestigationState) -> str:
 
 
 def route_after_risk(state: InvestigationState) -> str:
+    """Route to response execution or analysis-completion report."""
+    if state.get("disposition_only_intent"):
+        return ROUTE_RESPONSE
+    if state.get("defer_response_execution"):
+        return ROUTE_REPORT
     return ROUTE_RESPONSE
+
+
+def route_after_report(state: InvestigationState) -> str:
+    """End analysis at REPORTING for required policy; close when not required."""
+    policy = DispositionPolicy(
+        state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
+    )
+    if policy is DispositionPolicy.REQUIRED:
+        return ROUTE_HALT
+    return ROUTE_CLOSE
 
 
 def route_after_approval(state: InvestigationState) -> str:
@@ -184,22 +287,30 @@ def route_after_approval(state: InvestigationState) -> str:
 
 
 def route_after_verify(state: InvestigationState) -> str:
+    if state.get("halted"):
+        return ROUTE_HALT
     if state.get("verify_need_manual_resolution"):
         return ROUTE_MANUAL
     if state.get("verify_need_writeback_recovery"):
         return ROUTE_WRITEBACK
     if state.get("verify_need_action_replan"):
         return ROUTE_REPLAN
-    if (
-        state.get("disposition_only_intent")
-        or state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
-    ):
-        return ROUTE_HALT
+    # ISSUE-062 truth table: when all three flags are false → overall success → REPORT.
+    # Disposition-only / required policy events use the same REPORTING path;
+    # any deferred writeback that still needs waiting is handled via
+    # verify_need_writeback_recovery (checked above), not via HALT.
     return ROUTE_REPORT
 
 
+def route_after_replan(state: InvestigationState) -> str:
+    """After replan_node: if escalated, go to report; otherwise loop to planner."""
+    if state.get("escalated"):
+        return ROUTE_REPORT
+    return ROUTE_INVESTIGATE  # goes back to planner_node
+
+
 def _route_after_response(state: InvestigationState) -> str:
-    return ROUTE_HALT if state.get("halted") else ROUTE_EXECUTE
+    return ROUTE_HALT if state.get("halted") else ROUTE_TO_APPROVAL
 
 
 def _trace(node_name: str) -> InvestigationState:
@@ -275,6 +386,7 @@ def _event_context_from_state(state: InvestigationState) -> EventContext:
             )
         ),
         disposition_policy=policy,
+        escalated=bool(state.get("escalated", False)),
     )
     return EventContext(
         event=summary,
@@ -286,6 +398,7 @@ def _event_context_from_state(state: InvestigationState) -> EventContext:
             state.get("execution_substate", ExecutionSubstate.NONE.value)
         ),
         execution_plan=state.get("execution_plan"),
+        replan_count=int(state.get("replan_count", 0)),
     )
 
 
@@ -306,6 +419,62 @@ async def _transition_status(
         reason=reason,
     )
     return cast(InvestigationState, {"event_status": target.value})
+
+
+async def build_initial_investigation_state(
+    event_id: str,
+    *,
+    context_store: EventContextStore,
+) -> InvestigationState:
+    """Build LangGraph initial state from persisted EventContext + event row."""
+    context = await context_store.get_full_context(event_id)
+    event = context.event
+    policy = event.disposition_policy if event is not None else DispositionPolicy.NOT_REQUIRED
+    state: InvestigationState = {
+        "event_id": event_id,
+        "node_trace": [],
+        "degraded_flags": list(context.degraded_flags or []),
+        "halted": False,
+        "disposition_only_intent": bool(context.disposition_only_intent),
+        "execution_substate": context.execution_substate.value,
+        "replan_count": int(context.replan_count or 0),
+        "escalated": bool(event.escalated if event is not None else False),
+        "disposition_policy": policy.value,
+        "event_status": (event.status.value if event is not None else EventStatus.NEW.value),
+        "severity": (event.severity.value if event is not None else Severity.MEDIUM.value),
+        "final_verdict": (
+            event.final_verdict.value
+            if event is not None and event.final_verdict is not None
+            else None
+        ),
+        "event_status_update_readiness": (
+            event.writeback_readiness.value
+            if event is not None
+            else WritebackReadiness.NOT_REQUIRED.value
+        ),
+        "report_generated": context.report is not None,
+        "needs_approval_wait": False,
+        # ISSUE-566: initial HTTP investigate completes analysis at report;
+        # response/approval/execute/verify resume via approval_engine hooks.
+        "defer_response_execution": True,
+    }
+    if context.triage_result is not None:
+        state["triage_result"] = context.triage_result
+    if context.false_positive_match is not None:
+        state["false_positive_match"] = context.false_positive_match
+    if context.source_snapshot is not None:
+        state["source_snapshot"] = context.source_snapshot
+    if context.execution_plan is not None:
+        state["execution_plan"] = context.execution_plan
+    if context.evidence_output is not None:
+        state["evidence_output"] = context.evidence_output
+    if context.rag_output is not None:
+        state["rag_output"] = context.rag_output
+    if context.risk_assessment is not None:
+        state["risk_assessment"] = context.risk_assessment
+    if context.response_plan is not None:
+        state["response_plan"] = context.response_plan
+    return state
 
 
 async def _hydrate_context(
@@ -367,10 +536,50 @@ def build_investigation_graph(
     event_service = cast(_EventServiceLike, services["event_service"])
     degraded_flags = cast(DegradedFlagService, services["degraded_flags"])
 
+    # Hoist handler creation to closure — ReplanHandler and
+    # WritebackRecoveryHandler are stateless (no accumulated state between
+    # calls), so sharing a single instance per graph invocation avoids
+    # unnecessary allocations on every node execution.
+    _state_machine_port = cast(_StateMachinePort, services["state_machine"])
+    _replan_handler = ReplanHandler(
+        state_machine=_state_machine_port,
+        runtime=runtime,
+    )
+    _wb_handler = WritebackRecoveryHandler(
+        state_machine=_state_machine_port,
+        runtime=runtime,
+        disposition_sync=services.get("disposition_sync"),
+        lookup_poll_interval_s=get_settings().writeback_lookup_poll_interval_s,
+    )
+    _convergence_guard = services.get("convergence_guard")
+
     async def triage_graph_node(state: InvestigationState) -> InvestigationState:
-        result = await triage_agent.execute(
-            TriageAgentInput(event_id=state["event_id"], raw_event_summary="")
+        current = EventStatus(state.get("event_status", EventStatus.NEW.value))
+        status_patch: InvestigationState = cast(InvestigationState, {})
+        if current is EventStatus.NEW:
+            status_patch = await _transition_status(
+                services,
+                state,
+                EventStatus.TRIAGING,
+                reason="investigation:triage_start",
+            )
+        event_context: EventContext | None = None
+        context_store = services.get("context_store")
+        if context_store is not None:
+            try:
+                event_context = await context_store.get_full_context(state["event_id"])
+            except Exception:
+                logger.debug(
+                    "triage input: context lookup failed for event=%s",
+                    state["event_id"],
+                    exc_info=True,
+                )
+        triage_input = await build_triage_agent_input(
+            state["event_id"],
+            event_context=event_context,
+            event_service=services.get("event_service"),
         )
+        result = await triage_agent.execute(triage_input)
         if not isinstance(result, TriageResult):
             raise TypeError("triage_agent must return TriageResult")
         update: dict[str, Any] = {
@@ -382,7 +591,7 @@ def build_investigation_graph(
         update["event_status_update_readiness"] = (
             await runtime.get_event_status_update_readiness(state["event_id"])
         ).value
-        return _patch_state(_trace(NODE_TRIAGE), update)
+        return _patch_state(_trace(NODE_TRIAGE), {**status_patch, **update})
 
     async def begin_disposition_only_node(
         state: InvestigationState,
@@ -479,6 +688,22 @@ def build_investigation_graph(
             )
             report_generated = report is not None
 
+        # ISSUE-062 Blocker: escalated events arrive at close_node with
+        # CONTAINED/FAILED status in the DB (set by ReplanHandler.escalate()).
+        # STATE_TRANSITIONS has CONTAINED→{REPORTING, FAILED} and
+        # FAILED→{REPORTING} — no direct edge to CLOSED.  We must first
+        # transition through REPORTING to satisfy the state machine.
+        current_event_status = EventStatus(state.get("event_status", EventStatus.REPORTING.value))
+        if current_event_status in (EventStatus.CONTAINED, EventStatus.FAILED):
+            report_status = await _transition_status(
+                services,
+                state,
+                EventStatus.REPORTING,
+                reason="investigation:escalated_to_reporting",
+            )
+            state = _patch_state(state, report_status)
+
+        escalated = bool(state.get("escalated", False))
         status = await _transition_status(
             services,
             state,
@@ -495,8 +720,9 @@ def build_investigation_graph(
                 recommendation=((state.get("false_positive_match") or {}).get("recommendation")),
                 final_verdict=FinalVerdict(final_verdict) if final_verdict else None,
                 report_exists=report_generated,
+                escalated=escalated,
             ),
-            reason="investigation:close",
+            reason=build_fp_close_reason(state.get("false_positive_match")),
         )
         return _patch_state(
             _trace(NODE_CLOSE),
@@ -597,21 +823,28 @@ def build_investigation_graph(
         )
         if not isinstance(result, RiskAssessment):
             raise TypeError("risk_agent must return RiskAssessment")
-        await _transition_status(
-            services,
-            state,
-            EventStatus.PLANNING_RESPONSE,
-            reason="investigation:plan_response",
-        )
+        defer_response = bool(state.get("defer_response_execution"))
+        if defer_response:
+            risk_status = EventStatus.SCORING
+            status_patch: InvestigationState = cast(InvestigationState, {})
+        else:
+            status_patch = await _transition_status(
+                services,
+                state,
+                EventStatus.PLANNING_RESPONSE,
+                reason="investigation:plan_response",
+            )
+            risk_status = EventStatus.PLANNING_RESPONSE
         update: dict[str, Any] = {
-            "event_status": EventStatus.PLANNING_RESPONSE.value,
+            "event_status": risk_status.value,
             "risk_assessment": result.model_dump(mode="json"),
             "severity": result.severity.value,
         }
         await _hydrate_context(services, state["event_id"], update)
-        update["event_status"] = EventStatus.PLANNING_RESPONSE.value
+        update["event_status"] = risk_status.value
         return _patch_state(
             _trace(NODE_RISK),
+            status_patch,
             update,
         )
 
@@ -732,19 +965,46 @@ def build_investigation_graph(
         )
 
     async def approval_wait_node(state: InvestigationState) -> InvestigationState:
+        # Persist WAITING_APPROVAL substate and pause graph execution.
+        # The graph halts here; resume_investigation() is called after
+        # approve/reject API endpoints complete their decision cycle.
+        await runtime.set_execution_substate(
+            state["event_id"],
+            ExecutionSubstate.WAITING_APPROVAL,
+            event_status=EventStatus.WAITING_APPROVAL,
+        )
+        logger.info(
+            "approval_wait: event=%s paused for human approval",
+            state["event_id"],
+        )
         return _patch_state(
             _trace(NODE_APPROVAL_WAIT),
-            {"halted": True},
+            {
+                "halted": True,
+                "execution_substate": ExecutionSubstate.WAITING_APPROVAL.value,
+            },
         )
 
     async def execute_node(state: InvestigationState) -> InvestigationState:
         action_execution = services.get("action_execution")
+        execution_ok = True
         if action_execution is not None:
             plan_revision = _plan_revision_from_state(state)
-            await action_execution.execute_plan(
-                state["event_id"],
-                plan_revision=plan_revision,
-            )
+            try:
+                summary = await action_execution.execute_plan(
+                    state["event_id"],
+                    plan_revision=plan_revision,
+                )
+                # Track whether any IMMEDIATE actions were executed.
+                execution_ok = summary is not None
+            except Exception:
+                logger.exception(
+                    "execute_plan failed for event=%s revision=%d",
+                    state["event_id"],
+                    plan_revision,
+                )
+                execution_ok = False
+
         status = await _transition_status(
             services,
             state,
@@ -755,30 +1015,289 @@ def build_investigation_graph(
                 else "investigation:execute_stub"
             ),
         )
-        return _patch_state(_trace(NODE_EXECUTE), status)
+        return _patch_state(
+            _trace(NODE_EXECUTE),
+            status,
+            {"execution_ok": execution_ok},
+        )
 
     async def verify_node(state: InvestigationState) -> InvestigationState:
-        if (
-            state.get("disposition_only_intent")
-            or state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
-        ):
-            return _trace(NODE_VERIFY)
-        status = await _transition_status(
-            services,
-            state,
-            EventStatus.REPORTING,
-            reason="investigation:verify_stub",
+        verify_agent = cast(_AgentLike | None, agents.get("verify_agent"))
+        disposition_sync = services.get("disposition_sync")
+        event_disposition = services.get("event_disposition")
+        disposition_only = bool(state.get("disposition_only_intent"))
+        policy_required = state.get("disposition_policy") == DispositionPolicy.REQUIRED.value
+
+        # Should-Fix: when disposition_policy=required and no response_plan
+        # exists, escalate to MANUAL_RESOLUTION instead of constructing a
+        # placeholder that would silently swallow the missing plan.  A
+        # required-policy event must have a concrete response plan before
+        # verification can proceed.
+        if policy_required and state.get("response_plan") is None:
+            flags = await _persist_degraded_flag(
+                state,
+                "missing_response_plan_for_required_policy",
+                event_id=state["event_id"],
+                degraded_flags=degraded_flags,
+            )
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=EventStatus.VERIFYING,
+            )
+            return _patch_state(
+                _trace(NODE_VERIFY),
+                {
+                    "degraded_flags": flags,
+                    "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+                    "verify_need_action_replan": False,
+                    "verify_need_writeback_recovery": False,
+                    "verify_need_manual_resolution": True,
+                },
+            )
+
+        # Build ResponsePlan from state for VerifyAgent input.
+        # The fallback placeholder (plan_id="") is only reached for
+        # non-required-policy events where the planner didn't produce a
+        # response_plan — the empty plan is acceptable here because
+        # VerifyAgent only uses it for context; the policy won't enforce
+        # disposition writeback.
+        response_plan = (
+            ResponsePlan.model_validate(state["response_plan"])
+            if state.get("response_plan") is not None
+            else ResponsePlan(
+                plan_id="",
+                actions=[],
+                strategy_summary="",
+                generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+            )
         )
-        return _patch_state(_trace(NODE_VERIFY), status)
+
+        verification_result: VerificationResult | None = None
+        degraded = False
+
+        if verify_agent is not None:
+            try:
+                result = await verify_agent.execute(
+                    VerifyAgentInput(
+                        event_id=state["event_id"],
+                        response_plan=response_plan,
+                        verification_phase=VerificationPhase.EFFECT,
+                    )
+                )
+                if isinstance(result, VerificationResult):
+                    verification_result = result
+                else:
+                    degraded = True
+                    logger.warning(
+                        "verify_agent returned non-VerificationResult for event=%s",
+                        state["event_id"],
+                    )
+            except Exception:
+                degraded = True
+                logger.exception("verify_agent failed for event=%s", state["event_id"])
+        elif disposition_only or policy_required:
+            # Disposition-only path without verify_agent: activate phase 2
+            # disposition writeback.  Prefer EventDispositionService (ISSUE-059A)
+            # which routes through TerminalDispositionResolver and the
+            # after_effect_resolution_ready gate; fall back to direct
+            # disposition_sync.activate_deferred_disposition when EDS is
+            # not wired.  When neither is available, flag writeback recovery
+            # so the writeback recovery handler can pick it up.
+            disposition_activation_failed = False
+            if event_disposition is not None:
+                try:
+                    logger.info(
+                        "verify_node: activating deferred disposition via "
+                        "EventDispositionService for event=%s",
+                        state["event_id"],
+                    )
+                    plan_revision = _plan_revision_from_state(state)
+                    await event_disposition.activate_and_submit(
+                        state["event_id"],
+                        plan_revision,
+                        principal_or_system="verify_node:disposition_activation",
+                    )
+                except Exception:
+                    logger.exception(
+                        "verify_node: EventDispositionService activation failed for event=%s",
+                        state["event_id"],
+                    )
+                    degraded = True
+                    disposition_activation_failed = True
+            elif disposition_sync is not None:
+                try:
+                    logger.info(
+                        "verify_node: activating deferred disposition via "
+                        "disposition_sync for event=%s",
+                        state["event_id"],
+                    )
+                    await disposition_sync.activate_deferred_disposition(
+                        state["event_id"],
+                        operator="verify_node:disposition_activation",
+                    )
+                except Exception:
+                    logger.exception(
+                        "verify_node: disposition activation failed for event=%s",
+                        state["event_id"],
+                    )
+                    degraded = True
+                    disposition_activation_failed = True
+            else:
+                degraded = True
+
+            # When disposition activation itself fails the writeback was
+            # never created (the activation is what creates the outbox
+            # record), so there is nothing for WritebackRecoveryHandler to
+            # recover.  Route to MANUAL_RESOLUTION so an operator can
+            # decide whether to retry activation or close the event.
+            # We write the flag directly into state rather than through
+            # DegradedFlagService.set_flag to avoid the ISSUE-014 guardrail
+            # (verify_node is not a trusted caller and
+            # disposition_activation_failed is not in the allowlist).
+            if degraded and disposition_activation_failed:
+                flags = await _persist_degraded_flag(
+                    state,
+                    "disposition_activation_failed",
+                    event_id=state["event_id"],
+                    degraded_flags=degraded_flags,
+                )
+                await runtime.set_execution_substate(
+                    state["event_id"],
+                    ExecutionSubstate.MANUAL_RESOLUTION,
+                    event_status=EventStatus.VERIFYING,
+                )
+                return _patch_state(
+                    _trace(NODE_VERIFY),
+                    {
+                        "degraded_flags": flags,
+                        "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+                        "verify_need_action_replan": False,
+                        "verify_need_writeback_recovery": False,
+                        "verify_need_manual_resolution": True,
+                    },
+                )
+        else:
+            degraded = True
+
+        if degraded or verification_result is None:
+            # Degradation: verification could not complete.  Route to
+            # MANUAL_RESOLUTION so an operator can triage rather than
+            # silently assuming success and proceeding to REPORTING.
+            # We write the flag directly into state rather than through
+            # DegradedFlagService.set_flag to avoid the ISSUE-014 guardrail
+            # (verify_node is not a trusted caller and verify_degraded is
+            # not in the allowlist).
+            flags = await _persist_degraded_flag(
+                state,
+                "verify_degraded",
+                event_id=state["event_id"],
+                degraded_flags=degraded_flags,
+            )
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=EventStatus.VERIFYING,
+            )
+            return _patch_state(
+                _trace(NODE_VERIFY),
+                {
+                    "degraded_flags": flags,
+                    "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+                    "verify_need_action_replan": False,
+                    "verify_need_writeback_recovery": False,
+                    "verify_need_manual_resolution": True,
+                },
+            )
+
+        # Extract routing flags from VerificationResult.
+        update: dict[str, Any] = {
+            "verify_need_action_replan": verification_result.need_action_replan,
+            "verify_need_writeback_recovery": verification_result.need_writeback_recovery,
+            "verify_need_manual_resolution": verification_result.need_manual_resolution,
+            "verify_failed_actions": verification_result.failed_actions,
+            "verify_failed_writebacks": verification_result.failed_writebacks,
+            "verify_has_partial_success": verification_result.overall_status.value == "partial",
+        }
+
+        # Should-Fix: when execution_ok is False but VerifyAgent didn't report
+        # any specific failures, the execution layer itself failed without a
+        # corresponding verification signal.  This is an anomalous state —
+        # route to MANUAL_RESOLUTION instead of silently proceeding to
+        # REPORTING with a false sense of success.
+        if (
+            not state.get("execution_ok", True)
+            and not verification_result.need_action_replan
+            and not verification_result.need_writeback_recovery
+            and not verification_result.need_manual_resolution
+        ):
+            flags = await _persist_degraded_flag(
+                state,
+                "execution_failed_unverified",
+                event_id=state["event_id"],
+                degraded_flags=degraded_flags,
+            )
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=EventStatus.VERIFYING,
+            )
+            return _patch_state(
+                _trace(NODE_VERIFY),
+                {
+                    **update,
+                    "degraded_flags": flags,
+                    "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+                    "verify_need_action_replan": False,
+                    "verify_need_writeback_recovery": False,
+                    "verify_need_manual_resolution": True,
+                },
+            )
+
+        # Transition to the appropriate status based on verification outcome.
+        if verification_result.need_action_replan:
+            # Don't transition here — replan_node handles REPLANNING transition.
+            pass
+        elif verification_result.need_writeback_recovery:
+            # Stay in VERIFYING with WAITING_WRITEBACK substate.
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.WAITING_WRITEBACK,
+                event_status=EventStatus.VERIFYING,
+            )
+            update["execution_substate"] = ExecutionSubstate.WAITING_WRITEBACK.value
+        elif verification_result.need_manual_resolution:
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=EventStatus.VERIFYING,
+            )
+            update["execution_substate"] = ExecutionSubstate.MANUAL_RESOLUTION.value
+        else:
+            # Overall success — advance to REPORTING.
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.REPORTING,
+                reason="investigation:verify_success",
+            )
+            update.update(status)
+
+        return _patch_state(_trace(NODE_VERIFY), update)
 
     async def replan_node(state: InvestigationState) -> InvestigationState:
-        status = await _transition_status(
-            services,
+        patches = await replan_graph_node(
             state,
-            EventStatus.REPLANNING,
-            reason="investigation:replan_stub",
+            handler=_replan_handler,
+            convergence_guard=_convergence_guard,
         )
-        return _patch_state(_trace(NODE_REPLAN), status)
+        return _patch_state(_trace(NODE_REPLAN), patches)
+
+    async def writeback_recovery_node(state: InvestigationState) -> InvestigationState:
+        return await writeback_recovery_graph_node(
+            state,
+            handler=_wb_handler,
+        )
 
     async def report_node(state: InvestigationState) -> InvestigationState:
         report = await report_agent.execute(
@@ -788,12 +1307,29 @@ def build_investigation_graph(
                 risk_assessment=RiskAssessment.model_validate(state["risk_assessment"]),
             )
         )
+        # ISSUE-062 B2: When the writeback recovery path routes to report_node,
+        # the DB status may still be VERIFYING (verify_node stayed in VERIFYING
+        # for writeback recovery; writeback_recovery_node does not transition).
+        # Without the transition here, close_node would attempt VERIFYING→CLOSED
+        # which is an illegal state transition.
+        #
+        # The transition is guarded against the state dict (not the DB) to keep
+        # this call cheap — when verify_node already persisted REPORTING the
+        # state dict also carries "reporting" and we skip the redundant DB write.
+        current = EventStatus(state.get("event_status", EventStatus.VERIFYING.value))
+        if current is not EventStatus.REPORTING:
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.REPORTING,
+                reason="investigation:report",
+            )
+        else:
+            status = cast(InvestigationState, {})
         return _patch_state(
             _trace(NODE_REPORT),
-            {
-                "event_status": EventStatus.REPORTING.value,
-                "report_generated": report is not None,
-            },
+            status,
+            {"report_generated": report is not None},
         )
 
     async def halt_node(state: InvestigationState) -> InvestigationState:
@@ -823,6 +1359,7 @@ def build_investigation_graph(
     register(NODE_EXECUTE, execute_node)
     register(NODE_VERIFY, verify_node)
     register(NODE_REPLAN, replan_node)
+    register(NODE_WRITEBACK_RECOVERY, writeback_recovery_node)
     register(NODE_REPORT, report_node)
     register(NODE_HALT, halt_node)
     if rag_agent is not None:
@@ -857,14 +1394,17 @@ def build_investigation_graph(
     graph.add_conditional_edges(
         NODE_RISK,
         route_after_risk,
-        {ROUTE_RESPONSE: NODE_RESPONSE},
+        {
+            ROUTE_RESPONSE: NODE_RESPONSE,
+            ROUTE_REPORT: NODE_REPORT,
+        },
     )
     graph.add_conditional_edges(
         NODE_RESPONSE,
         _route_after_response,
         {
             ROUTE_HALT: NODE_HALT,
-            ROUTE_EXECUTE: NODE_APPROVAL,
+            ROUTE_TO_APPROVAL: NODE_APPROVAL,
         },
     )
     graph.add_conditional_edges(
@@ -884,13 +1424,54 @@ def build_investigation_graph(
             ROUTE_REPORT: NODE_REPORT,
             ROUTE_REPLAN: NODE_REPLAN,
             ROUTE_MANUAL: NODE_MANUAL_HOLD,
-            # P0 placeholder: writeback recovery shares manual_hold until ISSUE-062.
-            ROUTE_WRITEBACK: NODE_MANUAL_HOLD,
+            ROUTE_WRITEBACK: NODE_WRITEBACK_RECOVERY,
             ROUTE_HALT: NODE_HALT,
         },
     )
-    graph.add_edge(NODE_REPLAN, NODE_PLANNER)
-    graph.add_edge(NODE_REPORT, NODE_CLOSE)
+    # Writeback recovery routing (ISSUE-062 S2):
+    #
+    # NODE_WRITEBACK_RECOVERY deliberately reuses ``route_after_verify`` because
+    # its state output produces the same routing flags (verify_need_* / halted)
+    # that the verify→{report, replan, manual, writeback, halt} truth table
+    # consumes.  This is an intentional contract — not an oversight:
+    #
+    #   writeback_recovery_graph_node sets:
+    #     verify_need_writeback_recovery → ROUTE_WRITEBACK (loop back here)
+    #     verify_need_manual_resolution    → ROUTE_MANUAL  (manual_hold_node)
+    #     (neither flag)                   → ROUTE_REPORT  (report_node)
+    #     halted                           → ROUTE_HALT    (halt_node)
+    #
+    # If writeback recovery ever needs to send a signal beyond this set (e.g.
+    # "waiting but don't halt the graph"), define a dedicated route function
+    # rather than adding a new flag that route_after_verify must also handle.
+    graph.add_conditional_edges(
+        NODE_WRITEBACK_RECOVERY,
+        route_after_verify,
+        {
+            ROUTE_REPORT: NODE_REPORT,
+            ROUTE_REPLAN: NODE_REPLAN,
+            ROUTE_MANUAL: NODE_MANUAL_HOLD,
+            ROUTE_WRITEBACK: NODE_WRITEBACK_RECOVERY,
+            ROUTE_HALT: NODE_HALT,
+        },
+    )
+    # Replan: escalate→report, continue→back to planner for revise.
+    graph.add_conditional_edges(
+        NODE_REPLAN,
+        route_after_replan,
+        {
+            ROUTE_REPORT: NODE_REPORT,
+            ROUTE_INVESTIGATE: NODE_PLANNER,
+        },
+    )
+    graph.add_conditional_edges(
+        NODE_REPORT,
+        route_after_report,
+        {
+            ROUTE_CLOSE: NODE_CLOSE,
+            ROUTE_HALT: NODE_HALT,
+        },
+    )
     graph.add_edge(NODE_CLOSE, END)
     graph.add_edge(NODE_HALT, END)
 
@@ -1036,18 +1617,23 @@ __all__ = [
     "NODE_MANUAL_HOLD",
     "NODE_PLANNER",
     "NODE_RAG",
+    "NODE_REPLAN",
     "NODE_REPORT",
     "NODE_RESPONSE",
     "NODE_RISK",
     "NODE_TRIAGE",
     "NODE_VERIFY",
+    "NODE_WRITEBACK_RECOVERY",
     "P0_NODE_SEQUENCE",
     "build_investigation_graph",
+    "build_initial_investigation_state",
     "invoke_investigation_graph",
     "planner_node",
     "rag_node",
     "route_after_approval",
     "route_after_planner",
+    "route_after_replan",
+    "route_after_report",
     "route_after_risk",
     "route_after_triage",
     "route_after_verify",

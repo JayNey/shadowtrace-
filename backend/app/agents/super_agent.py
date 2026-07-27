@@ -46,7 +46,6 @@ from app.models.agent_io import (
     TriageResult,
 )
 from app.models.context import EventContext
-from app.models.entities import EntitySet
 from app.models.enums import (
     DispositionPolicy,
     EventStatus,
@@ -62,6 +61,7 @@ from app.models.security_event import EventSummary
 from app.models.workflow import MAX_AGENT_RETRIES, TransitionContext
 from app.orchestration.lease import EventLease, generate_owner_id
 from app.orchestration.workflow_graph import planner_node, rag_node
+from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.working_memory import BoundWorkingMemory
 
 logger = logging.getLogger(__name__)
@@ -224,6 +224,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         event_bus: Any | None = None,
         react_enabled: bool = False,
         trace_service: Any | None = None,
+        investigation_graph: Any | None = None,
     ) -> None:
         super().__init__(
             working_memory=working_memory,
@@ -244,6 +245,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         self.lease = lease
         self.convergence_guard = convergence_guard
         self.react_enabled = react_enabled
+        self._investigation_graph = investigation_graph
         self._transition_failures: dict[str, list[dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------ #
@@ -296,13 +298,27 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             await self._freeze_source_snapshot(event_context)
 
             # 4. Build and run graph
-            graph = self._build_graph()
-            state: dict[str, Any] = {
-                "event_context": event_context,
-                "super_agent_status": SuperAgentStatus.PLANNING,
-                "error": None,
-            }
-            final_state = await graph.ainvoke(state)
+            if self._investigation_graph is not None:
+                if self.context_store is None:
+                    raise RuntimeError(
+                        "SuperAgent requires context_store when investigation_graph is wired"
+                    )
+                from app.orchestration.workflow_graph import build_initial_investigation_state
+
+                initial = await build_initial_investigation_state(
+                    event_id,
+                    context_store=self.context_store,
+                )
+                config = {"configurable": {"thread_id": event_id}}
+                await self._investigation_graph.ainvoke(initial, config)
+            else:
+                graph = self._build_graph()
+                state: dict[str, Any] = {
+                    "event_context": event_context,
+                    "super_agent_status": SuperAgentStatus.PLANNING,
+                    "error": None,
+                }
+                final_state = await graph.ainvoke(state)
 
             # 5. Fail closed when state-machine transitions did not persist.
             failures = self._transition_failures.pop(event_id, [])
@@ -315,7 +331,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
 
             # 6. Persist final EventContext state so downstream consumers
             #    (API response, frontend, ReportAgent fallback) see latest data.
-            ec: EventContext = final_state.get("event_context", event_context)
+            if self._investigation_graph is not None:
+                ec = await self._load_event_context(event_id)
+            else:
+                ec = final_state.get("event_context", event_context)
             await self._persist_event_context(ec)
             await self._persist_analysis_only_complete(event_id)
 
@@ -502,7 +521,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         await self._transition(
             event_id,
             EventStatus.CLOSED,
-            reason="super_agent:short_circuit_closed",
+            reason=build_fp_close_reason(
+                ec.false_positive_match,
+                default="super_agent:short_circuit_closed",
+            ),
             ec=ec,
             context=TransitionContext(
                 need_investigation=False,
@@ -661,7 +683,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             await self._transition(
                 event_id,
                 EventStatus.CLOSED,
-                reason="super_agent:complete_not_required",
+                reason=build_fp_close_reason(
+                    ec.false_positive_match,
+                    default="super_agent:complete_not_required",
+                ),
                 ec=ec,
                 context=TransitionContext(need_investigation=need_inv),
             )
@@ -1201,28 +1226,12 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
 
     async def _build_triage_input(self, event_id: str, ec: EventContext) -> TriageAgentInput:
         """Build triage input aligned with ``AnalysisOnlyPipeline._run_triage``."""
-        raw_summary = _build_raw_summary(ec)
-        hint_entities = EntitySet()
-        if self.event_service is not None:
-            try:
-                event = await self.event_service.get_event(event_id)
-            except Exception:
-                event = None
-            if event is not None:
-                if isinstance(event, dict):
-                    title = str(event.get("title") or (ec.event.title if ec.event else event_id))
-                    description = str(event.get("description") or "")
-                    raw_summary = f"{title}. {description}".strip(". ")
-                else:
-                    description = str(getattr(event, "description", "") or "").strip()
-                    raw_summary = f"{event.title}. {description}".strip(". ")
-                    entities = getattr(event, "entities", None)
-                    if entities is not None:
-                        hint_entities = entities
-        return TriageAgentInput(
-            event_id=event_id,
-            raw_event_summary=raw_summary,
-            hint_entities=hint_entities,
+        from app.orchestration.triage_input_builder import build_triage_agent_input
+
+        return await build_triage_agent_input(
+            event_id,
+            event_context=ec,
+            event_service=self.event_service,
         )
 
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
@@ -1299,18 +1308,6 @@ def _current_status_from_context(ec: EventContext) -> EventStatus | None:
     if ec.event is not None:
         return ec.event.status
     return None
-
-
-def _build_raw_summary(ec: EventContext) -> str:
-    """Build a textual summary of the event for TriageAgent input."""
-    if ec.event is not None:
-        parts = [
-            f"title={ec.event.title}",
-            f"type={ec.event.event_type.value}",
-            f"severity={ec.event.severity.value}",
-        ]
-        return " | ".join(parts)
-    return ""
 
 
 def _disposition_policy_from_context(ec: EventContext) -> DispositionPolicy:

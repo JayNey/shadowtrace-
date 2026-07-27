@@ -43,6 +43,7 @@ from app.models.enums import DispositionPolicy, EventStatus, FinalVerdict
 from app.models.report import InvestigationReport
 from app.models.workflow import TransitionContext
 from app.services.event_service import EventService, StateMachinePort
+from app.services.false_positive_matcher import build_fp_close_reason
 
 logger = logging.getLogger(__name__)
 
@@ -341,7 +342,10 @@ class AnalysisOnlyPipeline:
                 context=TransitionContext(
                     need_investigation=triage_result.need_investigation,
                 ),
-                reason="analysis_pipeline:complete_not_required",
+                reason=build_fp_close_reason(
+                    await self._read_false_positive_match(event_id),
+                    default="analysis_pipeline:complete_not_required",
+                ),
             )
             await self._persist_analysis_only_complete(event_id)
             return AnalysisOnlyPipelineResult(
@@ -454,6 +458,14 @@ class AnalysisOnlyPipeline:
             raise TypeError("ReportAgent must return InvestigationReport or None")
         return report
 
+    async def _read_false_positive_match(self, event_id: str) -> dict[str, Any] | None:
+        if self._context_store is None:
+            return None
+        fp_match = await self._context_store.get(event_id, "false_positive_match")
+        if isinstance(fp_match, dict):
+            return fp_match
+        return None
+
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
         if self._context_store is not None:
             try:
@@ -511,6 +523,8 @@ class AnalysisOnlyPipeline:
 
         report = await self._run_report(event_id, placeholder_evidence, placeholder_risk)
 
+        fp_match = await self._read_false_positive_match(event_id)
+
         ctx = TransitionContext(
             need_investigation=False,
             recommendation="close_as_fp",
@@ -519,7 +533,10 @@ class AnalysisOnlyPipeline:
             event_id,
             EventStatus.CLOSED,
             context=ctx,
-            reason="analysis_pipeline:short_circuit_closed",
+            reason=build_fp_close_reason(
+                fp_match,
+                default="analysis_pipeline:short_circuit_closed",
+            ),
         )
 
         await self._persist_analysis_only_complete(event_id)

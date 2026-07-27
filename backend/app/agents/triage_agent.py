@@ -4,9 +4,10 @@ LLM primary path + regex fallback. Severity is assigned via deterministic
 ``SEVERITY_RULES``; ``need_investigation`` is ``True`` when severity >= medium.
 Two hook lists (``pre_triage_hooks``, ``post_triage_hooks``) alias the base
 ``pre_hooks`` / ``post_hooks`` lists. The P0 default ``RuleBasedFalsePositiveHook``
-writes ``EventContext.false_positive_match`` for stable fixture signatures via
-its own ``BoundWorkingMemory`` bound to the ``RuleBasedFalsePositiveHook``
-identity (aliased to ``FalsePositiveMatcher`` by ``WRITER_ALIASES``).
+runs as a pre-triage hook; the vector-based ``FalsePositiveMatcherHook`` runs as a
+post-triage hook so it has access to the LLM-extracted entities in ``triage_result``.
+Both write ``EventContext.false_positive_match`` via their own ``BoundWorkingMemory``
+bound to the ``FalsePositiveMatcher`` identity (RuleBased aliased via ``WRITER_ALIASES``).
 """
 
 from __future__ import annotations
@@ -96,6 +97,54 @@ _FP_SIGNATURES: dict[str, str] = {
 }
 
 
+def _resolve_fp_signature_key(source_snapshot: dict[str, Any]) -> str | None:
+    """Return a known FP signature key from immutable source evidence."""
+    scenario = source_snapshot.get("scenario", "")
+    if isinstance(scenario, str) and scenario in _FP_SIGNATURES:
+        return scenario
+
+    signature = source_snapshot.get("signature", "")
+    if isinstance(signature, str) and signature in _FP_SIGNATURES:
+        return signature
+
+    raw_snap = source_snapshot.get("raw_alert_snapshot")
+    if isinstance(raw_snap, dict):
+        fp_rule = raw_snap.get("fp_rule")
+        if isinstance(fp_rule, str) and fp_rule in _FP_SIGNATURES:
+            return fp_rule
+        normalized = raw_snap.get("normalized")
+        if isinstance(normalized, dict):
+            nested_rule = normalized.get("fp_rule")
+            if isinstance(nested_rule, str) and nested_rule in _FP_SIGNATURES:
+                return nested_rule
+        nested_scenario = raw_snap.get("scenario")
+        if isinstance(nested_scenario, str) and nested_scenario in _FP_SIGNATURES:
+            return nested_scenario
+
+    title = str(source_snapshot.get("title") or "").lower()
+    if "bulk login" in title and "change window" in title:
+        return "account_anomaly_fp"
+
+    return None
+
+
+def _fp_match_from_signature_key(key: str) -> dict[str, Any]:
+    """Build a rule-hook false_positive_match payload for *key*."""
+    matched_rule = _FP_SIGNATURES[key]
+    payload: dict[str, Any] = {
+        "matched_rule": matched_rule,
+        "source": "RuleBasedFalsePositiveHook",
+        "matched_at": datetime.now(UTC).isoformat(),
+        "recommendation": "close_as_fp",
+        "max_score": 1.0,
+    }
+    if key == "account_anomaly_fp":
+        payload["scenario"] = key
+    elif key in _FP_SIGNATURES:
+        payload["signature"] = key
+    return payload
+
+
 # --------------------------------------------------------------------------- #
 # RuleBasedFalsePositiveHook
 # --------------------------------------------------------------------------- #
@@ -108,6 +157,11 @@ class RuleBasedFalsePositiveHook:
     Scans the source_snapshot for stable scenario/fixture signatures and
     writes ``EventContext.false_positive_match`` when a known FP pattern is
     detected. Does NOT depend on pgvector or any knowledge base.
+
+    Runs as a pre-triage hook (before the vector-based FalsePositiveMatcherHook).
+    When a signature match is found, the match dict includes ``max_score: 1.0``
+    so downstream consumers (e.g. begin_disposition_only confidence boost) have
+    a score to work with even when only the rule hook matched.
 
     Uses its own ``BoundWorkingMemory`` bound to the ``RuleBasedFalsePositiveHook``
     writer identity (aliased to ``FalsePositiveMatcher`` via ``WRITER_ALIASES``),
@@ -144,32 +198,11 @@ class RuleBasedFalsePositiveHook:
         if not isinstance(snapshot, dict):
             return
 
-        scenario = snapshot.get("scenario", "")
-        signature = snapshot.get("signature", "")
-        fp_match: dict[str, Any] | None = None
-
-        # ---------------------------------------------------------------- #
-        # Check known FP signatures against scenario / signature fields
-        # ---------------------------------------------------------------- #
-        if scenario in _FP_SIGNATURES:
-            fp_match = {
-                "matched_rule": _FP_SIGNATURES[scenario],
-                "scenario": scenario,
-                "source": "RuleBasedFalsePositiveHook",
-                "matched_at": datetime.now(UTC).isoformat(),
-                "recommendation": "close_as_fp",
-            }
-        elif signature in _FP_SIGNATURES:
-            fp_match = {
-                "matched_rule": _FP_SIGNATURES[signature],
-                "signature": signature,
-                "source": "RuleBasedFalsePositiveHook",
-                "matched_at": datetime.now(UTC).isoformat(),
-                "recommendation": "close_as_fp",
-            }
-
-        if fp_match is None:
+        signature_key = _resolve_fp_signature_key(snapshot)
+        if signature_key is None:
             return
+
+        fp_match = _fp_match_from_signature_key(signature_key)
 
         # Write through the hook's OWN BoundWorkingMemory (writer identity =
         # FalsePositiveMatcher, matching FIELD_OWNERSHIP).
@@ -416,6 +449,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         trace_service: Any | None = None,
         audit_service: Any | None = None,
         event_bus: Any | None = None,
+        fp_matcher: Any | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -431,6 +465,25 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         # Convenience aliases matching the Issue-032 naming convention.
         self.pre_triage_hooks = self.pre_hooks
         self.post_triage_hooks = self.post_hooks
+
+        # Install the ISSUE-078 FalsePositiveMatcherHook (vector-based FP matching).
+        # Runs as a POST-triage hook so it has access to the LLM-extracted
+        # (and hint-merged) entities in triage_result — fixing the ISSUE-078
+        # spec requirement that FP matching uses the final EntitySet.
+        # The deterministic RuleBasedFalsePositiveHook runs first (pre-triage)
+        # and vector hook skips when the rule hook already confirmed close_as_fp.
+        # Uses its own BoundWorkingMemory bound to the "FalsePositiveMatcher"
+        # writer identity (same owner as RuleBasedFalsePositiveHook via WRITER_ALIASES).
+        if working_memory is not None and fp_matcher is not None:
+            from app.services.false_positive_matcher import FalsePositiveMatcherHook
+
+            fp_matcher_memory = working_memory.for_writer("FalsePositiveMatcher")
+            self.post_triage_hooks.append(
+                FalsePositiveMatcherHook(
+                    matcher=fp_matcher,
+                    working_memory=fp_matcher_memory,
+                )
+            )
 
         # Install the P0 RuleBasedFalsePositiveHook with its own writer identity.
         # The hook must write to EventContext.false_positive_match via the

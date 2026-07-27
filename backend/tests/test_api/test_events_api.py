@@ -60,6 +60,33 @@ def _hdr(role: str = "analyst") -> dict[str, str]:
     return {"Authorization": f"Bearer {role}-token"}
 
 
+async def _poll_event_status(
+    client: TestClient,
+    event_id: str,
+    expected: str,
+    *,
+    timeout_s: float = 5.0,
+    interval_s: float = 0.2,
+) -> dict[str, Any]:
+    """Poll GET /events/{id} until status matches or timeout (ISSUE-566)."""
+    deadline = time.monotonic() + timeout_s
+    last_status: str | None = None
+    while time.monotonic() < deadline:
+        detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+        assert detail.status_code == 200, detail.text
+        payload = detail.json()
+        last_status = payload["event"]["status"]
+        if last_status == expected:
+            return payload
+        if last_status == "failed":
+            pytest.fail(f"event {event_id} entered failed status while waiting for {expected!r}")
+        await asyncio.sleep(interval_s)
+    pytest.fail(
+        f"event {event_id} did not reach status {expected!r} within {timeout_s}s; "
+        f"last={last_status!r}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Fixtures
 # --------------------------------------------------------------------------- #
@@ -997,9 +1024,8 @@ async def test_investigate_http_low_risk_polls_to_closed(
     )
     assert resp.status_code == 202, resp.text
 
-    detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
-    assert detail.status_code == 200
-    assert detail.json()["event"]["status"] == "closed"
+    detail = await _poll_event_status(client, event_id, "closed")
+    assert detail["event"]["status"] == "closed"
 
     report_resp = client.get(f"/api/v1/events/{event_id}/report", headers=_hdr())
     assert report_resp.status_code == 200
@@ -1042,9 +1068,8 @@ async def test_investigate_high_risk_http_polls_to_reporting(
     )
     assert resp.status_code == 202, resp.text
 
-    detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
-    assert detail.status_code == 200
-    assert detail.json()["event"]["status"] == "reporting"
+    detail = await _poll_event_status(client, event_id, "reporting")
+    assert detail["event"]["status"] == "reporting"
 
     report_resp = client.get(f"/api/v1/events/{event_id}/report", headers=_hdr())
     assert report_resp.status_code == 200

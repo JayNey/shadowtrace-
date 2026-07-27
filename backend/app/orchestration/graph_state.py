@@ -41,11 +41,32 @@ class InvestigationState(TypedDict, total=False):
     verify_need_manual_resolution: bool
     verify_need_writeback_recovery: bool
     verify_need_action_replan: bool
+    verify_failed_actions: list[str] | None
+    verify_failed_writebacks: list[str] | None
+    verify_writeback_status: str | None
+    # NOTE(ISSUE-062-FOLLOWUP): ``verify_writeback_status`` is a per-cycle
+    # scalar — when multiple writebacks fail within the same verification
+    # cycle and each has a distinct status (e.g. "UNKNOWN" + "CONFLICT"),
+    # the scalar may misroute the second writeback.  See the matching
+    # limitation logged in writeback_recovery_handler.py.
+    writeback_lookup_count: int
+    writeback_retry_count: int
+    verify_has_partial_success: bool
+    # When False and no verify_failed_actions → MANUAL_RESOLUTION
+    execution_ok: bool
     include_rag: bool
     evidence_output: dict[str, Any] | None
     rag_output: dict[str, Any] | None
     risk_assessment: dict[str, Any] | None
     response_plan: dict[str, Any] | None
     plan_revision: int
+    replan_count: int
+    escalated: bool
     report_generated: bool
     needs_approval_wait: bool
+    # ISSUE-566: initial HTTP investigate (via build_initial_investigation_state)
+    # defers response/approval/execute/verify; analysis completes at report
+    # (REQUIRED→REPORTING, NOT_REQUIRED→CLOSED). Full P0 response execution
+    # resumes via approval_engine / resume_investigation. Workflow unit tests
+    # pass defer_response_execution=False via _base_state().
+    defer_response_execution: bool

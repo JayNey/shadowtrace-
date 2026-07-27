@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.models.enums import ErrorCategory
+from app.models.enums import ErrorCategory, EventStatus
 
 # --------------------------------------------------------------------------- #
 # Category → default retryability (简介 §4.9)
@@ -133,6 +133,10 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "adapter_validation_error": ErrorCategory.USER_INPUT,
     # Startup / runtime configuration (ISSUE-093 §5)
     "configuration_error": ErrorCategory.SYSTEM,
+    # Replan / writeback recovery (ISSUE-062)
+    "replan_count_exceeded": ErrorCategory.PERMANENT,
+    "writeback_recovery_exhausted": ErrorCategory.PERMANENT,
+    "writeback_manual_resolution_required": ErrorCategory.PERMANENT,
 }
 
 
@@ -419,6 +423,85 @@ class ConfigurationError(ShadowTraceError):
     default_error_code = "configuration_error"
     default_category = ErrorCategory.SYSTEM
     default_retryable = False
+
+
+# Replan / writeback recovery escalation errors (ISSUE-062)
+# These are raised AFTER the state-machine transition (dual-write: state +
+# exception) so the event is already in CONTAINED/FAILED/VERIFYING with the
+# appropriate substate when the exception propagates.  Callers catch them to
+# extract the escalation outcome for graph routing.
+
+
+class ReplanCountExceededError(ShadowTraceError):
+    """Replan count exhausted — event escalated to CONTAINED or FAILED.
+
+    Raised by ``ReplanHandler.escalate()`` after the state machine has already
+    persisted the escalated transition.  The caller is expected to catch this
+    and route to report generation with the ``target_status`` attached.
+    """
+
+    status_code = 422
+    default_error_code = "replan_count_exceeded"
+    default_category = ErrorCategory.PERMANENT
+    default_retryable = False
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        target_status: EventStatus,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.target_status: EventStatus = target_status
+        super().__init__(message, details=details)
+
+
+class WritebackRecoveryExhaustedError(ShadowTraceError):
+    """Automated writeback recovery exhausted (retry/lookup limit reached).
+
+    Raised by ``WritebackRecoveryHandler._escalate()`` when retry or lookup
+    counters hit their configured maximums.  The event is already in VERIFYING
+    with MANUAL_RESOLUTION substate before this exception propagates.
+    """
+
+    status_code = 422
+    default_error_code = "writeback_recovery_exhausted"
+    default_category = ErrorCategory.PERMANENT
+    default_retryable = False
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        writeback_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.writeback_id = writeback_id
+        super().__init__(message, details=details)
+
+
+class WritebackManualResolutionRequiredError(ShadowTraceError):
+    """Writeback requires manual resolution (conflict / direct MANUAL action).
+
+    Raised by ``WritebackRecoveryHandler._escalate()`` when the writeback
+    status is CONFLICT or the recovery evaluation returns MANUAL.  The event
+    is already in VERIFYING with MANUAL_RESOLUTION substate.
+    """
+
+    status_code = 409
+    default_error_code = "writeback_manual_resolution_required"
+    default_category = ErrorCategory.PERMANENT
+    default_retryable = False
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        writeback_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.writeback_id = writeback_id
+        super().__init__(message, details=details)
 
 
 # Backward-compat alias used by API modules that still say ``APIError``.

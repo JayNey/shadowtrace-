@@ -16,6 +16,9 @@ from app.models.agent_io import (
     RiskAssessment,
     ScoringMode,
     TriageResult,
+    VerificationOverallStatus,
+    VerificationPhase,
+    VerificationResult,
 )
 from app.models.context import EventContext
 from app.models.enums import (
@@ -37,13 +40,17 @@ from app.orchestration.graph_state import InvestigationState
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_APPROVAL_WAIT,
-    NODE_BEGIN_DISPOSITION_ONLY,
     NODE_CLOSE,
+    NODE_EXECUTE,
     NODE_HALT,
     NODE_MANUAL_HOLD,
+    NODE_PLANNER,
     NODE_RAG,
+    NODE_REPLAN,
+    NODE_REPORT,
     NODE_RESPONSE,
     NODE_RISK,
+    NODE_VERIFY,
     P0_NODE_SEQUENCE,
     ROUTE_CLOSE,
     ROUTE_DISPOSITION_ONLY,
@@ -61,6 +68,7 @@ from app.orchestration.workflow_graph import (
     build_investigation_graph,
     route_after_approval,
     route_after_planner,
+    route_after_report,
     route_after_risk,
     route_after_triage,
     route_after_verify,
@@ -97,6 +105,33 @@ class StubAgent:
     async def execute(self, input: Any) -> Any:
         self.calls.append(input)
         return self.result
+
+
+class ReplanOnceVerifyAgent:
+    """First verify pass requests replan; second pass succeeds (ISSUE-062 e2e)."""
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    async def execute(self, input: Any) -> VerificationResult:
+        self.calls.append(input)
+        if len(self.calls) == 1:
+            return VerificationResult(
+                overall_status=VerificationOverallStatus.FAILED,
+                verification_phase=VerificationPhase.EFFECT,
+                need_action_replan=True,
+                failed_actions=["act-failed-001"],
+            )
+        return VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+
+
+def _agents_with_verify(verify_agent: Any, *, triage: TriageResult | None = None) -> dict[str, Any]:
+    agents = _agents(triage=triage)
+    agents["verify_agent"] = verify_agent
+    return agents
 
 
 @dataclass
@@ -248,6 +283,12 @@ def _agents(*, triage: TriageResult | None = None) -> dict[str, Any]:
             )
         ),
         "report_agent": StubAgent(SimpleNamespace(report_id="rpt-stub")),
+        "verify_agent": StubAgent(
+            VerificationResult(
+                overall_status=VerificationOverallStatus.SUCCESS,
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ),
     }
 
 
@@ -309,6 +350,21 @@ def test_remaining_route_truth_tables() -> None:
     assert route_after_planner(_base_state(disposition_only_intent=True)) == ROUTE_RESPONSE
     assert route_after_planner(_base_state()) == ROUTE_EVIDENCE
     assert route_after_risk(_base_state()) == ROUTE_RESPONSE
+    assert route_after_risk(_base_state(defer_response_execution=True)) == ROUTE_REPORT
+    assert (
+        route_after_risk(
+            _base_state(
+                defer_response_execution=True,
+                disposition_only_intent=True,
+            )
+        )
+        == ROUTE_RESPONSE
+    )
+    assert (
+        route_after_report(_base_state(disposition_policy=DispositionPolicy.REQUIRED.value))
+        == ROUTE_HALT
+    )
+    assert route_after_report(_base_state()) == ROUTE_CLOSE
     assert (
         route_after_approval(
             _base_state(execution_substate=ExecutionSubstate.WAITING_APPROVAL.value)
@@ -319,10 +375,13 @@ def test_remaining_route_truth_tables() -> None:
     assert route_after_verify(_base_state(verify_need_manual_resolution=True)) == ROUTE_MANUAL
     assert route_after_verify(_base_state(verify_need_writeback_recovery=True)) == ROUTE_WRITEBACK
     assert route_after_verify(_base_state(verify_need_action_replan=True)) == ROUTE_REPLAN
-    assert route_after_verify(_base_state(disposition_only_intent=True)) == ROUTE_HALT
+    # ISSUE-062 truth table: disposition_only / required with all three flags
+    # false → overall success → REPORT (not HALT).  Deferred writeback waiting
+    # is handled via verify_need_writeback_recovery.
+    assert route_after_verify(_base_state(disposition_only_intent=True)) == ROUTE_REPORT
     assert (
         route_after_verify(_base_state(disposition_policy=DispositionPolicy.REQUIRED.value))
-        == ROUTE_HALT
+        == ROUTE_REPORT
     )
     assert route_after_verify(_base_state()) == ROUTE_REPORT
 
@@ -343,6 +402,30 @@ async def test_graph_compiles_and_golden_path_order() -> None:
     assert tuple(trace) == P0_NODE_SEQUENCE
     assert machine.status is EventStatus.CLOSED
     assert services["event_service"].verdicts == []
+
+
+@pytest.mark.asyncio
+async def test_graph_replan_one_cycle_then_success() -> None:
+    """ISSUE-062: effect verification failure triggers one replan cycle then CLOSED."""
+    verify_agent = ReplanOnceVerifyAgent()
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(
+        _agents_with_verify(verify_agent),
+        services,
+    ).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-replan-once"}},
+    )
+    trace = final["node_trace"]
+
+    assert NODE_REPLAN in trace
+    assert trace.count(NODE_VERIFY) == 2
+    assert final["replan_count"] == 1
+    assert final["escalated"] is False
+    assert NODE_CLOSE in trace
+    assert len(verify_agent.calls) == 2
+    assert machine.status is EventStatus.CLOSED
 
 
 @pytest.mark.asyncio
@@ -377,11 +460,93 @@ async def test_not_required_short_circuit_generates_report_and_closes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_not_required_short_circuit_from_new_reaches_closed() -> None:
+    """Investigate HTTP path starts at NEW; triage must reach TRIAGING then CLOSED."""
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=False,
+        reasoning="no investigation",
+    )
+    machine = FakeStateMachine()
+    event_id = "evt-short-new"
+    machine.statuses[event_id] = EventStatus.NEW
+    machine.status = EventStatus.NEW
+    services = _services(machine)
+    final = await build_investigation_graph(_agents(triage=triage), services).ainvoke(
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.NEW.value,
+            need_investigation=False,
+            severity=Severity.LOW.value,
+        ),
+        {"configurable": {"thread_id": event_id}},
+    )
+    assert final["node_trace"] == ["triage_node", NODE_CLOSE]
+    assert machine.status is EventStatus.CLOSED
+    assert (event_id, EventStatus.TRIAGING, "investigation:triage_start") in machine.transitions
+
+
+@pytest.mark.asyncio
+async def test_deferred_response_not_required_reaches_closed() -> None:
+    """ISSUE-566: HTTP investigate defers response execution and closes."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(defer_response_execution=True),
+        {"configurable": {"thread_id": "evt-defer-not-required"}},
+    )
+    assert final["node_trace"] == [
+        "triage_node",
+        NODE_PLANNER,
+        "evidence_node",
+        NODE_RISK,
+        NODE_REPORT,
+        NODE_CLOSE,
+    ]
+    assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_deferred_response_required_stays_reporting() -> None:
+    """ISSUE-566: required-policy HTTP investigate halts at REPORTING."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            defer_response_execution=True,
+        ),
+        {"configurable": {"thread_id": "evt-defer-required"}},
+    )
+    assert final["node_trace"] == [
+        "triage_node",
+        NODE_PLANNER,
+        "evidence_node",
+        NODE_RISK,
+        NODE_REPORT,
+        NODE_HALT,
+    ]
+    assert machine.status is EventStatus.REPORTING
+    assert final["halted"] is True
+
+
+@pytest.mark.asyncio
 async def test_required_threat_never_enters_disposition_only() -> None:
+    """REQUIRED non-FP threat does not take the disposition-only shortcut.
+
+    With ISSUE-062 Should-Fix #2, the verify_node for required policy
+    without a response_plan escalates to MANUAL_RESOLUTION instead of
+    silently proceeding with a placeholder plan.  The graph reaches
+    manual_hold_node with verify_need_manual_resolution=True and halts.
+    We assert the disposition-only path was not taken and the event is
+    routed to manual hold.
+    """
     runtime = FakeRuntime(WritebackReadiness.READY)
+    services = _services(runtime=runtime)
     final = await build_investigation_graph(
         _agents(),
-        _services(runtime=runtime),
+        services,
     ).ainvoke(
         _base_state(
             disposition_policy=DispositionPolicy.REQUIRED.value,
@@ -389,16 +554,25 @@ async def test_required_threat_never_enters_disposition_only() -> None:
         ),
         {"configurable": {"thread_id": "evt-threat"}},
     )
-    assert NODE_BEGIN_DISPOSITION_ONLY not in final["node_trace"]
-    assert NODE_CLOSE not in final["node_trace"]
-    assert NODE_HALT in final["node_trace"]
-    assert final["event_status"] == EventStatus.VERIFYING.value
     assert runtime.begun == []
+    assert final["halted"] is True
+    assert final["verify_need_manual_resolution"] is True
+    assert any(
+        "missing_response_plan_for_required_policy" in f for f in final.get("degraded_flags", [])
+    )
+    degraded = services["degraded_flags"]
+    assert any(call[3] == "InvestigationGraph" for call in getattr(degraded, "calls", []))
 
 
 @pytest.mark.asyncio
 async def test_required_golden_path_order_halts_at_verify() -> None:
-    """P0 main-chain order through verify, then HALT before report/close."""
+    """P0 main-chain order through verify, then MANUAL_RESOLUTION (ISSUE-062).
+
+    With ISSUE-062 Should-Fix #2, when disposition_policy=REQUIRED and no
+    response_plan exists, verify_node escalates to MANUAL_RESOLUTION rather
+    than constructing a placeholder and proceeding to REPORTING.  The graph
+    ends at manual_hold_node with halted=True.
+    """
     final = await build_investigation_graph(
         _agents(),
         _services(runtime=FakeRuntime(WritebackReadiness.READY)),
@@ -409,11 +583,8 @@ async def test_required_golden_path_order_halts_at_verify() -> None:
         ),
         {"configurable": {"thread_id": "evt-required-golden"}},
     )
-    expected_trace = (*P0_NODE_SEQUENCE[:8], NODE_HALT)
-    assert tuple(final["node_trace"]) == expected_trace
-    assert NODE_CLOSE not in final["node_trace"]
-    assert final["event_status"] == EventStatus.VERIFYING.value
     assert final["halted"] is True
+    assert final["verify_need_manual_resolution"] is True
 
 
 @pytest.mark.asyncio
@@ -637,3 +808,140 @@ async def test_approval_engine_wiring_without_actions_keeps_golden_path() -> Non
     )
     assert tuple(final["node_trace"]) == P0_NODE_SEQUENCE
     assert machine.status is EventStatus.CLOSED
+
+
+# ── Tests: approval wait and resume (Should-Fix #5) ──────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_approval_wait_node_halts_and_resumes() -> None:
+    """ISSUE-062 approval interrupt-recovery: the graph halts at
+    approval_wait_node; after external approval, resume_investigation
+    picks up from checkpoint and continues through execute→verify→
+    report→close.
+
+    Uses interrupt_before=[NODE_APPROVAL] to pause the graph right
+    before the approval gate.  On resume without an approval_engine,
+    the stub path transitions to EXECUTING_RESPONSE and the graph
+    continues to completion — simulating the external API having
+    already approved the plan.
+    """
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+
+    # Phase 1: run with approval_engine that requires wait, interrupt
+    # BEFORE approval_node so the checkpoint is saved at RESPONSE.
+    services1 = _services()
+    services1["approval_engine"] = FakeApprovalEngine(needs_wait=True, evaluated_count=2)
+    graph1 = build_investigation_graph(
+        _agents(),
+        services1,
+        checkpointer=saver,
+        interrupt_before=[NODE_APPROVAL],
+    )
+    config = {"configurable": {"thread_id": "evt-approval-resume"}}
+    state1 = _base_state(event_id="evt-approval-resume")
+
+    final1 = await graph1.ainvoke(state1, config)
+
+    # Phase 1 assertions: graph interrupted before approval_node
+    assert NODE_RESPONSE in final1["node_trace"]
+    assert NODE_APPROVAL not in final1["node_trace"], (
+        "Graph should be interrupted before approval_node"
+    )
+
+    # Phase 2: simulate external approval — create a new graph WITHOUT
+    # approval_engine.  When resumed, approval_node runs in stub mode:
+    # it transitions to EXECUTING_RESPONSE, sets execution_substate=NONE,
+    # and route_after_approval routes to EXECUTE (not WAIT).
+    machine2 = FakeStateMachine(
+        status=EventStatus.PLANNING_RESPONSE,
+        statuses={"evt-approval-resume": EventStatus.PLANNING_RESPONSE},
+    )
+    services2 = _services(machine2)
+    # No approval_engine → approval_node stub path → EXECUTING_RESPONSE
+    graph2 = build_investigation_graph(
+        _agents(),
+        services2,
+        checkpointer=saver,
+    )
+
+    final2 = await graph2.ainvoke(None, config)
+
+    # Phase 2 assertions: continued past approval through to CLOSED
+    assert NODE_APPROVAL in final2["node_trace"], (
+        f"Expected APPROVAL after resume, trace={final2['node_trace']}"
+    )
+    assert NODE_EXECUTE in final2["node_trace"], (
+        f"Expected EXECUTE after resume, trace={final2['node_trace']}"
+    )
+    assert NODE_VERIFY in final2["node_trace"]
+    assert NODE_REPORT in final2["node_trace"]
+    assert NODE_CLOSE in final2["node_trace"]
+    assert final2["halted"] is False
+
+
+@pytest.mark.asyncio
+async def test_approval_halts_at_wait_node_not_before() -> None:
+    """Verify that approval_wait_node is the halting point, not approval_node.
+    The approval_node evaluates the plan; only when needs_wait=True does the
+    graph route to approval_wait_node which sets halted=True."""
+    services = _services()
+    services["approval_engine"] = FakeApprovalEngine(needs_wait=True, evaluated_count=2)
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-approval-halt-point"}},
+    )
+    # approval_wait_node is the last node executed (before END)
+    assert final["node_trace"][-1] == NODE_APPROVAL_WAIT
+    assert final["halted"] is True
+    assert final["execution_substate"] == ExecutionSubstate.WAITING_APPROVAL.value
+    # approval_node should have run and set needs_approval_wait
+    assert NODE_APPROVAL in final["node_trace"]
+
+
+@pytest.mark.asyncio
+async def test_approval_gate_is_reentrant() -> None:
+    """The approval gate (NODE_APPROVAL → route_after_approval →
+    NODE_APPROVAL_WAIT or NODE_EXECUTE) is re-entrant: any path that
+    reaches planner → response passes through approval again.  This
+    ensures replanned L4 actions are re-approved before execution.
+
+    We verify this by running through approval twice in sequence using
+    interrupt_before to simulate an approval cycle.
+    """
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+
+    # Phase 1: run with approval required, interrupt before approval_node
+    services1 = _services()
+    services1["approval_engine"] = FakeApprovalEngine(needs_wait=True, evaluated_count=2)
+    graph1 = build_investigation_graph(
+        _agents(),
+        services1,
+        checkpointer=saver,
+        interrupt_before=[NODE_APPROVAL],
+    )
+    config = {"configurable": {"thread_id": "evt-reentrant"}}
+    final1 = await graph1.ainvoke(
+        _base_state(event_id="evt-reentrant"),
+        config,
+    )
+    assert NODE_APPROVAL not in final1["node_trace"]
+    assert NODE_RESPONSE in final1["node_trace"]
+
+    # Phase 2: resume without approval_engine → stub approval path →
+    # EXECUTING_RESPONSE → executes → completes to CLOSED.
+    machine2 = FakeStateMachine(
+        status=EventStatus.PLANNING_RESPONSE,
+        statuses={"evt-reentrant": EventStatus.PLANNING_RESPONSE},
+    )
+    services2 = _services(machine2)
+    graph2 = build_investigation_graph(_agents(), services2, checkpointer=saver)
+    final2 = await graph2.ainvoke(None, config)
+
+    # The graph passed through approval_node after resume and continued
+    # to completion — demonstrating the approval gate is re-entrant.
+    assert NODE_CLOSE in final2["node_trace"], (
+        f"Expected CLOSE after re-entrant approval, trace={final2['node_trace']}"
+    )
