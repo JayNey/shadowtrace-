@@ -1239,9 +1239,7 @@ def build_investigation_graph(
             "verify_need_manual_resolution": verification_result.need_manual_resolution,
             "verify_failed_actions": verification_result.failed_actions,
             "verify_failed_writebacks": verification_result.failed_writebacks,
-            "verify_writeback_status": _resolve_verify_writeback_status(
-                verification_result
-            ),
+            "verify_writeback_status": _resolve_verify_writeback_status(verification_result),
             "verify_has_partial_success": verification_result.overall_status.value == "partial",
         }
 
