@@ -22,6 +22,7 @@ dependencies = [
   "langgraph-checkpoint>=2.0.0,<4.0.0",
   "celery>=5.4.0",
   "opensearch-py>=2.7.0",
+  "neo4j>=5.27.0",
 ]
 
 [project.optional-dependencies]
@@ -46,7 +47,7 @@ packages = ["app"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-m 'not opensearch'"
+addopts = "-m 'not opensearch and not neo4j'"
 markers = [
   "integration: requires real PostgreSQL and Redis services",
   "tool_system: Registry/Executor/Mock tool-system integration chains (ISSUE-025)",
@@ -55,6 +56,7 @@ markers = [
   "orchestration: multi-agent orchestration integration (ISSUE-055)",
   "e2e_response: end-to-end response-loop integration (ISSUE-064)",
   "opensearch: requires OpenSearch service (ISSUE-084)",
+  "neo4j: requires Neo4j service (docker compose --profile optional up -d neo4j)",
 ]
 
 [tool.coverage.run]
