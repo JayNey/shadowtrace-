@@ -342,7 +342,10 @@ class AnalysisOnlyPipeline:
                 context=TransitionContext(
                     need_investigation=triage_result.need_investigation,
                 ),
-                reason="analysis_pipeline:complete_not_required",
+                reason=build_fp_close_reason(
+                    await self._read_false_positive_match(event_id),
+                    default="analysis_pipeline:complete_not_required",
+                ),
             )
             await self._persist_analysis_only_complete(event_id)
             return AnalysisOnlyPipelineResult(
@@ -455,6 +458,14 @@ class AnalysisOnlyPipeline:
             raise TypeError("ReportAgent must return InvestigationReport or None")
         return report
 
+    async def _read_false_positive_match(self, event_id: str) -> dict[str, Any] | None:
+        if self._context_store is None:
+            return None
+        fp_match = await self._context_store.get(event_id, "false_positive_match")
+        if isinstance(fp_match, dict):
+            return fp_match
+        return None
+
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
         if self._context_store is not None:
             try:
@@ -512,11 +523,7 @@ class AnalysisOnlyPipeline:
 
         report = await self._run_report(event_id, placeholder_evidence, placeholder_risk)
 
-        fp_match = None
-        if self._context_store is not None:
-            fp_match = await self._context_store.get(event_id, "false_positive_match")
-            if not isinstance(fp_match, dict):
-                fp_match = None
+        fp_match = await self._read_false_positive_match(event_id)
 
         ctx = TransitionContext(
             need_investigation=False,
