@@ -224,6 +224,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         event_bus: Any | None = None,
         react_enabled: bool = False,
         trace_service: Any | None = None,
+        investigation_graph: Any | None = None,
     ) -> None:
         super().__init__(
             working_memory=working_memory,
@@ -244,6 +245,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         self.lease = lease
         self.convergence_guard = convergence_guard
         self.react_enabled = react_enabled
+        self._investigation_graph = investigation_graph
         self._transition_failures: dict[str, list[dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------ #
@@ -296,13 +298,27 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             await self._freeze_source_snapshot(event_context)
 
             # 4. Build and run graph
-            graph = self._build_graph()
-            state: dict[str, Any] = {
-                "event_context": event_context,
-                "super_agent_status": SuperAgentStatus.PLANNING,
-                "error": None,
-            }
-            final_state = await graph.ainvoke(state)
+            if self._investigation_graph is not None:
+                if self.context_store is None:
+                    raise RuntimeError(
+                        "SuperAgent requires context_store when investigation_graph is wired"
+                    )
+                from app.orchestration.workflow_graph import build_initial_investigation_state
+
+                initial = await build_initial_investigation_state(
+                    event_id,
+                    context_store=self.context_store,
+                )
+                config = {"configurable": {"thread_id": event_id}}
+                await self._investigation_graph.ainvoke(initial, config)
+            else:
+                graph = self._build_graph()
+                state: dict[str, Any] = {
+                    "event_context": event_context,
+                    "super_agent_status": SuperAgentStatus.PLANNING,
+                    "error": None,
+                }
+                final_state = await graph.ainvoke(state)
 
             # 5. Fail closed when state-machine transitions did not persist.
             failures = self._transition_failures.pop(event_id, [])
@@ -315,7 +331,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
 
             # 6. Persist final EventContext state so downstream consumers
             #    (API response, frontend, ReportAgent fallback) see latest data.
-            ec: EventContext = final_state.get("event_context", event_context)
+            if self._investigation_graph is not None:
+                ec = await self._load_event_context(event_id)
+            else:
+                ec = final_state.get("event_context", event_context)  # type: ignore[name-defined]
             await self._persist_event_context(ec)
             await self._persist_analysis_only_complete(event_id)
 

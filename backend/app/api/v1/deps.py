@@ -42,6 +42,7 @@ _disposition_sync: Any = None  # DispositionSyncService
 _action_execution: Any = None  # ActionExecutionService
 _adapter_registry: Any = None  # DispositionAdapterRegistry
 _workflow_runtime: Any = None  # WorkflowRuntimeService
+_event_disposition: Any = None  # EventDispositionService
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -206,6 +207,79 @@ async def get_disposition_sync() -> Any:
             resume_investigation=_resume_investigation,
         )
     return _disposition_sync
+
+
+async def get_event_disposition_service() -> Any:
+    """Return EventDispositionService for phase-2 terminal writeback activation."""
+    global _event_disposition
+    if _event_disposition is None:
+        from app.services.event_disposition_service import EventDispositionService
+
+        _event_disposition = EventDispositionService(
+            _get_session_factory(),
+            disposition_sync=await get_disposition_sync(),
+            context_store=_get_context_store(),
+            event_bus=_get_event_bus(),
+        )
+    return _event_disposition
+
+
+async def _build_production_investigation_graph(
+    *,
+    planner_agent: Any,
+    convergence_guard: Any,
+) -> Any:
+    """Wire ISSUE-048/062 LangGraph for production SuperAgent orchestration."""
+    from app.agents.response_agent import ResponseAgent
+    from app.agents.verify_agent import VerifyAgent
+    from app.orchestration.checkpointer import build_checkpointer
+    from app.orchestration.workflow_graph import build_investigation_graph
+
+    stack = await _get_investigation_stack()
+    wm = stack["wm"]
+    response_agent = ResponseAgent(
+        llm_client=stack["llm_client"],
+        working_memory=wm.for_writer("ResponseAgent"),
+        budget_service=stack["budget_service"],
+        output_guard=stack["output_guard"],
+        trace_service=stack["trace_service"],
+        event_service=stack["event_service"],
+        session_factory=stack["session_factory"],
+        scenario_id="insider_data_exfiltration",
+    )
+    verify_agent = VerifyAgent(
+        tool_executor=stack["tool_executor"],
+        working_memory=wm.for_writer("VerifyAgent"),
+        trace_service=stack["trace_service"],
+        event_bus=_get_event_bus(),
+        session_factory=stack["session_factory"],
+        event_disposition_service=await get_event_disposition_service(),
+        disposition_sync_service=await get_disposition_sync(),
+    )
+    agents = {
+        "triage_agent": stack["triage"],
+        "planner_agent": planner_agent,
+        "evidence_agent": stack["evidence"],
+        "risk_agent": stack["risk"],
+        "report_agent": stack["report"],
+        "response_agent": response_agent,
+        "verify_agent": verify_agent,
+        "rag_agent": stack["rag"],
+    }
+    services = {
+        "state_machine": stack["state_machine"],
+        "event_service": stack["event_service"],
+        "workflow_runtime": await _get_workflow_runtime(),
+        "degraded_flags": stack["degraded_flags"],
+        "context_store": stack["context_store"],
+        "approval_engine": await get_approval_engine(),
+        "action_execution": await get_action_execution(),
+        "disposition_sync": await get_disposition_sync(),
+        "event_disposition": await get_event_disposition_service(),
+        "convergence_guard": convergence_guard,
+    }
+    checkpointer = await build_checkpointer(_get_redis())
+    return build_investigation_graph(agents, services, checkpointer=checkpointer)
 
 
 async def get_action_execution() -> Any:
@@ -393,6 +467,10 @@ async def get_super_agent() -> Any:
         convergence_guard = ConvergenceGuard(
             working_memory=wm.for_writer("ConvergenceGuard"),
         )
+        investigation_graph = await _build_production_investigation_graph(
+            planner_agent=planner,
+            convergence_guard=convergence_guard,
+        )
 
         _super_agent = SuperAgent(
             triage_agent=stack["triage"],
@@ -408,6 +486,7 @@ async def get_super_agent() -> Any:
             event_bus=_get_event_bus(),
             trace_service=stack["trace_service"],
             react_enabled=settings.react_enabled,
+            investigation_graph=investigation_graph,
         )
     return _super_agent
 
@@ -418,6 +497,7 @@ def reset_deps() -> None:
     global _audit_log, _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
     global _super_agent, _event_lease, _investigation_stack
     global _disposition_sync, _action_execution, _adapter_registry, _workflow_runtime
+    global _event_disposition
     _session_factory = None
     _redis_client = None
     _context_store = None
@@ -435,3 +515,4 @@ def reset_deps() -> None:
     _action_execution = None
     _adapter_registry = None
     _workflow_runtime = None
+    _event_disposition = None

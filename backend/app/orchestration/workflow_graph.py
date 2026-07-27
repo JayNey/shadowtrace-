@@ -63,39 +63,32 @@ from app.services.state_machine_service import StateMachineService
 logger = logging.getLogger(__name__)
 
 
-def _append_degraded_flag(
+async def _persist_degraded_flag(
     state: InvestigationState,
     flag_name: str,
     *,
     event_id: str,
+    degraded_flags: DegradedFlagService,
 ) -> list[str]:
-    """Append *flag_name* directly into the ``degraded_flags`` list.
-
-    This helper concentrates the FIELD_OWNERSHIP bypass that verify_node
-    relies on.  verify_node is not a trusted caller for
-    :class:`DegradedFlagService` (ISSUE-014 guardrail), so it writes
-    degraded flags directly into state.  All direct state writes are routed
-    through this single function so the bypass surface is visible,
-    grep-able, and easy to replace when ISSUE-014 is extended to recognize
-    verify_node's writer identity.
-
-    A structured warning is logged on every call to maintain audit-trail
-    parity with :meth:`DegradedFlagService.set_flag` (which leaves a DB
-    audit record via the ORM write).  This log is the minimum viable
-    substitute until ISSUE-014 registers verify_node as a trusted writer
-    or a dedicated audit-log write path is added to the bypass.
-    """
-    logger.warning(
-        "degraded_flag bypass: flag=%s event=%s (ISSUE-014 FIELD_OWNERSHIP "
-        "bypass — verify_node is not a DegradedFlagService trusted caller)",
-        flag_name,
-        event_id,
-    )
-    return apply_flag_to_list(
-        list(state.get("degraded_flags") or []),
-        flag_name,
-        True,
-    )
+    """Persist a verify-node degraded flag to DB + EventContext and graph state."""
+    try:
+        return await degraded_flags.set_flag(
+            event_id,
+            flag_name,
+            True,
+            writer=_GRAPH_OPERATOR,
+        )
+    except Exception:
+        logger.exception(
+            "degraded_flag persistence failed: flag=%s event=%s — falling back to graph state",
+            flag_name,
+            event_id,
+        )
+        return apply_flag_to_list(
+            list(state.get("degraded_flags") or []),
+            flag_name,
+            True,
+        )
 
 
 CompiledInvestigationGraph = CompiledStateGraph[
@@ -410,6 +403,67 @@ async def _transition_status(
         reason=reason,
     )
     return cast(InvestigationState, {"event_status": target.value})
+
+
+async def build_initial_investigation_state(
+    event_id: str,
+    *,
+    context_store: EventContextStore,
+) -> InvestigationState:
+    """Build LangGraph initial state from persisted EventContext + event row."""
+    context = await context_store.get_full_context(event_id)
+    event = context.event
+    policy = (
+        event.disposition_policy
+        if event is not None
+        else DispositionPolicy.NOT_REQUIRED
+    )
+    state: InvestigationState = {
+        "event_id": event_id,
+        "node_trace": [],
+        "degraded_flags": list(context.degraded_flags or []),
+        "halted": False,
+        "disposition_only_intent": bool(context.disposition_only_intent),
+        "execution_substate": context.execution_substate.value,
+        "replan_count": int(context.replan_count or 0),
+        "escalated": bool(event.escalated if event is not None else False),
+        "disposition_policy": policy.value,
+        "event_status": (
+            event.status.value if event is not None else EventStatus.NEW.value
+        ),
+        "severity": (
+            event.severity.value if event is not None else Severity.MEDIUM.value
+        ),
+        "final_verdict": (
+            event.final_verdict.value
+            if event is not None and event.final_verdict is not None
+            else None
+        ),
+        "event_status_update_readiness": (
+            event.writeback_readiness.value
+            if event is not None
+            else WritebackReadiness.NOT_REQUIRED.value
+        ),
+        "report_generated": context.report is not None,
+        "needs_approval_wait": False,
+    }
+    if context.triage_result is not None:
+        state["triage_result"] = context.triage_result
+    if context.false_positive_match is not None:
+        state["false_positive_match"] = context.false_positive_match
+    if context.source_snapshot is not None:
+        state["source_snapshot"] = context.source_snapshot
+    if context.execution_plan is not None:
+        state["execution_plan"] = context.execution_plan
+    if context.evidence_output is not None:
+        state["evidence_output"] = context.evidence_output
+    if context.rag_output is not None:
+        state["rag_output"] = context.rag_output
+    if context.risk_assessment is not None:
+        state["risk_assessment"] = context.risk_assessment
+    if context.response_plan is not None:
+        state["response_plan"] = context.response_plan
+    return state
 
 
 async def _hydrate_context(
@@ -939,10 +993,11 @@ def build_investigation_graph(
         # required-policy event must have a concrete response plan before
         # verification can proceed.
         if policy_required and state.get("response_plan") is None:
-            flags = _append_degraded_flag(
+            flags = await _persist_degraded_flag(
                 state,
                 "missing_response_plan_for_required_policy",
                 event_id=state["event_id"],
+                degraded_flags=degraded_flags,
             )
             await runtime.set_execution_substate(
                 state["event_id"],
@@ -1060,10 +1115,11 @@ def build_investigation_graph(
             # (verify_node is not a trusted caller and
             # disposition_activation_failed is not in the allowlist).
             if degraded and disposition_activation_failed:
-                flags = _append_degraded_flag(
+                flags = await _persist_degraded_flag(
                     state,
                     "disposition_activation_failed",
                     event_id=state["event_id"],
+                    degraded_flags=degraded_flags,
                 )
                 await runtime.set_execution_substate(
                     state["event_id"],
@@ -1091,10 +1147,11 @@ def build_investigation_graph(
             # DegradedFlagService.set_flag to avoid the ISSUE-014 guardrail
             # (verify_node is not a trusted caller and verify_degraded is
             # not in the allowlist).
-            flags = _append_degraded_flag(
+            flags = await _persist_degraded_flag(
                 state,
                 "verify_degraded",
                 event_id=state["event_id"],
+                degraded_flags=degraded_flags,
             )
             await runtime.set_execution_substate(
                 state["event_id"],
@@ -1133,10 +1190,11 @@ def build_investigation_graph(
             and not verification_result.need_writeback_recovery
             and not verification_result.need_manual_resolution
         ):
-            flags = _append_degraded_flag(
+            flags = await _persist_degraded_flag(
                 state,
                 "execution_failed_unverified",
                 event_id=state["event_id"],
+                degraded_flags=degraded_flags,
             )
             await runtime.set_execution_substate(
                 state["event_id"],
@@ -1187,11 +1245,12 @@ def build_investigation_graph(
         return _patch_state(_trace(NODE_VERIFY), update)
 
     async def replan_node(state: InvestigationState) -> InvestigationState:
-        return await replan_graph_node(
+        patches = await replan_graph_node(
             state,
             handler=_replan_handler,
             convergence_guard=_convergence_guard,
         )
+        return _patch_state(_trace(NODE_REPLAN), patches)
 
     async def writeback_recovery_node(state: InvestigationState) -> InvestigationState:
         return await writeback_recovery_graph_node(
@@ -1516,6 +1575,7 @@ __all__ = [
     "NODE_WRITEBACK_RECOVERY",
     "P0_NODE_SEQUENCE",
     "build_investigation_graph",
+    "build_initial_investigation_state",
     "invoke_investigation_graph",
     "planner_node",
     "rag_node",

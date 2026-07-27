@@ -45,6 +45,7 @@ from app.orchestration.workflow_graph import (
     NODE_HALT,
     NODE_MANUAL_HOLD,
     NODE_RAG,
+    NODE_REPLAN,
     NODE_REPORT,
     NODE_RESPONSE,
     NODE_RISK,
@@ -101,6 +102,33 @@ class StubAgent:
     async def execute(self, input: Any) -> Any:
         self.calls.append(input)
         return self.result
+
+
+class ReplanOnceVerifyAgent:
+    """First verify pass requests replan; second pass succeeds (ISSUE-062 e2e)."""
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    async def execute(self, input: Any) -> VerificationResult:
+        self.calls.append(input)
+        if len(self.calls) == 1:
+            return VerificationResult(
+                overall_status=VerificationOverallStatus.FAILED,
+                verification_phase=VerificationPhase.EFFECT,
+                need_action_replan=True,
+                failed_actions=["act-failed-001"],
+            )
+        return VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+
+
+def _agents_with_verify(verify_agent: Any, *, triage: TriageResult | None = None) -> dict[str, Any]:
+    agents = _agents(triage=triage)
+    agents["verify_agent"] = verify_agent
+    return agents
 
 
 @dataclass
@@ -359,6 +387,30 @@ async def test_graph_compiles_and_golden_path_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_graph_replan_one_cycle_then_success() -> None:
+    """ISSUE-062: effect verification failure triggers one replan cycle then CLOSED."""
+    verify_agent = ReplanOnceVerifyAgent()
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(
+        _agents_with_verify(verify_agent),
+        services,
+    ).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-replan-once"}},
+    )
+    trace = final["node_trace"]
+
+    assert NODE_REPLAN in trace
+    assert trace.count(NODE_VERIFY) == 2
+    assert final["replan_count"] == 1
+    assert final["escalated"] is False
+    assert NODE_CLOSE in trace
+    assert len(verify_agent.calls) == 2
+    assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
 async def test_optional_rag_is_between_evidence_and_risk() -> None:
     agents = _agents()
     agents["rag_agent"] = StubAgent(None)
@@ -401,9 +453,10 @@ async def test_required_threat_never_enters_disposition_only() -> None:
     routed to manual hold.
     """
     runtime = FakeRuntime(WritebackReadiness.READY)
+    services = _services(runtime=runtime)
     final = await build_investigation_graph(
         _agents(),
-        _services(runtime=runtime),
+        services,
     ).ainvoke(
         _base_state(
             disposition_policy=DispositionPolicy.REQUIRED.value,
@@ -416,6 +469,11 @@ async def test_required_threat_never_enters_disposition_only() -> None:
     assert final["verify_need_manual_resolution"] is True
     assert any(
         "missing_response_plan_for_required_policy" in f for f in final.get("degraded_flags", [])
+    )
+    degraded = services["degraded_flags"]
+    assert any(
+        call[3] == "InvestigationGraph"
+        for call in getattr(degraded, "calls", [])
     )
 
 

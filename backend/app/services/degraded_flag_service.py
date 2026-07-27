@@ -19,6 +19,11 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
     {
         "redis_context_unavailable",
         "disposition_writeback_blocked",
+        # ISSUE-062 verify_node escalation flags (InvestigationGraph writer)
+        "missing_response_plan_for_required_policy",
+        "disposition_activation_failed",
+        "verify_degraded",
+        "execution_failed_unverified",
     }
 )
 
@@ -30,6 +35,7 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "StateMachineService",
         "DegradedFlagService",
         "AnalysisOnlyPipeline",
+        "InvestigationGraph",
     }
 )
 
