@@ -919,7 +919,7 @@ async def test_rollback_event_skips_non_rollbackable(
 
 
 @pytest.mark.asyncio
-async def test_compensate_rolls_back_before_failed_only(
+async def test_compensate_creates_pending_rollback_before_failed_only(
     session_factory: async_sessionmaker[AsyncSession],
     audit: EventAuditLogService,
     cleanup: None,
