@@ -35,6 +35,7 @@ from app.agents.rules.rollback_mapping import (
     is_rollbackable,
 )
 from app.core.config import get_settings
+from app.core.errors import AdapterNotFoundError
 from app.core.event_bus import EventBus
 from app.db import models as orm
 from app.models.action import Action as ActionModel
@@ -42,6 +43,7 @@ from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
     ActionStatus,
+    CapabilityState,
     DispositionIntentKind,
     ExecutionOwner,
     WritebackReadiness,
@@ -148,6 +150,7 @@ class RollbackService:
         disposition_sync: Any = None,
         event_bus: EventBus | None = None,
         command_factory: DispositionCommandFactory | None = None,
+        adapter_registry: Any = None,
     ) -> None:
         self._session_factory = session_factory
         self._audit = audit
@@ -156,6 +159,7 @@ class RollbackService:
         self._disposition_sync = disposition_sync
         self._bus = event_bus
         self._factory = command_factory or DispositionCommandFactory()
+        self._adapter_registry = adapter_registry
 
     # -----------------------------------------------------------------
     # Public API
@@ -166,6 +170,8 @@ class RollbackService:
         action_id: str,
         operator: str,
         reason: str,
+        *,
+        automated: bool = False,
     ) -> RollbackResult:
         """Rollback a single response Action end-to-end.
 
@@ -203,6 +209,16 @@ class RollbackService:
                             f"Rollback rejected for {action_id}: {pre_check.warning} — {reason}"
                         ),
                     )
+                    await self._publish_rollback_event(
+                        event_id=original.event_id,
+                        action_id=action_id,
+                        source_action_id=action_id,
+                        operator=operator,
+                        rolled_back=False,
+                        rollback_effect_status=None,
+                        warning=pre_check.warning,
+                        rejected=True,
+                    )
                     return pre_check
 
                 rollback_tool = get_rollback_tool(original.tool_name)
@@ -215,7 +231,11 @@ class RollbackService:
                 # --- Create rollback Action ---------------------------------------
                 comp_required = original.writeback_required and original.writeback_applicable
                 plan_revision = original.plan_revision
-                execution_owner = original.execution_owner or ExecutionOwner.DIRECT_TOOL
+                original_owner = original.execution_owner or ExecutionOwner.DIRECT_TOOL
+                execution_owner, adapter_supports_comp = _resolve_rollback_owner_and_compensation(
+                    original,
+                    adapter_registry=self._adapter_registry,
+                )
 
                 fingerprint = _compute_rollback_fingerprint(
                     original.event_id, plan_revision, action_id, rollback_tool
@@ -249,31 +269,16 @@ class RollbackService:
                     else:
                         disposition_source_ref = disposition_source_ref_raw  # type: ignore[assignment]
 
-                # Live-mode gate: compensation writebacks require confirmed XDR
-                # writeback capability (ISSUE-061 spec §降级策略).
-                readiness = WritebackReadiness.NOT_REQUIRED
-                if comp_required:
-                    if _xdr_writeback_allowed():
-                        readiness = WritebackReadiness.READY
-                    else:
-                        readiness = WritebackReadiness.CAPABILITY_UNSUPPORTED
+                readiness = _resolve_compensation_readiness(
+                    comp_required=comp_required,
+                    original_owner=original_owner,
+                    adapter_supports_compensation=adapter_supports_comp,
+                )
 
-                # Rollback actions are created as APPROVED because the
-                # *operator* calling ``rollback_action`` is the human
-                # approval authority — they have explicitly decided to
-                # reverse the original action.  The audit log (written
-                # just below) records their identity and reason, which
-                # serves as the approval evidence for L2+ rollback tools.
-                #
-                # When rollback is initiated by an *automated* path
-                # (e.g. a false-positive hook or Saga compensation),
-                # L2+ rollback actions SHOULD instead be created as
-                # PENDING and routed through ApprovalEngine before
-                # execution.  The automated caller can inject that
-                # behaviour via the ``execute_rollback`` hook
-                # (ISSUE-061 §统一命名 point 3 / ISSUE-093 §4).
-                rb_status = ActionStatus.APPROVED
-                rb_auto_execute = True
+                rb_status, rb_auto_execute = _rollback_initial_status(
+                    action_level=action_level,
+                    automated=automated,
+                )
 
                 rollback_action_id = new_action_id()
                 rb_row = orm.Action(
@@ -314,6 +319,29 @@ class RollbackService:
                     reason=f"Rollback initiated for {action_id}: {reason}",
                 )
 
+        if rb_status is ActionStatus.PENDING:
+            pending_result = RollbackResult(
+                action_id=action_id,
+                rollback_action_id=rollback_action_id,
+                rollback_tool=rollback_tool,
+                rollback_effect_status=None,
+                compensation_writeback_required=comp_required,
+                compensation_writeback_readiness=readiness,
+                rolled_back=False,
+                warning="awaiting_approval",
+                audit_log_id=audit_log_id,
+            )
+            await self._publish_rollback_event(
+                event_id=original.event_id,
+                action_id=rollback_action_id,
+                source_action_id=action_id,
+                operator=operator,
+                rolled_back=False,
+                rollback_effect_status=None,
+                warning="awaiting_approval",
+            )
+            return pending_result
+
         # --- Execute rollback ---------------------------------------------------
         try:
             executed = await self._execute_rollback(rollback_action_id, operator)
@@ -321,6 +349,15 @@ class RollbackService:
             logger.exception("Rollback execution failed: %s", rollback_action_id)
             # Mark the rollback action as FAILED
             await self._update_action_status(rollback_action_id, ActionStatus.FAILED)
+            await self._publish_rollback_event(
+                event_id=original.event_id,
+                action_id=rollback_action_id,
+                source_action_id=action_id,
+                operator=operator,
+                rolled_back=False,
+                rollback_effect_status="failed",
+                warning=f"rollback_execution_error: {exc}",
+            )
             return RollbackResult(
                 action_id=action_id,
                 rollback_action_id=rollback_action_id,
@@ -375,20 +412,15 @@ class RollbackService:
         )
 
         # --- Publish event -------------------------------------------------------
-        if self._bus is not None:
-            await self._bus.publish_event(
-                original.event_id,
-                "action_executed",
-                {
-                    "action_id": rollback_action_id,
-                    "rollback": True,
-                    "rollback_action_id": rollback_action_id,
-                    "source_action_id": action_id,
-                    "rolled_back": rolled_back,
-                    "rollback_effect_status": effect_status,
-                    "operator": operator,
-                },
-            )
+        await self._publish_rollback_event(
+            event_id=original.event_id,
+            action_id=rollback_action_id,
+            source_action_id=action_id,
+            operator=operator,
+            rolled_back=rolled_back,
+            rollback_effect_status=effect_status,
+            warning=warning,
+        )
 
         return result
 
@@ -552,6 +584,13 @@ class RollbackService:
                                 f"failed action: {failed_action_id}"
                             ),
                         )
+                results.append(
+                    RollbackResult(
+                        action_id=action.action_id,
+                        rolled_back=False,
+                        warning="not_rollbackable",
+                    )
+                )
                 continue
 
             try:
@@ -559,6 +598,7 @@ class RollbackService:
                     action.action_id,
                     operator=operator,
                     reason=f"{reason} (failed: {failed_action_id})",
+                    automated=True,
                 )
                 results.append(result)
             except Exception:
@@ -581,6 +621,13 @@ class RollbackService:
                                 f"unexpected exception — failed action: {failed_action_id}"
                             ),
                         )
+                results.append(
+                    RollbackResult(
+                        action_id=action.action_id,
+                        rolled_back=False,
+                        warning="rollback_error",
+                    )
+                )
 
         return results
 
@@ -629,6 +676,36 @@ class RollbackService:
                     row.status = status.value
                     row.updated_at = _utc_now()
                     await session.flush()
+
+    async def _publish_rollback_event(
+        self,
+        *,
+        event_id: str,
+        action_id: str,
+        source_action_id: str | None,
+        operator: str,
+        rolled_back: bool,
+        rollback_effect_status: RollbackEffectStatus | None,
+        warning: str | None = None,
+        rejected: bool = False,
+    ) -> None:
+        """Publish ``action_executed`` for rollback lifecycle visibility."""
+        if self._bus is None:
+            return
+        payload: dict[str, Any] = {
+            "action_id": action_id,
+            "rollback": True,
+            "rollback_action_id": action_id,
+            "source_action_id": source_action_id,
+            "rolled_back": rolled_back,
+            "rollback_effect_status": rollback_effect_status,
+            "operator": operator,
+        }
+        if warning is not None:
+            payload["warning"] = warning
+        if rejected:
+            payload["rejected"] = True
+        await self._bus.publish_event(event_id, "action_executed", payload)
 
     async def _create_compensation_writebacks(
         self,
@@ -752,6 +829,95 @@ class _CompensationResult:
     ) -> None:
         self.writebacks = writebacks
         self.aggregate_status = aggregate_status
+
+
+def _source_product(disposition_source_ref: Any) -> str | None:
+    if disposition_source_ref is None:
+        return None
+    if hasattr(disposition_source_ref, "source_product"):
+        return str(disposition_source_ref.source_product)
+    if isinstance(disposition_source_ref, dict):
+        product = disposition_source_ref.get("source_product")
+        return str(product) if product else None
+    return None
+
+
+def _adapter_supports_xdr_compensation(
+    original: ActionModel,
+    adapter_registry: Any | None,
+) -> bool:
+    if adapter_registry is None:
+        return False
+    product = _source_product(original.disposition_source_ref)
+    if not product:
+        return False
+    try:
+        adapter = adapter_registry.get(product)
+    except AdapterNotFoundError:
+        return False
+    caps = adapter.capabilities()
+    comp = caps.intents.get(DispositionIntentKind.COMPENSATION_RECORD)
+    entity = caps.intents.get(DispositionIntentKind.ENTITY_ACTION_SUBMIT)
+    record_op = caps.operations.get("record_compensation")
+    return (
+        comp is CapabilityState.SUPPORTED
+        and entity is CapabilityState.SUPPORTED
+        and record_op is CapabilityState.SUPPORTED
+    )
+
+
+def _resolve_rollback_owner_and_compensation(
+    original: ActionModel,
+    *,
+    adapter_registry: Any | None,
+) -> tuple[ExecutionOwner, bool]:
+    """Pick rollback execution owner; narrow XDR_MANAGED to adapter capability."""
+    original_owner = original.execution_owner or ExecutionOwner.DIRECT_TOOL
+    if original_owner is ExecutionOwner.DIRECT_TOOL:
+        return ExecutionOwner.DIRECT_TOOL, False
+    adapter_supports = _adapter_supports_xdr_compensation(original, adapter_registry)
+    if adapter_supports:
+        return ExecutionOwner.XDR_MANAGED, True
+    return ExecutionOwner.DIRECT_TOOL, False
+
+
+def _resolve_compensation_readiness(
+    *,
+    comp_required: bool,
+    original_owner: ExecutionOwner,
+    adapter_supports_compensation: bool,
+) -> WritebackReadiness:
+    if not comp_required:
+        return WritebackReadiness.NOT_REQUIRED
+    if not _xdr_writeback_allowed():
+        return WritebackReadiness.CAPABILITY_UNSUPPORTED
+    if original_owner is ExecutionOwner.XDR_MANAGED and not adapter_supports_compensation:
+        return WritebackReadiness.CAPABILITY_UNSUPPORTED
+    return WritebackReadiness.READY
+
+
+def _rollback_initial_status(
+    *,
+    action_level: str,
+    automated: bool,
+) -> tuple[ActionStatus, bool]:
+    """Human rollback approves inline; automated Saga L2+ waits for ApprovalEngine."""
+    if automated and action_level.lower() in {"l2", "l3", "l4"}:
+        return ActionStatus.PENDING, False
+    return ActionStatus.APPROVED, True
+
+
+def build_execute_rollback_hook(action_execution: Any) -> ExecuteRollbackHook:
+    """Wire RollbackService execution to ActionExecutionService (production path)."""
+
+    async def _execute(rollback_action_id: str, operator: str) -> ActionModel:
+        executed = await action_execution.execute_action(
+            rollback_action_id,
+            operator=operator,
+        )
+        return ActionModel.model_validate(executed.model_dump(mode="python"))
+
+    return _execute
 
 
 async def _default_execute_rollback(rollback_action_id: str, operator: str) -> ActionModel:
@@ -941,4 +1107,4 @@ def _aggregate_writeback_status(
     return WritebackStatus.PARTIAL
 
 
-__all__ = ["RollbackService"]
+__all__ = ["RollbackService", "build_execute_rollback_hook"]

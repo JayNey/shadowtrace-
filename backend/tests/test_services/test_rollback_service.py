@@ -371,6 +371,22 @@ class _MockDispositionSync:
         )
 
 
+class _MockEventBus:
+    """Records EventBus publish calls for rollback visibility tests."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def publish_event(
+        self,
+        event_id: str,
+        message_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> bool:
+        self.events.append((event_id, message_type, dict(payload or {})))
+        return True
+
+
 # ---------------------------------------------------------------------------
 # execute_rollback hook factory
 # ---------------------------------------------------------------------------
@@ -1308,6 +1324,222 @@ async def test_rollback_event_skips_unverified_effect(
     assert len(results) == 1
     assert results[0].rolled_back is True
     assert results[0].rollback_tool == "unblock_ip"
+
+
+@pytest.mark.asyncio
+async def test_rollback_action_publishes_event_on_success_and_rejection(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+) -> None:
+    """Rollback success and pre_check rejection both publish action_executed."""
+    event_id = await _seed_event(session_factory)
+    original = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_ip",
+        status=ActionStatus.SUCCESS,
+    )
+    bus = _MockEventBus()
+    execute = _mock_execute_hook(session_factory, succeed=True)
+    svc = _rollback_service(
+        session_factory,
+        audit,
+        execute=execute,
+        event_bus=bus,
+    )
+
+    success = await svc.rollback_action(
+        original.action_id,
+        operator="test-op",
+        reason="event bus success",
+    )
+    assert success.rolled_back is True
+    assert len(bus.events) == 1
+    assert bus.events[0][1] == "action_executed"
+    assert bus.events[0][2]["rollback"] is True
+    assert bus.events[0][2]["rolled_back"] is True
+
+    non_rb = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="force_logout",
+        target="user@test.com",
+        target_type="account",
+        status=ActionStatus.SUCCESS,
+    )
+    rejected = await svc.rollback_action(
+        non_rb.action_id,
+        operator="test-op",
+        reason="event bus rejection",
+    )
+    assert rejected.warning == "not_rollbackable"
+    assert len(bus.events) == 2
+    assert bus.events[1][2]["rejected"] is True
+    assert bus.events[1][2]["rolled_back"] is False
+
+
+@pytest.mark.asyncio
+async def test_compensate_returns_warning_for_non_rollbackable_predecessor(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+) -> None:
+    """Saga compensate returns RollbackResult for skipped non-rollbackable actions."""
+    event_id = await _seed_event(session_factory)
+    t1 = _utc_now()
+    t2 = datetime.fromtimestamp(t1.timestamp() + 10, tz=UTC)
+    t3 = datetime.fromtimestamp(t1.timestamp() + 20, tz=UTC)
+
+    await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="force_logout",
+        target="user@test.com",
+        target_type="account",
+        status=ActionStatus.SUCCESS,
+        executed_at=t1,
+    )
+    failed = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_ip",
+        target="10.0.0.1",
+        status=ActionStatus.FAILED,
+        executed_at=t3,
+    )
+    await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_domain",
+        target="evil.example",
+        target_type="domain",
+        status=ActionStatus.SUCCESS,
+        executed_at=t2,
+    )
+
+    execute = _mock_execute_hook(session_factory, succeed=True)
+    svc = _rollback_service(session_factory, audit, execute=execute)
+    results = await svc.compensate(
+        event_id,
+        failed_action_id=failed.action_id,
+        operator="saga-test",
+    )
+
+    skipped = [r for r in results if r.warning == "not_rollbackable"]
+    assert len(skipped) == 1
+
+
+@pytest.mark.asyncio
+async def test_rollback_compensation_skipped_when_xdr_writeback_disallowed(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live mode without ALLOW_XDR_WRITEBACK must not enqueue compensation."""
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "disposition_mode", "live")
+    monkeypatch.setattr(settings, "allow_xdr_writeback", False)
+
+    event_id = await _seed_event(
+        session_factory,
+        disposition_policy=DispositionPolicy.REQUIRED,
+    )
+    conn_id = f"conn-{_sfx()}"
+    source_record_id = await _seed_source_object(session_factory, event_id, connector_id=conn_id)
+    disposition_source_ref = {
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-test",
+        "connector_id": conn_id,
+        "source_kind": SourceObjectKind.INCIDENT.value,
+        "source_object_id": f"incident-{_sfx()}",
+    }
+    original = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_ip",
+        status=ActionStatus.SUCCESS,
+        writeback_required=True,
+        writeback_applicable=True,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        disposition_source_ref=disposition_source_ref,
+    )
+    await _seed_disposition_outbox(
+        session_factory,
+        action_id=original.action_id,
+        event_id=event_id,
+        source_record_id=source_record_id,
+    )
+    mock_sync = _MockDispositionSync()
+    execute = _mock_execute_hook(session_factory, succeed=True)
+    svc = _rollback_service(
+        session_factory,
+        audit,
+        execute=execute,
+        disposition_sync=mock_sync,
+    )
+
+    result = await svc.rollback_action(
+        original.action_id,
+        operator="test-op",
+        reason="live gate test",
+    )
+
+    assert result.rolled_back is True
+    assert result.compensation_writeback_readiness is WritebackReadiness.CAPABILITY_UNSUPPORTED
+    assert result.compensation_writebacks == []
+    assert mock_sync.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_compensate_automated_l2_creates_pending_rollback_action(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+) -> None:
+    """Automated Saga path creates PENDING rollback for L2+ tools."""
+    event_id = await _seed_event(session_factory)
+    t1 = _utc_now()
+    t2 = datetime.fromtimestamp(t1.timestamp() + 10, tz=UTC)
+
+    predecessor = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_ip",
+        target="10.0.0.1",
+        status=ActionStatus.SUCCESS,
+        executed_at=t1,
+    )
+    failed = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_domain",
+        target="evil.example",
+        target_type="domain",
+        status=ActionStatus.FAILED,
+        executed_at=t2,
+    )
+
+    svc = RollbackService(session_factory, audit=audit)
+    results = await svc.compensate(
+        event_id,
+        failed_action_id=failed.action_id,
+        operator="SagaCompensation",
+    )
+
+    assert len(results) == 1
+    assert results[0].warning == "awaiting_approval"
+    assert results[0].rolled_back is False
+    assert results[0].rollback_action_id is not None
+
+    async with session_factory() as session:
+        rb_row = await session.get(orm.Action, results[0].rollback_action_id)
+        assert rb_row is not None
+        assert ActionStatus(rb_row.status) is ActionStatus.PENDING
+        assert rb_row.source_action_id == predecessor.action_id
 
 
 # ---------------------------------------------------------------------------
