@@ -41,7 +41,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.ids import new_action_id, new_event_id
-from app.models.rollback_result import RollbackResult
+from app.models.rollback_result import RollbackEffectStatus, RollbackResult
 from app.services.event_audit_log_service import EventAuditLogService
 from app.services.rollback_service import RollbackService
 
@@ -408,6 +408,46 @@ def _mock_execute_hook(
     return _execute
 
 
+def _mock_verify_hook(
+    *,
+    verified: bool = True,
+    skipped: bool = False,
+) -> Callable[[ActionModel, ActionModel], Awaitable[RollbackEffectStatus]]:
+    """Return a verify_rollback_effect hook for unit tests."""
+
+    async def _verify(
+        original: ActionModel,
+        rollback_action: ActionModel,
+    ) -> RollbackEffectStatus:
+        if rollback_action.status is not ActionStatus.SUCCESS:
+            return "failed"
+        if skipped:
+            return "skipped"
+        return "verified" if verified else "failed"
+
+    return _verify
+
+
+def _rollback_service(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    *,
+    execute: Callable[[str, str], Awaitable[ActionModel]] | None = None,
+    verify: Callable[[ActionModel, ActionModel], Awaitable[RollbackEffectStatus]] | None = None,
+    disposition_sync: Any = None,
+    event_bus: Any = None,
+) -> RollbackService:
+    """Construct RollbackService with default verify hook for happy-path tests."""
+    return RollbackService(
+        session_factory,
+        audit=audit,
+        execute_rollback=execute,
+        verify_rollback_effect=verify or _mock_verify_hook(verified=True),
+        disposition_sync=disposition_sync,
+        event_bus=event_bus,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests: rollback_action
 # ---------------------------------------------------------------------------
@@ -430,11 +470,7 @@ async def test_rollback_action_success_verification_rolls_back_original(
     )
 
     execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = RollbackService(
-        session_factory,
-        audit=audit,
-        execute_rollback=execute,
-    )
+    svc = _rollback_service(session_factory, audit, execute=execute)
 
     result = await svc.rollback_action(
         original.action_id,
@@ -484,17 +520,45 @@ async def test_rollback_action_execution_failure_keeps_original_status(
     cleanup: None,
 ) -> None:
     """Rollback execution fails → original Action stays SUCCESS,
-    rollback Action exists but is FAILED, rolled_back=False."""
-    event_id = await _seed_event(session_factory)
+    rollback Action exists but is FAILED, rolled_back=False, no compensation."""
+    event_id = await _seed_event(
+        session_factory,
+        disposition_policy=DispositionPolicy.REQUIRED,
+    )
+    conn_id = f"conn-{_sfx()}"
+    source_record_id = await _seed_source_object(session_factory, event_id, connector_id=conn_id)
+    disposition_source_ref = {
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-test",
+        "connector_id": conn_id,
+        "source_kind": SourceObjectKind.INCIDENT.value,
+        "source_object_id": f"incident-{_sfx()}",
+    }
     original = await _seed_response_action(
         session_factory,
         event_id=event_id,
         tool_name="block_ip",
         status=ActionStatus.SUCCESS,
+        writeback_required=True,
+        writeback_applicable=True,
+        disposition_source_ref=disposition_source_ref,
     )
+    await _seed_disposition_outbox(
+        session_factory,
+        action_id=original.action_id,
+        event_id=event_id,
+        source_record_id=source_record_id,
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT,
+    )
+    mock_sync = _MockDispositionSync()
 
     execute = _mock_execute_hook(session_factory, succeed=False)
-    svc = RollbackService(session_factory, audit=audit, execute_rollback=execute)
+    svc = _rollback_service(
+        session_factory,
+        audit,
+        execute=execute,
+        disposition_sync=mock_sync,
+    )
 
     result = await svc.rollback_action(
         original.action_id,
@@ -516,6 +580,80 @@ async def test_rollback_action_execution_failure_keeps_original_status(
         rb_row = await session.get(orm.Action, result.rollback_action_id)
         assert rb_row is not None
         assert ActionStatus(rb_row.status) is ActionStatus.FAILED
+
+    assert result.compensation_writebacks == []
+    assert mock_sync.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_rollback_action_readback_false_keeps_original_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    audit: EventAuditLogService,
+    cleanup: None,
+) -> None:
+    """Readback returns false after rollback execution SUCCESS → original stays SUCCESS."""
+    event_id = await _seed_event(
+        session_factory,
+        disposition_policy=DispositionPolicy.REQUIRED,
+    )
+    conn_id = f"conn-{_sfx()}"
+    source_record_id = await _seed_source_object(session_factory, event_id, connector_id=conn_id)
+    disposition_source_ref = {
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-test",
+        "connector_id": conn_id,
+        "source_kind": SourceObjectKind.INCIDENT.value,
+        "source_object_id": f"incident-{_sfx()}",
+    }
+    original = await _seed_response_action(
+        session_factory,
+        event_id=event_id,
+        tool_name="block_ip",
+        status=ActionStatus.SUCCESS,
+        writeback_required=True,
+        writeback_applicable=True,
+        disposition_source_ref=disposition_source_ref,
+    )
+    await _seed_disposition_outbox(
+        session_factory,
+        action_id=original.action_id,
+        event_id=event_id,
+        source_record_id=source_record_id,
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT,
+    )
+    mock_sync = _MockDispositionSync()
+
+    execute = _mock_execute_hook(session_factory, succeed=True)
+    verify = _mock_verify_hook(verified=False)
+    svc = _rollback_service(
+        session_factory,
+        audit,
+        execute=execute,
+        verify=verify,
+        disposition_sync=mock_sync,
+    )
+
+    result = await svc.rollback_action(
+        original.action_id,
+        operator="test-op",
+        reason="readback false test",
+    )
+
+    assert result.rollback_effect_status == "failed"
+    assert result.rolled_back is False
+    assert result.warning == "rollback_effect_not_verified"
+    assert result.compensation_writebacks == []
+    assert mock_sync.call_count == 0
+
+    async with session_factory() as session:
+        original_row = await session.get(orm.Action, original.action_id)
+        assert original_row is not None
+        assert ActionStatus(original_row.status) is ActionStatus.SUCCESS
+        assert original_row.rollback_status != "completed"
+
+        rb_row = await session.get(orm.Action, result.rollback_action_id)
+        assert rb_row is not None
+        assert ActionStatus(rb_row.status) is ActionStatus.SUCCESS
 
 
 @pytest.mark.asyncio
@@ -696,7 +834,7 @@ async def test_rollback_event_reverse_order_batch(
     )
 
     execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = RollbackService(session_factory, audit=audit, execute_rollback=execute)
+    svc = _rollback_service(session_factory, audit, execute=execute)
 
     results = await svc.rollback_event(
         event_id,
@@ -742,7 +880,7 @@ async def test_rollback_event_skips_non_rollbackable(
     )
 
     execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = RollbackService(session_factory, audit=audit, execute_rollback=execute)
+    svc = _rollback_service(session_factory, audit, execute=execute)
 
     results = await svc.rollback_event(
         event_id,
@@ -814,7 +952,7 @@ async def test_compensate_rolls_back_before_failed_only(
     )
 
     execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = RollbackService(session_factory, audit=audit, execute_rollback=execute)
+    svc = _rollback_service(session_factory, audit, execute=execute)
 
     results = await svc.compensate(
         event_id,
@@ -848,9 +986,7 @@ async def test_rollback_action_with_writeback_required_creates_compensation(
         disposition_policy=DispositionPolicy.REQUIRED,
     )
     conn_id = f"conn-{_sfx()}"
-    source_record_id = await _seed_source_object(
-        session_factory, event_id, connector_id=conn_id
-    )
+    source_record_id = await _seed_source_object(session_factory, event_id, connector_id=conn_id)
     disposition_source_ref = {
         "source_product": "mock_xdr",
         "source_tenant_id": "tenant-test",
@@ -880,10 +1016,10 @@ async def test_rollback_action_with_writeback_required_creates_compensation(
     mock_sync = _MockDispositionSync()
 
     execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = RollbackService(
+    svc = _rollback_service(
         session_factory,
-        audit=audit,
-        execute_rollback=execute,
+        audit,
+        execute=execute,
         disposition_sync=mock_sync,
     )
 
@@ -918,9 +1054,7 @@ async def test_rollback_action_multiple_dispositions_creates_multiple_compensati
         disposition_policy=DispositionPolicy.REQUIRED,
     )
     conn_id = f"conn-{_sfx()}"
-    source_record_id = await _seed_source_object(
-        session_factory, event_id, connector_id=conn_id
-    )
+    source_record_id = await _seed_source_object(session_factory, event_id, connector_id=conn_id)
     disposition_source_ref = {
         "source_product": "mock_xdr",
         "source_tenant_id": "tenant-test",
@@ -956,10 +1090,10 @@ async def test_rollback_action_multiple_dispositions_creates_multiple_compensati
 
     mock_sync = _MockDispositionSync()
     execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = RollbackService(
+    svc = _rollback_service(
         session_factory,
-        audit=audit,
-        execute_rollback=execute,
+        audit,
+        execute=execute,
         disposition_sync=mock_sync,
     )
 
@@ -1091,7 +1225,7 @@ async def test_compensate_no_actions_before_failed(
     )
 
     execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = RollbackService(session_factory, audit=audit, execute_rollback=execute)
+    svc = _rollback_service(session_factory, audit, execute=execute)
 
     results = await svc.compensate(
         event_id,
@@ -1162,7 +1296,7 @@ async def test_rollback_event_skips_unverified_effect(
     )
 
     execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = RollbackService(session_factory, audit=audit, execute_rollback=execute)
+    svc = _rollback_service(session_factory, audit, execute=execute)
 
     results = await svc.rollback_event(
         event_id,
@@ -1183,6 +1317,8 @@ async def test_rollback_event_skips_unverified_effect(
 
 def test_rollback_mapping_covers_all_expected_tools() -> None:
     """Verify that the 6 rollbackable tools have mappings."""
+    from app.agents.rules.rollback_mapping import ROLLBACK_VERIFY_MAP, get_rollback_verify_tool
+
     assert is_rollbackable("block_ip")
     assert is_rollbackable("block_domain")
     assert is_rollbackable("isolate_host")
@@ -1195,6 +1331,10 @@ def test_rollback_mapping_covers_all_expected_tools() -> None:
     assert not is_rollbackable("revoke_token")
     assert not is_rollbackable("notify_security_team")
     assert not is_rollbackable("nonexistent_tool")
+
+    assert get_rollback_verify_tool("unblock_ip") == "check_ip_block_status"
+    assert get_rollback_verify_tool("close_false_positive_ticket") is None
+    assert len(ROLLBACK_VERIFY_MAP) == 6
 
 
 def test_rollback_result_compatibility_field() -> None:

@@ -59,9 +59,29 @@ def get_source_tool(rollback_tool_name: str) -> str | None:
     return None
 
 
+# Independent readback tools used to confirm a rollback reversed the original
+# effect (ISSUE-061 §统一命名 point 4).  ``None`` means no readback surface
+# exists — callers may treat a successful rollback execution as ``skipped``.
+ROLLBACK_VERIFY_MAP: dict[str, str | None] = {
+    "unblock_ip": "check_ip_block_status",
+    "unblock_domain": "check_domain_block_status",
+    "cancel_host_isolation": "check_host_isolation_status",
+    "restore_file": "check_file_quarantine_status",
+    "restore_account": "check_account_status",
+    "close_false_positive_ticket": None,
+}
+
+
+def get_rollback_verify_tool(rollback_tool_name: str) -> str | None:
+    """Return the readback verification tool for *rollback_tool_name*, or None."""
+    return ROLLBACK_VERIFY_MAP.get(rollback_tool_name)
+
+
 __all__ = [
     "ROLLBACK_MAPPING",
+    "ROLLBACK_VERIFY_MAP",
     "get_rollback_tool",
+    "get_rollback_verify_tool",
     "get_source_tool",
     "is_rollbackable",
 ]

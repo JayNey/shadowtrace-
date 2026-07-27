@@ -12,7 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from app.models.enums import WritebackReadiness, WritebackStatus
 
-RollbackEffectStatus = Literal["verified", "failed", "unverifiable", "not_supported"]
+RollbackEffectStatus = Literal[
+    "verified",
+    "failed",
+    "unverifiable",
+    "not_supported",
+    "skipped",
+]
 
 
 class CompensationWritebackItem(BaseModel):

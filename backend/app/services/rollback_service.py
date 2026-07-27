@@ -29,7 +29,11 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.rules.rollback_mapping import get_rollback_tool, is_rollbackable
+from app.agents.rules.rollback_mapping import (
+    get_rollback_tool,
+    get_rollback_verify_tool,
+    is_rollbackable,
+)
 from app.core.config import get_settings
 from app.core.event_bus import EventBus
 from app.db import models as orm
@@ -124,6 +128,12 @@ ExecuteRollbackHook = Callable[
     Awaitable[ActionModel],
 ]
 
+# Callback hook for independently verifying rollback effect after execution.
+VerifyRollbackEffectHook = Callable[
+    [ActionModel, ActionModel],  # (original_action, rollback_action)
+    Awaitable[RollbackEffectStatus],
+]
+
 
 class RollbackService:
     """Service for action rollback and Saga compensation (ISSUE-061)."""
@@ -134,6 +144,7 @@ class RollbackService:
         *,
         audit: EventAuditLogService,
         execute_rollback: ExecuteRollbackHook | None = None,
+        verify_rollback_effect: VerifyRollbackEffectHook | None = None,
         disposition_sync: Any = None,
         event_bus: EventBus | None = None,
         command_factory: DispositionCommandFactory | None = None,
@@ -141,6 +152,7 @@ class RollbackService:
         self._session_factory = session_factory
         self._audit = audit
         self._execute_rollback = execute_rollback or _default_execute_rollback
+        self._verify_rollback_effect = verify_rollback_effect or _default_verify_rollback_effect
         self._disposition_sync = disposition_sync
         self._bus = event_bus
         self._factory = command_factory or DispositionCommandFactory()
@@ -322,20 +334,31 @@ class RollbackService:
             )
 
         # --- Verify rollback effect ----------------------------------------------
-        effect_status = _determine_effect_status(executed)
+        effect_status = await self._verify_rollback_effect(original, executed)
 
         # --- CAS original Action → ROLLED_BACK ----------------------------------
-        if effect_status == "verified":
+        if effect_status in ("verified", "skipped"):
             rolled_back = await self._cas_rollback_status(action_id, original)
         else:
             rolled_back = False
 
         # --- Create compensation writebacks --------------------------------------
-        comp_result = await self._create_compensation_writebacks(
-            original_action=original,
-            rollback_action=executed,
-            operator=operator,
-        )
+        if effect_status in ("verified", "skipped"):
+            comp_result = await self._create_compensation_writebacks(
+                original_action=original,
+                rollback_action=executed,
+                operator=operator,
+            )
+        else:
+            comp_result = _CompensationResult(writebacks=[], aggregate_status=None)
+
+        warning: str | None = None
+        if (
+            not rolled_back
+            and executed.status is ActionStatus.SUCCESS
+            and effect_status == "failed"
+        ):
+            warning = "rollback_effect_not_verified"
 
         result = RollbackResult(
             action_id=action_id,
@@ -347,6 +370,7 @@ class RollbackService:
             compensation_writebacks=comp_result.writebacks,
             compensation_writeback_status=comp_result.aggregate_status,
             rolled_back=rolled_back,
+            warning=warning,
             audit_log_id=audit_log_id,
         )
 
@@ -731,15 +755,90 @@ class _CompensationResult:
 
 
 async def _default_execute_rollback(rollback_action_id: str, operator: str) -> ActionModel:
-    """Default execution hook: marks the rollback action SUCCESS.
-
-    In production this would go through ActionExecutionService / ToolExecutor.
-    The caller should inject a real executor.
-    """
+    """Default execution hook — production must inject ActionExecutionService."""
     raise NotImplementedError(
         "Real rollback execution requires ActionExecutionService integration. "
         "Inject an `execute_rollback` hook in production."
     )
+
+
+async def _default_verify_rollback_effect(
+    original: ActionModel,
+    rollback_action: ActionModel,
+) -> RollbackEffectStatus:
+    """Verify rollback effect via independent readback tools when available."""
+    execution_status = _execution_effect_status(rollback_action)
+    if execution_status != "verified":
+        return execution_status
+
+    verify_tool = get_rollback_verify_tool(rollback_action.tool_name)
+    if verify_tool is None:
+        return "skipped"
+
+    from app.tools.verify._common import execute_verification_tool
+
+    params = {
+        "target_type": rollback_action.target_type,
+        "target": rollback_action.target,
+        "parameters": dict(rollback_action.parameters or {}),
+    }
+    try:
+        verify_result = await execute_verification_tool(verify_tool, params)
+    except Exception:
+        logger.exception(
+            "Rollback readback verification failed: rollback=%s verify_tool=%s",
+            rollback_action.action_id,
+            verify_tool,
+        )
+        return "failed"
+
+    if _readback_confirms_rollback(verify_result):
+        return "verified"
+    return "failed"
+
+
+def _execution_effect_status(action: ActionModel) -> RollbackEffectStatus:
+    """Grade rollback execution outcome before independent readback."""
+    if action.status is ActionStatus.SUCCESS:
+        return "verified"
+    if action.status is ActionStatus.PARTIAL_SUCCESS:
+        return "unverifiable"
+    if action.status is ActionStatus.UNKNOWN:
+        return "unverifiable"
+    return "failed"
+
+
+_READBACK_FAILURE_DETAILS = frozenset(
+    {
+        "forced_failure_override",
+        "execution_job_not_found",
+        "observation_not_visible",
+        "observation_job_mismatch",
+    }
+)
+
+
+def _readback_confirms_rollback(verify_result: dict[str, Any]) -> bool:
+    """Return True when readback shows the original forward effect is gone."""
+    status = str(verify_result.get("status", "")).lower()
+    if status in {"failed", "timeout", "unknown"}:
+        return False
+
+    data = verify_result.get("data")
+    if not isinstance(data, dict):
+        return False
+
+    # Forward verification tools return is_verified=True when the effect is
+    # still present.  After a successful rollback the effect must be absent.
+    if data.get("is_verified") is True:
+        return False
+
+    detail = str(data.get("detail", ""))
+    if detail in _READBACK_FAILURE_DETAILS:
+        return False
+    if detail.startswith(("execution_job_", "execution_target_")):
+        return False
+    return True
 
 
 def _pre_check_rollbackable(action: ActionModel) -> RollbackResult | None:
@@ -800,43 +899,6 @@ def _pre_check_rollbackable(action: ActionModel) -> RollbackResult | None:
         )
 
     return None
-
-
-def _determine_effect_status(action: ActionModel) -> RollbackEffectStatus:
-    """Map rollback Action execution result to effect verification status.
-
-    The rollback tool's reported status is the first signal, but true
-    independent verification requires a follow-up readback call (e.g.
-    check_ip_block_status after unblock_ip).  This function grades the
-    *readiness* for the CAS step rather than performing the readback itself.
-
-    .. important::
-
-       Effect verification and compensation-writeback readiness are
-       **independent** concerns (ISSUE-061 §降级策略 / §验收标准 point 1).
-       This function ONLY grades the entity rollback effect.  The
-       ``compensation_writeback_readiness`` field on :class:`RollbackResult`
-       carries the compensation capability signal separately so that the UI
-       can show "效果已回滚" and "外部补偿不支持/未确认" as distinct items.
-
-    ``not_supported`` in ``RollbackEffectStatus`` is reserved for execution
-    owners that fundamentally lack any readback mechanism (not yet
-    encountered in baseline adapters).  It is not returned by this function
-    but remains available for future readback-verification hooks.
-    """
-    if action.status is ActionStatus.SUCCESS:
-        # TODO(ISSUE-061): wire readback verification as part of the
-        # execute_rollback hook pipeline.  Currently we trust the rollback
-        # tool's reported SUCCESS, but a follow-up readback call should
-        # confirm the original effect was genuinely reversed.
-        return "verified"
-    if action.status is ActionStatus.PARTIAL_SUCCESS:
-        # TODO(ISSUE-061): add per-target readback for PARTIAL_SUCCESS
-        # rollback actions so they can graduate to "verified".
-        return "unverifiable"
-    if action.status is ActionStatus.UNKNOWN:
-        return "unverifiable"
-    return "failed"
 
 
 def _xdr_writeback_allowed() -> bool:
