@@ -46,7 +46,6 @@ from app.models.agent_io import (
     TriageResult,
 )
 from app.models.context import EventContext
-from app.models.entities import EntitySet
 from app.models.enums import (
     DispositionPolicy,
     EventStatus,
@@ -1224,28 +1223,12 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
 
     async def _build_triage_input(self, event_id: str, ec: EventContext) -> TriageAgentInput:
         """Build triage input aligned with ``AnalysisOnlyPipeline._run_triage``."""
-        raw_summary = _build_raw_summary(ec)
-        hint_entities = EntitySet()
-        if self.event_service is not None:
-            try:
-                event = await self.event_service.get_event(event_id)
-            except Exception:
-                event = None
-            if event is not None:
-                if isinstance(event, dict):
-                    title = str(event.get("title") or (ec.event.title if ec.event else event_id))
-                    description = str(event.get("description") or "")
-                    raw_summary = f"{title}. {description}".strip(". ")
-                else:
-                    description = str(getattr(event, "description", "") or "").strip()
-                    raw_summary = f"{event.title}. {description}".strip(". ")
-                    entities = getattr(event, "entities", None)
-                    if entities is not None:
-                        hint_entities = entities
-        return TriageAgentInput(
-            event_id=event_id,
-            raw_event_summary=raw_summary,
-            hint_entities=hint_entities,
+        from app.orchestration.triage_input_builder import build_triage_agent_input
+
+        return await build_triage_agent_input(
+            event_id,
+            event_context=ec,
+            event_service=self.event_service,
         )
 
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
@@ -1322,18 +1305,6 @@ def _current_status_from_context(ec: EventContext) -> EventStatus | None:
     if ec.event is not None:
         return ec.event.status
     return None
-
-
-def _build_raw_summary(ec: EventContext) -> str:
-    """Build a textual summary of the event for TriageAgent input."""
-    if ec.event is not None:
-        parts = [
-            f"title={ec.event.title}",
-            f"type={ec.event.event_type.value}",
-            f"severity={ec.event.severity.value}",
-        ]
-        return " | ".join(parts)
-    return ""
 
 
 def _disposition_policy_from_context(ec: EventContext) -> DispositionPolicy:
