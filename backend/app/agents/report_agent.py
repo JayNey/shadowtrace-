@@ -248,6 +248,15 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         merged: list[ReportSection] = []
         for section in base:
             content = overrides.get(section.key) or section.content
+            if section.key == "overview" and section.key in overrides:
+                required_fp_lines = [
+                    line for line in section.content.splitlines() if line.startswith("fp_")
+                ]
+                missing_fp_lines = [
+                    line for line in required_fp_lines if line not in content.splitlines()
+                ]
+                if missing_fp_lines:
+                    content = "\n".join([content, *missing_fp_lines])
             merged.append(
                 ReportSection(
                     key=section.key,
