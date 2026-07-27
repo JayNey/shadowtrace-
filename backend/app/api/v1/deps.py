@@ -527,14 +527,8 @@ def reset_deps() -> None:
     global _session_factory, _redis_client, _context_store, _degraded_flags
     global _audit_log, _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
     global _super_agent, _event_lease, _investigation_stack
-    global (
-        _disposition_sync,
-        _action_execution,
-        _rollback_service,
-        _adapter_registry,
-        _workflow_runtime,
-        _event_disposition,
-    )
+    global _disposition_sync, _action_execution, _rollback_service
+    global _adapter_registry, _workflow_runtime, _event_disposition
     _session_factory = None
     _redis_client = None
     _context_store = None
