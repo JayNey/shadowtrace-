@@ -428,9 +428,38 @@ def _no_match() -> FPMatchResult:
     )
 
 
+def build_fp_close_reason(
+    false_positive_match: dict[str, Any] | None,
+    *,
+    default: str = "investigation:close",
+) -> str:
+    """Build an audit-friendly close reason including FP case / pattern metadata."""
+    if not isinstance(false_positive_match, dict):
+        return default
+    if false_positive_match.get("recommendation") != "close_as_fp":
+        return default
+
+    case_id = false_positive_match.get("matched_case_id")
+    pattern = (
+        false_positive_match.get("matched_pattern")
+        or false_positive_match.get("matched_rule")
+        or false_positive_match.get("scenario")
+        or false_positive_match.get("signature")
+    )
+    parts = ["close_as_fp"]
+    if case_id:
+        parts.append(f"matched {case_id}")
+    elif pattern:
+        parts.append("matched")
+    if pattern:
+        parts.append(str(pattern))
+    return " ".join(parts)
+
+
 __all__ = [
     "FPMatchResult",
     "FalsePositiveMatcher",
     "FalsePositiveMatcherHook",
     "_entities_from_triage_result",
+    "build_fp_close_reason",
 ]

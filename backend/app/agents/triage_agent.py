@@ -97,6 +97,54 @@ _FP_SIGNATURES: dict[str, str] = {
 }
 
 
+def _resolve_fp_signature_key(source_snapshot: dict[str, Any]) -> str | None:
+    """Return a known FP signature key from immutable source evidence."""
+    scenario = source_snapshot.get("scenario", "")
+    if isinstance(scenario, str) and scenario in _FP_SIGNATURES:
+        return scenario
+
+    signature = source_snapshot.get("signature", "")
+    if isinstance(signature, str) and signature in _FP_SIGNATURES:
+        return signature
+
+    raw_snap = source_snapshot.get("raw_alert_snapshot")
+    if isinstance(raw_snap, dict):
+        fp_rule = raw_snap.get("fp_rule")
+        if isinstance(fp_rule, str) and fp_rule in _FP_SIGNATURES:
+            return fp_rule
+        normalized = raw_snap.get("normalized")
+        if isinstance(normalized, dict):
+            nested_rule = normalized.get("fp_rule")
+            if isinstance(nested_rule, str) and nested_rule in _FP_SIGNATURES:
+                return nested_rule
+        nested_scenario = raw_snap.get("scenario")
+        if isinstance(nested_scenario, str) and nested_scenario in _FP_SIGNATURES:
+            return nested_scenario
+
+    title = str(source_snapshot.get("title") or "").lower()
+    if "bulk login" in title and "change window" in title:
+        return "account_anomaly_fp"
+
+    return None
+
+
+def _fp_match_from_signature_key(key: str) -> dict[str, Any]:
+    """Build a rule-hook false_positive_match payload for *key*."""
+    matched_rule = _FP_SIGNATURES[key]
+    payload: dict[str, Any] = {
+        "matched_rule": matched_rule,
+        "source": "RuleBasedFalsePositiveHook",
+        "matched_at": datetime.now(UTC).isoformat(),
+        "recommendation": "close_as_fp",
+        "max_score": 1.0,
+    }
+    if key == "account_anomaly_fp":
+        payload["scenario"] = key
+    elif key in _FP_SIGNATURES:
+        payload["signature"] = key
+    return payload
+
+
 # --------------------------------------------------------------------------- #
 # RuleBasedFalsePositiveHook
 # --------------------------------------------------------------------------- #
@@ -150,34 +198,11 @@ class RuleBasedFalsePositiveHook:
         if not isinstance(snapshot, dict):
             return
 
-        scenario = snapshot.get("scenario", "")
-        signature = snapshot.get("signature", "")
-        fp_match: dict[str, Any] | None = None
-
-        # ---------------------------------------------------------------- #
-        # Check known FP signatures against scenario / signature fields
-        # ---------------------------------------------------------------- #
-        if scenario in _FP_SIGNATURES:
-            fp_match = {
-                "matched_rule": _FP_SIGNATURES[scenario],
-                "scenario": scenario,
-                "source": "RuleBasedFalsePositiveHook",
-                "matched_at": datetime.now(UTC).isoformat(),
-                "recommendation": "close_as_fp",
-                "max_score": 1.0,
-            }
-        elif signature in _FP_SIGNATURES:
-            fp_match = {
-                "matched_rule": _FP_SIGNATURES[signature],
-                "signature": signature,
-                "source": "RuleBasedFalsePositiveHook",
-                "matched_at": datetime.now(UTC).isoformat(),
-                "recommendation": "close_as_fp",
-                "max_score": 1.0,
-            }
-
-        if fp_match is None:
+        signature_key = _resolve_fp_signature_key(snapshot)
+        if signature_key is None:
             return
+
+        fp_match = _fp_match_from_signature_key(signature_key)
 
         # Write through the hook's OWN BoundWorkingMemory (writer identity =
         # FalsePositiveMatcher, matching FIELD_OWNERSHIP).

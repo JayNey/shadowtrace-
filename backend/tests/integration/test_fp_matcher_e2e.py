@@ -281,25 +281,6 @@ async def test_fp_matcher_account_anomaly_fp_skips_evidence_collection(
     assert row is not None
     event_id = row.event_id
 
-    # Pre-write a simulated close_as_fp false_positive_match using the
-    # canonical "FalsePositiveMatcher" writer identity.  This simulates
-    # what the FalsePositiveMatcherHook / RuleBasedFalsePositiveHook would
-    # write when a vector/rule hit is confirmed for account_anomaly_fp.
-    fp_wm = working_memory.for_writer("FalsePositiveMatcher")
-    await fp_wm.write(
-        event_id,
-        "false_positive_match",
-        {
-            "matched": True,
-            "max_score": 1.0,
-            "matched_case_id": "case-account-anomaly-fp",
-            "matched_pattern": "ops_change_window_bulk_login",
-            "recommendation": "close_as_fp",
-            "source": "FalsePositiveMatcher",
-            "matched_at": "2026-01-01T00:00:00+00:00",
-        },
-    )
-
     # Run the pipeline with fp_matcher wired (scenario_id must match so
     # RiskAgent / ReportAgent use the correct calibration).
     pipeline, projection = build_analysis_pipeline(scenario_id=SCENARIO_ID)
@@ -308,15 +289,17 @@ async def test_fp_matcher_account_anomaly_fp_skips_evidence_collection(
 
     assert result is not None
 
-    # The pipeline completed without crashing (the fp_matcher hooks ran
-    # without error).  With a close_as_fp false_positive_match pre-written
-    # and disposition_policy=NOT_REQUIRED on the account_anomaly_fp
-    # scenario, the pipeline should short-circuit if the TriageAgent
-    # correctly identifies the event as ACCOUNT_ANOMALY (LOW severity).
-    # With keyword-based event_type mapping, the severity may be MEDIUM,
-    # in which case the pipeline runs the full investigation instead of
-    # short-circuiting.  Either way the event reaches CLOSED because
-    # disposition_policy is NOT_REQUIRED.
+    # RuleBasedFalsePositiveHook must detect account_anomaly_fp from the
+    # ingested source evidence (title / snapshot) without manual pre-write.
+    fp_wm = working_memory.for_writer("FalsePositiveMatcher")
+    verify_fp = await fp_wm.read(event_id, "false_positive_match")
+    assert isinstance(verify_fp, dict), (
+        f"RuleBasedFalsePositiveHook did not write false_positive_match: {verify_fp!r}"
+    )
+    assert verify_fp.get("recommendation") == "close_as_fp"
+    assert verify_fp.get("matched_rule") == "ops_change_window_bulk_login"
+
+    # With disposition_policy=NOT_REQUIRED, the pipeline should reach CLOSED.
     assert result.status == EventStatus.CLOSED, (
         f"Expected CLOSED for account_anomaly_fp, got {result.status}"
     )
@@ -337,17 +320,31 @@ async def test_fp_matcher_account_anomaly_fp_skips_evidence_collection(
         assert result.status == EventStatus.CLOSED
 
     # false_positive_match must still be readable after the pipeline run.
-    verify_fp = await fp_wm.read(event_id, "false_positive_match")
-    assert isinstance(verify_fp, dict), (
-        f"false_positive_match lost after pipeline run: {verify_fp!r}"
-    )
     assert verify_fp.get("recommendation") == "close_as_fp"
 
     # Verify the event reached CLOSED in the database.
     async with session_factory() as session:
         row = await session.get(orm.SecurityEvent, event_id)
+        close_logs = (
+            await session.scalars(
+                select(orm.EventAuditLog)
+                .where(
+                    orm.EventAuditLog.event_id == event_id,
+                    orm.EventAuditLog.to_status == EventStatus.CLOSED.value,
+                )
+                .order_by(orm.EventAuditLog.created_at.desc())
+            )
+        ).all()
     assert row is not None
     assert row.status == EventStatus.CLOSED, f"DB status is {row.status}, expected CLOSED"
+    assert close_logs, "Expected audit log entry for CLOSED transition"
+    assert "ops_change_window_bulk_login" in (close_logs[0].reason or "")
+
+    # Report must explain the FP basis when short-circuited.
+    if result.report is not None:
+        overview = next((s for s in result.report.sections if s.key == "overview"), None)
+        assert overview is not None
+        assert "fp_matched_pattern" in overview.content or "fp_matched_case_id" in overview.content
 
 
 # --------------------------------------------------------------------------- #

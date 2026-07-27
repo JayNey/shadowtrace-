@@ -801,3 +801,44 @@ def test_verdict_resolver_no_fp_match_uses_risk() -> None:
     )
     verdict = resolver.resolve(assessment, false_positive_match=None)
     assert verdict is FinalVerdict.NONE
+
+
+# --------------------------------------------------------------------------- #
+# build_fp_close_reason
+# --------------------------------------------------------------------------- #
+
+
+def test_build_fp_close_reason_includes_case_id() -> None:
+    from app.services.false_positive_matcher import build_fp_close_reason
+
+    reason = build_fp_close_reason(
+        {
+            "recommendation": "close_as_fp",
+            "matched_case_id": "case-00000001",
+            "matched_pattern": "ops-change-bot pattern",
+        }
+    )
+    assert "case-00000001" in reason
+    assert "ops-change-bot pattern" in reason
+
+
+def test_build_fp_close_reason_uses_matched_rule_when_no_case_id() -> None:
+    from app.services.false_positive_matcher import build_fp_close_reason
+
+    reason = build_fp_close_reason(
+        {
+            "recommendation": "close_as_fp",
+            "matched_rule": "ops_change_window_bulk_login",
+        }
+    )
+    assert "ops_change_window_bulk_login" in reason
+
+
+def test_build_fp_close_reason_default_when_not_fp() -> None:
+    from app.services.false_positive_matcher import build_fp_close_reason
+
+    assert build_fp_close_reason(None) == "investigation:close"
+    assert (
+        build_fp_close_reason({"recommendation": "no_match"}, default="custom:close")
+        == "custom:close"
+    )

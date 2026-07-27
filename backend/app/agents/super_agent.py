@@ -62,6 +62,7 @@ from app.models.security_event import EventSummary
 from app.models.workflow import MAX_AGENT_RETRIES, TransitionContext
 from app.orchestration.lease import EventLease, generate_owner_id
 from app.orchestration.workflow_graph import planner_node, rag_node
+from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.working_memory import BoundWorkingMemory
 
 logger = logging.getLogger(__name__)
@@ -521,7 +522,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         await self._transition(
             event_id,
             EventStatus.CLOSED,
-            reason="super_agent:short_circuit_closed",
+            reason=build_fp_close_reason(
+                ec.false_positive_match,
+                default="super_agent:short_circuit_closed",
+            ),
             ec=ec,
             context=TransitionContext(
                 need_investigation=False,

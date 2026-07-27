@@ -43,6 +43,7 @@ from app.models.enums import DispositionPolicy, EventStatus, FinalVerdict
 from app.models.report import InvestigationReport
 from app.models.workflow import TransitionContext
 from app.services.event_service import EventService, StateMachinePort
+from app.services.false_positive_matcher import build_fp_close_reason
 
 logger = logging.getLogger(__name__)
 
@@ -511,6 +512,12 @@ class AnalysisOnlyPipeline:
 
         report = await self._run_report(event_id, placeholder_evidence, placeholder_risk)
 
+        fp_match = None
+        if self._context_store is not None:
+            fp_match = await self._context_store.get(event_id, "false_positive_match")
+            if not isinstance(fp_match, dict):
+                fp_match = None
+
         ctx = TransitionContext(
             need_investigation=False,
             recommendation="close_as_fp",
@@ -519,7 +526,10 @@ class AnalysisOnlyPipeline:
             event_id,
             EventStatus.CLOSED,
             context=ctx,
-            reason="analysis_pipeline:short_circuit_closed",
+            reason=build_fp_close_reason(
+                fp_match,
+                default="analysis_pipeline:short_circuit_closed",
+            ),
         )
 
         await self._persist_analysis_only_complete(event_id)

@@ -58,6 +58,7 @@ from app.orchestration.writeback_recovery_handler import (
 from app.services.analysis_only_pipeline import run_rag_stage
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService, apply_flag_to_list
+from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.state_machine_service import StateMachineService
 
 logger = logging.getLogger(__name__)
@@ -688,7 +689,7 @@ def build_investigation_graph(
                 report_exists=report_generated,
                 escalated=escalated,
             ),
-            reason="investigation:close",
+            reason=build_fp_close_reason(state.get("false_positive_match")),
         )
         return _patch_state(
             _trace(NODE_CLOSE),

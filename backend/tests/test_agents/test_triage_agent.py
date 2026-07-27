@@ -452,6 +452,53 @@ class TestFPHook:
         assert result is not None
         assert result["signature"] == "ops_change_window_bulk_login"
 
+    @pytest.mark.asyncio
+    async def test_hook_matches_change_window_title(self):
+        """Hook matches account_anomaly_fp from incident title when scenario absent."""
+        fp_memory = _MockBoundWorkingMemory(writer_name="FalsePositiveMatcher")
+        agent_memory = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        await agent_memory.write(
+            "evt-001",
+            "source_snapshot",
+            {
+                "title": "Bulk login by ops account during change window",
+            },
+        )
+
+        agent = MagicMock()
+        agent.working_memory = agent_memory
+
+        hook = RuleBasedFalsePositiveHook(working_memory=fp_memory)
+        await hook(agent, _make_input("evt-001"))
+
+        result = await fp_memory.read("evt-001", "false_positive_match")
+        assert result is not None
+        assert result["recommendation"] == "close_as_fp"
+        assert result["scenario"] == "account_anomaly_fp"
+
+    @pytest.mark.asyncio
+    async def test_hook_matches_fp_rule_in_raw_alert_snapshot(self):
+        """Hook matches fp_rule stored in raw_alert_snapshot during ingest."""
+        fp_memory = _MockBoundWorkingMemory(writer_name="FalsePositiveMatcher")
+        agent_memory = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        await agent_memory.write(
+            "evt-001",
+            "source_snapshot",
+            {
+                "raw_alert_snapshot": {"fp_rule": "ops_change_window_bulk_login"},
+            },
+        )
+
+        agent = MagicMock()
+        agent.working_memory = agent_memory
+
+        hook = RuleBasedFalsePositiveHook(working_memory=fp_memory)
+        await hook(agent, _make_input("evt-001"))
+
+        result = await fp_memory.read("evt-001", "false_positive_match")
+        assert result is not None
+        assert result["signature"] == "ops_change_window_bulk_login"
+
 
 # --------------------------------------------------------------------------- #
 # Tests: TriageAgent — main scenarios
