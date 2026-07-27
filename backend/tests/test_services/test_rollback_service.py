@@ -925,7 +925,11 @@ async def test_compensate_rolls_back_before_failed_only(
     cleanup: None,
 ) -> None:
     """Saga compensation: only actions executed *before* the failed action
-    are rolled back, in reverse order."""
+    get rollback Actions, in reverse order.
+
+    L2+ tools on the automated Saga path stop at PENDING (ApprovalEngine gate);
+    predecessors are not effect-rolled-back until approval and execution complete.
+    """
     event_id = await _seed_event(session_factory)
 
     t1 = _utc_now()
@@ -971,8 +975,7 @@ async def test_compensate_rolls_back_before_failed_only(
         executed_at=t4,
     )
 
-    execute = _mock_execute_hook(session_factory, succeed=True)
-    svc = _rollback_service(session_factory, audit, execute=execute)
+    svc = RollbackService(session_factory, audit=audit)
 
     results = await svc.compensate(
         event_id,
@@ -985,7 +988,25 @@ async def test_compensate_rolls_back_before_failed_only(
     assert len(results) == 2
     assert results[0].action_id == a2.action_id  # latest first
     assert results[1].action_id == a1.action_id
-    assert all(r.rolled_back for r in results)
+    assert all(r.warning == "awaiting_approval" for r in results)
+    assert all(r.rolled_back is False for r in results)
+    assert all(r.rollback_action_id is not None for r in results)
+
+    async with session_factory() as session:
+        for result, predecessor in (
+            (results[0], a2),
+            (results[1], a1),
+        ):
+            rb_row = await session.get(orm.Action, result.rollback_action_id)
+            assert rb_row is not None
+            assert ActionStatus(rb_row.status) is ActionStatus.PENDING
+            assert rb_row.source_action_id == predecessor.action_id
+
+        # Original predecessors stay SUCCESS until rollback executes post-approval.
+        for original_id in (a1.action_id, a2.action_id):
+            orig_row = await session.get(orm.Action, original_id)
+            assert orig_row is not None
+            assert ActionStatus(orig_row.status) is ActionStatus.SUCCESS
 
 
 # ---------------------------------------------------------------------------
