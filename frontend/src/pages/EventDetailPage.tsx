@@ -22,6 +22,7 @@ import EventOverviewCard from "../components/event/EventOverviewCard";
 import EntityList from "../components/event/EntityList";
 import EvidenceList from "../components/event/EvidenceList";
 import RiskScorePanel from "../components/event/RiskScorePanel";
+import StorylineTimeline from "../components/storyline/StorylineTimeline";
 import { useEventDetail, type EventWriteback } from "../hooks/useEventDetail";
 import type { Action } from "../types/action";
 import type {
@@ -390,7 +391,6 @@ export default function EventDetailPage() {
   const navigate = useNavigate();
   const {
     event,
-    traces,
     actions,
     executionJobs,
     dispositions,
@@ -490,8 +490,14 @@ export default function EventDetailPage() {
     { key: "source", label: "来源对象", children: sourceContent },
     {
       key: "timeline",
-      label: `调查时间线${traces.length ? `（${traces.length}）` : ""}`,
-      children: <Placeholder feature="调查时间线" />,
+      label: "攻击故事线",
+      children: (
+        <StorylineTimeline
+          eventId={eventId}
+          evidence={evidenceOutput?.evidence_list ?? []}
+          refreshToken={event.event.updated_at}
+        />
+      ),
     },
     { key: "graph", label: "攻击图谱", children: <Placeholder feature="攻击图谱" /> },
     {

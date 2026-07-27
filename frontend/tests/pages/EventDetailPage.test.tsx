@@ -6,6 +6,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { EventDetailResponse } from "../../src/types/event";
 
 const mockGetEvent = vi.fn();
+const mockGetTimeline = vi.fn();
 const mockGetTraces = vi.fn();
 const mockListActions = vi.fn();
 const mockListDispositions = vi.fn();
@@ -16,6 +17,7 @@ const mockGetWriteback = vi.fn();
 
 vi.mock("../../src/services/eventApi", () => ({
   getEvent: (...args: unknown[]) => mockGetEvent(...args),
+  getTimeline: (...args: unknown[]) => mockGetTimeline(...args),
   getTraces: (...args: unknown[]) => mockGetTraces(...args),
   listActions: (...args: unknown[]) => mockListActions(...args),
   listDispositions: (...args: unknown[]) => mockListDispositions(...args),
@@ -205,6 +207,31 @@ describe("EventDetailPage", () => {
     vi.clearAllMocks();
     socketHandler = undefined;
     mockGetEvent.mockResolvedValue({ data: makeDetail() });
+    mockGetTimeline.mockResolvedValue({
+      data: {
+        storyline_id: "sty-70",
+        event_id: "evt-70",
+        narrative_summary: "异常账户登录后收集并外传敏感数据。",
+        generated_by: "rule",
+        phases: [
+          {
+            phase_order: 1,
+            phase_name: "initial_access",
+            tactic: "Initial Access",
+            narrative: "攻击者使用有效账户。",
+            entries: [
+              {
+                timestamp: "2026-07-27T08:00:00Z",
+                description: "异常管理员登录",
+                evidence_id: "ev-normal",
+                technique_id: "T1078",
+                severity_hint: "high",
+              },
+            ],
+          },
+        ],
+      },
+    });
     mockGetTraces.mockResolvedValue({
       data: { total: 0, page: 1, page_size: 20, items: [] },
     });
@@ -261,6 +288,16 @@ describe("EventDetailPage", () => {
     await user.click(screen.getByRole("tab", { name: /证据/ }));
     expect(screen.getByTestId("location-hash")).toHaveTextContent("#evidence");
     expect(screen.getByText("异常地理位置登录")).toBeInTheDocument();
+  });
+
+  it("loads the attack storyline in the timeline tab", async () => {
+    renderPage("/events/evt-70#timeline");
+
+    expect(
+      await screen.findByText("异常账户登录后收集并外传敏感数据。"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("规则生成")).toBeInTheDocument();
+    expect(mockGetTimeline).toHaveBeenCalledWith("evt-70");
   });
 
   it("highlights conflicting evidence and exposes its reason", async () => {

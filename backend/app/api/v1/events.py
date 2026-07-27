@@ -1266,23 +1266,6 @@ async def list_tool_calls(
 
 
 # --------------------------------------------------------------------------- #
-# GET /events/{event_id}/timeline (stub, real implementation deferred)
-# --------------------------------------------------------------------------- #
-
-
-@router.get("/events/{event_id}/timeline", response_model=s.TimelineResponse)
-async def get_timeline(
-    event_id: str,
-    principal: CurrentPrincipal,
-    event_service: EventService = Depends(get_event_service),
-) -> s.TimelineResponse:
-    event = await event_service.get_event(event_id)
-    if event is None:
-        raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
-    return s.TimelineResponse(event_id=event_id, items=[])
-
-
-# --------------------------------------------------------------------------- #
 # GET /events/{event_id}/graph (stub, real implementation deferred)
 # --------------------------------------------------------------------------- #
 

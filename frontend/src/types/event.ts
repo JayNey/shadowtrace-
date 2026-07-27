@@ -323,6 +323,43 @@ export interface EvidenceOutput {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Attack storyline models                                           */
+/* ------------------------------------------------------------------ */
+
+export type StorylineGeneratedBy = "llm" | "rule";
+
+export type StorylinePhaseName =
+  | "initial_access"
+  | "collection"
+  | "staging"
+  | "exfiltration"
+  | "post_action";
+
+export interface TimelineEntry {
+  timestamp: string;
+  description: string;
+  evidence_id: string;
+  technique_id?: string | null;
+  severity_hint?: Severity | null;
+}
+
+export interface StorylinePhase {
+  phase_order: number;
+  phase_name: StorylinePhaseName;
+  tactic?: string | null;
+  narrative: string;
+  entries: TimelineEntry[];
+}
+
+export interface AttackStoryline {
+  storyline_id: string;
+  event_id: string;
+  narrative_summary: string;
+  phases: StorylinePhase[];
+  generated_by: StorylineGeneratedBy;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Risk models                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -355,6 +392,7 @@ export interface EventContextSnapshot {
   source_snapshot?: Record<string, unknown> | null;
   source_sync_state?: SourceSyncState | null;
   evidence_output?: EvidenceOutput | null;
+  storyline?: AttackStoryline | null;
   risk_assessment?: RiskAssessment | null;
   execution_jobs?: ExecutionJobResponse[];
   execution_summary?: {

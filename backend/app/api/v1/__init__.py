@@ -12,6 +12,7 @@ from app.api.v1 import (
     knowledge,
     source_records,
     stats,
+    timeline,
     tools,
     trajectory,
 )
@@ -28,3 +29,4 @@ api_router.include_router(tools.router)
 api_router.include_router(knowledge.router)
 api_router.include_router(stats.router)
 api_router.include_router(trajectory.router)
+api_router.include_router(timeline.router)

@@ -2,6 +2,7 @@
 
 import apiClient from "./apiClient";
 import type {
+  AttackStoryline,
   EventDetailResponse,
   EventListParams,
   EventListResponse,
@@ -29,6 +30,10 @@ export function listEvents(params?: EventListParams) {
 
 export function getEvent(eventId: string) {
   return apiClient.get<EventDetailResponse>(`/events/${eventId}`);
+}
+
+export function getTimeline(eventId: string) {
+  return apiClient.get<AttackStoryline>(`/events/${eventId}/timeline`);
 }
 
 export function triggerInvestigation(eventId: string) {
