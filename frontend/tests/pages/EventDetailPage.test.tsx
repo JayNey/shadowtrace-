@@ -1,9 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { App as AntApp } from "antd";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { EventDetailResponse } from "../../src/types/event";
+import { useAgentStatusStore } from "../../src/stores/agentStatusStore";
 
 const mockGetEvent = vi.fn();
 const mockGetTimeline = vi.fn();
@@ -38,23 +39,42 @@ vi.mock("../../src/services/auditApi", () => ({
   getTrajectory: (...args: unknown[]) => mockGetTrajectory(...args),
 }));
 
-let socketHandler: ((event: { type: string; event_id: string; payload: Record<string, unknown> }) => void) | undefined;
+type SocketHandler = (event: {
+  type: string;
+  event_id: string;
+  payload: Record<string, unknown>;
+}) => void;
+
+const socketHandlers = new Set<SocketHandler>();
+/** @deprecated keep for tests that emit via the last-registered handler name */
+let socketHandler: SocketHandler | undefined;
 const mockSocketSubscribe = vi.fn();
+
+function emitSocketEvent(event: {
+  type: string;
+  event_id: string;
+  payload: Record<string, unknown>;
+}) {
+  for (const handler of [...socketHandlers]) {
+    handler(event);
+  }
+}
 
 vi.mock("../../src/services/socketClient", () => ({
   socketClient: {
     connect: vi.fn(),
     subscribe: (eventId: string) => mockSocketSubscribe(eventId),
-    onEvent: (
-      handler: (event: {
-        type: string;
-        event_id: string;
-        payload: Record<string, unknown>;
-      }) => void,
-    ) => {
+    get isConnected() {
+      return true;
+    },
+    onEvent: (handler: SocketHandler) => {
+      socketHandlers.add(handler);
       socketHandler = handler;
       return () => {
-        socketHandler = undefined;
+        socketHandlers.delete(handler);
+        if (socketHandler === handler) {
+          socketHandler = [...socketHandlers].at(-1);
+        }
       };
     },
   },
@@ -214,8 +234,16 @@ function renderPage(initialPath = "/events/evt-70#source") {
 }
 
 describe("EventDetailPage", () => {
+  afterEach(() => {
+    cleanup();
+    useAgentStatusStore.getState().stopWatching();
+    socketHandlers.clear();
+    socketHandler = undefined;
+  });
+
   beforeEach(async () => {
     vi.clearAllMocks();
+    socketHandlers.clear();
     socketHandler = undefined;
     mockGetEvent.mockResolvedValue({ data: makeDetail() });
     mockGetTimeline.mockResolvedValue({
@@ -442,7 +470,7 @@ describe("EventDetailPage", () => {
         },
       }),
     });
-    socketHandler?.({ type: "risk_updated", event_id: "evt-70", payload: {} });
+    emitSocketEvent({ type: "risk_updated", event_id: "evt-70", payload: {} });
     await waitFor(() => {
       expect(screen.getByText("已关闭")).toBeInTheDocument();
       expect(screen.getByText("六维风险 · 88")).toBeInTheDocument();

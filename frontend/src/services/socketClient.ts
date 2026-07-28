@@ -129,7 +129,10 @@ class SocketClient {
       type === "action_verified" ||
       type === "disposition_submitted" ||
       type === "tool_call_started" ||
-      type === "tool_call_completed"
+      type === "tool_call_completed" ||
+      type === "agent_progress" ||
+      type === "agent_completed" ||
+      type === "agent_failed"
     ) {
       this.emit({ type, event_id, payload });
     }
