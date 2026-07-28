@@ -394,7 +394,7 @@ class ImpactAssessmentService:
         assessment: ImpactAssessment,
     ) -> None:
         """Persist *assessment* JSONB onto the action row."""
-        from app.models import orm
+        from app.db import models as orm
 
         await session.execute(
             update(orm.Action)

@@ -467,9 +467,10 @@ class ReportSectionBuilder:
 
         hints: list[str] = []
         for action in response_actions:
-            payload = by_action_id.get(action.action_id)
-            if payload is None:
+            raw = by_action_id.get(action.action_id)
+            if raw is None:
                 continue
+            payload = raw
             level = action.action_level.value if action.action_level else ""
             disruption = str(payload.get("business_disruption", "")).lower()
             score = payload.get("impact_score", 0)
