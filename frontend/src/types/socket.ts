@@ -72,7 +72,10 @@ export type EventDetailSocketEventType =
   | "action_verified"
   | "disposition_submitted"
   | "tool_call_started"
-  | "tool_call_completed";
+  | "tool_call_completed"
+  | "agent_progress"
+  | "agent_completed"
+  | "agent_failed";
 
 export type SocketEvent =
   | { type: "event_created"; event_id: string; payload: SocketEventCreatedPayload }
@@ -85,6 +88,36 @@ export type SocketEvent =
       event_id: string;
       payload: Record<string, unknown> & Partial<SocketToolCallPayload>;
     };
+
+/* ------------------------------------------------------------------ */
+/*  Agent socket payloads (ISSUE-075)                                 */
+/* ------------------------------------------------------------------ */
+
+export interface SocketAgentProgressPayload {
+  agent_name: string;
+  status?: string;
+  message?: string;
+  progress_percent?: number | null;
+  progress_pct?: number | null;
+  phase?: string;
+  step_index?: number;
+  total_steps?: number;
+}
+
+export interface SocketAgentCompletedPayload {
+  agent_name: string;
+  output_summary?: string;
+  duration_ms?: number;
+  degraded?: boolean;
+}
+
+export interface SocketAgentFailedPayload {
+  agent_name: string;
+  error_detail?: string;
+  error?: string;
+  error_code?: string;
+  retryable?: boolean;
+}
 
 export function mapSocketWritebackStatus(status: string): WritebackStatus {
   return status.toLowerCase() as WritebackStatus;

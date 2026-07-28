@@ -22,6 +22,7 @@ import EventOverviewCard from "../components/event/EventOverviewCard";
 import EntityList from "../components/event/EntityList";
 import EvidenceList from "../components/event/EvidenceList";
 import RiskScorePanel from "../components/event/RiskScorePanel";
+import AgentStatusPanel from "../components/agent/AgentStatusPanel";
 import EntityGraph from "../components/graph/EntityGraph";
 import StorylineTimeline from "../components/storyline/StorylineTimeline";
 import EventAuditPanel from "../components/audit/EventAuditPanel";
@@ -403,6 +404,7 @@ export default function EventDetailPage() {
   const navigate = useNavigate();
   const {
     event,
+    traces,
     actions,
     executionJobs,
     dispositions,
@@ -586,6 +588,11 @@ export default function EventDetailPage() {
         </Button>
       </Space>
       <EventOverviewCard detail={event} />
+      <AgentStatusPanel
+        eventId={eventId}
+        eventStatus={event.event.status}
+        traces={traces}
+      />
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={10}>
           <EntityList entities={event.event.entities} />
