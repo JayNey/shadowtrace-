@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.api.v1 import schemas as s
+from app.api.v1.deps import _get_context_store as _real_get_context_store
 from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
 from app.api.v1.deps import get_event_service as _real_get_event_service
 from app.api.v1.deps import get_state_machine as _real_get_state_machine
@@ -25,6 +26,7 @@ from app.core.errors import (
     ValidationError as DomainValidationError,
 )
 from app.main import app
+from app.models.context import EventContext
 from app.models.disposition import DispositionCommand
 from app.models.enums import (
     DispositionPolicy,
@@ -96,6 +98,7 @@ def client() -> TestClient:
         return _MockDispositionSyncService()
 
     app.dependency_overrides[_real_get_disposition_sync] = _mock_disposition_sync
+    app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -299,6 +302,42 @@ class _MockStateMachine:
         evt.status = EventStatus.CLOSED
         evt.external_unsynced = True
         return evt
+
+
+def _example_storyline() -> dict[str, Any]:
+    """Minimal AttackStoryline payload for contract validation (ISSUE-070)."""
+    return {
+        "storyline_id": "sty-contract-004",
+        "event_id": s.EXAMPLE_EVENT_ID,
+        "narrative_summary": "Contract test attack storyline.",
+        "generated_by": "rule",
+        "phases": [
+            {
+                "phase_order": 1,
+                "phase_name": "initial_access",
+                "tactic": "Initial Access",
+                "narrative": "Example entry for contract validation.",
+                "entries": [
+                    {
+                        "timestamp": "2026-01-01T08:00:00Z",
+                        "description": "Contract validation storyline entry.",
+                        "evidence_id": "ev-contract-004",
+                        "technique_id": "T1078",
+                        "severity_hint": "high",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+class _MockContextStore:
+    """Context store stub so timeline contract tests avoid real Postgres."""
+
+    async def get_full_context(self, event_id: str) -> EventContext:
+        if event_id != s.EXAMPLE_EVENT_ID:
+            raise KeyError(event_id)
+        return EventContext(storyline=_example_storyline())
 
 
 # --------------------------------------------------------------------------- #
