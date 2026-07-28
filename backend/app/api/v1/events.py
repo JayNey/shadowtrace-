@@ -1284,32 +1284,9 @@ async def get_actions(
         extra_conditions=extra,
     )
 
-    items: list[ActionModel] = []
-    for row in rows:
-        from app.models.enums import ActionCategory, ActionLevel
+    from app.services.action_mapper import action_from_orm
 
-        try:
-            action_cat = ActionCategory(row.action_category)
-        except ValueError:
-            action_cat = ActionCategory.SYSTEM
-        try:
-            action_lvl = ActionLevel(row.action_level)
-        except ValueError:
-            action_lvl = ActionLevel.L0
-
-        items.append(
-            ActionModel(
-                action_id=row.action_id,
-                event_id=row.event_id,
-                plan_revision=int(row.plan_revision or 1),
-                action_fingerprint=row.action_fingerprint,
-                action_category=action_cat,
-                action_name=row.action_name,
-                tool_name=row.tool_name,
-                action_level=action_lvl,
-                reason=row.reason,
-            )
-        )
+    items: list[ActionModel] = [action_from_orm(row) for row in rows]
 
     return s.ActionListResponse(total=total, page=page, page_size=page_size, items=items)
 

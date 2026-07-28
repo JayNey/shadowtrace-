@@ -19,6 +19,7 @@ from app.api.v1.deps import reset_deps
 from app.db import models as orm
 from app.main import app
 from app.models.enums import (
+    ActionStatus,
     DispositionPolicy,
     EventStatus,
     EventType,
@@ -608,6 +609,66 @@ async def test_actions_paginated(
     assert "page" in data
     assert "page_size" in data
     assert "items" in data
+
+
+@pytest.mark.asyncio
+async def test_actions_returns_full_fields_for_waiting_approval(
+    client: TestClient,
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """GET /events/{id}/actions must expose fields needed by approval center UI."""
+    event_id = await _create_test_event(event_service, title="Waiting approval fields")
+    now = datetime.now(UTC)
+    disposition_ref = {
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-1",
+        "connector_id": "conn-1",
+        "source_kind": "incident",
+        "source_object_type": "incident",
+        "source_object_id": "INC-001",
+    }
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Action(
+                    action_id="act-wait-full",
+                    event_id=event_id,
+                    plan_revision=2,
+                    action_fingerprint="fp-wait-full",
+                    action_category="response",
+                    action_name="block ip",
+                    tool_name="block_ip",
+                    action_level="l4",
+                    execution_phase="immediate",
+                    target_type="ip",
+                    target="203.0.113.50",
+                    status=ActionStatus.WAITING_APPROVAL.value,
+                    reason="High-risk lateral movement",
+                    provider_name="mock_xdr",
+                    execution_owner="xdr_managed",
+                    disposition_source_ref=disposition_ref,
+                    updated_at=now,
+                )
+            )
+
+    resp = client.get(
+        f"/api/v1/events/{event_id}/actions?status=waiting_approval",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 200, resp.text
+    items = resp.json()["items"]
+    assert len(items) == 1
+    item = items[0]
+    assert item["action_id"] == "act-wait-full"
+    assert item["status"] == "waiting_approval"
+    assert item["execution_phase"] == "immediate"
+    assert item["execution_owner"] == "xdr_managed"
+    assert item["target"] == "203.0.113.50"
+    assert item["target_type"] == "ip"
+    assert item["reason"] == "High-risk lateral movement"
+    assert item["disposition_source_ref"]["source_object_id"] == "INC-001"
+    assert item["updated_at"] is not None
 
 
 # --------------------------------------------------------------------------- #

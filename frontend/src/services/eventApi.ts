@@ -79,18 +79,24 @@ export function getAuditLogs(eventId: string) {
 
 export function listActions(
   eventId: string,
-  params?: { page?: number; page_size?: number },
+  params?: { page?: number; page_size?: number; status?: string },
 ) {
   return apiClient.get<ActionListResponse>(`/events/${eventId}/actions`, {
     params,
   });
 }
 
-export function approveAction(actionId: string, body?: { comment?: string }) {
+export function approveAction(
+  actionId: string,
+  body?: { comment?: string; decision_id?: string },
+) {
   return apiClient.post(`/actions/${actionId}/approve`, body ?? {});
 }
 
-export function rejectAction(actionId: string, body: { comment?: string }) {
+export function rejectAction(
+  actionId: string,
+  body: { comment?: string; decision_id?: string },
+) {
   return apiClient.post(`/actions/${actionId}/reject`, body);
 }
 

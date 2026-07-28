@@ -1,12 +1,19 @@
 /** ApprovalCenterPage — approval queue with cards and real-time updates (ISSUE-073). */
 
-import { useEffect, useState, useCallback } from "react";
-import { Typography, Space, Empty, Spin, Alert } from "antd";
+import { useEffect, useMemo, useState } from "react";
+import { Typography, Space, Empty, Spin, Alert, message } from "antd";
 import { CheckCircleOutlined } from "@ant-design/icons";
-import { useApprovalStore } from "../stores/approvalStore";
-import { listEvents } from "../services/eventApi";
+import {
+  useApprovalStore,
+  loadRevisionProgress,
+  revisionProgressKey,
+  isActionTimedOut,
+  type ApprovalDecisionBody,
+  type RevisionProgress,
+} from "../stores/approvalStore";
 import ApprovalCard from "../components/approval/ApprovalCard";
 import ApprovalActionModal from "../components/approval/ApprovalActionModal";
+import type { Action } from "../types/action";
 
 const { Title, Text } = Typography;
 
@@ -21,38 +28,46 @@ export default function ApprovalPage() {
     pendingApprovals,
     loading,
     error,
+    approvalDeadlines,
     loadPendingApprovals,
+    refreshEventIds,
     approve,
     reject,
-    startPolling,
-    stopPolling,
   } = useApprovalStore();
 
   const [modal, setModal] = useState<ModalState>({ open: false, actionId: null, mode: "approve" });
   const [submitting, setSubmitting] = useState(false);
-
-  // Fetch event IDs on mount — load from API, not eventStore
-  useEffect(() => {
-    listEvents({ page_size: 200 })
-      .then((res) => {
-        const ids = res.data.items.map((e: { event_id: string }) => e.event_id);
-        loadPendingApprovals(ids);
-        startPolling(ids);
-      })
-      .catch(() => { /* swallow */ });
-    return () => stopPolling();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Check if an action has timed out (backend timeout is authoritative;
-  // this is a front-end visual hint based on updated_at age > 30 min).
-  const isTimedOut = useCallback(
-    (action: { updated_at: string | null }) => {
-      if (!action.updated_at) return false;
-      const age = Date.now() - new Date(action.updated_at).getTime();
-      return age > 30 * 60 * 1000;
-    },
-    [],
+  const [revisionProgress, setRevisionProgress] = useState<Map<string, RevisionProgress>>(
+    new Map(),
   );
+
+  useEffect(() => {
+    void refreshEventIds().then((ids) => loadPendingApprovals(ids));
+  }, [loadPendingApprovals, refreshEventIds]);
+
+  useEffect(() => {
+    if (pendingApprovals.length === 0) {
+      setRevisionProgress(new Map());
+      return;
+    }
+    let cancelled = false;
+    void loadRevisionProgress(pendingApprovals).then((map) => {
+      if (!cancelled) setRevisionProgress(map);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [pendingApprovals]);
+
+  const groupedByEvent = useMemo(() => {
+    const groups = new Map<string, Action[]>();
+    for (const action of pendingApprovals) {
+      const list = groups.get(action.event_id) ?? [];
+      list.push(action);
+      groups.set(action.event_id, list);
+    }
+    return [...groups.entries()].map(([eventId, actions]) => ({ eventId, actions }));
+  }, [pendingApprovals]);
 
   const handleApprove = (actionId: string) => {
     setModal({ open: true, actionId, mode: "approve" });
@@ -62,15 +77,27 @@ export default function ApprovalPage() {
     setModal({ open: true, actionId, mode: "reject" });
   };
 
-  const handleConfirm = async (actionId: string, comment?: string) => {
+  const handleConfirm = async (actionId: string, body: ApprovalDecisionBody) => {
+    const action = pendingApprovals.find((a) => a.action_id === actionId);
+    const eventId = action?.event_id;
+    const remainingBefore = eventId
+      ? pendingApprovals.filter((a) => a.event_id === eventId).length
+      : 0;
     setSubmitting(true);
     try {
       if (modal.mode === "approve") {
-        await approve(actionId, comment);
+        await approve(actionId, body);
       } else {
-        await reject(actionId, comment ?? "");
+        if (!body.comment?.trim()) {
+          message.error("拒绝必须填写原因");
+          return;
+        }
+        await reject(actionId, body);
       }
       setModal({ open: false, actionId: null, mode: "approve" });
+      if (eventId && remainingBefore > 1) {
+        message.info("本事件仍有待审批动作，计划尚未全部决出。");
+      }
     } catch {
       // API error toast already shown by apiClient interceptor
     } finally {
@@ -104,16 +131,39 @@ export default function ApprovalPage() {
         {pendingApprovals.length === 0 && !loading ? (
           <Empty description="暂无待审批动作" style={{ marginTop: 48 }} />
         ) : (
-          <Space direction="vertical" size="middle" style={{ width: "100%", marginTop: 16 }}>
-            {pendingApprovals.map((action) => (
-              <ApprovalCard
-                key={action.action_id}
-                action={action}
-                timedOut={isTimedOut(action)}
-                onApprove={handleApprove}
-                onReject={handleReject}
-              />
-            ))}
+          <Space direction="vertical" size="large" style={{ width: "100%", marginTop: 16 }}>
+            {groupedByEvent.map(({ eventId, actions }) => {
+              const sample = actions[0];
+              const rev = sample.plan_revision ?? 0;
+              const progress = revisionProgress.get(revisionProgressKey(eventId, rev));
+              return (
+                <Space key={eventId} direction="vertical" size="middle" style={{ width: "100%" }}>
+                  <Alert
+                    type="info"
+                    showIcon
+                    message={
+                      progress
+                        ? `事件 ${eventId} · revision ${rev} · 本 revision 已决出 ${progress.decided}/${progress.total}`
+                        : `事件 ${eventId} · revision ${rev}`
+                    }
+                    description="同一计划须全部审批完（含 deferred）后才进入执行。"
+                  />
+                  {actions.map((action) => (
+                    <ApprovalCard
+                      key={action.action_id}
+                      action={action}
+                      deadline={approvalDeadlines[action.action_id]}
+                      timedOut={isActionTimedOut(
+                        action,
+                        approvalDeadlines[action.action_id],
+                      )}
+                      onApprove={handleApprove}
+                      onReject={handleReject}
+                    />
+                  ))}
+                </Space>
+              );
+            })}
           </Space>
         )}
       </Spin>

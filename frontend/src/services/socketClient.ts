@@ -131,6 +131,12 @@ class SocketClient {
           event_id: String(payload.event_id ?? event_id),
           status: payload.status as string | undefined,
           approval_cycle: payload.approval_cycle as number | undefined,
+          deadline: payload.deadline as string | undefined,
+          summary: payload.summary as string | undefined,
+          impact_assessment: payload.impact_assessment as
+            | Record<string, unknown>
+            | null
+            | undefined,
         },
       });
       return;

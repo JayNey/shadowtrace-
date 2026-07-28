@@ -60,6 +60,9 @@ export interface SocketApprovalPayload {
   event_id?: string;
   status?: string;
   approval_cycle?: number;
+  deadline?: string;
+  summary?: string;
+  impact_assessment?: Record<string, unknown> | null;
 }
 
 export type EventDetailSocketEventType =

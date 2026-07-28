@@ -1,6 +1,11 @@
 /** ApprovalActionModal — approve / reject dialog (ISSUE-073). */
 
 import { Modal, Form, Input } from "antd";
+import {
+  currentApproverDisplay,
+  newDecisionId,
+  type ApprovalDecisionBody,
+} from "../../stores/approvalStore";
 
 const { TextArea } = Input;
 
@@ -9,7 +14,7 @@ interface ApprovalActionModalProps {
   actionId: string | null;
   mode: "approve" | "reject";
   loading: boolean;
-  onConfirm: (actionId: string, comment?: string) => void;
+  onConfirm: (actionId: string, body: ApprovalDecisionBody) => void;
   onCancel: () => void;
 }
 
@@ -29,9 +34,17 @@ export default function ApprovalActionModal({
 
   const handleOk = async () => {
     if (!actionId) return;
-    const values = await form.validateFields();
-    onConfirm(actionId, isReject ? values.comment : undefined);
-    form.resetFields();
+    try {
+      const values = await form.validateFields();
+      const comment = values.comment?.trim();
+      onConfirm(actionId, {
+        decision_id: newDecisionId(),
+        comment: comment || undefined,
+      });
+      form.resetFields();
+    } catch {
+      // validation failed — keep modal open
+    }
   };
 
   return (
@@ -50,6 +63,9 @@ export default function ApprovalActionModal({
       destroyOnHidden
     >
       <Form form={form} layout="vertical">
+        <Form.Item label="当前审批者">
+          <Input value={currentApproverDisplay()} disabled />
+        </Form.Item>
         {isReject && (
           <Form.Item
             name="comment"

@@ -1,21 +1,23 @@
 /** ApprovalCenterPage tests (ISSUE-073). */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import ApprovalPage from "../../src/pages/ApprovalPage";
 
-// Mock zustand stores
-vi.mock("../../src/stores/approvalStore", () => ({
-  useApprovalStore: vi.fn(),
+const { mockIsActionTimedOut, mockLoadRevisionProgress } = vi.hoisted(() => ({
+  mockIsActionTimedOut: vi.fn(() => false),
+  mockLoadRevisionProgress: vi.fn(async () => new Map()),
 }));
 
-vi.mock("../../src/stores/eventStore", () => ({
-  useEventStore: vi.fn(() => ({ items: [{ event_id: "evt-test" }] })),
-}));
-
-vi.mock("../../src/services/socketClient", () => ({
-  socketClient: { onEvent: vi.fn(() => vi.fn()) },
-}));
+vi.mock("../../src/stores/approvalStore", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/stores/approvalStore")>();
+  return {
+    ...actual,
+    useApprovalStore: vi.fn(),
+    loadRevisionProgress: mockLoadRevisionProgress,
+    isActionTimedOut: mockIsActionTimedOut,
+  };
+});
 
 import { useApprovalStore } from "../../src/stores/approvalStore";
 
@@ -23,11 +25,11 @@ const mockStore = {
   pendingApprovals: [] as unknown[],
   loading: false,
   error: null as string | null,
+  approvalDeadlines: {} as Record<string, string>,
   loadPendingApprovals: vi.fn(),
+  refreshEventIds: vi.fn(async () => ["evt-test"]),
   approve: vi.fn(),
   reject: vi.fn(),
-  startPolling: vi.fn(),
-  stopPolling: vi.fn(),
 };
 
 function setStore(overrides: Partial<typeof mockStore>) {
@@ -40,6 +42,8 @@ function setStore(overrides: Partial<typeof mockStore>) {
 describe("ApprovalPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsActionTimedOut.mockReturnValue(false);
+    mockLoadRevisionProgress.mockResolvedValue(new Map());
     setStore({});
   });
 
@@ -53,7 +57,15 @@ describe("ApprovalPage", () => {
     expect(screen.getByText("暂无待审批动作")).toBeDefined();
   });
 
-  it("renders approval cards for pending actions", async () => {
+  it("renders approval cards and revision progress", async () => {
+    mockLoadRevisionProgress.mockResolvedValue(
+      new Map([
+        [
+          "evt-test:1",
+          { eventId: "evt-test", planRevision: 1, decided: 1, total: 3 },
+        ],
+      ]),
+    );
     setStore({
       pendingApprovals: [
         {
@@ -67,6 +79,7 @@ describe("ApprovalPage", () => {
           target: "10.0.0.1",
           target_type: "ip",
           status: "waiting_approval",
+          plan_revision: 1,
           updated_at: new Date().toISOString(),
         },
       ],
@@ -75,9 +88,13 @@ describe("ApprovalPage", () => {
     render(<ApprovalPage />);
     expect(screen.getByText("block_ip")).toBeDefined();
     expect(screen.getByText("L4")).toBeDefined();
+    await waitFor(() => {
+      expect(screen.getByText(/本 revision 已决出 1\/3/)).toBeDefined();
+    });
   });
 
-  it("shows timed-out badge for old actions", async () => {
+  it("shows timed-out badge for old actions", () => {
+    mockIsActionTimedOut.mockReturnValue(true);
     setStore({
       pendingApprovals: [
         {
@@ -91,6 +108,7 @@ describe("ApprovalPage", () => {
           target: "host-1",
           target_type: "host",
           status: "waiting_approval",
+          plan_revision: 1,
           updated_at: new Date(Date.now() - 40 * 60 * 1000).toISOString(),
         },
       ],
@@ -100,7 +118,7 @@ describe("ApprovalPage", () => {
     expect(screen.getByText("已超时")).toBeDefined();
   });
 
-  it("shows deferred action tag", async () => {
+  it("shows deferred action tag", () => {
     setStore({
       pendingApprovals: [
         {
@@ -114,6 +132,7 @@ describe("ApprovalPage", () => {
           target: null,
           target_type: null,
           status: "waiting_approval",
+          plan_revision: 2,
           updated_at: new Date().toISOString(),
         },
       ],

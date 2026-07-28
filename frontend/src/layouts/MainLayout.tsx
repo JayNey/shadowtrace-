@@ -1,6 +1,6 @@
 /** Main layout — Ant Design sidebar + header + content (ISSUE-067). */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { Layout, Menu, Badge } from "antd";
 import type { MenuProps } from "antd";
@@ -27,11 +27,18 @@ export default function MainLayout() {
 
   const unreadCount = useApprovalStore((s) => s.unreadCount);
   const clearUnread = useApprovalStore((s) => s.clearUnread);
+  const initGlobalListener = useApprovalStore((s) => s.initGlobalListener);
+  const stopPolling = useApprovalStore((s) => s.stopPolling);
 
   const handleBellClick = () => {
     clearUnread();
     navigate("/approvals");
   };
+
+  useEffect(() => {
+    initGlobalListener();
+    return () => stopPolling();
+  }, [initGlobalListener, stopPolling]);
 
   // Determine selected key from current path
   const selectedKey = location.pathname.startsWith("/events")

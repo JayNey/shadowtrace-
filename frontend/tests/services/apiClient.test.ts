@@ -95,7 +95,14 @@ describe("eventApi", () => {
   });
 
   it("approveAction calls POST /actions/:id/approve", async () => {
-    await eventApi.approveAction("act-1");
-    expect(mockPost).toHaveBeenCalledWith("/actions/act-1/approve");
+    const body = { decision_id: "dec-1", comment: "LGTM" };
+    await eventApi.approveAction("act-1", body);
+    expect(mockPost).toHaveBeenCalledWith("/actions/act-1/approve", body);
+  });
+
+  it("rejectAction calls POST /actions/:id/reject", async () => {
+    const body = { decision_id: "dec-2", comment: "not safe" };
+    await eventApi.rejectAction("act-1", body);
+    expect(mockPost).toHaveBeenCalledWith("/actions/act-1/reject", body);
   });
 });
