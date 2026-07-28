@@ -25,6 +25,7 @@ from app.core.errors import (
 from app.core.errors import (
     ValidationError as DomainValidationError,
 )
+from app.core.config import get_settings
 from app.main import app
 from app.models.context import EventContext
 from app.models.disposition import DispositionCommand
@@ -170,13 +171,31 @@ class _MockContextStore:
     """Return a valid storyline for context-backed endpoint contracts."""
 
     async def get_full_context(self, event_id: str) -> EventContext:
+        if event_id != s.EXAMPLE_EVENT_ID:
+            raise KeyError(event_id)
         return EventContext(
             storyline={
-                "storyline_id": "sty-contract-1",
+                "storyline_id": "sty-contract-004",
                 "event_id": event_id,
-                "narrative_summary": "Contract-test attack storyline.",
+                "narrative_summary": "Contract test attack storyline.",
                 "generated_by": "rule",
-                "phases": [],
+                "phases": [
+                    {
+                        "phase_order": 1,
+                        "phase_name": "initial_access",
+                        "tactic": "Initial Access",
+                        "narrative": "Example entry for contract validation.",
+                        "entries": [
+                            {
+                                "timestamp": "2026-01-01T08:00:00Z",
+                                "description": "Contract validation storyline entry.",
+                                "evidence_id": "ev-contract-004",
+                                "technique_id": "T1078",
+                                "severity_hint": "high",
+                            }
+                        ],
+                    }
+                ],
             }
         )
 
@@ -320,42 +339,6 @@ class _MockStateMachine:
         return evt
 
 
-def _example_storyline() -> dict[str, Any]:
-    """Minimal AttackStoryline payload for contract validation (ISSUE-070)."""
-    return {
-        "storyline_id": "sty-contract-004",
-        "event_id": s.EXAMPLE_EVENT_ID,
-        "narrative_summary": "Contract test attack storyline.",
-        "generated_by": "rule",
-        "phases": [
-            {
-                "phase_order": 1,
-                "phase_name": "initial_access",
-                "tactic": "Initial Access",
-                "narrative": "Example entry for contract validation.",
-                "entries": [
-                    {
-                        "timestamp": "2026-01-01T08:00:00Z",
-                        "description": "Contract validation storyline entry.",
-                        "evidence_id": "ev-contract-004",
-                        "technique_id": "T1078",
-                        "severity_hint": "high",
-                    }
-                ],
-            }
-        ],
-    }
-
-
-class _MockContextStore:
-    """Context store stub so timeline contract tests avoid real Postgres."""
-
-    async def get_full_context(self, event_id: str) -> EventContext:
-        if event_id != s.EXAMPLE_EVENT_ID:
-            raise KeyError(event_id)
-        return EventContext(storyline=_example_storyline())
-
-
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
@@ -364,7 +347,10 @@ class _MockContextStore:
 def test_openapi_has_all_core_paths_and_methods() -> None:
     schema = app.openapi()
     assert schema["openapi"].startswith("3.")
-    for method, path in CORE_ENDPOINTS:
+    expected = set(CORE_ENDPOINTS)
+    if not get_settings().event_chat_enabled:
+        expected.discard(("post", "/api/v1/events/{event_id}/chat"))
+    for method, path in expected:
         assert path in schema["paths"], f"missing path {path}"
         assert method in schema["paths"][path], f"missing {method.upper()} {path}"
 

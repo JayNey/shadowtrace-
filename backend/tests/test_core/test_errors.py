@@ -66,6 +66,7 @@ _REQUIRED_DOCUMENTED_CODES: frozenset[str] = frozenset(
         "investigation_in_progress",
         "wrong_execution_channel",
         "storyline_not_ready",
+        "context_not_ready",
         "qa_unavailable",
         "auth_error",
         "remote_error",

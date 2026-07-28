@@ -16,6 +16,7 @@ from app.api.v1.deps import get_event_service
 from app.core.auth import Principal, get_principal
 from app.core.llm.base import InMemoryLLMCallAuditRecorder
 from app.core.llm.mock_client import MockLLMClient
+from app.core.llm.base import LLMInvalidJSONError, LLMProviderError
 from app.main import app
 from app.services.event_qa_service import (
     ChatAnswer,
@@ -34,9 +35,16 @@ class _EventService:
 
 
 class _QAService:
-    def __init__(self, answer: ChatAnswer | None = None, *, fail: bool = False) -> None:
+    def __init__(
+        self,
+        answer: ChatAnswer | None = None,
+        *,
+        fail: bool = False,
+        error: Exception | None = None,
+    ) -> None:
         self.result = answer or ChatAnswer(answer="基于评分与证据，事件为高危。")
         self.fail = fail
+        self.error = error or RuntimeError("provider unavailable")
         self.calls: list[tuple[str, str, list[ChatHistoryItem]]] = []
 
     async def answer(
@@ -47,7 +55,7 @@ class _QAService:
     ) -> ChatAnswer:
         self.calls.append((event_id, question, history))
         if self.fail:
-            raise RuntimeError("provider unavailable")
+            raise self.error
         return self.result
 
 
@@ -204,7 +212,9 @@ def test_chat_endpoint_returns_event_not_found_before_qa() -> None:
 
 
 def test_chat_endpoint_maps_optional_service_failure_to_503() -> None:
-    response = _client(_QAService(fail=True)).post(
+    response = _client(
+        _QAService(fail=True, error=LLMProviderError("provider unavailable")),
+    ).post(
         "/api/v1/events/evt-076/chat",
         json={"question": "为什么高危", "history": []},
     )
@@ -215,6 +225,52 @@ def test_chat_endpoint_maps_optional_service_failure_to_503() -> None:
         "error_message": "event Q&A is temporarily unavailable",
         "details": {"event_id": "evt-076"},
     }
+
+
+def test_chat_endpoint_returns_context_not_ready_when_context_missing() -> None:
+    response = _client(_QAService(fail=True, error=KeyError("evt-076"))).post(
+        "/api/v1/events/evt-076/chat",
+        json={"question": "为什么高危", "history": []},
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {
+        "error_code": "context_not_ready",
+        "error_message": "context for event evt-076 is not ready",
+        "details": {"event_id": "evt-076"},
+    }
+
+
+def test_chat_endpoint_maps_empty_question_to_validation_error() -> None:
+    response = _client(
+        _QAService(fail=True, error=ValueError("question must not be empty")),
+    ).post(
+        "/api/v1/events/evt-076/chat",
+        json={"question": "为什么高危", "history": []},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error_code"] == "validation_error"
+    assert "question must not be empty" in response.json()["error_message"]
+
+
+def test_chat_endpoint_maps_invalid_llm_json_to_503() -> None:
+    response = _client(
+        _QAService(
+            fail=True,
+            error=LLMInvalidJSONError(
+                "invalid json from provider",
+                invalid_content="{not-json",
+                validation_error="Expecting value",
+            ),
+        ),
+    ).post(
+        "/api/v1/events/evt-076/chat",
+        json={"question": "为什么高危", "history": []},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error_code"] == "qa_unavailable"
 
 
 def test_chat_endpoint_rejects_more_than_ten_history_items() -> None:

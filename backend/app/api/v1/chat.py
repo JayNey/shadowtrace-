@@ -6,12 +6,14 @@ import logging
 from typing import Annotated, Any, Protocol
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError
 
 from app.api.v1.deps import _get_investigation_stack, get_event_service
-from app.api.v1.errors import EventNotFoundError
+from app.api.v1.errors import EventNotFoundError, ResourceNotFoundError
 from app.core.auth import CurrentPrincipal
 from app.core.errors import DependencyUnavailableError
+from app.core.errors import ValidationError as DomainValidationError
+from app.core.llm.base import LLMInvalidJSONError, LLMProviderError, LLMTimeoutError
 from app.services.decision_trace_service import DecisionTraceService
 from app.services.event_qa_service import ChatAnswer, ChatHistoryItem, EventQAService
 
@@ -73,7 +75,24 @@ async def event_chat(
         )
     try:
         return await qa_service.answer(event_id, request.question, request.history)
-    except Exception as exc:
+    except KeyError as exc:
+        raise ResourceNotFoundError(
+            f"context for event {event_id} is not ready",
+            error_code="context_not_ready",
+            details={"event_id": event_id},
+        ) from exc
+    except ValueError as exc:
+        raise DomainValidationError(
+            str(exc),
+            details={"event_id": event_id},
+        ) from exc
+    except (
+        DependencyUnavailableError,
+        LLMProviderError,
+        LLMTimeoutError,
+        LLMInvalidJSONError,
+        PydanticValidationError,
+    ) as exc:
         logger.warning("event Q&A unavailable event_id=%s: %s", event_id, exc, exc_info=True)
         raise DependencyUnavailableError(
             "event Q&A is temporarily unavailable",

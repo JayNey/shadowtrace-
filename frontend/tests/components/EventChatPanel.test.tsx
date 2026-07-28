@@ -84,6 +84,24 @@ describe("EventChatPanel", () => {
     expect(screen.getByTestId("location-hash")).toHaveTextContent("#audit");
   });
 
+  it("jumps report references to the report tab", async () => {
+    const user = userEvent.setup();
+    mockAskEventQuestion.mockResolvedValue({
+      data: {
+        answer: "详见报告章节。",
+        references: [{ ref_type: "report", ref_id: "executive_summary" }],
+      },
+    });
+    renderPanel();
+
+    await user.type(screen.getByLabelText("事件问题"), "报告怎么说");
+    await user.click(screen.getByRole("button", { name: /发送/ }));
+    await user.click(
+      await screen.findByRole("button", { name: /报告 executive_summary/ }),
+    );
+    expect(screen.getByTestId("location-hash")).toHaveTextContent("#report");
+  });
+
   it("sends at most ten prior messages as history", async () => {
     const user = userEvent.setup();
     mockAskEventQuestion.mockResolvedValue({

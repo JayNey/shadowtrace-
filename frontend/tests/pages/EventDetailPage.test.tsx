@@ -422,6 +422,15 @@ describe("EventDetailPage", () => {
     expect(screen.getByLabelText("事件问题")).toBeInTheDocument();
   });
 
+  it("hides the chat tab when VITE_EVENT_CHAT_ENABLED=false", async () => {
+    vi.stubEnv("VITE_EVENT_CHAT_ENABLED", "false");
+    renderPage("/events/evt-70#chat");
+
+    expect(await screen.findByText("异常管理员登录")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "问答" })).not.toBeInTheDocument();
+    vi.unstubAllEnvs();
+  });
+
   it("highlights conflicting evidence and exposes its reason", async () => {
     const user = userEvent.setup();
     renderPage("/events/evt-70#evidence");

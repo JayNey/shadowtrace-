@@ -116,6 +116,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     # Product / API surface codes referenced in the plan
     "investigation_in_progress": ErrorCategory.PERMANENT,
     "storyline_not_ready": ErrorCategory.USER_INPUT,
+    "context_not_ready": ErrorCategory.USER_INPUT,
     "qa_unavailable": ErrorCategory.TRANSIENT,
     # Generic dependency / domain defaults used by subclasses
     "dependency_unavailable": ErrorCategory.TRANSIENT,

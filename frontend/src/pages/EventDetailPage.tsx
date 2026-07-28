@@ -26,6 +26,7 @@ import EntityGraph from "../components/graph/EntityGraph";
 import StorylineTimeline from "../components/storyline/StorylineTimeline";
 import EventAuditPanel from "../components/audit/EventAuditPanel";
 import EventChatPanel from "../components/chat/EventChatPanel";
+import { isEventChatEnabled } from "../config/features";
 import { useEventDetail, type EventWriteback } from "../hooks/useEventDetail";
 import type { Action } from "../types/action";
 import type {
@@ -36,7 +37,7 @@ import type {
   WritebackStatus,
 } from "../types/event";
 
-const TAB_KEYS = [
+const BASE_TAB_KEYS = [
   "source",
   "timeline",
   "graph",
@@ -44,15 +45,22 @@ const TAB_KEYS = [
   "actions",
   "writeback",
   "audit",
-  "chat",
-  "report",
 ] as const;
 
-type TabKey = (typeof TAB_KEYS)[number];
+type BaseTabKey = (typeof BASE_TAB_KEYS)[number];
+type TabKey = BaseTabKey | "chat" | "report";
+
+function eventDetailTabKeys(): TabKey[] {
+  const keys: TabKey[] = [...BASE_TAB_KEYS];
+  if (isEventChatEnabled()) keys.push("chat");
+  keys.push("report");
+  return keys;
+}
 
 function activeTab(hash: string): TabKey {
+  const keys = eventDetailTabKeys();
   const value = hash.replace(/^#/, "") as TabKey;
-  return TAB_KEYS.includes(value) ? value : "source";
+  return keys.includes(value) ? value : "source";
 }
 
 function Placeholder({ feature }: { feature: string }) {
@@ -408,7 +416,7 @@ export default function EventDetailPage() {
 
   useEffect(() => {
     const raw = location.hash.replace(/^#/, "");
-    if (!TAB_KEYS.includes(raw as TabKey)) {
+    if (!eventDetailTabKeys().includes(raw as TabKey)) {
       navigate(
         { pathname: location.pathname, search: location.search, hash: "source" },
         { replace: true },
@@ -546,11 +554,15 @@ export default function EventDetailPage() {
         <EventAuditPanel eventId={eventId} qualityScores={context?.quality_scores} />
       ),
     },
-    {
-      key: "chat",
-      label: "问答",
-      children: <EventChatPanel eventId={eventId} />,
-    },
+    ...(isEventChatEnabled()
+      ? [
+          {
+            key: "chat" as const,
+            label: "问答",
+            children: <EventChatPanel eventId={eventId} />,
+          },
+        ]
+      : []),
     {
       key: "report",
       label: "报告",
