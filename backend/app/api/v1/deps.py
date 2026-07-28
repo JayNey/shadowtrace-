@@ -48,6 +48,8 @@ _event_disposition: Any = None  # EventDispositionService
 _opensearch_client: Any = None  # OpenSearchClient
 _search_service: Any = None  # SearchService
 _tool_call_log: Any = None  # ToolCallLogService
+_graph_sync_service: Any = None  # GraphSyncService (ISSUE-082)
+_neo4j_client: Any = None  # Neo4jClient (ISSUE-082)
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -379,6 +381,36 @@ def get_search_service() -> Any:
     return _search_service
 
 
+async def get_graph_sync_service() -> Any:
+    """Return GraphSyncService when NEO4J_ENABLED=true; None otherwise.
+
+    ISSUE-082 §实现步骤 point 3: GraphAgent 输出后异步触发 Neo4j 同步。
+    """
+    global _graph_sync_service, _neo4j_client
+    settings = get_settings()
+    if not settings.neo4j_enabled:
+        return None
+    if _graph_sync_service is None:
+        from app.core.neo4j_client import Neo4jClient
+        from app.services.graph_sync_service import GraphSyncService
+
+        _neo4j_client = Neo4jClient()
+        _graph_sync_service = GraphSyncService(
+            _get_session_factory(),
+            client=_neo4j_client,
+        )
+    return _graph_sync_service
+
+
+async def shutdown_neo4j_client() -> None:
+    """Close the lazy Neo4j driver on application shutdown (ISSUE-082)."""
+    global _neo4j_client, _graph_sync_service
+    if _neo4j_client is not None:
+        await _neo4j_client.aclose()
+        _neo4j_client = None
+        _graph_sync_service = None
+
+
 DispositionSyncDep = Annotated[Any, Depends(get_disposition_sync)]
 ActionExecutionDep = Annotated[Any, Depends(get_action_execution)]
 RollbackServiceDep = Annotated[Any, Depends(get_rollback_service)]
@@ -398,6 +430,7 @@ async def _get_wm() -> Any:
 async def _build_investigation_agents() -> dict[str, Any]:
     """Wire shared P0 agents and services for pipeline / SuperAgent."""
     from app.agents.evidence_agent import EvidenceAgent
+    from app.agents.graph_agent import GraphAgent
     from app.agents.memory_agent import MemoryAgent
     from app.agents.rag_agent import RAGAgent
     from app.agents.report_agent import ReportAgent
@@ -499,6 +532,16 @@ async def _build_investigation_agents() -> dict[str, Any]:
         event_bus=event_bus,
         scenario_id="insider_data_exfiltration",
     )
+    graph_sync = await get_graph_sync_service()
+    graph_agent = GraphAgent(
+        working_memory=wm.for_writer("GraphAgent"),
+        budget_service=budget_service,
+        output_guard=output_guard,
+        trace_service=trace_service,
+        event_bus=event_bus,
+        session_factory=session_factory,
+        graph_sync_service=graph_sync,
+    )
 
     return {
         "settings": settings,
@@ -512,6 +555,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         "rag": rag,
         "risk": risk,
         "report": report,
+        "graph_agent": graph_agent,
         "memory": memory,
         "context_store": _get_context_store(),
         "degraded_flags": _get_degraded_flags(),
@@ -607,6 +651,7 @@ async def get_super_agent() -> Any:
             investigation_graph=investigation_graph,
             memory_agent=stack["memory"],
             audit_service=_get_audit_log(),
+            graph_agent=stack["graph_agent"],
         )
     return _super_agent
 
@@ -620,6 +665,7 @@ def reset_deps() -> None:
     global _adapter_registry, _workflow_runtime, _event_disposition
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
+    global _graph_sync_service, _neo4j_client
     _session_factory = None
     _redis_client = None
     _context_store = None
@@ -643,3 +689,5 @@ def reset_deps() -> None:
     _opensearch_client = None
     _search_service = None
     _tool_call_log = None
+    _graph_sync_service = None
+    _neo4j_client = None
