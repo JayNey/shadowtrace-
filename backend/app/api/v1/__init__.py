@@ -12,6 +12,7 @@ from app.api.v1 import (
     graph,
     health,
     knowledge,
+    search,
     source_records,
     stats,
     timeline,
@@ -38,6 +39,7 @@ def create_api_router(*, include_chat: bool = True) -> APIRouter:
     router.include_router(trajectory.router)
     router.include_router(timeline.router)
     router.include_router(graph.router)
+    router.include_router(search.router)
     if include_chat:
         router.include_router(chat.router)
     return router

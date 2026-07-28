@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
-import { Layout, Menu, Badge } from "antd";
+import { Layout, Menu, Badge, Space } from "antd";
 import type { MenuProps } from "antd";
 import {
   UnorderedListOutlined,
@@ -11,6 +11,7 @@ import {
   BellOutlined,
 } from "@ant-design/icons";
 import { useApprovalStore } from "../stores/approvalStore";
+import GlobalSearchBox from "../components/search/GlobalSearchBox";
 
 const { Header, Sider, Content } = Layout;
 
@@ -90,9 +91,12 @@ export default function MainLayout() {
           }}
         >
           <span>ShadowTrace — 多 Agent 安全运营系统</span>
-          <Badge count={unreadCount} overflowCount={99} onClick={handleBellClick}>
-            <BellOutlined style={{ fontSize: 18, cursor: "pointer" }} />
-          </Badge>
+          <Space size="middle">
+            <GlobalSearchBox />
+            <Badge count={unreadCount} overflowCount={99} onClick={handleBellClick}>
+              <BellOutlined style={{ fontSize: 18, cursor: "pointer" }} />
+            </Badge>
+          </Space>
         </Header>
         <Content style={{ margin: 16 }}>
           <Outlet />
