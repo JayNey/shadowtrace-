@@ -17,21 +17,23 @@ DESIGN NOTES (ISSUE-064 review):
   ``tests/test_orchestration/test_writeback_recovery.py`` (ISSUE-062).
 - _seed_required_fp bypasses RuleBasedFalsePositiveHook and the vector
   matching pipeline by seeding the journal directly.  This is an intentional
-  downgrade pending ISSUE-032 fixture-injection support.  When ISSUE-032
-  delivers, add a companion sub-scenario that exercises the real pipeline.
+  downgrade for the primary scenario-5 test; ``test_scenario_5_via_rule_based_fp_hook``
+  exercises the real RuleBasedFalsePositiveHook path.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.response_agent import compute_template_hash
+from app.agents.response_agent import build_mock_capability_manifest, compute_template_hash
+from app.agents.triage_agent import RuleBasedFalsePositiveHook
 from app.core.auth import Principal
 from app.core.errors import ValidationError
 from app.core.event_bus import EventBus
@@ -39,9 +41,12 @@ from app.core.redis_client import RedisClient
 from app.db import models as orm
 from app.db.orm.approval import ApprovalRecordORM
 from app.mock_xdr.state import MockXDRState, find_forbidden_analysis_keys
+from app.models.action import TERMINAL_DISPOSITION_TOOL, Action
 from app.models.agent_io import (
     CollectionStatus,
+    RiskAssessment,
     ScoringMode,
+    TriageAgentInput,
     VerificationOverallStatus,
     VerificationPhase,
 )
@@ -92,10 +97,12 @@ from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_audit_log_service import EventAuditLogService
 from app.services.event_disposition_service import (
     EventDispositionService,
+    _action_from_row,
 )
 from app.services.event_service import EventService
 from app.services.state_machine_service import StateMachineService
 from app.services.terminal_disposition_resolver import TerminalDispositionResolver
+from app.services.working_memory import WorkingMemory
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
 )
@@ -377,13 +384,10 @@ async def _seed_required_fp(
        to the journal.  This is an intentional downgrade for ISSUE-064;
        the real pipeline requires ISSUE-032 fixture-injection support.
 
-       When ISSUE-032 delivers:
-       1. Add a companion sub-scenario that exercises the real
-          RuleBasedFalsePositiveHook path.
-       2. Consider deprecating this helper in favour of a shared
-          fixture that seeds the journal through the real pipeline.
-
-       See ISSUE-032 for the fixture-injection work.
+       When ISSUE-032 delivers fixture-injection support, consider deprecating
+       this helper in favour of shared fixtures.  The companion test
+       ``test_scenario_5_via_rule_based_fp_hook`` already covers the real
+       RuleBasedFalsePositiveHook path.
     """
     async with session_factory() as session:
         async with session.begin():
@@ -396,6 +400,129 @@ async def _seed_required_fp(
                     "max_score": max_score,
                 },
             )
+
+
+def _low_confidence_risk() -> RiskAssessment:
+    """Risk assessment below L3 confidence threshold (0.85)."""
+    return RiskAssessment(
+        risk_score=78,
+        confidence=0.72,
+        severity=Severity.HIGH,
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        scoring_mode=ScoringMode.LLM_AND_RULE,
+    )
+
+
+async def _load_action(
+    session_factory: async_sessionmaker[AsyncSession],
+    action_id: str,
+) -> Action:
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action_id)
+        assert row is not None, f"Action {action_id} not found"
+        return _action_from_row(row)
+
+
+async def _submit_entity_action_once(
+    session_factory: async_sessionmaker[AsyncSession],
+    disposition_sync_service: DispositionSyncService,
+    disposition_command_factory: DispositionCommandFactory,
+    *,
+    event_id: str,
+    action_id: str,
+    mock_xdr_state: MockXDRState,
+    entity_action_code: str = "contain_device",
+    operator: str = "test",
+) -> str:
+    """Enqueue and deliver exactly one ENTITY_ACTION_SUBMIT via MockXDR."""
+    request_counter_before = mock_xdr_state.request_counter
+    outbox_id: str | None = None
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            action = _action_from_row(row)
+            locator = SourceObjectLocator.model_validate(action.disposition_source_ref)
+            source_record_id = f"src-{SCENARIO_INCIDENT_ID}"
+            token_row = await session.get(orm.SourceObject, source_record_id)
+            token = token_row.current_concurrency_token if token_row else None
+            disposition_id = new_disposition_id()
+            command = disposition_command_factory.build_entity_action_submit(
+                action,
+                source_locator=locator,
+                source_concurrency_token=token,
+                operator_id=operator,
+                disposition_id=disposition_id,
+                closure_cycle=int(action.plan_revision),
+                entity_action_code=entity_action_code,
+            )
+            outbox_record = await disposition_sync_service.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+                logical_slot="entity_action",
+            )
+            outbox_id = outbox_record.outbox_id
+            row.status = ActionStatus.EXECUTING.value
+
+    assert outbox_id is not None
+    await disposition_sync_service.deliver_outbox(outbox_id)
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.SUCCESS.value
+
+    assert mock_xdr_state.request_counter == request_counter_before + 1, (
+        "IMMEDIATE entity action must submit to MockXDR exactly once"
+    )
+    return outbox_id
+
+
+async def _run_rule_based_fp_hook(
+    session_factory: async_sessionmaker[AsyncSession],
+    working_memory: WorkingMemory,
+    event_id: str,
+    *,
+    scenario: str = "account_anomaly_fp",
+    title: str = "Bulk login by ops account during change window",
+) -> dict[str, Any]:
+    """Exercise RuleBasedFalsePositiveHook (not journal injection)."""
+    async with session_factory() as session:
+        async with session.begin():
+            await append_context_journal_in_session(
+                session,
+                event_id,
+                "source_snapshot",
+                {
+                    "scenario": scenario,
+                    "title": title,
+                },
+            )
+
+    hook = RuleBasedFalsePositiveHook(
+        working_memory=working_memory.for_writer("RuleBasedFalsePositiveHook"),
+    )
+    triage_agent = MagicMock()
+    triage_agent.working_memory = working_memory.for_writer("TriageAgent")
+    await hook(
+        triage_agent,
+        TriageAgentInput(event_id=event_id, raw_event_summary=title),
+    )
+
+    fp_match = await working_memory.for_writer("FalsePositiveMatcher").read(
+        event_id,
+        "false_positive_match",
+    )
+    assert isinstance(fp_match, dict), (
+        f"RuleBasedFalsePositiveHook must write false_positive_match, got {fp_match!r}"
+    )
+    assert fp_match.get("source") == "RuleBasedFalsePositiveHook"
+    assert fp_match.get("recommendation") == "close_as_fp"
+    return fp_match
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +695,8 @@ async def test_scenario_1_xdr_managed_full_loop(
     context_store: EventContextStore,
     event_service: EventService,
     event_disposition_service: EventDispositionService,
+    disposition_sync_service: DispositionSyncService,
+    disposition_command_factory: DispositionCommandFactory,
     state_machine_service: StateMachineService,
     mock_xdr_state: MockXDRState,
 ) -> None:
@@ -618,8 +747,8 @@ async def test_scenario_1_xdr_managed_full_loop(
         writeback_applicable=True,
     )
 
-    # Create an IMMEDIATE action that was already executed successfully
-    _ = await _insert_action(
+    # Create an IMMEDIATE action (APPROVED) — submit entity writeback once via MockXDR
+    immediate_action_id = await _insert_action(
         session_factory,
         event_id=event_id,
         action_name="isolate_host",
@@ -627,12 +756,40 @@ async def test_scenario_1_xdr_managed_full_loop(
         action_category=ActionCategory.RESPONSE,
         execution_phase=ActionExecutionPhase.IMMEDIATE,
         execution_owner=ExecutionOwner.XDR_MANAGED,
-        status=ActionStatus.SUCCESS,
+        status=ActionStatus.APPROVED,
         action_level=ActionLevel.L2,
         writeback_required=True,
         writeback_applicable=True,
         writeback_readiness=WritebackReadiness.READY,
     )
+
+    mock_xdr_requests_before_entity = mock_xdr_state.request_counter
+    await _submit_entity_action_once(
+        session_factory,
+        disposition_sync_service,
+        disposition_command_factory,
+        event_id=event_id,
+        action_id=immediate_action_id,
+        mock_xdr_state=mock_xdr_state,
+        operator="test-scenario-1-entity",
+    )
+
+    # P0 spec: IMMEDIATE entity writeback submitted exactly once
+    async with session_factory() as session:
+        entity_outbox_count = await session.scalar(
+            select(func.count())
+            .select_from(orm.DispositionOutbox)
+            .where(
+                orm.DispositionOutbox.event_id == event_id,
+                orm.DispositionOutbox.intent_kind
+                == DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+            )
+        )
+        assert entity_outbox_count == 1, (
+            f"IMMEDIATE must produce exactly one ENTITY_ACTION_SUBMIT outbox, "
+            f"got {entity_outbox_count}"
+        )
+    assert mock_xdr_state.request_counter == mock_xdr_requests_before_entity + 1
 
     # Seed verification context
     async with session_factory() as session:
@@ -793,7 +950,7 @@ async def test_scenario_2_low_confidence_l3_manual_approval(
                 },
             )
 
-    # Create an L3 action in WAITING_APPROVAL (simulating evaluation)
+    # Create an L3 action in PENDING — ApprovalEngine.evaluate() drives L3 gate
     l3_action_id = new_action_id()
     await _insert_action(
         session_factory,
@@ -804,41 +961,36 @@ async def test_scenario_2_low_confidence_l3_manual_approval(
         action_category=ActionCategory.RESPONSE,
         execution_phase=ActionExecutionPhase.IMMEDIATE,
         execution_owner=ExecutionOwner.XDR_MANAGED,
-        status=ActionStatus.WAITING_APPROVAL,
+        status=ActionStatus.PENDING,
         action_level=ActionLevel.L3,
         writeback_required=True,
         writeback_applicable=True,
+        plan_revision=1,
     )
 
-    # Create the approval record
-    async with session_factory() as session:
-        async with session.begin():
-            approval = ApprovalRecordORM(
-                approval_id=new_approval_id(),
-                action_id=l3_action_id,
-                event_id=event_id,
-                plan_revision=1,
-                approval_cycle=0,
-                decision_id=f"dec-{new_approval_id()}",
-                required_level=ActionLevel.L3.value,
-                decision=ApprovalDecisionKind.REQUIRE_APPROVAL.value,
-                operator="ApprovalEngine",
-                detail={
-                    "rule_applied": "level_l3_high_confidence",
-                    "reason": "L3 requires high/critical severity and confidence >= 0.85",
-                },
-                requested_at=datetime.now(UTC),
-                timeout_at=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),
-            )
-            session.add(approval)
-
-    # --- Act: approve via ApprovalEngine (B2 fix: NOT direct DB write) ---
     engine = ApprovalEngine(
         session_factory,
         state_machine=state_machine_service,
         context_store=context_store,
+        capability_manifest=build_mock_capability_manifest(),
     )
 
+    l3_action = await _load_action(session_factory, l3_action_id)
+    decision = await engine.evaluate(l3_action, _low_confidence_risk(), approval_cycle=0)
+    assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
+
+    # --- Assert: L3 gate → WAITING_APPROVAL (not direct DB seed) ---
+    async with session_factory() as session:
+        row = await session.get(orm.Action, l3_action_id)
+        assert row is not None
+        assert ActionStatus(row.status) is ActionStatus.WAITING_APPROVAL, (
+            f"Expected WAITING_APPROVAL after evaluate(), got {row.status}"
+        )
+        event_row = await session.get(orm.SecurityEvent, event_id)
+        assert event_row is not None
+        assert EventStatus(event_row.status) is EventStatus.WAITING_APPROVAL
+
+    # --- Act: approve via ApprovalEngine (B2 fix: NOT direct DB write) ---
     await engine.approve(
         l3_action_id,
         principal=Principal(
@@ -967,6 +1119,141 @@ async def test_scenario_2_low_confidence_l3_manual_approval(
         )
 
     # B5 fix: Assert no analysis content leaked
+    await assert_no_analysis_content_in_outbound(session_factory, event_id)
+
+
+@pytest.mark.usefixtures("clean_state")
+async def test_scenario_2_plan_revision_gate_blocks_until_all_approved(
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    event_disposition_service: EventDispositionService,
+    state_machine_service: StateMachineService,
+    mock_xdr_state: MockXDRState,
+) -> None:
+    """Scenario 2 gate: same plan_revision IMMEDIATE + deferred must all be decided.
+
+    One APPROVED + one WAITING_APPROVAL must not activate terminal disposition;
+    after all APPROVED, activate_and_submit succeeds.
+    """
+    event_id = await _create_event(session_factory, context_store, severity=Severity.HIGH)
+    await _seed_source_object(session_factory)
+    plan_revision = 1
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            assert row is not None
+            row.status = EventStatus.REPORTING.value
+            row.confidence = 0.72
+            row.final_verdict = FinalVerdict.CONFIRMED_THREAT.value
+            row.risk_score = 78
+
+    immediate_id = await _insert_action(
+        session_factory,
+        event_id=event_id,
+        action_name="isolate_host",
+        tool_name="isolate_host",
+        action_category=ActionCategory.RESPONSE,
+        execution_phase=ActionExecutionPhase.IMMEDIATE,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        status=ActionStatus.PENDING,
+        action_level=ActionLevel.L3,
+        plan_revision=plan_revision,
+    )
+    deferred_id = await _insert_action(
+        session_factory,
+        event_id=event_id,
+        action_name=TERMINAL_DISPOSITION_TOOL,
+        tool_name=TERMINAL_DISPOSITION_TOOL,
+        action_category=ActionCategory.RESPONSE,
+        execution_phase=ActionExecutionPhase.POST_VERIFY,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        status=ActionStatus.PENDING,
+        action_level=ActionLevel.L3,
+        activation_condition="after_effect_resolution",
+        writeback_required=True,
+        writeback_applicable=True,
+        plan_revision=plan_revision,
+        approved_terminal_dispositions=[
+            SourceDisposition.CONTAINED.value,
+            SourceDisposition.COMPLETED.value,
+        ],
+    )
+
+    engine = ApprovalEngine(
+        session_factory,
+        state_machine=state_machine_service,
+        context_store=context_store,
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    eval_result = await engine.evaluate_plan(event_id, plan_revision, _low_confidence_risk())
+    assert eval_result.needs_wait is True
+    assert eval_result.evaluated_count == 2
+
+    async with session_factory() as session:
+        event_row = await session.get(orm.SecurityEvent, event_id)
+        assert event_row is not None
+        assert EventStatus(event_row.status) is EventStatus.WAITING_APPROVAL
+        immediate_row = await session.get(orm.Action, immediate_id)
+        deferred_row = await session.get(orm.Action, deferred_id)
+        assert immediate_row is not None and deferred_row is not None
+        assert ActionStatus(immediate_row.status) is ActionStatus.WAITING_APPROVAL
+        assert ActionStatus(deferred_row.status) is ActionStatus.WAITING_APPROVAL
+
+    principal = Principal(subject="test-approver", roles=["approver"])
+    await engine.approve(immediate_id, principal, "approve immediate only", None)
+
+    async with session_factory() as session:
+        event_row = await session.get(orm.SecurityEvent, event_id)
+        assert event_row is not None
+        assert EventStatus(event_row.status) is EventStatus.WAITING_APPROVAL, (
+            "Plan must stay WAITING_APPROVAL until every action is decided"
+        )
+        immediate_row = await session.get(orm.Action, immediate_id)
+        deferred_row = await session.get(orm.Action, deferred_id)
+        assert immediate_row is not None and deferred_row is not None
+        assert ActionStatus(immediate_row.status) is ActionStatus.APPROVED
+        assert ActionStatus(deferred_row.status) is ActionStatus.WAITING_APPROVAL
+
+    async with session_factory() as session:
+        async with session.begin():
+            await append_context_journal_in_session(
+                session,
+                event_id,
+                "verification_result",
+                {
+                    "overall_status": VerificationOverallStatus.SUCCESS.value,
+                    "verification_phase": VerificationPhase.EFFECT.value,
+                    "results": [],
+                },
+            )
+
+    blocked = await event_disposition_service.activate_and_submit(
+        event_id,
+        plan_revision,
+        principal_or_system="test-scenario-2-gate-blocked",
+    )
+    assert blocked.activated is False
+    assert blocked.skipped_reason == "not_approved"
+    assert blocked.action_id == deferred_id
+
+    await engine.approve(deferred_id, principal, "approve deferred", None)
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, immediate_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.SUCCESS.value
+
+    activation = await event_disposition_service.activate_and_submit(
+        event_id,
+        plan_revision,
+        principal_or_system="test-scenario-2-gate-open",
+    )
+    assert activation.activated is True, (
+        f"terminal disposition must activate when plan fully decided: {activation.skipped_reason}"
+    )
+
     await assert_no_analysis_content_in_outbound(session_factory, event_id)
 
 
@@ -2178,6 +2465,98 @@ async def test_scenario_4f_unactivated_deferred_not_counted_as_failed(
 # ---------------------------------------------------------------------------
 # Scenario 5: Disposition-only (false positive → IGNORED → CLOSED)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("clean_state")
+async def test_scenario_5_via_rule_based_fp_hook(
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    workflow_runtime_service: WorkflowRuntimeService,
+    event_disposition_service: EventDispositionService,
+    working_memory: WorkingMemory,
+    mock_xdr_state: MockXDRState,
+) -> None:
+    """Scenario 5 companion: false_positive_match via RuleBasedFalsePositiveHook.
+
+    Exercises the real pre-triage hook path (not ``_seed_required_fp`` journal
+    injection) before ``begin_disposition_only`` → activate_and_submit.
+    """
+    identity = f"mock_xdr|tenant-a|conn-1|incident|{SCENARIO_INCIDENT_ID}-fp-hook"
+    occurred = datetime(2024, 6, 15, 9, 0, 0, tzinfo=UTC)
+    event_id = new_event_id(identity, occurred)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type=EventType.DATA_EXFILTRATION.value,
+                    title="Bulk login by ops account during change window",
+                    description="RuleBasedFalsePositiveHook companion test",
+                    status=EventStatus.TRIAGING.value,
+                    severity=Severity.MEDIUM.value,
+                    risk_score=0,
+                    confidence=0.0,
+                    final_verdict=FinalVerdict.NONE.value,
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    creation_source_ref={
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "tenant-a",
+                        "connector_id": "conn-1",
+                        "source_kind": "incident",
+                        "source_object_id": f"{SCENARIO_INCIDENT_ID}-fp-hook",
+                    },
+                    disposition_source_ref={
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "tenant-a",
+                        "connector_id": "conn-1",
+                        "source_kind": "incident",
+                        "source_object_id": f"{SCENARIO_INCIDENT_ID}-fp-hook",
+                    },
+                    source_type="mock_xdr",
+                    occurred_at=occurred,
+                )
+            )
+
+    await _seed_source_object(
+        session_factory,
+        object_id=f"{SCENARIO_INCIDENT_ID}-fp-hook",
+    )
+    mock_xdr_state.upsert_object(
+        "incident",
+        f"{SCENARIO_INCIDENT_ID}-fp-hook",
+        {"reference": {"source_disposition": "unknown"}},
+    )
+
+    fp_match = await _run_rule_based_fp_hook(
+        session_factory,
+        working_memory,
+        event_id,
+    )
+    assert fp_match.get("matched_rule") == "ops_change_window_bulk_login"
+
+    await workflow_runtime_service.begin_disposition_only(event_id)
+
+    result = await event_disposition_service.activate_and_submit(
+        event_id,
+        plan_revision=1,
+        principal_or_system="test-scenario-5-hook",
+    )
+    assert result.activated is True, f"activation skipped: {result.skipped_reason}"
+    assert result.derived_disposition is SourceDisposition.IGNORED
+
+    async with session_factory() as session:
+        receipt = await session.scalar(
+            select(orm.DispositionReceipt).where(
+                orm.DispositionReceipt.disposition_id == result.disposition_id,
+                orm.DispositionReceipt.status == WritebackStatus.CONFIRMED.value,
+                orm.DispositionReceipt.confirmation_evidence
+                == ConfirmationEvidence.READBACK_VERIFIED.value,
+            )
+        )
+        assert receipt is not None
+
+    await assert_no_analysis_content_in_outbound(session_factory, event_id)
 
 
 @pytest.mark.usefixtures("clean_state")
