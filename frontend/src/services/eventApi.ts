@@ -19,7 +19,7 @@ import type {
   ResolveWritebackRequest,
 } from "../types/action";
 import type { InvestigationReport } from "../types/report";
-import type { AgentTrace, AuditLog, DecisionTrace } from "../types/trace";
+import type { AgentTrace, AuditLog } from "../types/trace";
 
 // ------------------------------------------------------------------ //
 // Events
@@ -71,14 +71,6 @@ export function getAuditLogs(eventId: string) {
   return apiClient.get<{ total: number; page: number; page_size: number; items: AuditLog[] }>(
     `/events/${eventId}/audit-logs`,
   );
-}
-
-export function getToolCalls(eventId: string) {
-  return apiClient.get<unknown[]>(`/events/${eventId}/tool-calls`);
-}
-
-export function getDecisionTrace(eventId: string) {
-  return apiClient.get<DecisionTrace[]>(`/events/${eventId}/decision-trace`);
 }
 
 // ------------------------------------------------------------------ //

@@ -45,12 +45,24 @@ export interface SocketWritebackUpdatedPayload {
   updated_at?: string;
 }
 
+export interface SocketToolCallPayload {
+  call_id: string;
+  tool_name: string;
+  status?: string;
+  tool_category?: string;
+  provider_code?: string;
+  duration_ms?: number;
+  retry_count?: number;
+}
+
 export type EventDetailSocketEventType =
   | "risk_updated"
   | "final_verdict_updated"
   | "action_executed"
   | "action_verified"
-  | "disposition_submitted";
+  | "disposition_submitted"
+  | "tool_call_started"
+  | "tool_call_completed";
 
 export type SocketEvent =
   | { type: "event_created"; event_id: string; payload: SocketEventCreatedPayload }
@@ -59,7 +71,7 @@ export type SocketEvent =
   | {
       type: EventDetailSocketEventType;
       event_id: string;
-      payload: Record<string, unknown>;
+      payload: Record<string, unknown> & Partial<SocketToolCallPayload>;
     };
 
 export function mapSocketWritebackStatus(status: string): WritebackStatus {

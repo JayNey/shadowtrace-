@@ -1,4 +1,4 @@
-/** Trace / audit models — matching backend agent trace + openapi.json */
+/** Typed tool-audit and decision-trace API contracts (ISSUE-072). */
 
 export interface AgentTrace {
   trace_id: string;
@@ -15,19 +15,6 @@ export interface AgentTrace {
   llm_tokens_used: number | null;
 }
 
-export interface DecisionTrace {
-  decision_id: string;
-  event_id: string;
-  agent_name: string;
-  decision_type: string;
-  observation_summary: string;
-  evidence_refs: string[];
-  candidate_actions: string[];
-  selected_action: string | null;
-  confidence: number | null;
-  timestamp: string;
-}
-
 export interface AuditLog {
   log_id: string;
   event_id: string;
@@ -35,4 +22,95 @@ export interface AuditLog {
   action: string;
   detail: string;
   timestamp: string;
+}
+
+export interface ToolCallItem {
+  call_id: string;
+  event_id: string;
+  action_id: string | null;
+  tool_name: string;
+  tool_category: string;
+  status: string;
+  duration_ms: number | null;
+  provider: string | null;
+  execution_owner: string | null;
+  disposition_id: string | null;
+  writeback_status: string | null;
+  parameters: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error_detail: string | null;
+  retry_count: number;
+  started_at: string | null;
+  completed_at: string | null;
+  truncated: boolean;
+}
+
+export interface ToolCallsResponse {
+  total: number;
+  page: number;
+  page_size: number;
+  items: ToolCallItem[];
+}
+
+export type DecisionTraceEntryType =
+  | "agent_execution"
+  | "tool_call"
+  | "llm_call"
+  | "state_transition"
+  | "approval"
+  | "action_execution"
+  | "disposition"
+  | "writeback";
+
+export interface DecisionTraceEntry {
+  entry_id: string;
+  entry_type: DecisionTraceEntryType;
+  timestamp: string;
+  actor: string;
+  title: string;
+  detail: Record<string, unknown>;
+  ref_id: string | null;
+}
+
+export interface DecisionTraceSummary {
+  agent_count: number;
+  tool_call_count: number;
+  llm_call_count: number;
+  total_tokens: number;
+  state_transition_count: number;
+  approval_count: number;
+  action_execution_count: number;
+  disposition_count: number;
+  writeback_count: number;
+  total_duration_ms: number | null;
+}
+
+export interface DecisionTraceResponse {
+  event_id: string;
+  entries: DecisionTraceEntry[];
+  summary: DecisionTraceSummary;
+  missing_sources: string[];
+  page: number;
+  page_size: number;
+  total: number;
+}
+
+export interface TrajectoryReport {
+  event_id: string;
+  total_steps: number;
+  agent_invocations: number;
+  tool_calls: number;
+  llm_calls: number;
+  metrics: Record<string, number>;
+  findings: string[];
+  insufficient_trace: boolean;
+}
+
+export interface AgentQualityScore {
+  agent_name: string;
+  score: number;
+  verdict?: string;
+  metrics?: Record<string, number>;
+  reasons?: string[];
+  evaluated_by?: string;
 }

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -626,6 +627,73 @@ async def test_event_tool_calls_empty(
     assert resp.status_code == 200
     data = resp.json()
     assert data["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_tool_call_audit_returns_safe_detail_and_action_metadata(
+    client: TestClient,
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Tool audit exposes only persisted safe projections plus action metadata."""
+    event_id = await _create_test_event(event_service, title="Detailed tool audit")
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Action(
+                    action_id="act-audit-detail",
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint="fp-audit-detail",
+                    action_category="response",
+                    action_name="block ip",
+                    tool_name="block_ip",
+                    action_level="l2",
+                    provider_name="mock_xdr",
+                    execution_owner="direct_tool",
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    writeback_status=WritebackStatus.PENDING.value,
+                )
+            )
+            session.add(
+                orm.ToolCallLog(
+                    call_id="call-audit-detail",
+                    event_id=event_id,
+                    action_id="act-audit-detail",
+                    tool_name="block_ip",
+                    tool_category="response",
+                    parameters={
+                        "target": "203.0.113.9",
+                        "token": "[REDACTED]",
+                        "_truncated": True,
+                    },
+                    result={"provider_code": "accepted"},
+                    status="success",
+                    started_at=now,
+                    completed_at=now,
+                    duration_ms=24,
+                    retry_count=2,
+                )
+            )
+
+    response = client.get(
+        f"/api/v1/events/{event_id}/tool-calls",
+        headers=_hdr(),
+    )
+
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["provider"] == "mock_xdr"
+    assert item["execution_owner"] == "direct_tool"
+    assert item["writeback_status"] == "pending"
+    assert item["parameters"]["token"] == "[REDACTED]"
+    assert item["parameters"]["target"] == "203.0.113.9"
+    assert item["retry_count"] == 2
+    assert item["truncated"] is True
+    assert "raw_result" not in item
 
 
 @pytest.mark.asyncio

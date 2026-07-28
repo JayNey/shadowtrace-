@@ -990,6 +990,138 @@ async def _db_read(
         ) from exc
 
 
+def _tool_call_is_truncated(row: orm.ToolCallLog) -> bool:
+    """Report whether any already-sanitised audit projection was bounded."""
+    return bool(
+        row.parameters.get("_truncated")
+        or row.result.get("_truncated")
+        or (row.error_detail or "").startswith("[TRUNCATED ")
+    )
+
+
+def _tool_call_provider(row: orm.ToolCallLog, action: orm.Action | None) -> str | None:
+    """Resolve provider without consulting internal provider raw payloads."""
+    if action is not None and action.provider_name:
+        return action.provider_name
+    for key in ("provider_name", "provider"):
+        value = row.result.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+async def _query_tool_call_items(
+    *,
+    page: int,
+    page_size: int,
+    event_id: str | None = None,
+    tool_name: str | None = None,
+    status_filter: str | None = None,
+) -> tuple[list[s.ToolCallItem], int]:
+    """Read safe tool-call projections and related disposition metadata."""
+    sf = _try_get_session_factory()
+    page = max(1, page)
+    page_size = min(max(1, page_size), 200)
+    if sf is None:
+        return [], 0
+
+    conditions: list[Any] = []
+    if event_id:
+        conditions.append(orm.ToolCallLog.event_id == event_id)
+    if tool_name:
+        conditions.append(orm.ToolCallLog.tool_name == tool_name)
+    if status_filter:
+        conditions.append(orm.ToolCallLog.status == status_filter)
+
+    try:
+        async with sf() as session:
+            count = await session.scalar(
+                select(func.count(orm.ToolCallLog.call_id)).where(*conditions)
+            )
+            total = int(count or 0)
+            rows = (
+                await session.execute(
+                    select(orm.ToolCallLog, orm.Action)
+                    .outerjoin(orm.Action, orm.Action.action_id == orm.ToolCallLog.action_id)
+                    .where(*conditions)
+                    .order_by(
+                        orm.ToolCallLog.started_at.desc().nulls_last(),
+                        orm.ToolCallLog.call_id.desc(),
+                    )
+                    .offset((page - 1) * page_size)
+                    .limit(page_size)
+                )
+            ).all()
+
+            action_ids = {row.action_id for row, _action in rows if row.action_id is not None}
+            dispositions: dict[str, orm.DispositionOutbox] = {}
+            if action_ids:
+                disposition_rows = (
+                    await session.scalars(
+                        select(orm.DispositionOutbox)
+                        .where(orm.DispositionOutbox.action_id.in_(action_ids))
+                        .order_by(
+                            orm.DispositionOutbox.updated_at.desc(),
+                            orm.DispositionOutbox.outbox_id.desc(),
+                        )
+                    )
+                ).all()
+                for disposition_row in disposition_rows:
+                    dispositions.setdefault(disposition_row.action_id, disposition_row)
+
+        items: list[s.ToolCallItem] = []
+        for row, action in rows:
+            related_disposition = dispositions.get(row.action_id or "")
+            items.append(
+                s.ToolCallItem(
+                    call_id=row.call_id,
+                    event_id=row.event_id,
+                    action_id=row.action_id,
+                    tool_name=row.tool_name,
+                    tool_category=row.tool_category,
+                    status=row.status,
+                    duration_ms=row.duration_ms,
+                    provider=_tool_call_provider(row, action),
+                    execution_owner=action.execution_owner if action is not None else None,
+                    disposition_id=(
+                        related_disposition.disposition_id
+                        if related_disposition is not None
+                        else None
+                    ),
+                    writeback_status=(
+                        (
+                            related_disposition.latest_writeback_status
+                            if related_disposition is not None
+                            else None
+                        )
+                        or (action.writeback_status if action is not None else None)
+                    ),
+                    # ToolCallLogService has already recursively redacted secrets,
+                    # projected raw payloads to hashes and bounded oversized fields.
+                    parameters=row.parameters,
+                    result=row.result,
+                    error_detail=row.error_detail,
+                    retry_count=row.retry_count,
+                    started_at=row.started_at,
+                    completed_at=row.completed_at,
+                    truncated=_tool_call_is_truncated(row),
+                )
+            )
+        return items, total
+    except (ImportError, ModuleNotFoundError):
+        logger.warning("Tool-call audit query skipped (session factory unavailable)")
+        return [], 0
+    except (ConnectionRefusedError, TimeoutError, sa_exc.OperationalError):
+        logger.warning("Tool-call audit query degraded (transient DB error)", exc_info=True)
+        return [], 0
+    except Exception as exc:
+        logger.error("Tool-call audit query failed: %s", exc, exc_info=True)
+        raise DependencyUnavailableError(
+            "database query failed for tool-call audit",
+            error_code="dependency_unavailable",
+        ) from exc
+
+
 # --------------------------------------------------------------------------- #
 # GET /events/{event_id}/report
 # --------------------------------------------------------------------------- #
@@ -1112,27 +1244,11 @@ async def get_event_tool_calls(
     if event is None:
         raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
 
-    rows, total = await _db_read(
-        event_id,
-        orm.ToolCallLog,
-        orm.ToolCallLog.started_at.desc(),
+    items, total = await _query_tool_call_items(
+        event_id=event_id,
         page=page,
         page_size=page_size,
     )
-
-    items: list[s.ToolCallItem] = []
-    for row in rows:
-        items.append(
-            s.ToolCallItem(
-                call_id=row.call_id,
-                event_id=row.event_id,
-                action_id=row.action_id,
-                tool_name=row.tool_name,
-                tool_category=row.tool_category,
-                status=row.status,
-                duration_ms=row.duration_ms,
-            )
-        )
 
     return s.ToolCallsResponse(total=total, page=page, page_size=page_size, items=items)
 
@@ -1211,58 +1327,15 @@ async def list_tool_calls(
     tool_name: str | None = None,
     status: str | None = None,
 ) -> s.ToolCallsResponse:
-    sf = _try_get_session_factory()
-    if sf is None:
-        return s.ToolCallsResponse(total=0, page=page, page_size=page_size, items=[])
-
-    try:
-        page = max(1, page)
-        page_size = min(max(1, page_size), 200)
-        async with sf() as session:
-            conditions: list[Any] = []
-            if tool_name:
-                conditions.append(orm.ToolCallLog.tool_name == tool_name)
-            if status:
-                conditions.append(orm.ToolCallLog.status == status)
-
-            count = await session.scalar(
-                select(func.count(orm.ToolCallLog.call_id)).where(*conditions)
-            )
-            total = int(count or 0)
-            rows = (
-                await session.scalars(
-                    select(orm.ToolCallLog)
-                    .where(*conditions)
-                    .order_by(orm.ToolCallLog.started_at.desc())
-                    .offset((page - 1) * page_size)
-                    .limit(page_size)
-                )
-            ).all()
-
-        items: list[s.ToolCallItem] = []
-        for row in rows:
-            items.append(
-                s.ToolCallItem(
-                    call_id=row.call_id,
-                    event_id=row.event_id,
-                    action_id=row.action_id,
-                    tool_name=row.tool_name,
-                    tool_category=row.tool_category,
-                    status=row.status,
-                    duration_ms=row.duration_ms,
-                )
-            )
-
-        return s.ToolCallsResponse(total=total, page=page, page_size=page_size, items=items)
-    except (ConnectionRefusedError, TimeoutError, sa_exc.OperationalError):
-        logger.warning("Global tool-calls query failed (transient DB error)", exc_info=True)
-        return s.ToolCallsResponse(total=0, page=page, page_size=page_size, items=[])
-    except Exception as exc:
-        logger.error("Global tool-calls query failed (non-transient): %s", exc, exc_info=True)
-        raise DependencyUnavailableError(
-            "database query failed for global tool-calls",
-            error_code="dependency_unavailable",
-        ) from exc
+    page = max(1, page)
+    page_size = min(max(1, page_size), 200)
+    items, total = await _query_tool_call_items(
+        page=page,
+        page_size=page_size,
+        tool_name=tool_name,
+        status_filter=status,
+    )
+    return s.ToolCallsResponse(total=total, page=page, page_size=page_size, items=items)
 
 
 # --------------------------------------------------------------------------- #

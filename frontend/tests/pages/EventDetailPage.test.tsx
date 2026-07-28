@@ -15,6 +15,9 @@ const mockListConnectors = vi.fn();
 const mockGetSourceRecord = vi.fn();
 const mockGetExecutionJob = vi.fn();
 const mockGetWriteback = vi.fn();
+const mockGetDecisionTrace = vi.fn();
+const mockGetEventToolCalls = vi.fn();
+const mockGetTrajectory = vi.fn();
 
 vi.mock("../../src/services/eventApi", () => ({
   getEvent: (...args: unknown[]) => mockGetEvent(...args),
@@ -27,6 +30,12 @@ vi.mock("../../src/services/eventApi", () => ({
   getSourceRecord: (...args: unknown[]) => mockGetSourceRecord(...args),
   getExecutionJob: (...args: unknown[]) => mockGetExecutionJob(...args),
   getWriteback: (...args: unknown[]) => mockGetWriteback(...args),
+}));
+
+vi.mock("../../src/services/auditApi", () => ({
+  getDecisionTrace: (...args: unknown[]) => mockGetDecisionTrace(...args),
+  getEventToolCalls: (...args: unknown[]) => mockGetEventToolCalls(...args),
+  getTrajectory: (...args: unknown[]) => mockGetTrajectory(...args),
 }));
 
 let socketHandler: ((event: { type: string; event_id: string; payload: Record<string, unknown> }) => void) | undefined;
@@ -302,6 +311,46 @@ describe("EventDetailPage", () => {
     });
     mockGetExecutionJob.mockResolvedValue({ data: {} });
     mockGetWriteback.mockResolvedValue({ data: {} });
+    mockGetDecisionTrace.mockResolvedValue({
+      data: {
+        event_id: "evt-70",
+        entries: [
+          {
+            entry_id: "entry-agent",
+            entry_type: "agent_execution",
+            timestamp: "2026-07-27T08:02:00Z",
+            actor: "RiskAgent",
+            title: "RiskAgent 完成风险评估",
+            detail: {
+              structured_conclusion: "高风险异常登录",
+              evidence_refs: ["ev-normal"],
+              confidence: 0.88,
+            },
+            ref_id: "trace-1",
+          },
+        ],
+        summary: {},
+        missing_sources: [],
+        page: 1,
+        page_size: 200,
+        total: 1,
+      },
+    });
+    mockGetEventToolCalls.mockResolvedValue({
+      data: { total: 0, page: 1, page_size: 200, items: [] },
+    });
+    mockGetTrajectory.mockResolvedValue({
+      data: {
+        event_id: "evt-70",
+        total_steps: 1,
+        agent_invocations: 1,
+        tool_calls: 0,
+        llm_calls: 0,
+        metrics: { evidence_yield: 0.8 },
+        findings: [],
+        insufficient_trace: false,
+      },
+    });
     ({ default: EventDetailPage } = await import("../../src/pages/EventDetailPage"));
   });
 
@@ -348,6 +397,19 @@ describe("EventDetailPage", () => {
     renderPage("/events/evt-70#source");
     expect(await screen.findByText("异常管理员登录")).toBeInTheDocument();
     expect(mockGetGraph).not.toHaveBeenCalled();
+  });
+
+  it("integrates decision trace and trajectory metrics in the audit tab", async () => {
+    renderPage("/events/evt-70#audit");
+
+    expect(await screen.findByText("RiskAgent 完成风险评估")).toBeInTheDocument();
+    expect(screen.getByText("高风险异常登录")).toBeInTheDocument();
+    expect(screen.getByText("轨迹质量摘要")).toBeInTheDocument();
+    expect(screen.getByText("80%")).toBeInTheDocument();
+    expect(mockGetDecisionTrace).toHaveBeenCalledWith("evt-70", {
+      page: 1,
+      page_size: 200,
+    });
   });
 
   it("highlights conflicting evidence and exposes its reason", async () => {

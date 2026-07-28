@@ -125,6 +125,9 @@ def _agent_detail(row: orm.AgentTrace, inferred: bool) -> dict[str, Any]:
         "selected_action",
         "rules_applied",
         "model_name",
+        "model_version",
+        "rule_version",
+        "warnings",
     ):
         value = basis.get(key)
         if value not in (None, "", [], {}):
@@ -139,6 +142,7 @@ def _agent_detail(row: orm.AgentTrace, inferred: bool) -> dict[str, Any]:
         "need_writeback_recovery",
         "collection_status",
         "evidence_list",
+        "warnings",
     ):
         if key in output_data and output_data[key] is not None:
             detail[key] = output_data[key]

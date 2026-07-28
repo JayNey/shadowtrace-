@@ -127,7 +127,9 @@ class SocketClient {
       type === "final_verdict_updated" ||
       type === "action_executed" ||
       type === "action_verified" ||
-      type === "disposition_submitted"
+      type === "disposition_submitted" ||
+      type === "tool_call_started" ||
+      type === "tool_call_completed"
     ) {
       this.emit({ type, event_id, payload });
     }

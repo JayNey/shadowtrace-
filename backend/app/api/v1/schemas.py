@@ -204,6 +204,17 @@ class ToolCallItem(BaseModel):
     tool_category: str
     status: str
     duration_ms: int | None = None
+    provider: str | None = None
+    execution_owner: str | None = None
+    disposition_id: str | None = None
+    writeback_status: str | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    result: dict[str, Any] = Field(default_factory=dict)
+    error_detail: str | None = None
+    retry_count: int = 0
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    truncated: bool = False
 
 
 class ToolCallsResponse(PageMeta):
