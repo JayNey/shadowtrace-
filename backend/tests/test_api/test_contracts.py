@@ -115,21 +115,6 @@ def _hdr(role: str = "analyst") -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 
 
-class _MockContextStore:
-    """In-memory context stub so timeline/graph contract GETs return 200."""
-
-    async def get_full_context(self, event_id: str) -> EventContext:
-        return EventContext(
-            storyline={
-                "storyline_id": "sty-contract-1",
-                "event_id": event_id,
-                "narrative_summary": "Contract-test storyline placeholder.",
-                "generated_by": "rule",
-                "phases": [],
-            }
-        )
-
-
 class _MockEventService:
     """Minimal mock returning example data for contract validation."""
 
