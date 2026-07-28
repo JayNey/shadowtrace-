@@ -349,7 +349,7 @@
           }
         },
         "responses": {
-          "200": {
+          "202": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -482,6 +482,26 @@
               "type": "string",
               "title": "Event Id"
             }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
           }
         ],
         "responses": {
@@ -523,6 +543,26 @@
             "schema": {
               "type": "string",
               "title": "Event Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
             }
           }
         ],
@@ -566,6 +606,26 @@
               "type": "string",
               "title": "Event Id"
             }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
           }
         ],
         "responses": {
@@ -575,132 +635,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ToolCallsResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/events/{event_id}/timeline": {
-      "get": {
-        "tags": [
-          "events"
-        ],
-        "summary": "Get Timeline",
-        "operationId": "get_timeline_api_v1_events__event_id__timeline_get",
-        "parameters": [
-          {
-            "name": "event_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Event Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TimelineResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/events/{event_id}/graph": {
-      "get": {
-        "tags": [
-          "events"
-        ],
-        "summary": "Get Graph",
-        "operationId": "get_graph_api_v1_events__event_id__graph_get",
-        "parameters": [
-          {
-            "name": "event_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Event Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GraphResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/events/{event_id}/decision-trace": {
-      "get": {
-        "tags": [
-          "events"
-        ],
-        "summary": "Get Decision Trace",
-        "operationId": "get_decision_trace_api_v1_events__event_id__decision_trace_get",
-        "parameters": [
-          {
-            "name": "event_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Event Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/DecisionTraceResponse"
                 }
               }
             }
@@ -779,6 +713,215 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ActionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/tool-calls": {
+      "get": {
+        "tags": [
+          "tools"
+        ],
+        "summary": "List Tool Calls",
+        "operationId": "list_tool_calls_api_v1_tool_calls_get",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Page Size"
+            }
+          },
+          {
+            "name": "tool_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tool Name"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ToolCallsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events/{event_id}/graph": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Get Graph",
+        "operationId": "get_graph_api_v1_events__event_id__graph_get",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events/{event_id}/decision-trace": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Get Decision Trace",
+        "description": "Aggregated decision trace aggregating agent, tool, LLM, state,\napproval, action, disposition, and writeback entries into a single\ntimestamp-ordered timeline (ISSUE-063).",
+        "operationId": "get_decision_trace_api_v1_events__event_id__decision_trace_get",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          },
+          {
+            "name": "entry_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Entry Type"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionTraceResponse"
                 }
               }
             }
@@ -1428,6 +1571,7 @@
           "platform"
         ],
         "summary": "Get Task",
+        "description": "Return Celery task state for an investigation dispatched via ``TASK_MODE=celery``.",
         "operationId": "get_task_api_v1_tasks__task_id__get",
         "parameters": [
           {
@@ -1478,91 +1622,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ToolsResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/tool-calls": {
-      "get": {
-        "tags": [
-          "tools"
-        ],
-        "summary": "List Tool Calls",
-        "operationId": "list_tool_calls_api_v1_tool_calls_get",
-        "parameters": [
-          {
-            "name": "page",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 1,
-              "title": "Page"
-            }
-          },
-          {
-            "name": "page_size",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "default": 20,
-              "title": "Page Size"
-            }
-          },
-          {
-            "name": "tool_name",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Tool Name"
-            }
-          },
-          {
-            "name": "status",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Status"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ToolCallsResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1637,6 +1696,89 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/StatsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events/{event_id}/trajectory": {
+      "get": {
+        "tags": [
+          "trajectory"
+        ],
+        "summary": "Get Trajectory",
+        "description": "Return structured trajectory quality metrics for *event_id*.",
+        "operationId": "get_trajectory_api_v1_events__event_id__trajectory_get",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrajectoryReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events/{event_id}/timeline": {
+      "get": {
+        "summary": "Get Timeline",
+        "description": "Return the generated attack storyline stored in ``EventContext``.",
+        "operationId": "get_timeline_api_v1_events__event_id__timeline_get",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttackStoryline"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1981,12 +2123,13 @@
           "rollback_status": {
             "anyOf": [
               {
-                "$ref": "#/components/schemas/ActionStatus"
+                "type": "string"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Rollback Status"
           },
           "source_action_id": {
             "anyOf": [
@@ -2194,6 +2337,41 @@
         "title": "ActionStatus",
         "description": "Action lifecycle state (11 states)."
       },
+      "AttackStoryline": {
+        "properties": {
+          "storyline_id": {
+            "type": "string",
+            "title": "Storyline Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "narrative_summary": {
+            "type": "string",
+            "title": "Narrative Summary"
+          },
+          "phases": {
+            "items": {
+              "$ref": "#/components/schemas/StorylinePhase"
+            },
+            "type": "array",
+            "title": "Phases"
+          },
+          "generated_by": {
+            "$ref": "#/components/schemas/StorylineGeneratedBy"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "storyline_id",
+          "event_id",
+          "narrative_summary",
+          "generated_by"
+        ],
+        "title": "AttackStoryline"
+      },
       "AuditLogItem": {
         "properties": {
           "id": {
@@ -2338,8 +2516,14 @@
             "title": "Capabilities"
           },
           "disposition_policy_default": {
-            "$ref": "#/components/schemas/DispositionPolicy",
-            "default": "not_required"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DispositionPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "last_sync_at": {
             "anyOf": [
@@ -2383,13 +2567,40 @@
             "type": "string",
             "title": "Event Id"
           },
-          "steps": {
+          "entries": {
             "items": {
               "additionalProperties": true,
               "type": "object"
             },
             "type": "array",
-            "title": "Steps"
+            "title": "Entries"
+          },
+          "summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Summary"
+          },
+          "missing_sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missing Sources"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page",
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size",
+            "default": 50
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
           }
         },
         "type": "object",
@@ -2911,6 +3122,7 @@
             "title": "Occurred At"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "event_id",
@@ -2923,7 +3135,8 @@
           "writeback_required",
           "writeback_readiness"
         ],
-        "title": "EventListItem"
+        "title": "EventListItem",
+        "description": "Redacted list-view projection of a :class:`SecurityEvent` (ISSUE-004).\n\nLives alongside ``SecurityEvent`` (not in the API schemas module) so that\n``EventContext.event`` (ISSUE-094 §2) can be typed as ``EventSummary``\nwithout the models layer depending on the API layer."
       },
       "EventListResponse": {
         "properties": {
@@ -3072,6 +3285,7 @@
             "default": false
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "event_id",
@@ -3085,7 +3299,8 @@
           "writeback_readiness",
           "disposition_policy"
         ],
-        "title": "EventSummary"
+        "title": "EventSummary",
+        "description": "The authoritative shape of ``EventContext.event`` (ISSUE-094 §2)."
       },
       "EventType": {
         "type": "string",
@@ -3864,6 +4079,9 @@
           "resolution": {
             "type": "string",
             "enum": [
+              "success",
+              "partial_success",
+              "failed",
               "mark_success",
               "mark_failed",
               "manual_confirmed"
@@ -4477,6 +4695,66 @@
         "type": "object",
         "title": "StatsResponse"
       },
+      "StorylineGeneratedBy": {
+        "type": "string",
+        "enum": [
+          "llm",
+          "rule"
+        ],
+        "title": "StorylineGeneratedBy"
+      },
+      "StorylinePhase": {
+        "properties": {
+          "phase_order": {
+            "type": "integer",
+            "title": "Phase Order"
+          },
+          "phase_name": {
+            "$ref": "#/components/schemas/StorylinePhaseName"
+          },
+          "tactic": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tactic"
+          },
+          "narrative": {
+            "type": "string",
+            "title": "Narrative",
+            "default": ""
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineEntry"
+            },
+            "type": "array",
+            "title": "Entries"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "phase_order",
+          "phase_name"
+        ],
+        "title": "StorylinePhase"
+      },
+      "StorylinePhaseName": {
+        "type": "string",
+        "enum": [
+          "initial_access",
+          "collection",
+          "staging",
+          "exfiltration",
+          "post_action"
+        ],
+        "title": "StorylinePhaseName"
+      },
       "SubmitEntityActionParams": {
         "properties": {
           "operation_code": {
@@ -4635,9 +4913,9 @@
             "type": "string",
             "title": "Task Id"
           },
-          "status": {
+          "state": {
             "type": "string",
-            "title": "Status"
+            "title": "State"
           },
           "event_id": {
             "anyOf": [
@@ -4654,53 +4932,55 @@
         "type": "object",
         "required": [
           "task_id",
-          "status"
+          "state"
         ],
         "title": "TaskResponse"
       },
-      "TimelineItem": {
+      "TimelineEntry": {
         "properties": {
           "timestamp": {
             "type": "string",
             "format": "date-time",
             "title": "Timestamp"
           },
-          "kind": {
+          "description": {
             "type": "string",
-            "title": "Kind"
+            "title": "Description"
           },
-          "summary": {
+          "evidence_id": {
             "type": "string",
-            "title": "Summary"
+            "title": "Evidence Id"
+          },
+          "technique_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Technique Id"
+          },
+          "severity_hint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Severity"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "timestamp",
-          "kind",
-          "summary"
+          "description",
+          "evidence_id"
         ],
-        "title": "TimelineItem"
-      },
-      "TimelineResponse": {
-        "properties": {
-          "event_id": {
-            "type": "string",
-            "title": "Event Id"
-          },
-          "items": {
-            "items": {
-              "$ref": "#/components/schemas/TimelineItem"
-            },
-            "type": "array",
-            "title": "Items"
-          }
-        },
-        "type": "object",
-        "required": [
-          "event_id"
-        ],
-        "title": "TimelineResponse"
+        "title": "TimelineEntry"
       },
       "ToolCallItem": {
         "properties": {
@@ -4909,6 +5189,60 @@
         },
         "type": "object",
         "title": "TracesResponse"
+      },
+      "TrajectoryReport": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "total_steps": {
+            "type": "integer",
+            "title": "Total Steps",
+            "default": 0
+          },
+          "agent_invocations": {
+            "type": "integer",
+            "title": "Agent Invocations",
+            "default": 0
+          },
+          "tool_calls": {
+            "type": "integer",
+            "title": "Tool Calls",
+            "default": 0
+          },
+          "llm_calls": {
+            "type": "integer",
+            "title": "Llm Calls",
+            "default": 0
+          },
+          "metrics": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Metrics"
+          },
+          "findings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Findings"
+          },
+          "insufficient_trace": {
+            "type": "boolean",
+            "title": "Insufficient Trace",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id"
+        ],
+        "title": "TrajectoryReport",
+        "description": "Structured quality analysis of one investigation trajectory."
       },
       "ValidationError": {
         "properties": {
