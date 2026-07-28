@@ -73,7 +73,11 @@ vi.mock("../../src/services/socketClient", () => ({
       return () => {
         socketHandlers.delete(handler);
         if (socketHandler === handler) {
-          socketHandler = [...socketHandlers].at(-1);
+          const remaining = [...socketHandlers];
+          socketHandler =
+            remaining.length > 0
+              ? remaining[remaining.length - 1]
+              : undefined;
         }
       };
     },
@@ -385,6 +389,7 @@ describe("EventDetailPage", () => {
   it("renders overview, entities, six-dimensional risk and source capabilities", async () => {
     renderPage();
     expect(await screen.findByText("异常管理员登录")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-status-panel")).toBeInTheDocument();
     expect(screen.getByText("alice")).toBeInTheDocument();
     expect(screen.getByText("workstation-01")).toBeInTheDocument();
     expect(screen.getByTestId("risk-radar")).toBeInTheDocument();

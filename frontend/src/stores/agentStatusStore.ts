@@ -104,6 +104,14 @@ function defaultAgentMap(): Record<AgentName, AgentStatusInfo> {
   return map;
 }
 
+/** True when live socket traffic is driving the panel — traces must not clobber. */
+function shouldProtectLiveSocketState(
+  isInvestigating: boolean,
+  connected: boolean,
+): boolean {
+  return isInvestigating && connected;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Activity feed                                                     */
 /* ------------------------------------------------------------------ */
@@ -204,11 +212,17 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
     }
 
     // Reset state for new event.
-    set({ agents: defaultAgentMap(), feed: [], isInvestigating: false });
+    set({
+      agents: defaultAgentMap(),
+      feed: [],
+      isInvestigating: false,
+      socketConnected: false,
+    });
 
-    // Connect socket and subscribe.
+    // Connect socket and subscribe; sync connectivity immediately (avoid false 降级 tag).
     socketClient.connect();
     socketClient.subscribe(eventId);
+    set({ socketConnected: socketClient.isConnected });
 
     const unsub = socketClient.onEvent((evt) => {
       if (evt.event_id !== eventId) return;
@@ -247,11 +261,10 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
 
     // Poll fallback every 10s when socket is unavailable (ISSUE-075 降级).
     const timer = setInterval(() => {
-      if (!socketClient.isConnected) {
-        set({ socketConnected: false });
+      const connected = socketClient.isConnected;
+      set({ socketConnected: connected });
+      if (!connected) {
         void get().pollTraces(eventId);
-      } else {
-        set({ socketConnected: true });
       }
     }, 10_000);
 
@@ -357,6 +370,16 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
   replayFromTraces(traces: AgentTrace[]) {
     if (!traces || traces.length === 0) return;
 
+    // Never overwrite live socket-driven status with a stale/delayed traces snapshot.
+    if (
+      shouldProtectLiveSocketState(
+        get().isInvestigating,
+        socketClient.isConnected || get().socketConnected,
+      )
+    ) {
+      return;
+    }
+
     const agents = defaultAgentMap();
     const feed: ActivityFeedEntry[] = [];
 
@@ -414,6 +437,15 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
   },
 
   async pollTraces(eventId: string) {
+    // Skip while live socket investigation owns the panel (race with delayed HTTP).
+    if (
+      shouldProtectLiveSocketState(
+        get().isInvestigating,
+        socketClient.isConnected || get().socketConnected,
+      )
+    ) {
+      return;
+    }
     try {
       const res = await getTraces(eventId);
       const traces = res.data.items;
