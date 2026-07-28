@@ -47,6 +47,13 @@ export default function AgentStatusPanel({
   const replayFromTraces = useAgentStatusStore((s) => s.replayFromTraces);
 
   const closed = eventStatus === "closed";
+  const completedCount = ALL_AGENT_NAMES.filter(
+    (name) =>
+      agents[name].status === "COMPLETED" || agents[name].status === "DEGRADED",
+  ).length;
+  const failedCount = ALL_AGENT_NAMES.filter(
+    (name) => agents[name].status === "FAILED",
+  ).length;
   const [activeKeys, setActiveKeys] = useState<string[]>(
     closed ? [] : ["agent-status"],
   );
@@ -84,6 +91,15 @@ export default function AgentStatusPanel({
     <Space size={8} onClick={(e) => e.stopPropagation()}>
       {isInvestigating && <Tag color="processing">研判进行中</Tag>}
       {closed && <Tag>已结案回放</Tag>}
+      {closed && (completedCount > 0 || failedCount > 0) && (
+        <Typography.Text
+          type="secondary"
+          style={{ fontSize: 12 }}
+          data-testid="agent-status-replay-summary"
+        >
+          {completedCount} 完成 · {failedCount} 失败
+        </Typography.Text>
+      )}
       {!socketConnected && (
         <Tag color="default">轮询降级 · 10s</Tag>
       )}

@@ -86,6 +86,7 @@ describe("AgentStatusPanel", () => {
     act(() => {
       useAgentStatusStore.getState().stopWatching();
     });
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
@@ -100,6 +101,17 @@ describe("AgentStatusPanel", () => {
     for (const name of ALL_AGENT_NAMES) {
       expect(screen.getByTestId(`agent-card-${name}`)).toBeInTheDocument();
     }
+  });
+
+  it("marks socketConnected true after connect without waiting for agent events", async () => {
+    render(
+      <AgentStatusPanel eventId="evt-75" eventStatus="analyzing" traces={[]} />,
+    );
+
+    await waitFor(() => {
+      expect(useAgentStatusStore.getState().socketConnected).toBe(true);
+    });
+    expect(screen.queryByText(/轮询降级/)).not.toBeInTheDocument();
   });
 
   it("drives PROCESSING then COMPLETED from socket events", async () => {
@@ -165,6 +177,89 @@ describe("AgentStatusPanel", () => {
     expect(useAgentStatusStore.getState().feed[199].message).toBe("step-209");
   });
 
+  it("does not let delayed pollTraces overwrite live socket PROCESSING", async () => {
+    let resolveTraces!: (value: unknown) => void;
+    mockGetTraces.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveTraces = resolve;
+        }),
+    );
+
+    render(
+      <AgentStatusPanel eventId="evt-75" eventStatus="analyzing" traces={[]} />,
+    );
+    await waitFor(() => expect(socketHandler).toBeDefined());
+
+    emitSocket("agent_progress", {
+      agent_name: "triage_agent",
+      message: "live progress",
+      progress_percent: 40,
+    });
+    expect(useAgentStatusStore.getState().agents.triage_agent.status).toBe(
+      "PROCESSING",
+    );
+    expect(useAgentStatusStore.getState().agents.triage_agent.message).toBe(
+      "live progress",
+    );
+
+    await act(async () => {
+      resolveTraces({
+        data: {
+          items: [
+            makeTrace({
+              agent_name: "triage_agent",
+              status: "completed",
+              duration_ms: 1,
+            }),
+          ],
+          total: 1,
+          page: 1,
+          page_size: 50,
+        },
+      });
+      await Promise.resolve();
+    });
+
+    expect(useAgentStatusStore.getState().agents.triage_agent.status).toBe(
+      "PROCESSING",
+    );
+    expect(useAgentStatusStore.getState().agents.triage_agent.message).toBe(
+      "live progress",
+    );
+    expect(useAgentStatusStore.getState().isInvestigating).toBe(true);
+  });
+
+  it("polls traces every 10s only when socket is disconnected", async () => {
+    vi.useFakeTimers();
+    connected = true;
+    mockGetTraces.mockResolvedValue({
+      data: { items: [], total: 0, page: 1, page_size: 50 },
+    });
+
+    render(
+      <AgentStatusPanel eventId="evt-75" eventStatus="analyzing" traces={[]} />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const callsAfterStart = mockGetTraces.mock.calls.length;
+    expect(callsAfterStart).toBeGreaterThanOrEqual(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(mockGetTraces.mock.calls.length).toBe(callsAfterStart);
+
+    connected = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(mockGetTraces.mock.calls.length).toBe(callsAfterStart + 1);
+    expect(useAgentStatusStore.getState().socketConnected).toBe(false);
+  });
+
   it("replays historical status from traces on closed events", async () => {
     const traces: AgentTrace[] = [
       makeTrace({
@@ -205,6 +300,9 @@ describe("AgentStatusPanel", () => {
     });
     expect(screen.getByText(/2\s*条活动/)).toBeInTheDocument();
     expect(screen.getByText("已结案回放")).toBeInTheDocument();
+    expect(screen.getByTestId("agent-status-replay-summary")).toHaveTextContent(
+      "1 完成 · 1 失败",
+    );
   });
 
   it("defaults expanded while investigating and collapsed when CLOSED", () => {
