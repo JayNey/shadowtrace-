@@ -915,12 +915,14 @@ async def test_scenario_2_low_confidence_l3_manual_approval(
     # (ISSUE-064 review B4 fix).
     await _seed_source_object(session_factory)
 
-    # Override confidence to be below L3 threshold (0.85)
+    # Override confidence to be below L3 threshold (0.85).
+    # Event must be PLANNING_RESPONSE so ApprovalEngine can transition to
+    # WAITING_APPROVAL (state matrix has no REPORTING → WAITING_APPROVAL edge).
     async with session_factory() as session:
         async with session.begin():
             row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
             assert row is not None
-            row.status = EventStatus.REPORTING.value
+            row.status = EventStatus.PLANNING_RESPONSE.value
             row.confidence = 0.72  # Below L3 threshold of 0.85
             row.final_verdict = FinalVerdict.CONFIRMED_THREAT.value
             row.risk_score = 78
@@ -928,7 +930,7 @@ async def test_scenario_2_low_confidence_l3_manual_approval(
                 orm.EventAuditLog(
                     event_id=event_id,
                     from_status=EventStatus.NEW.value,
-                    to_status=EventStatus.REPORTING.value,
+                    to_status=EventStatus.PLANNING_RESPONSE.value,
                     operator="test",
                     reason="scenario 2 setup",
                 )
@@ -1143,7 +1145,7 @@ async def test_scenario_2_plan_revision_gate_blocks_until_all_approved(
         async with session.begin():
             row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
             assert row is not None
-            row.status = EventStatus.REPORTING.value
+            row.status = EventStatus.PLANNING_RESPONSE.value
             row.confidence = 0.72
             row.final_verdict = FinalVerdict.CONFIRMED_THREAT.value
             row.risk_score = 78
