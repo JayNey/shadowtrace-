@@ -132,7 +132,5 @@ def test_timeline_returns_event_not_found_first() -> None:
 def test_timeline_openapi_declares_attack_storyline_response() -> None:
     schema = app.openapi()
     operation = schema["paths"]["/api/v1/events/{event_id}/timeline"]["get"]
-    response_ref = operation["responses"]["200"]["content"]["application/json"]["schema"][
-        "$ref"
-    ]
+    response_ref = operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
     assert response_ref.endswith("/AttackStoryline")
