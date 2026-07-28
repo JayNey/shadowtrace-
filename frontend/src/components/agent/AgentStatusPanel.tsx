@@ -43,7 +43,6 @@ export default function AgentStatusPanel({
   const feed = useAgentStatusStore((s) => s.feed);
   const isInvestigating = useAgentStatusStore((s) => s.isInvestigating);
   const socketConnected = useAgentStatusStore((s) => s.socketConnected);
-  const lastAgentEventAt = useAgentStatusStore((s) => s.lastAgentEventAt);
   const startWatching = useAgentStatusStore((s) => s.startWatching);
   const stopWatching = useAgentStatusStore((s) => s.stopWatching);
   const replayFromTraces = useAgentStatusStore((s) => s.replayFromTraces);
@@ -72,28 +71,22 @@ export default function AgentStatusPanel({
     };
   }, [eventId, startWatching, stopWatching]);
 
-  // Page-load history replay from traces (closed / mid-flight summary).
-  // Skip overwrite only while fresh agent_* traffic owns the panel.
+  // Page-load / eventId history replay from parent traces only.
+  // Do NOT re-run when socketConnected flips — that would apply a stale
+  // page-load snapshot and wipe live COMPLETED (ISSUE-075 review). Disconnect
+  // recovery is owned by store pollTraces().
   useEffect(() => {
     if (traces.length === 0) return;
-    if (
-      shouldProtectLiveSocketState(
-        isInvestigating,
-        socketConnected,
-        lastAgentEventAt,
-      )
-    ) {
+    const {
+      isInvestigating: investigating,
+      socketConnected: connected,
+      lastAgentEventAt: lastAt,
+    } = useAgentStatusStore.getState();
+    if (shouldProtectLiveSocketState(investigating, connected, lastAt)) {
       return;
     }
     replayFromTraces(traces);
-  }, [
-    eventId,
-    traces,
-    replayFromTraces,
-    isInvestigating,
-    socketConnected,
-    lastAgentEventAt,
-  ]);
+  }, [eventId, traces, replayFromTraces]);
 
   // Expand while investigating; collapse after CLOSED.
   useEffect(() => {

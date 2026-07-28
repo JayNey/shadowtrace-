@@ -324,6 +324,106 @@ describe("AgentStatusPanel", () => {
     );
   });
 
+  it("does not wipe socket COMPLETED when disconnect triggers stale traces replay", async () => {
+    render(
+      <AgentStatusPanel eventId="evt-75" eventStatus="analyzing" traces={[]} />,
+    );
+    await waitFor(() => expect(socketHandler).toBeDefined());
+
+    emitSocket("agent_progress", {
+      agent_name: "triage_agent",
+      phase: "running",
+      message: "live progress",
+    });
+    emitSocket("agent_completed", {
+      agent_name: "triage_agent",
+      output_summary: "分诊完成",
+      duration_ms: 120,
+    });
+    emitSocket("agent_progress", {
+      agent_name: "evidence_agent",
+      phase: "running",
+      message: "collecting",
+    });
+
+    expect(useAgentStatusStore.getState().agents.triage_agent.status).toBe(
+      "COMPLETED",
+    );
+    const feedBefore = useAgentStatusStore.getState().feed.length;
+
+    // Stale page-load snapshot omits triage/evidence — must not reset cards.
+    act(() => {
+      useAgentStatusStore.setState({
+        socketConnected: false,
+        lastAgentEventAt: Date.now() - 15_000,
+      });
+      useAgentStatusStore.getState().replayFromTraces([
+        makeTrace({
+          agent_name: "super_agent",
+          status: "completed",
+          duration_ms: 10,
+        }),
+      ]);
+    });
+
+    const state = useAgentStatusStore.getState();
+    expect(state.agents.triage_agent.status).toBe("COMPLETED");
+    expect(state.agents.triage_agent.message).toBe("分诊完成");
+    expect(state.agents.evidence_agent.status).toBe("PROCESSING");
+    expect(state.agents.super_agent.status).toBe("COMPLETED");
+    expect(state.feed.length).toBe(feedBefore);
+    expect(state.isInvestigating).toBe(true);
+  });
+
+  it("does not re-apply parent traces when socketConnected flips to false", async () => {
+    const staleTraces = [
+      makeTrace({
+        agent_name: "super_agent",
+        status: "completed",
+        duration_ms: 10,
+      }),
+    ];
+    const { rerender } = render(
+      <AgentStatusPanel
+        eventId="evt-75"
+        eventStatus="analyzing"
+        traces={staleTraces}
+      />,
+    );
+    await waitFor(() => expect(socketHandler).toBeDefined());
+
+    emitSocket("agent_completed", {
+      agent_name: "triage_agent",
+      output_summary: "live triage done",
+      duration_ms: 50,
+    });
+    expect(useAgentStatusStore.getState().agents.triage_agent.status).toBe(
+      "COMPLETED",
+    );
+
+    act(() => {
+      useAgentStatusStore.setState({
+        socketConnected: false,
+        lastAgentEventAt: Date.now() - 15_000,
+      });
+    });
+    // Parent re-render with same traces must not wipe live COMPLETED.
+    rerender(
+      <AgentStatusPanel
+        eventId="evt-75"
+        eventStatus="analyzing"
+        traces={staleTraces}
+      />,
+    );
+
+    expect(useAgentStatusStore.getState().agents.triage_agent.status).toBe(
+      "COMPLETED",
+    );
+    expect(useAgentStatusStore.getState().agents.triage_agent.message).toBe(
+      "live triage done",
+    );
+  });
+
   it("does not poll within silence window after live agent socket events", async () => {
     vi.useFakeTimers();
     connected = true;

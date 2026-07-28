@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from app.agents.base import AgentOutput, BaseAgent
@@ -258,12 +259,18 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         *,
         owner_id: str | None = None,
         lease_acquired: bool = False,
+        publish_lifecycle: bool = True,
     ) -> None:
         """Run the full investigation graph for *event_id*.
 
         Acquires a distributed lease (unless *lease_acquired* is True),
         freezes the source snapshot, executes the LangGraph pipeline,
         persists the final context, and releases the lease on completion.
+
+        ``publish_lifecycle`` emits ``agent_progress`` / ``agent_completed`` /
+        ``agent_failed`` for ``super_agent`` (ISSUE-075). Production callers use
+        ``investigate()`` directly (not ``BaseAgent.execute``), so this flag
+        defaults to True. ``_run`` sets it False to avoid double-publish.
         """
         if self.planner_agent is None:
             raise RuntimeError("SuperAgent requires a PlannerAgent")
@@ -277,6 +284,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         renewal_task: asyncio.Task[None] | None = None
         event_context: EventContext | None = None
         guard_reset_needed = True  # cleared only when another worker owns the lease
+        lifecycle_input = SuperAgentInput(event_id=event_id)
+        started_at = datetime.now(UTC)
+        lifecycle_started = False
 
         try:
             # 1. Acquire lease
@@ -290,6 +300,12 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                             details={"event_id": event_id},
                         )
                 renewal_task = await self.lease.start_renewal(event_id, resolved_owner)
+
+            # Emit progress only after we own the lease (ISSUE-075).
+            if publish_lifecycle:
+                started_at = datetime.now(UTC)
+                await self._publish_agent_progress(lifecycle_input)
+                lifecycle_started = True
 
             # 2. Load / build initial state
             event_context = await self._load_event_context(event_id)
@@ -338,6 +354,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             await self._persist_event_context(ec)
             await self._persist_analysis_only_complete(event_id)
 
+            if lifecycle_started:
+                duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
+                await self._publish_agent_completed(lifecycle_input, duration_ms=duration_ms)
+
         except InvestigationInProgressError:
             # Concurrent trigger — another worker already owns this event.
             # Do NOT transition to FAILED; the active worker is still
@@ -345,7 +365,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             # handle its own counters.
             guard_reset_needed = False
             raise
-        except Exception:
+        except Exception as exc:
+            if lifecycle_started:
+                await self._publish_agent_failed(lifecycle_input, str(exc))
             await self._transition(
                 event_id, EventStatus.FAILED, reason="exception", ec=event_context
             )
@@ -378,8 +400,12 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
     # ------------------------------------------------------------------ #
 
     async def _run(self, input: SuperAgentInput) -> AgentOutput:
-        """Delegates to ``investigate`` so BaseAgent.execute() applies."""
-        await self.investigate(input.event_id)
+        """Delegates to ``investigate`` so BaseAgent.execute() applies.
+
+        Skip investigate-level socket lifecycle: ``execute`` already publishes
+        agent_progress / completed / failed.
+        """
+        await self.investigate(input.event_id, publish_lifecycle=False)
         return AgentOutput(agent_name="super_agent", success=True)
 
     # ------------------------------------------------------------------ #

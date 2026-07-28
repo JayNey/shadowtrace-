@@ -328,6 +328,7 @@ def _build_super_agent(
     rag: Any | None = None,
     lease: _InMemoryEventLease | None = None,
     event_service: _MockEventService | None = None,
+    event_bus: Any | None = None,
     react_enabled: bool = False,
 ) -> SuperAgent:
     """Build a SuperAgent with stub agents for isolated testing."""
@@ -340,6 +341,7 @@ def _build_super_agent(
         report_agent=_StubReportAgent(report or _make_report(event_id)),
         lease=lease,  # type: ignore[arg-type]
         event_service=event_service,  # type: ignore[arg-type]
+        event_bus=event_bus,
         react_enabled=react_enabled,
     )
 
@@ -378,6 +380,68 @@ class TestSuperAgentGoldenPath:
         assert result.agent_name == "super_agent"
         assert result.success is True
         assert events[_EVENT_ID]["status"] == EventStatus.REPORTING
+
+    async def test_investigate_publishes_agent_lifecycle_events(self) -> None:
+        """Production ``investigate()`` path must emit agent_progress→completed (ISSUE-075)."""
+        published: list[tuple[str, dict[str, Any]]] = []
+
+        class _CapturingBus:
+            async def publish_event(
+                self,
+                event_id: str,
+                message_type: str,
+                payload: dict[str, Any] | None = None,
+            ) -> bool:
+                published.append((message_type, dict(payload or {})))
+                return True
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        event_service = _MockEventService(events)
+        agent = _build_super_agent(event_service=event_service, event_bus=_CapturingBus())
+        await agent.investigate(_EVENT_ID)
+
+        types = [t for t, _ in published]
+        assert "agent_progress" in types
+        assert "agent_completed" in types
+        progress = next(p for t, p in published if t == "agent_progress")
+        completed = next(p for t, p in published if t == "agent_completed")
+        assert progress["agent_name"] == "super_agent"
+        assert progress["phase"] == "running"
+        assert "message" in progress
+        assert completed["agent_name"] == "super_agent"
+        assert "output_summary" in completed
+        assert isinstance(completed.get("duration_ms"), int)
+
+    async def test_investigate_in_progress_does_not_publish_failed(self) -> None:
+        """Lease conflict must not emit agent_failed for the losing caller."""
+        published: list[str] = []
+
+        class _CapturingBus:
+            async def publish_event(
+                self,
+                event_id: str,
+                message_type: str,
+                payload: dict[str, Any] | None = None,
+            ) -> bool:
+                published.append(message_type)
+                return True
+
+        lease = _InMemoryEventLease()
+        owner = generate_owner_id()
+        assert await lease.acquire(_EVENT_ID, owner) is True
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        agent = _build_super_agent(
+            lease=lease,
+            event_service=_MockEventService(events),
+            event_bus=_CapturingBus(),
+        )
+        with pytest.raises(InvestigationInProgressError):
+            await agent.investigate(_EVENT_ID)
+        assert published == []
 
     async def test_graph_survives_rag_failure(self) -> None:
         """RAG failure must not block the main pipeline (降级策略)."""
