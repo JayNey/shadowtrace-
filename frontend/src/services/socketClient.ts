@@ -75,13 +75,20 @@ class SocketClient {
    */
   subscribe(eventId: string): void {
     this.pendingEventIds.add(eventId);
-    if (this.socket?.connected) {
+    // Use the connect-handler flag: socket.io mocks / race windows may leave
+    // ``socket.connected`` false briefly while ``this.connected`` is already true.
+    if (this.connected && this.socket) {
       this.socket.emit("subscribe", { event_id: eventId });
     }
   }
 
+  /** Drop a queued/watched event id (detail-page unmount / event switch). */
+  forgetEvent(eventId: string): void {
+    this.pendingEventIds.delete(eventId);
+  }
+
   private flushSubscriptions(): void {
-    if (!this.socket?.connected) return;
+    if (!this.connected || !this.socket) return;
     for (const eventId of this.pendingEventIds) {
       this.socket.emit("subscribe", { event_id: eventId });
     }

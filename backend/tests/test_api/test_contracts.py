@@ -95,6 +95,7 @@ def client() -> TestClient:
     mock_es = _MockEventService()
     app.dependency_overrides[_real_get_event_service] = lambda: mock_es
     app.dependency_overrides[_real_get_state_machine] = lambda: _MockStateMachine()
+    app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
 
     async def _mock_disposition_sync() -> _MockDispositionSyncService:
         return _MockDispositionSyncService()
@@ -112,6 +113,21 @@ def _hdr(role: str = "analyst") -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 # Mock services for contract tests (no DB required)
 # --------------------------------------------------------------------------- #
+
+
+class _MockContextStore:
+    """In-memory context stub so timeline/graph contract GETs return 200."""
+
+    async def get_full_context(self, event_id: str) -> EventContext:
+        return EventContext(
+            storyline={
+                "storyline_id": "sty-contract-1",
+                "event_id": event_id,
+                "narrative_summary": "Contract-test storyline placeholder.",
+                "generated_by": "rule",
+                "phases": [],
+            }
+        )
 
 
 class _MockEventService:

@@ -190,6 +190,8 @@ interface AgentStatusState {
   pollTimer: ReturnType<typeof setInterval> | null;
   /** Socket unsubscribe function. */
   socketUnsub: (() => void) | null;
+  /** Event id currently watched (for subscription cleanup). */
+  watchedEventId: string | null;
 
   /* ---- actions ---- */
 
@@ -223,16 +225,20 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
   lastAgentEventAt: 0,
   pollTimer: null,
   socketUnsub: null,
+  watchedEventId: null,
 
   /* ---- actions ---- */
 
   startWatching(eventId: string) {
-    const { socketUnsub, pollTimer } = get();
+    const { socketUnsub, pollTimer, watchedEventId } = get();
     // Clean up previous watchers.
     socketUnsub?.();
     if (pollTimer) {
       clearInterval(pollTimer);
       set({ pollTimer: null });
+    }
+    if (watchedEventId && watchedEventId !== eventId) {
+      socketClient.forgetEvent(watchedEventId);
     }
 
     // Reset state for new event.
@@ -242,6 +248,7 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
       isInvestigating: false,
       socketConnected: false,
       lastAgentEventAt: 0,
+      watchedEventId: eventId,
     });
 
     // Connect then subscribe (subscribe queues until transport is up).
@@ -284,18 +291,12 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
     // Immediate traces snapshot (history replay / socket-down bootstrap).
     void get().pollTraces(eventId);
 
-    // Poll when disconnected OR connected-but-silent (schema-drop / stall).
+    // ISSUE-075 降级：仅 Socket 不可用时每 10s 轮询 traces（勿在 connected-but-silent
+    // 时 poll，否则长 _run 会把 live PROCESSING 抹成 IDLE——trace 仅在结束后写入）。
     const timer = setInterval(() => {
       const connected = socketClient.isConnected;
-      const { isInvestigating, lastAgentEventAt } = get();
       set({ socketConnected: connected });
-      if (
-        !shouldProtectLiveSocketState(
-          isInvestigating,
-          connected,
-          lastAgentEventAt,
-        )
-      ) {
+      if (!connected) {
         void get().pollTraces(eventId);
       }
     }, AGENT_SOCKET_SILENCE_MS);
@@ -304,13 +305,16 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
   },
 
   stopWatching() {
-    const { socketUnsub, pollTimer } = get();
+    const { socketUnsub, pollTimer, watchedEventId } = get();
     socketUnsub?.();
     if (pollTimer) {
       clearInterval(pollTimer);
     }
+    if (watchedEventId) {
+      socketClient.forgetEvent(watchedEventId);
+    }
     get().reset();
-    set({ socketUnsub: null, pollTimer: null });
+    set({ socketUnsub: null, pollTimer: null, watchedEventId: null });
   },
 
   /* ---- socket event handlers ---- */
@@ -414,6 +418,7 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
       return;
     }
 
+    const previous = get().agents;
     const agents = defaultAgentMap();
     const feed: ActivityFeedEntry[] = [];
 
@@ -467,10 +472,25 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
       });
     }
 
+    // Preserve in-flight live PROCESSING not yet written to traces (trace is
+    // recorded only after _run finishes — ISSUE-075 review Blocker).
+    for (const name of ALL_AGENT_NAMES) {
+      if (
+        previous[name].status === "PROCESSING" &&
+        agents[name].status === "IDLE"
+      ) {
+        agents[name] = { ...previous[name] };
+      }
+    }
+
+    const stillProcessing = ALL_AGENT_NAMES.some(
+      (name) => agents[name].status === "PROCESSING",
+    );
+
     set({
       agents,
       feed: feed.slice(-MAX_FEED_ENTRIES),
-      isInvestigating: false,
+      isInvestigating: stillProcessing,
     });
   },
 

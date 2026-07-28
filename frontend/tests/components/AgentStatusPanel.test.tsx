@@ -29,6 +29,7 @@ vi.mock("../../src/services/socketClient", () => ({
       connected = true;
     }),
     subscribe: vi.fn(),
+    forgetEvent: vi.fn(),
     get isConnected() {
       return connected;
     },
@@ -248,24 +249,18 @@ describe("AgentStatusPanel", () => {
     await act(async () => {
       await Promise.resolve();
     });
-    // Connected + silent: first interval also polls (false-connected 降级).
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
-    });
-    const callsWhileConnectedSilent = mockGetTraces.mock.calls.length;
-    expect(callsWhileConnectedSilent).toBeGreaterThanOrEqual(2);
-
+    // Drop transport after watch starts (connect() mock marks connected).
     connected = false;
+    const callsAfterStart = mockGetTraces.mock.calls.length;
+
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
-    expect(mockGetTraces.mock.calls.length).toBe(
-      callsWhileConnectedSilent + 1,
-    );
+    expect(mockGetTraces.mock.calls.length).toBe(callsAfterStart + 1);
     expect(useAgentStatusStore.getState().socketConnected).toBe(false);
   });
 
-  it("polls traces when socket is connected but no agent events arrive", async () => {
+  it("does not poll while socket stays connected (even if agent_* is silent)", async () => {
     vi.useFakeTimers();
     connected = true;
     mockGetTraces.mockResolvedValue({
@@ -282,9 +277,51 @@ describe("AgentStatusPanel", () => {
     const callsAfterStart = mockGetTraces.mock.calls.length;
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.advanceTimersByTimeAsync(30_000);
     });
-    expect(mockGetTraces.mock.calls.length).toBe(callsAfterStart + 1);
+    // Connected → no interval poll (ISSUE-075 降级 only when socket down).
+    expect(mockGetTraces.mock.calls.length).toBe(callsAfterStart);
+  });
+
+  it("keeps live PROCESSING when delayed traces omit the in-flight agent", async () => {
+    render(
+      <AgentStatusPanel eventId="evt-75" eventStatus="analyzing" traces={[]} />,
+    );
+    await waitFor(() => expect(socketHandler).toBeDefined());
+
+    emitSocket("agent_progress", {
+      agent_name: "triage_agent",
+      phase: "running",
+      message: "live long-running",
+      progress_pct: 10,
+    });
+    expect(useAgentStatusStore.getState().agents.triage_agent.status).toBe(
+      "PROCESSING",
+    );
+
+    // Simulate silence-window expiry so shouldProtectLiveSocketState is false,
+    // then a poll/replay that only knows about an older completed agent.
+    act(() => {
+      useAgentStatusStore.setState({ lastAgentEventAt: Date.now() - 15_000 });
+      useAgentStatusStore.getState().replayFromTraces([
+        makeTrace({
+          agent_name: "super_agent",
+          status: "completed",
+          duration_ms: 50,
+        }),
+      ]);
+    });
+
+    expect(useAgentStatusStore.getState().agents.triage_agent.status).toBe(
+      "PROCESSING",
+    );
+    expect(useAgentStatusStore.getState().agents.triage_agent.message).toBe(
+      "live long-running",
+    );
+    expect(useAgentStatusStore.getState().isInvestigating).toBe(true);
+    expect(useAgentStatusStore.getState().agents.super_agent.status).toBe(
+      "COMPLETED",
+    );
   });
 
   it("does not poll within silence window after live agent socket events", async () => {
@@ -309,29 +346,13 @@ describe("AgentStatusPanel", () => {
       progress_pct: 20,
     });
 
-    // Refresh traffic mid-window so the 10s interval still sees fresh agent_*.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000);
-    });
-    emitSocket("agent_progress", {
-      agent_name: "triage_agent",
-      phase: "running",
-      message: "still live",
-      progress_pct: 40,
-    });
     const callsAfterLive = mockGetTraces.mock.calls.length;
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(5_000);
+      await vi.advanceTimersByTimeAsync(20_000);
     });
-    // Interval at ~10s: last agent event ~5s ago → still fresh → no poll.
+    // Still connected → interval must not poll even after silence.
     expect(mockGetTraces.mock.calls.length).toBe(callsAfterLive);
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
-    });
-    // Interval at ~20s: last agent event ~15s ago → silent → poll.
-    expect(mockGetTraces.mock.calls.length).toBeGreaterThan(callsAfterLive);
   });
 
   it("accepts contract-shaped progress_pct and error fields", async () => {

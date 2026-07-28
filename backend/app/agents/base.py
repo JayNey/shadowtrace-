@@ -108,7 +108,8 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
             output = await self._apply_guardrails(output)
             for hook in self.post_hooks:
                 await hook(self, input)
-            await self._publish_agent_completed(input)
+            duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
+            await self._publish_agent_completed(input, duration_ms=duration_ms)
             return output
         except Exception as exc:
             status = "failed"
@@ -196,18 +197,21 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
                 exc_info=True,
             )
 
-    async def _publish_agent_completed(self, input: TIn) -> None:
+    async def _publish_agent_completed(self, input: TIn, *, duration_ms: int | None = None) -> None:
         """Publish ``agent_completed`` with required ``output_summary`` (schema)."""
         if self.event_bus is None:
             return
         try:
+            payload: dict[str, Any] = {
+                "agent_name": self.agent_name,
+                "output_summary": f"{self.agent_name} completed",
+            }
+            if duration_ms is not None:
+                payload["duration_ms"] = duration_ms
             await self.event_bus.publish_event(
                 input.event_id,
                 "agent_completed",
-                {
-                    "agent_name": self.agent_name,
-                    "output_summary": f"{self.agent_name} completed",
-                },
+                payload,
             )
         except Exception:
             logger.debug(

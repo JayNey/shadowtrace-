@@ -64,6 +64,7 @@ vi.mock("../../src/services/socketClient", () => ({
   socketClient: {
     connect: vi.fn(),
     subscribe: (eventId: string) => mockSocketSubscribe(eventId),
+    forgetEvent: vi.fn(),
     get isConnected() {
       return true;
     },

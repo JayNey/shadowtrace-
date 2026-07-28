@@ -947,7 +947,6 @@ async def test_scenario_2_low_confidence_l3_manual_approval(
                     "risk_score": 78,
                     "confidence": 0.72,
                     "severity": Severity.HIGH.value,
-                    "final_verdict": FinalVerdict.CONFIRMED_THREAT.value,
                     "scoring_mode": ScoringMode.LLM_AND_RULE.value,
                 },
             )
