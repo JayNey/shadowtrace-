@@ -423,3 +423,8 @@ async def test_base_agent_socket_payloads_pass_events_schema() -> None:
             "payload": payload,
         }
         jsonschema.validate(instance=envelope, schema=schema)
+
+    completed = next(p for t, p in published if t == "agent_completed")
+    assert "duration_ms" in completed
+    assert isinstance(completed["duration_ms"], (int, float))
+    assert completed["duration_ms"] >= 0

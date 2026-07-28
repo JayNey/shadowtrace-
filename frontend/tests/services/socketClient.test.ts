@@ -69,6 +69,27 @@ describe("socketClient", () => {
     expect(mockEmit).toHaveBeenCalledWith("subscribe", { event_id: "evt-99" });
   });
 
+  it("queues subscribe until connect then flushes", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    socketClient.connect();
+    socketClient.subscribe("evt-queued");
+    expect(mockEmit).not.toHaveBeenCalled();
+    connectHandler?.();
+    expect(mockEmit).toHaveBeenCalledWith("subscribe", {
+      event_id: "evt-queued",
+    });
+  });
+
+  it("forgetEvent drops pending room so reconnect does not rejoin it", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    socketClient.connect();
+    socketClient.subscribe("evt-old");
+    socketClient.forgetEvent("evt-old");
+    mockEmit.mockClear();
+    connectHandler?.();
+    expect(mockEmit).not.toHaveBeenCalled();
+  });
+
   it("maps state_change envelope to to_status payload", async () => {
     const { socketClient } = await import("../../src/services/socketClient");
     const handler = vi.fn();
