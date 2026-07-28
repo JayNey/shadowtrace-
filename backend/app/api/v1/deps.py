@@ -255,12 +255,14 @@ async def _build_production_investigation_graph(
 
     stack = await _get_investigation_stack()
     wm = stack["wm"]
+    event_bus = _get_event_bus()
     response_agent = ResponseAgent(
         llm_client=stack["llm_client"],
         working_memory=wm.for_writer("ResponseAgent"),
         budget_service=stack["budget_service"],
         output_guard=stack["output_guard"],
         trace_service=stack["trace_service"],
+        event_bus=event_bus,
         event_service=stack["event_service"],
         session_factory=stack["session_factory"],
         scenario_id="insider_data_exfiltration",
@@ -269,7 +271,7 @@ async def _build_production_investigation_graph(
         tool_executor=stack["tool_executor"],
         working_memory=wm.for_writer("VerifyAgent"),
         trace_service=stack["trace_service"],
-        event_bus=_get_event_bus(),
+        event_bus=event_bus,
         session_factory=stack["session_factory"],
         event_disposition_service=await get_event_disposition_service(),
         disposition_sync_service=await get_disposition_sync(),
@@ -387,12 +389,17 @@ async def _build_investigation_agents() -> dict[str, Any]:
     case_kb_service = CaseKBService(knowledge_store, session_factory)
     fp_matcher = FalsePositiveMatcher(case_kb_service)
 
+    # ISSUE-075: every stage Agent must receive EventBus so BaseAgent.execute
+    # emits schema-valid agent_progress / agent_completed / agent_failed.
+    event_bus = _get_event_bus()
+
     triage = TriageAgent(
         llm_client=llm_client,
         working_memory=wm.for_writer("TriageAgent"),
         budget_service=budget_service,
         output_guard=output_guard,
         trace_service=trace_service,
+        event_bus=event_bus,
         fp_matcher=fp_matcher,
     )
     evidence = EvidenceAgent(
@@ -402,6 +409,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         budget_service=budget_service,
         output_guard=output_guard,
         trace_service=trace_service,
+        event_bus=event_bus,
         event_service=event_service,
         session_factory=session_factory,
     )
@@ -411,6 +419,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         budget_service=budget_service,
         output_guard=output_guard,
         trace_service=trace_service,
+        event_bus=event_bus,
     )
     risk = RiskAgent(
         llm_client=llm_client,
@@ -418,6 +427,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         budget_service=budget_service,
         output_guard=output_guard,
         trace_service=trace_service,
+        event_bus=event_bus,
         event_service=event_service,
         scenario_id="insider_data_exfiltration",
     )
@@ -428,7 +438,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         output_guard=output_guard,
         trace_service=trace_service,
         event_service=event_service,
-        event_bus=_get_event_bus(),
+        event_bus=event_bus,
         scenario_id="insider_data_exfiltration",
     )
 
@@ -511,6 +521,7 @@ async def get_super_agent() -> Any:
             budget_service=stack["budget_service"],
             output_guard=stack["output_guard"],
             trace_service=stack["trace_service"],
+            event_bus=_get_event_bus(),
         )
         convergence_guard = ConvergenceGuard(
             working_memory=wm.for_writer("ConvergenceGuard"),

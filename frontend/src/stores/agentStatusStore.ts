@@ -472,14 +472,22 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
       });
     }
 
-    // Preserve in-flight live PROCESSING not yet written to traces (trace is
-    // recorded only after _run finishes — ISSUE-075 review Blocker).
+    // Preserve live socket statuses not yet reflected in traces (trace is
+    // recorded only after _run finishes — ISSUE-075). Keep PROCESSING and
+    // terminal COMPLETED/FAILED/DEGRADED so disconnect/stale-prop replay
+    // cannot wipe cards back to IDLE.
+    let preservedLive = false;
     for (const name of ALL_AGENT_NAMES) {
+      const prev = previous[name];
+      if (agents[name].status !== "IDLE") continue;
       if (
-        previous[name].status === "PROCESSING" &&
-        agents[name].status === "IDLE"
+        prev.status === "PROCESSING" ||
+        prev.status === "COMPLETED" ||
+        prev.status === "FAILED" ||
+        prev.status === "DEGRADED"
       ) {
-        agents[name] = { ...previous[name] };
+        agents[name] = { ...prev };
+        preservedLive = true;
       }
     }
 
@@ -487,10 +495,16 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
       (name) => agents[name].status === "PROCESSING",
     );
 
+    // When preserving live cards, keep the live feed; traces-only feed would
+    // drop socket messages for agents not yet in the HTTP snapshot.
+    const nextFeed = preservedLive
+      ? get().feed
+      : feed.slice(-MAX_FEED_ENTRIES);
+
     set({
       agents,
-      feed: feed.slice(-MAX_FEED_ENTRIES),
-      isInvestigating: stillProcessing,
+      feed: nextFeed,
+      isInvestigating: stillProcessing || (preservedLive && get().isInvestigating),
     });
   },
 
