@@ -206,6 +206,17 @@
       "title": "ActionStatus",
       "type": "string"
     },
+    "BusinessDisruption": {
+      "description": "Business impact disruption level (ISSUE-079).",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "BusinessDisruption",
+      "type": "string"
+    },
     "ConfirmationEvidence": {
       "enum": [
         "adapter_acknowledged",
@@ -793,6 +804,20 @@
           "title": "Actions",
           "type": "array"
         },
+        "writeback_counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Writeback Counts",
+          "type": "object"
+        },
+        "writeback_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Writeback Ids",
+          "type": "array"
+        },
         "writeback_summary": {
           "anyOf": [
             {
@@ -838,16 +863,49 @@
     },
     "ImpactAssessment": {
       "additionalProperties": false,
-      "description": "Estimated blast radius / reversibility of an action (detailed in ISSUE-079).",
+      "description": "Estimated blast radius / reversibility of an action (ISSUE-079).\n\nFields match the ISSUE-079 unified naming:\n- ``impact_score``: 0-100, base (action_level) + asset bonus, capped at 100\n- ``business_disruption``: none / low / medium / high\n- ``reversible``: per rollback mapping (e.g. force_logout → False)",
       "properties": {
-        "impact_level": {
-          "$ref": "#/$defs/Severity",
-          "default": "low"
+        "action_id": {
+          "title": "Action Id",
+          "type": "string"
+        },
+        "impact_score": {
+          "default": 0,
+          "description": "0-100 composite impact score",
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Impact Score",
+          "type": "integer"
+        },
+        "affected_scope": {
+          "default": "",
+          "description": "Description of affected targets and scope",
+          "title": "Affected Scope",
+          "type": "string"
         },
         "reversible": {
           "default": true,
+          "description": "Whether the action can be rolled back",
           "title": "Reversible",
           "type": "boolean"
+        },
+        "business_disruption": {
+          "$ref": "#/$defs/BusinessDisruption",
+          "default": "none",
+          "description": "none | low | medium | high"
+        },
+        "assessment_detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable assessment rationale",
+          "title": "Assessment Detail"
         },
         "affected_entity_count": {
           "default": 0,
@@ -860,18 +918,6 @@
           },
           "title": "Affected Targets",
           "type": "array"
-        },
-        "notes": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Notes"
         },
         "assessed_by": {
           "anyOf": [
@@ -886,6 +932,9 @@
           "title": "Assessed By"
         }
       },
+      "required": [
+        "action_id"
+      ],
       "title": "ImpactAssessment",
       "type": "object"
     },
@@ -1889,6 +1938,11 @@
       ],
       "default": null
     },
+    "analysis_only_complete": {
+      "default": false,
+      "title": "Analysis Only Complete",
+      "type": "boolean"
+    },
     "state_history": {
       "items": {
         "additionalProperties": true,
@@ -1950,6 +2004,45 @@
       },
       "title": "Degraded Flags",
       "type": "array"
+    },
+    "triage_degraded": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Triage Degraded"
+    },
+    "graph_degraded": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Graph Degraded"
+    },
+    "storyline_degraded": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Storyline Degraded"
     }
   },
   "title": "EventContext",

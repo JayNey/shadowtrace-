@@ -37,3 +37,21 @@ def test_exported_schemas_are_valid_json(tmp_path: Path) -> None:
         data = json.loads(path.read_text(encoding="utf-8"))
         assert isinstance(data, dict)
         assert "properties" in data or "$ref" in data or "type" in data
+
+
+def test_action_embedded_impact_assessment_matches_standalone_schema() -> None:
+    """Action.json must embed the current ImpactAssessment schema (ISSUE-079)."""
+    repo_root = Path(__file__).resolve().parents[3]
+    action_path = repo_root / "contracts/schemas/Action.json"
+    standalone_path = repo_root / "contracts/schemas/ImpactAssessment.json"
+    action_schema = json.loads(action_path.read_text(encoding="utf-8"))
+    standalone = json.loads(standalone_path.read_text(encoding="utf-8"))
+    embedded = action_schema["$defs"]["ImpactAssessment"]
+    embedded_props = embedded.get("properties", {})
+    standalone_props = standalone.get("properties", {})
+    assert set(embedded_props) == set(standalone_props)
+    assert embedded.get("required") == standalone.get("required")
+    assert "impact_level" not in embedded_props
+    assert "notes" not in embedded_props
+    assert "action_id" in embedded_props
+    assert "business_disruption" in embedded_props

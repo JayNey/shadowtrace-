@@ -66,6 +66,15 @@
       "title": "DispositionIntentKind",
       "type": "string"
     },
+    "ExecutionChannel": {
+      "description": "Concrete channel declared on a ProviderToolBinding.",
+      "enum": [
+        "tool_provider",
+        "disposition_adapter"
+      ],
+      "title": "ExecutionChannel",
+      "type": "string"
+    },
     "SourceObjectKind": {
       "description": "Canonical source object kind used for the internal discriminated union.",
       "enum": [
@@ -165,6 +174,18 @@
       "default": false,
       "title": "Supports Concurrency Control",
       "type": "boolean"
+    },
+    "supports_fencing": {
+      "default": false,
+      "title": "Supports Fencing",
+      "type": "boolean"
+    },
+    "allowed_execution_channels": {
+      "items": {
+        "$ref": "#/$defs/ExecutionChannel"
+      },
+      "title": "Allowed Execution Channels",
+      "type": "array"
     },
     "bindings": {
       "items": {

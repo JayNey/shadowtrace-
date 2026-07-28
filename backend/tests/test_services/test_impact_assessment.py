@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -19,6 +19,7 @@ from app.services.impact_assessment_service import (
     _ASSET_VALUE_BONUS,
     ImpactAssessmentService,
     _base_score,
+    _build_asset_query_params,
     create_default_asset_provider,
 )
 
@@ -511,6 +512,62 @@ def test_business_disruption_enum_values() -> None:
         assert ia.business_disruption == value
         # Verify it's the enum member, not just the string
         assert isinstance(ia.business_disruption, BusinessDisruption)
+
+
+@pytest.mark.asyncio
+async def test_default_asset_provider_account_target() -> None:
+    """Account targets must not query asset_info with hostname=<username>."""
+    provider = create_default_asset_provider()
+    with patch(
+        "app.tools.query.query_asset_info.execute",
+        new_callable=AsyncMock,
+        return_value={"data": []},
+    ) as mock_execute:
+        result = await provider("admin_user", "account")
+
+    mock_execute.assert_not_awaited()
+    assert result is not None
+    assert result["business_role"] == "admin"
+
+
+def test_build_asset_query_params_account_returns_none() -> None:
+    assert _build_asset_query_params("admin_user", "account") is None
+    assert _build_asset_query_params("10.0.0.1", "host") == {"ip": "10.0.0.1"}
+    assert _build_asset_query_params("HOST-01", "hostname") == {"hostname": "HOST-01"}
+
+
+@pytest.mark.asyncio
+async def test_default_asset_provider_host_uses_ip_param() -> None:
+    provider = create_default_asset_provider()
+    mock_execute = AsyncMock(
+        return_value={
+            "data": [{"asset_value": "critical", "business_role": "server", "hostname": "HOST-01"}]
+        }
+    )
+    with patch("app.tools.query.query_asset_info.execute", mock_execute):
+        result = await provider("10.0.0.1", "host")
+
+    mock_execute.assert_awaited_once_with({"ip": "10.0.0.1"})
+    assert result is not None
+    assert result["asset_value"] == "critical"
+
+
+@pytest.mark.asyncio
+async def test_disable_account_admin_via_default_provider() -> None:
+    svc = ImpactAssessmentService(asset_info_provider=create_default_asset_provider())
+    action = _action(
+        tool_name="disable_account",
+        target="admin_user",
+        target_type="account",
+    )
+    with patch(
+        "app.tools.query.query_asset_info.execute",
+        new_callable=AsyncMock,
+        return_value={"data": []},
+    ):
+        result = await svc.assess(action)
+
+    assert result.business_disruption == "high"
 
 
 # --------------------------------------------------------------------------- #

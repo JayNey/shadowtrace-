@@ -1,0 +1,65 @@
+{
+  "additionalProperties": false,
+  "description": "Aggregated counts computed from the full (unfiltered) trace.",
+  "properties": {
+    "agent_count": {
+      "default": 0,
+      "title": "Agent Count",
+      "type": "integer"
+    },
+    "tool_call_count": {
+      "default": 0,
+      "title": "Tool Call Count",
+      "type": "integer"
+    },
+    "llm_call_count": {
+      "default": 0,
+      "title": "Llm Call Count",
+      "type": "integer"
+    },
+    "total_tokens": {
+      "default": 0,
+      "title": "Total Tokens",
+      "type": "integer"
+    },
+    "state_transition_count": {
+      "default": 0,
+      "title": "State Transition Count",
+      "type": "integer"
+    },
+    "approval_count": {
+      "default": 0,
+      "title": "Approval Count",
+      "type": "integer"
+    },
+    "action_execution_count": {
+      "default": 0,
+      "title": "Action Execution Count",
+      "type": "integer"
+    },
+    "disposition_count": {
+      "default": 0,
+      "title": "Disposition Count",
+      "type": "integer"
+    },
+    "writeback_count": {
+      "default": 0,
+      "title": "Writeback Count",
+      "type": "integer"
+    },
+    "total_duration_ms": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Total Duration Ms"
+    }
+  },
+  "title": "DecisionTraceSummary",
+  "type": "object"
+}

@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "DecisionTraceEntryType": {
+      "enum": [
+        "agent_execution",
+        "tool_call",
+        "llm_call",
+        "state_transition",
+        "approval",
+        "action_execution",
+        "disposition",
+        "writeback"
+      ],
+      "title": "DecisionTraceEntryType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "A single step in the decision trace timeline.\n\n``detail`` is a sanitised structured projection (never raw payload).",
+  "properties": {
+    "entry_id": {
+      "title": "Entry Id",
+      "type": "string"
+    },
+    "entry_type": {
+      "$ref": "#/$defs/DecisionTraceEntryType"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "title": "Timestamp",
+      "type": "string"
+    },
+    "actor": {
+      "title": "Actor",
+      "type": "string"
+    },
+    "title": {
+      "title": "Title",
+      "type": "string"
+    },
+    "detail": {
+      "additionalProperties": true,
+      "title": "Detail",
+      "type": "object"
+    },
+    "ref_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ref Id"
+    }
+  },
+  "required": [
+    "entry_id",
+    "entry_type",
+    "timestamp",
+    "actor",
+    "title"
+  ],
+  "title": "DecisionTraceEntry",
+  "type": "object"
+}

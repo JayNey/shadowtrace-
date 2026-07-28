@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "DecisionTraceEntry": {
+      "additionalProperties": false,
+      "description": "A single step in the decision trace timeline.\n\n``detail`` is a sanitised structured projection (never raw payload).",
+      "properties": {
+        "entry_id": {
+          "title": "Entry Id",
+          "type": "string"
+        },
+        "entry_type": {
+          "$ref": "#/$defs/DecisionTraceEntryType"
+        },
+        "timestamp": {
+          "format": "date-time",
+          "title": "Timestamp",
+          "type": "string"
+        },
+        "actor": {
+          "title": "Actor",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "detail": {
+          "additionalProperties": true,
+          "title": "Detail",
+          "type": "object"
+        },
+        "ref_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ref Id"
+        }
+      },
+      "required": [
+        "entry_id",
+        "entry_type",
+        "timestamp",
+        "actor",
+        "title"
+      ],
+      "title": "DecisionTraceEntry",
+      "type": "object"
+    },
+    "DecisionTraceEntryType": {
+      "enum": [
+        "agent_execution",
+        "tool_call",
+        "llm_call",
+        "state_transition",
+        "approval",
+        "action_execution",
+        "disposition",
+        "writeback"
+      ],
+      "title": "DecisionTraceEntryType",
+      "type": "string"
+    },
+    "DecisionTraceSummary": {
+      "additionalProperties": false,
+      "description": "Aggregated counts computed from the full (unfiltered) trace.",
+      "properties": {
+        "agent_count": {
+          "default": 0,
+          "title": "Agent Count",
+          "type": "integer"
+        },
+        "tool_call_count": {
+          "default": 0,
+          "title": "Tool Call Count",
+          "type": "integer"
+        },
+        "llm_call_count": {
+          "default": 0,
+          "title": "Llm Call Count",
+          "type": "integer"
+        },
+        "total_tokens": {
+          "default": 0,
+          "title": "Total Tokens",
+          "type": "integer"
+        },
+        "state_transition_count": {
+          "default": 0,
+          "title": "State Transition Count",
+          "type": "integer"
+        },
+        "approval_count": {
+          "default": 0,
+          "title": "Approval Count",
+          "type": "integer"
+        },
+        "action_execution_count": {
+          "default": 0,
+          "title": "Action Execution Count",
+          "type": "integer"
+        },
+        "disposition_count": {
+          "default": 0,
+          "title": "Disposition Count",
+          "type": "integer"
+        },
+        "writeback_count": {
+          "default": 0,
+          "title": "Writeback Count",
+          "type": "integer"
+        },
+        "total_duration_ms": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Duration Ms"
+        }
+      },
+      "title": "DecisionTraceSummary",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Full decision trace for one event.",
+  "properties": {
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "entries": {
+      "items": {
+        "$ref": "#/$defs/DecisionTraceEntry"
+      },
+      "title": "Entries",
+      "type": "array"
+    },
+    "summary": {
+      "$ref": "#/$defs/DecisionTraceSummary"
+    },
+    "missing_sources": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Missing Sources",
+      "type": "array"
+    }
+  },
+  "required": [
+    "event_id"
+  ],
+  "title": "DecisionTrace",
+  "type": "object"
+}

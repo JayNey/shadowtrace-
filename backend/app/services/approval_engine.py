@@ -547,28 +547,9 @@ class ApprovalEngine:
     ) -> None:
         async with self._session_factory() as session:
             async with session.begin():
-                # ISSUE-079: persist impact_assessment to the action row.
-                if action.impact_assessment is not None:
-                    await session.execute(
-                        update(orm.Action)
-                        .where(orm.Action.action_id == action.action_id)
-                        .values(
-                            impact_assessment=action.impact_assessment.model_dump(mode="json"),
-                            updated_at=datetime.now(UTC),
-                        )
-                    )
-                    # ISSUE-079: write to EventContext.impact_assessments list.
-                    if self._context_store is not None:
-                        from app.services.context_service import (
-                            append_list_context_journal_in_session,
-                        )
-
-                        await append_list_context_journal_in_session(
-                            session,
-                            action.event_id,
-                            "impact_assessments",
-                            action.impact_assessment,
-                        )
+                # ISSUE-079: persist impact_assessment via ImpactAssessmentService.
+                if action.impact_assessment is not None and self._impact_assessment is not None:
+                    await self._impact_assessment.persist_evaluation(session, action)
 
                 await self._upsert_record(session, action, decision, approval_cycle)
                 if decision.decision is ApprovalDecisionKind.AUTO_APPROVE:

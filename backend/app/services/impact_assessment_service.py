@@ -3,12 +3,20 @@
 Evaluates the blast radius, reversibility, and business disruption risk of a
 response action using fixed rules keyed on tool_name, action_level, and asset
 information from query_asset_info.
+
+Fixed rules in ISSUE-079 spec cover isolate_host, disable_account, block_ip, and
+zero-disruption ticketing tools.  ``quarantine_file`` and ``force_logout`` rules
+are extension defaults (not spec-hard requirements) kept for consistent scoring.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
+
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.network_utils import is_internal_ip
 from app.models.action import Action, ImpactAssessment
@@ -191,6 +199,35 @@ def _describe_scope(action: Action, asset_info: dict[str, Any] | None) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _build_asset_query_params(target: str, target_type: str | None) -> dict[str, Any] | None:
+    """Map action target metadata to ``query_asset_info`` input fields."""
+    tt = (target_type or "host").lower()
+    if tt in ("ip", "host"):
+        return {"ip": target}
+    if tt == "hostname":
+        return {"hostname": target}
+    if tt == "account":
+        # query_asset_info only indexes ip/hostname; account lookups use hints.
+        return None
+    return {"hostname": target}
+
+
+def _account_asset_hint(username: str) -> dict[str, Any]:
+    """Infer account business_role from username when asset projection is unavailable."""
+    lower = username.casefold()
+    if "domain_admin" in lower or lower.startswith("da_"):
+        role = "domain_admin"
+    elif lower.endswith("_admin") or lower == "admin" or "admin" in lower:
+        role = "admin"
+    else:
+        role = "employee"
+    return {
+        "asset_value": "medium",
+        "business_role": role,
+        "hostname": "",
+    }
+
+
 def create_default_asset_provider() -> Any:
     """Build a default ``asset_info_provider`` backed by ``query_asset_info``.
 
@@ -200,14 +237,16 @@ def create_default_asset_provider() -> Any:
     """
 
     async def _provider(target: str, target_type: str | None) -> dict[str, Any] | None:
+        tt = (target_type or "").lower()
+        if tt == "account":
+            return _account_asset_hint(target)
+
+        params = _build_asset_query_params(target, target_type)
+        if params is None:
+            return None
+
         try:
             from app.tools.query.query_asset_info import execute as _query_asset_info
-
-            params: dict[str, Any] = {}
-            if target_type in ("ip", "host") or not target_type:
-                params["ip"] = target
-            else:
-                params["hostname"] = target
 
             result = await _query_asset_info(params)
             data = result.get("data", [])
@@ -269,7 +308,7 @@ class ImpactAssessmentService:
 
         Args:
             action: The response action to assess.
-            event_context: Reserved for future entity-aware assessment (unused in P0).
+            event_context: Reserved for future entity-aware assessment (EntitySet P1).
 
         Returns:
             ImpactAssessment with impact_score, business_disruption, reversible,
@@ -331,6 +370,51 @@ class ImpactAssessmentService:
             assessment_detail=assessment_detail,
             assessed_by="ImpactAssessmentService",
         )
+
+    async def persist_to_context(
+        self,
+        session: AsyncSession,
+        event_id: str,
+        assessment: ImpactAssessment,
+    ) -> None:
+        """Append *assessment* to ``EventContext.impact_assessments`` (FIELD_OWNERSHIP writer)."""
+        from app.services.context_service import append_list_context_journal_in_session
+
+        await append_list_context_journal_in_session(
+            session,
+            event_id,
+            "impact_assessments",
+            assessment,
+        )
+
+    async def persist_to_action_row(
+        self,
+        session: AsyncSession,
+        action_id: str,
+        assessment: ImpactAssessment,
+    ) -> None:
+        """Persist *assessment* JSONB onto the action row."""
+        from app.models import orm
+
+        await session.execute(
+            update(orm.Action)
+            .where(orm.Action.action_id == action_id)
+            .values(
+                impact_assessment=assessment.model_dump(mode="json"),
+                updated_at=datetime.now(UTC),
+            )
+        )
+
+    async def persist_evaluation(
+        self,
+        session: AsyncSession,
+        action: Action,
+    ) -> None:
+        """Persist assessment to action row and EventContext (ISSUE-079)."""
+        if action.impact_assessment is None:
+            return
+        await self.persist_to_action_row(session, action.action_id, action.impact_assessment)
+        await self.persist_to_context(session, action.event_id, action.impact_assessment)
 
 
 __all__ = [

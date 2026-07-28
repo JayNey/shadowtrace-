@@ -2469,6 +2469,17 @@
         "type": "object",
         "title": "AuditLogsResponse"
       },
+      "BusinessDisruption": {
+        "type": "string",
+        "enum": [
+          "none",
+          "low",
+          "medium",
+          "high"
+        ],
+        "title": "BusinessDisruption",
+        "description": "Business impact disruption level (ISSUE-079)."
+      },
       "ConfirmationEvidence": {
         "type": "string",
         "enum": [
@@ -3604,14 +3615,46 @@
       },
       "ImpactAssessment": {
         "properties": {
-          "impact_level": {
-            "$ref": "#/components/schemas/Severity",
-            "default": "low"
+          "action_id": {
+            "type": "string",
+            "title": "Action Id"
+          },
+          "impact_score": {
+            "type": "integer",
+            "maximum": 100.0,
+            "minimum": 0.0,
+            "title": "Impact Score",
+            "description": "0-100 composite impact score",
+            "default": 0
+          },
+          "affected_scope": {
+            "type": "string",
+            "title": "Affected Scope",
+            "description": "Description of affected targets and scope",
+            "default": ""
           },
           "reversible": {
             "type": "boolean",
             "title": "Reversible",
+            "description": "Whether the action can be rolled back",
             "default": true
+          },
+          "business_disruption": {
+            "$ref": "#/components/schemas/BusinessDisruption",
+            "description": "none | low | medium | high",
+            "default": "none"
+          },
+          "assessment_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assessment Detail",
+            "description": "Human-readable assessment rationale"
           },
           "affected_entity_count": {
             "type": "integer",
@@ -3624,17 +3667,6 @@
             },
             "type": "array",
             "title": "Affected Targets"
-          },
-          "notes": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Notes"
           },
           "assessed_by": {
             "anyOf": [
@@ -3650,8 +3682,11 @@
         },
         "additionalProperties": false,
         "type": "object",
+        "required": [
+          "action_id"
+        ],
         "title": "ImpactAssessment",
-        "description": "Estimated blast radius / reversibility of an action (detailed in ISSUE-079)."
+        "description": "Estimated blast radius / reversibility of an action (ISSUE-079).\n\nFields match the ISSUE-079 unified naming:\n- ``impact_score``: 0-100, base (action_level) + asset bonus, capped at 100\n- ``business_disruption``: none / low / medium / high\n- ``reversible``: per rollback mapping (e.g. force_logout → False)"
       },
       "IngestSourceRecordRequest": {
         "properties": {

@@ -100,6 +100,10 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             fp_match = None
         final_verdict = await self._resolve_final_verdict(input.event_id)
 
+        impact_assessments = await self._read_optional(input.event_id, "impact_assessments")
+        if not isinstance(impact_assessments, list):
+            impact_assessments = None
+
         draft_sections = self.section_builder.build(
             event_id=input.event_id,
             evidence_output=input.evidence_output,
@@ -112,6 +116,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             false_positive_match=fp_match,
             escalated=input.escalated,
             replan_count=input.replan_count,
+            impact_assessments=impact_assessments,
         )
         title = self.section_builder.default_title(triage, input.event_id)
         summary = self.section_builder.default_summary(

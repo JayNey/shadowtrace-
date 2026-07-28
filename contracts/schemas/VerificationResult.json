@@ -68,6 +68,34 @@
           ],
           "default": null,
           "title": "Detail"
+        },
+        "verification_action_dirty": {
+          "default": false,
+          "title": "Verification Action Dirty",
+          "type": "boolean"
+        },
+        "verification_phase": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VerificationPhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "confirmation_evidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmation Evidence"
         }
       },
       "required": [
@@ -179,6 +207,18 @@
     },
     "verification_phase": {
       "$ref": "#/$defs/VerificationPhase"
+    },
+    "wm_persisted": {
+      "default": false,
+      "title": "Wm Persisted",
+      "type": "boolean"
+    },
+    "publish_failures": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Publish Failures",
+      "type": "array"
     }
   },
   "required": [

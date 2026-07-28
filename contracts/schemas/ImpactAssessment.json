@@ -1,6 +1,7 @@
 {
   "$defs": {
     "BusinessDisruption": {
+      "description": "Business impact disruption level (ISSUE-079).",
       "enum": [
         "none",
         "low",
@@ -12,7 +13,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Estimated blast radius / reversibility of an action (ISSUE-079).",
+  "description": "Estimated blast radius / reversibility of an action (ISSUE-079).\n\nFields match the ISSUE-079 unified naming:\n- ``impact_score``: 0-100, base (action_level) + asset bonus, capped at 100\n- ``business_disruption``: none / low / medium / high\n- ``reversible``: per rollback mapping (e.g. force_logout → False)",
   "properties": {
     "action_id": {
       "title": "Action Id",
@@ -20,23 +21,23 @@
     },
     "impact_score": {
       "default": 0,
+      "description": "0-100 composite impact score",
       "maximum": 100,
       "minimum": 0,
       "title": "Impact Score",
-      "type": "integer",
-      "description": "0-100 composite impact score"
+      "type": "integer"
     },
     "affected_scope": {
       "default": "",
+      "description": "Description of affected targets and scope",
       "title": "Affected Scope",
-      "type": "string",
-      "description": "Description of affected targets and scope"
+      "type": "string"
     },
     "reversible": {
       "default": true,
+      "description": "Whether the action can be rolled back",
       "title": "Reversible",
-      "type": "boolean",
-      "description": "Whether the action can be rolled back"
+      "type": "boolean"
     },
     "business_disruption": {
       "$ref": "#/$defs/BusinessDisruption",
@@ -53,8 +54,8 @@
         }
       ],
       "default": null,
-      "title": "Assessment Detail",
-      "description": "Human-readable assessment rationale"
+      "description": "Human-readable assessment rationale",
+      "title": "Assessment Detail"
     },
     "affected_entity_count": {
       "default": 0,
@@ -81,7 +82,9 @@
       "title": "Assessed By"
     }
   },
-  "required": ["action_id"],
+  "required": [
+    "action_id"
+  ],
   "title": "ImpactAssessment",
   "type": "object"
 }

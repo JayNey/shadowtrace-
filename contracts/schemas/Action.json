@@ -48,6 +48,17 @@
       "title": "ActionStatus",
       "type": "string"
     },
+    "BusinessDisruption": {
+      "description": "Business impact disruption level (ISSUE-079).",
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high"
+      ],
+      "title": "BusinessDisruption",
+      "type": "string"
+    },
     "ExecutionOwner": {
       "enum": [
         "xdr_managed",
@@ -58,16 +69,49 @@
     },
     "ImpactAssessment": {
       "additionalProperties": false,
-      "description": "Estimated blast radius / reversibility of an action (detailed in ISSUE-079).",
+      "description": "Estimated blast radius / reversibility of an action (ISSUE-079).\n\nFields match the ISSUE-079 unified naming:\n- ``impact_score``: 0-100, base (action_level) + asset bonus, capped at 100\n- ``business_disruption``: none / low / medium / high\n- ``reversible``: per rollback mapping (e.g. force_logout → False)",
       "properties": {
-        "impact_level": {
-          "$ref": "#/$defs/Severity",
-          "default": "low"
+        "action_id": {
+          "title": "Action Id",
+          "type": "string"
+        },
+        "impact_score": {
+          "default": 0,
+          "description": "0-100 composite impact score",
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Impact Score",
+          "type": "integer"
+        },
+        "affected_scope": {
+          "default": "",
+          "description": "Description of affected targets and scope",
+          "title": "Affected Scope",
+          "type": "string"
         },
         "reversible": {
           "default": true,
+          "description": "Whether the action can be rolled back",
           "title": "Reversible",
           "type": "boolean"
+        },
+        "business_disruption": {
+          "$ref": "#/$defs/BusinessDisruption",
+          "default": "none",
+          "description": "none | low | medium | high"
+        },
+        "assessment_detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable assessment rationale",
+          "title": "Assessment Detail"
         },
         "affected_entity_count": {
           "default": 0,
@@ -80,18 +124,6 @@
           },
           "title": "Affected Targets",
           "type": "array"
-        },
-        "notes": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Notes"
         },
         "assessed_by": {
           "anyOf": [
@@ -106,18 +138,11 @@
           "title": "Assessed By"
         }
       },
+      "required": [
+        "action_id"
+      ],
       "title": "ImpactAssessment",
       "type": "object"
-    },
-    "Severity": {
-      "enum": [
-        "low",
-        "medium",
-        "high",
-        "critical"
-      ],
-      "title": "Severity",
-      "type": "string"
     },
     "SourceDisposition": {
       "description": "Normalized external disposition label; source_status_raw keeps the original.",
@@ -509,13 +534,14 @@
     "rollback_status": {
       "anyOf": [
         {
-          "$ref": "#/$defs/ActionStatus"
+          "type": "string"
         },
         {
           "type": "null"
         }
       ],
-      "default": null
+      "default": null,
+      "title": "Rollback Status"
     },
     "source_action_id": {
       "anyOf": [

@@ -564,6 +564,20 @@
       "title": "Actions",
       "type": "array"
     },
+    "writeback_counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Writeback Counts",
+      "type": "object"
+    },
+    "writeback_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Writeback Ids",
+      "type": "array"
+    },
     "writeback_summary": {
       "anyOf": [
         {

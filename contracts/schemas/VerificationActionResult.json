@@ -10,6 +10,14 @@
       "title": "EffectStatus",
       "type": "string"
     },
+    "VerificationPhase": {
+      "enum": [
+        "effect",
+        "disposition"
+      ],
+      "title": "VerificationPhase",
+      "type": "string"
+    },
     "WritebackReadiness": {
       "description": "Pre-submission condition; not an external receipt.",
       "enum": [
@@ -98,6 +106,34 @@
       ],
       "default": null,
       "title": "Detail"
+    },
+    "verification_action_dirty": {
+      "default": false,
+      "title": "Verification Action Dirty",
+      "type": "boolean"
+    },
+    "verification_phase": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/VerificationPhase"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "confirmation_evidence": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Confirmation Evidence"
     }
   },
   "required": [

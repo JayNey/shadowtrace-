@@ -631,6 +631,48 @@ def test_builder_preserves_section_order() -> None:
     assert [s.key for s in sections] == list(SECTION_KEYS)
 
 
+def test_report_includes_impact_assessment_hint() -> None:
+    """ISSUE-079: recommendations reference high-impact assessments from context."""
+    builder = ReportSectionBuilder()
+    event_id = "evt-impact-hint"
+    action = Action(
+        action_id="act-isolate-dc",
+        event_id=event_id,
+        plan_revision=1,
+        action_fingerprint="fp-isolate",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Isolate Host",
+        tool_name="isolate_host",
+        action_level=ActionLevel.L4,
+        target="10.0.0.10",
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+    )
+    response_plan = ResponsePlan(
+        plan_id="plan-impact",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        actions=[action],
+    )
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=_main_evidence(event_id),
+        risk_assessment=_high_risk(),
+        triage_result=_main_triage(),
+        response_plan=response_plan,
+        impact_assessments=[
+            {
+                "action_id": "act-isolate-dc",
+                "impact_score": 90,
+                "business_disruption": "high",
+                "affected_scope": "tool=isolate_host",
+                "reversible": True,
+            }
+        ],
+    )
+    recommendations = next(section for section in sections if section.key == "recommendations")
+    assert "高影响处置复核" in recommendations.content
+    assert "isolate_host" in recommendations.content
+
+
 def test_builder_includes_human_escalation_note() -> None:
     """ISSUE-062 acceptance: escalated events must carry human-escalation text."""
     builder = ReportSectionBuilder()

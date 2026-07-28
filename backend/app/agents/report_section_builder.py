@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from app.models.action import Action
+from app.models.action import Action, ImpactAssessment
 from app.models.agent_io import (
     EvidenceOutput,
     ResponsePlan,
@@ -73,6 +73,7 @@ class ReportSectionBuilder:
         content_sha256: str | None = None,
         escalated: bool = False,
         replan_count: int = 0,
+        impact_assessments: list[ImpactAssessment] | list[dict[str, Any]] | None = None,
     ) -> list[ReportSection]:
         # Prefer triage entities; otherwise derive labels from evidence raw/related.
         account_lines, asset_lines, process_lines, file_lines, external_lines = self._entity_lines(
@@ -111,6 +112,7 @@ class ReportSectionBuilder:
             false_positive_match=false_positive_match,
             escalated=escalated,
             replan_count=replan_count,
+            impact_assessments=impact_assessments,
         )
         appendix = self._appendix(
             event_id=event_id,
@@ -443,6 +445,46 @@ class ReportSectionBuilder:
             )
         return "\n".join(lines)
 
+    def _impact_assessment_hints(
+        self,
+        response_actions: list[Action],
+        impact_assessments: list[ImpactAssessment] | list[dict[str, Any]] | None,
+    ) -> list[str]:
+        if not impact_assessments or not response_actions:
+            return []
+
+        by_action_id: dict[str, dict[str, Any]] = {}
+        for item in impact_assessments:
+            if isinstance(item, ImpactAssessment):
+                payload = item.model_dump(mode="json")
+            elif isinstance(item, dict):
+                payload = item
+            else:
+                continue
+            action_id = payload.get("action_id")
+            if isinstance(action_id, str) and action_id:
+                by_action_id[action_id] = payload
+
+        hints: list[str] = []
+        for action in response_actions:
+            payload = by_action_id.get(action.action_id)
+            if payload is None:
+                continue
+            level = action.action_level.value if action.action_level else ""
+            disruption = str(payload.get("business_disruption", "")).lower()
+            score = payload.get("impact_score", 0)
+            if level in {"l4", "l5"} and disruption == "high":
+                target = action.target or "-"
+                hints.append(
+                    "高影响处置复核："
+                    f"{action.tool_name}（target={target}）"
+                    f" impact_score={score}、business_disruption=high，"
+                    "建议人工复核后再执行。"
+                )
+            if len(hints) >= 2:
+                break
+        return hints
+
     def _recommendations(
         self,
         *,
@@ -452,8 +494,10 @@ class ReportSectionBuilder:
         false_positive_match: dict[str, Any] | None = None,
         escalated: bool = False,
         replan_count: int = 0,
+        impact_assessments: list[ImpactAssessment] | list[dict[str, Any]] | None = None,
     ) -> str:
         tips: list[str] = []
+        tips.extend(self._impact_assessment_hints(response_actions, impact_assessments))
         if escalated:
             tips.append(
                 "人工升级：自动重规划已达上限（"
@@ -486,7 +530,7 @@ class ReportSectionBuilder:
         if not response_actions:
             tips.append("当前无 RESPONSE 处置动作；确认 disposition_policy 后再规划。")
         tips.append("报告仅存 ShadowTrace 本地，禁止写入 DispositionCommand。")
-        # Keep 3–5 recommendations.
+        # Keep 3–5 recommendations (impact hints may consume slots first).
         return "\n".join(f"{idx}. {tip}" for idx, tip in enumerate(tips[:5], start=1))
 
     def _appendix(
