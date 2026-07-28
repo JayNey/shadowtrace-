@@ -67,6 +67,9 @@ export const AGENT_STATUS_COLORS: Record<AgentStatus, string> = {
   DEGRADED: "#fa8c16",
 };
 
+/** Silence window: poll traces when no agent_* arrives (false "connected"). */
+export const AGENT_SOCKET_SILENCE_MS = 10_000;
+
 /* ------------------------------------------------------------------ */
 /*  Per-agent info                                                    */
 /* ------------------------------------------------------------------ */
@@ -104,12 +107,29 @@ function defaultAgentMap(): Record<AgentName, AgentStatusInfo> {
   return map;
 }
 
-/** True when live socket traffic is driving the panel — traces must not clobber. */
-function shouldProtectLiveSocketState(
+/** True when a recent agent_* socket event is driving the panel. */
+export function hasFreshAgentSocketTraffic(
+  lastAgentEventAt: number,
+  now = Date.now(),
+): boolean {
+  return lastAgentEventAt > 0 && now - lastAgentEventAt < AGENT_SOCKET_SILENCE_MS;
+}
+
+/**
+ * Protect live socket UI from traces overwrite only while agent traffic is fresh.
+ * Transport-connected but silent sockets must NOT block poll / replay (ISSUE-075).
+ */
+export function shouldProtectLiveSocketState(
   isInvestigating: boolean,
   connected: boolean,
+  lastAgentEventAt: number,
+  now = Date.now(),
 ): boolean {
-  return isInvestigating && connected;
+  return (
+    isInvestigating &&
+    connected &&
+    hasFreshAgentSocketTraffic(lastAgentEventAt, now)
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -163,6 +183,9 @@ interface AgentStatusState {
   /** Whether socket is currently connected. */
   socketConnected: boolean;
 
+  /** Epoch ms of last agent_progress / completed / failed (0 = none). */
+  lastAgentEventAt: number;
+
   /** Poll fallback interval id. */
   pollTimer: ReturnType<typeof setInterval> | null;
   /** Socket unsubscribe function. */
@@ -197,6 +220,7 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
   feed: [],
   isInvestigating: false,
   socketConnected: false,
+  lastAgentEventAt: 0,
   pollTimer: null,
   socketUnsub: null,
 
@@ -217,9 +241,10 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
       feed: [],
       isInvestigating: false,
       socketConnected: false,
+      lastAgentEventAt: 0,
     });
 
-    // Connect socket and subscribe; sync connectivity immediately (avoid false 降级 tag).
+    // Connect then subscribe (subscribe queues until transport is up).
     socketClient.connect();
     socketClient.subscribe(eventId);
     set({ socketConnected: socketClient.isConnected });
@@ -227,7 +252,7 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
     const unsub = socketClient.onEvent((evt) => {
       if (evt.event_id !== eventId) return;
       if (evt.type === "agent_progress") {
-        set({ isInvestigating: true, socketConnected: true });
+        set({ socketConnected: true });
         get().applyAgentProgress(
           evt.payload as unknown as SocketAgentProgressPayload,
         );
@@ -259,14 +284,21 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
     // Immediate traces snapshot (history replay / socket-down bootstrap).
     void get().pollTraces(eventId);
 
-    // Poll fallback every 10s when socket is unavailable (ISSUE-075 降级).
+    // Poll when disconnected OR connected-but-silent (schema-drop / stall).
     const timer = setInterval(() => {
       const connected = socketClient.isConnected;
+      const { isInvestigating, lastAgentEventAt } = get();
       set({ socketConnected: connected });
-      if (!connected) {
+      if (
+        !shouldProtectLiveSocketState(
+          isInvestigating,
+          connected,
+          lastAgentEventAt,
+        )
+      ) {
         void get().pollTraces(eventId);
       }
-    }, 10_000);
+    }, AGENT_SOCKET_SILENCE_MS);
 
     set({ socketUnsub: unsub, pollTimer: timer });
   },
@@ -287,14 +319,10 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
     const agentName = payload.agent_name as AgentName;
     if (!ALL_AGENT_NAMES.includes(agentName)) return;
 
-    const message =
-      payload.message ??
-      payload.phase ??
-      "处理中…";
+    // Contract primary field is progress_pct; ISSUE-075 also allows progress_percent.
+    const message = payload.message ?? payload.phase ?? "处理中…";
     const progress =
-      payload.progress_percent ??
-      payload.progress_pct ??
-      null;
+      payload.progress_percent ?? payload.progress_pct ?? null;
 
     set((state) => ({
       agents: {
@@ -304,11 +332,13 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
           status: "PROCESSING" as AgentStatus,
           message: message,
           progress_percent: progress,
-          started_at: state.agents[agentName].started_at ?? new Date().toISOString(),
+          started_at:
+            state.agents[agentName].started_at ?? new Date().toISOString(),
         },
       },
       feed: pushFeedEntry(state.feed, agentName, message),
       isInvestigating: true,
+      lastAgentEventAt: Date.now(),
     }));
   },
 
@@ -316,9 +346,7 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
     const agentName = payload.agent_name as AgentName;
     if (!ALL_AGENT_NAMES.includes(agentName)) return;
 
-    const message =
-      payload.output_summary ??
-      "执行完成";
+    const message = payload.output_summary ?? "执行完成";
 
     set((state) => {
       const prev = state.agents[agentName];
@@ -327,7 +355,9 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
           ...state.agents,
           [agentName]: {
             ...prev,
-            status: payload.degraded ? "DEGRADED" : ("COMPLETED" as AgentStatus),
+            status: payload.degraded
+              ? "DEGRADED"
+              : ("COMPLETED" as AgentStatus),
             message: message,
             progress_percent: 100,
             completed_at: new Date().toISOString(),
@@ -336,6 +366,7 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
           },
         },
         feed: pushFeedEntry(state.feed, agentName, message),
+        lastAgentEventAt: Date.now(),
       };
     });
   },
@@ -344,7 +375,8 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
     const agentName = payload.agent_name as AgentName;
     if (!ALL_AGENT_NAMES.includes(agentName)) return;
 
-    const error = payload.error_detail ?? payload.error ?? "执行失败";
+    // Contract primary field is `error`; accept error_detail as alias.
+    const error = payload.error ?? payload.error_detail ?? "执行失败";
 
     set((state) => {
       const prev = state.agents[agentName];
@@ -360,7 +392,8 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
             error_detail: error,
           },
         },
-        feed: pushFeedEntry(state.feed, agentName, `❌ ${error}`),
+        feed: pushFeedEntry(state.feed, agentName, error),
+        lastAgentEventAt: Date.now(),
       };
     });
   },
@@ -370,11 +403,12 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
   replayFromTraces(traces: AgentTrace[]) {
     if (!traces || traces.length === 0) return;
 
-    // Never overwrite live socket-driven status with a stale/delayed traces snapshot.
+    // Never overwrite fresh live socket-driven status with a delayed HTTP snapshot.
     if (
       shouldProtectLiveSocketState(
         get().isInvestigating,
         socketClient.isConnected || get().socketConnected,
+        get().lastAgentEventAt,
       )
     ) {
       return;
@@ -433,15 +467,20 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
       });
     }
 
-    set({ agents, feed: feed.slice(-MAX_FEED_ENTRIES), isInvestigating: false });
+    set({
+      agents,
+      feed: feed.slice(-MAX_FEED_ENTRIES),
+      isInvestigating: false,
+    });
   },
 
   async pollTraces(eventId: string) {
-    // Skip while live socket investigation owns the panel (race with delayed HTTP).
+    // Skip while fresh live socket investigation owns the panel.
     if (
       shouldProtectLiveSocketState(
         get().isInvestigating,
         socketClient.isConnected || get().socketConnected,
+        get().lastAgentEventAt,
       )
     ) {
       return;
@@ -463,6 +502,7 @@ export const useAgentStatusStore = create<AgentStatusState>((set, get) => ({
       feed: [],
       isInvestigating: false,
       socketConnected: false,
+      lastAgentEventAt: 0,
     });
   },
 }));

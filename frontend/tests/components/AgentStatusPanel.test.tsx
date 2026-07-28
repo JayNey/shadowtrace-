@@ -78,7 +78,11 @@ describe("AgentStatusPanel", () => {
     mockGetTraces.mockResolvedValue({ data: { items: [], total: 0, page: 1, page_size: 50 } });
     act(() => {
       useAgentStatusStore.getState().reset();
-      useAgentStatusStore.setState({ pollTimer: null, socketUnsub: null });
+      useAgentStatusStore.setState({
+        pollTimer: null,
+        socketUnsub: null,
+        lastAgentEventAt: 0,
+      });
     });
   });
 
@@ -230,7 +234,38 @@ describe("AgentStatusPanel", () => {
     expect(useAgentStatusStore.getState().isInvestigating).toBe(true);
   });
 
-  it("polls traces every 10s only when socket is disconnected", async () => {
+  it("polls traces every 10s when socket is disconnected", async () => {
+    vi.useFakeTimers();
+    connected = true;
+    mockGetTraces.mockResolvedValue({
+      data: { items: [], total: 0, page: 1, page_size: 50 },
+    });
+
+    render(
+      <AgentStatusPanel eventId="evt-75" eventStatus="analyzing" traces={[]} />,
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // Connected + silent: first interval also polls (false-connected 降级).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    const callsWhileConnectedSilent = mockGetTraces.mock.calls.length;
+    expect(callsWhileConnectedSilent).toBeGreaterThanOrEqual(2);
+
+    connected = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(mockGetTraces.mock.calls.length).toBe(
+      callsWhileConnectedSilent + 1,
+    );
+    expect(useAgentStatusStore.getState().socketConnected).toBe(false);
+  });
+
+  it("polls traces when socket is connected but no agent events arrive", async () => {
     vi.useFakeTimers();
     connected = true;
     mockGetTraces.mockResolvedValue({
@@ -245,19 +280,91 @@ describe("AgentStatusPanel", () => {
       await Promise.resolve();
     });
     const callsAfterStart = mockGetTraces.mock.calls.length;
-    expect(callsAfterStart).toBeGreaterThanOrEqual(1);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
-    });
-    expect(mockGetTraces.mock.calls.length).toBe(callsAfterStart);
-
-    connected = false;
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
     });
     expect(mockGetTraces.mock.calls.length).toBe(callsAfterStart + 1);
-    expect(useAgentStatusStore.getState().socketConnected).toBe(false);
+  });
+
+  it("does not poll within silence window after live agent socket events", async () => {
+    vi.useFakeTimers();
+    connected = true;
+    mockGetTraces.mockResolvedValue({
+      data: { items: [], total: 0, page: 1, page_size: 50 },
+    });
+
+    render(
+      <AgentStatusPanel eventId="evt-75" eventStatus="analyzing" traces={[]} />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(socketHandler).toBeDefined();
+
+    emitSocket("agent_progress", {
+      agent_name: "triage_agent",
+      phase: "running",
+      message: "live",
+      progress_pct: 20,
+    });
+
+    // Refresh traffic mid-window so the 10s interval still sees fresh agent_*.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    emitSocket("agent_progress", {
+      agent_name: "triage_agent",
+      phase: "running",
+      message: "still live",
+      progress_pct: 40,
+    });
+    const callsAfterLive = mockGetTraces.mock.calls.length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    // Interval at ~10s: last agent event ~5s ago → still fresh → no poll.
+    expect(mockGetTraces.mock.calls.length).toBe(callsAfterLive);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    // Interval at ~20s: last agent event ~15s ago → silent → poll.
+    expect(mockGetTraces.mock.calls.length).toBeGreaterThan(callsAfterLive);
+  });
+
+  it("accepts contract-shaped progress_pct and error fields", async () => {
+    render(
+      <AgentStatusPanel eventId="evt-75" eventStatus="analyzing" traces={[]} />,
+    );
+    await waitFor(() => expect(socketHandler).toBeDefined());
+
+    emitSocket("agent_progress", {
+      agent_name: "triage_agent",
+      phase: "analyzing",
+      message: "Extracting IOCs...",
+      progress_pct: 50,
+    });
+    expect(
+      screen.getByTestId("agent-card-triage_agent"),
+    ).toHaveAttribute("data-status", "PROCESSING");
+    expect(screen.getAllByText("Extracting IOCs...").length).toBeGreaterThanOrEqual(
+      1,
+    );
+
+    emitSocket("agent_failed", {
+      agent_name: "evidence_agent",
+      error: "LLM timeout after 3 retries",
+      error_code: "llm_timeout",
+      retryable: true,
+    });
+    expect(
+      screen.getByTestId("agent-card-evidence_agent"),
+    ).toHaveAttribute("data-status", "FAILED");
+    expect(screen.getByTestId("agent-activity-feed").textContent).toContain(
+      "LLM timeout after 3 retries",
+    );
   });
 
   it("replays historical status from traces on closed events", async () => {

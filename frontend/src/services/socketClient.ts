@@ -13,6 +13,8 @@ class SocketClient {
   private handlers: Set<EventHandler> = new Set();
   private connected = false;
   private envelopeListenerAttached = false;
+  /** Event rooms to (re)join once the transport is up. */
+  private pendingEventIds = new Set<string>();
 
   /** Connect to /events namespace. Safe to call multiple times (dedup). */
   connect(): void {
@@ -32,6 +34,7 @@ class SocketClient {
         });
         this.socket.on("connect", () => {
           this.connected = true;
+          this.flushSubscriptions();
         });
         this.socket.on("disconnect", () => {
           this.connected = false;
@@ -59,15 +62,29 @@ class SocketClient {
     this.socket?.disconnect();
     this.socket = null;
     this.connected = false;
+    this.pendingEventIds.clear();
   }
 
   get isConnected(): boolean {
     return this.connected;
   }
 
-  /** Subscribe to a specific event room (ISSUE-040 subscribe handler). */
+  /**
+   * Subscribe to a specific event room (ISSUE-040).
+   * Queues until connected so callers need not wait for the handshake.
+   */
   subscribe(eventId: string): void {
-    this.socket?.emit("subscribe", { event_id: eventId });
+    this.pendingEventIds.add(eventId);
+    if (this.socket?.connected) {
+      this.socket.emit("subscribe", { event_id: eventId });
+    }
+  }
+
+  private flushSubscriptions(): void {
+    if (!this.socket?.connected) return;
+    for (const eventId of this.pendingEventIds) {
+      this.socket.emit("subscribe", { event_id: eventId });
+    }
   }
 
   onEvent(handler: EventHandler): () => void {
