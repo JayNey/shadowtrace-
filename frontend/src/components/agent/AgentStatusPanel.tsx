@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Col, Collapse, Row, Space, Tag, Typography } from "antd";
 import {
   ALL_AGENT_NAMES,
+  shouldProtectLiveSocketState,
   useAgentStatusStore,
 } from "../../stores/agentStatusStore";
 import type { AgentTrace } from "../../types/trace";
@@ -42,6 +43,7 @@ export default function AgentStatusPanel({
   const feed = useAgentStatusStore((s) => s.feed);
   const isInvestigating = useAgentStatusStore((s) => s.isInvestigating);
   const socketConnected = useAgentStatusStore((s) => s.socketConnected);
+  const lastAgentEventAt = useAgentStatusStore((s) => s.lastAgentEventAt);
   const startWatching = useAgentStatusStore((s) => s.startWatching);
   const stopWatching = useAgentStatusStore((s) => s.stopWatching);
   const replayFromTraces = useAgentStatusStore((s) => s.replayFromTraces);
@@ -71,12 +73,27 @@ export default function AgentStatusPanel({
   }, [eventId, startWatching, stopWatching]);
 
   // Page-load history replay from traces (closed / mid-flight summary).
-  // Skip overwrite while live socket investigation is driving the panel.
+  // Skip overwrite only while fresh agent_* traffic owns the panel.
   useEffect(() => {
     if (traces.length === 0) return;
-    if (isInvestigating && socketConnected) return;
+    if (
+      shouldProtectLiveSocketState(
+        isInvestigating,
+        socketConnected,
+        lastAgentEventAt,
+      )
+    ) {
+      return;
+    }
     replayFromTraces(traces);
-  }, [eventId, traces, replayFromTraces, isInvestigating, socketConnected]);
+  }, [
+    eventId,
+    traces,
+    replayFromTraces,
+    isInvestigating,
+    socketConnected,
+    lastAgentEventAt,
+  ]);
 
   // Expand while investigating; collapse after CLOSED.
   useEffect(() => {

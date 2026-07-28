@@ -373,3 +373,53 @@ async def test_agent_wrong_input_type_raises_before_trace() -> None:
             await agent.execute(input)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_base_agent_socket_payloads_pass_events_schema() -> None:
+    """BaseAgent agent_* payloads must validate against Socket.IO contract (ISSUE-075).
+
+    SocketIOManager drops envelopes that fail ``events.schema.json``; incomplete
+    payloads (missing phase/message/output_summary/error) make the live panel dead.
+    """
+    import json
+
+    import jsonschema
+
+    schema_path = BACKEND_DIR.parent / "contracts" / "socketio" / "events.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    published: list[tuple[str, dict[str, Any]]] = []
+
+    class _CapturingBus:
+        async def publish_event(
+            self,
+            event_id: str,
+            message_type: str,
+            payload: dict[str, Any] | None = None,
+        ) -> bool:
+            published.append((message_type, dict(payload or {})))
+            return True
+
+    event_id = "evt-20260728-abcd1234"
+    bus = _CapturingBus()
+
+    await _FakeSuccessAgent(event_bus=bus).execute(TriageAgentInput(event_id=event_id))
+    with pytest.raises(RuntimeError, match="simulated agent crash"):
+        await _FakeFailingAgent(event_bus=bus).execute(TriageAgentInput(event_id=event_id))
+
+    assert [t for t, _ in published] == [
+        "agent_progress",
+        "agent_completed",
+        "agent_progress",
+        "agent_failed",
+    ]
+
+    for message_type, payload in published:
+        envelope = {
+            "type": message_type,
+            "event_id": event_id,
+            "sequence": 1,
+            "timestamp": "2026-07-28T10:00:00Z",
+            "payload": payload,
+        }
+        jsonschema.validate(instance=envelope, schema=schema)

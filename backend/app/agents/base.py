@@ -170,6 +170,12 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
             )
 
     async def _publish_agent_progress(self, input: TIn) -> None:
+        """Publish ``agent_progress`` with Socket.IO contract fields (ISSUE-040/075).
+
+        Payload must satisfy ``contracts/socketio/events.schema.json``
+        ``AgentProgressPayload`` (required: agent_name, phase, message;
+        ``additionalProperties: false``) or SocketIOManager drops the event.
+        """
         if self.event_bus is None:
             return
         try:
@@ -178,7 +184,8 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
                 "agent_progress",
                 {
                     "agent_name": self.agent_name,
-                    "status": "processing",
+                    "phase": "running",
+                    "message": f"{self.agent_name} processing",
                 },
             )
         except Exception:
@@ -190,6 +197,7 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
             )
 
     async def _publish_agent_completed(self, input: TIn) -> None:
+        """Publish ``agent_completed`` with required ``output_summary`` (schema)."""
         if self.event_bus is None:
             return
         try:
@@ -198,6 +206,7 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
                 "agent_completed",
                 {
                     "agent_name": self.agent_name,
+                    "output_summary": f"{self.agent_name} completed",
                 },
             )
         except Exception:
@@ -209,6 +218,7 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
             )
 
     async def _publish_agent_failed(self, input: TIn, error_detail: str) -> None:
+        """Publish ``agent_failed`` with required ``error`` (schema; not error_detail)."""
         if self.event_bus is None:
             return
         try:
@@ -217,7 +227,7 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
                 "agent_failed",
                 {
                     "agent_name": self.agent_name,
-                    "error_detail": redact_sensitive_text(error_detail),
+                    "error": redact_sensitive_text(error_detail),
                 },
             )
         except Exception:
