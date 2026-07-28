@@ -408,7 +408,6 @@ def _low_confidence_risk() -> RiskAssessment:
         risk_score=78,
         confidence=0.72,
         severity=Severity.HIGH,
-        final_verdict=FinalVerdict.CONFIRMED_THREAT,
         scoring_mode=ScoringMode.LLM_AND_RULE,
     )
 
@@ -454,6 +453,7 @@ async def _submit_entity_action_once(
                 source_concurrency_token=token,
                 operator_id=operator,
                 disposition_id=disposition_id,
+                writeback_id="pending",
                 closure_cycle=int(action.plan_revision),
                 entity_action_code=entity_action_code,
             )
