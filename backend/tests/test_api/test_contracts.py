@@ -18,6 +18,7 @@ from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
 from app.api.v1.deps import get_event_service as _real_get_event_service
 from app.api.v1.deps import get_state_machine as _real_get_state_machine
 from app.api.v1.errors import register_exception_handlers
+from app.core.config import get_settings
 from app.core.errors import (
     EventNotFoundError,
     WritebackConflictError,
@@ -25,7 +26,6 @@ from app.core.errors import (
 from app.core.errors import (
     ValidationError as DomainValidationError,
 )
-from app.core.config import get_settings
 from app.main import app
 from app.models.context import EventContext
 from app.models.disposition import DispositionCommand

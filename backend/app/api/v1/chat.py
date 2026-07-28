@@ -6,7 +6,8 @@ import logging
 from typing import Annotated, Any, Protocol
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, ConfigDict, Field, ValidationError as PydanticValidationError
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
 from app.api.v1.deps import _get_investigation_stack, get_event_service
 from app.api.v1.errors import EventNotFoundError, ResourceNotFoundError

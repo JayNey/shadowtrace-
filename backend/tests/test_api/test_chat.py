@@ -14,9 +14,8 @@ from app.api.v1 import create_api_router
 from app.api.v1.chat import get_event_qa_service
 from app.api.v1.deps import get_event_service
 from app.core.auth import Principal, get_principal
-from app.core.llm.base import InMemoryLLMCallAuditRecorder
+from app.core.llm.base import InMemoryLLMCallAuditRecorder, LLMInvalidJSONError, LLMProviderError
 from app.core.llm.mock_client import MockLLMClient
-from app.core.llm.base import LLMInvalidJSONError, LLMProviderError
 from app.main import app
 from app.services.event_qa_service import (
     ChatAnswer,
