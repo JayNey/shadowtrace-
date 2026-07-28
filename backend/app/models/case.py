@@ -35,6 +35,14 @@ class HistoryCase(BaseModel):
     risk_score: int = Field(default=0, ge=0, le=100)
     resolution: str = Field(..., description="How the case was resolved / closed")
     closed_at: datetime | str | None = Field(default=None, description="ISO-8601 case closure time")
+    successful_response: bool = Field(
+        default=False,
+        description="True only when action effect and required writeback were verified",
+    )
+    response_outcomes: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Preserved action effect/writeback outcomes",
+    )
 
 
 def make_chunk_id(kb_name: str, case_id: str) -> str:
@@ -96,4 +104,6 @@ def history_case_metadata(case: HistoryCase) -> dict[str, Any]:
         "closed_at": (
             case.closed_at.isoformat() if isinstance(case.closed_at, datetime) else case.closed_at
         ),
+        "successful_response": case.successful_response,
+        "response_outcomes": case.response_outcomes,
     }

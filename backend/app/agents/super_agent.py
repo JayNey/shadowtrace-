@@ -36,6 +36,8 @@ from app.models.agent_io import (
     EvidenceOutput,
     ExecutionPlan,
     GraphOutput,
+    InvestigationResult,
+    MemoryAgentInput,
     PlanStep,
     RAGOutput,
     ReportAgentInput,
@@ -226,10 +228,13 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         react_enabled: bool = False,
         trace_service: Any | None = None,
         investigation_graph: Any | None = None,
+        memory_agent: _AgentProtocol | None = None,
+        audit_service: Any | None = None,
     ) -> None:
         super().__init__(
             working_memory=working_memory,
             trace_service=trace_service,
+            audit_service=audit_service,
             event_bus=event_bus,
         )
         self.triage_agent = triage_agent
@@ -247,7 +252,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         self.convergence_guard = convergence_guard
         self.react_enabled = react_enabled
         self._investigation_graph = investigation_graph
+        self.memory_agent = memory_agent
         self._transition_failures: dict[str, list[dict[str, Any]]] = {}
+        self._memory_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------ #
     # Public entry point
@@ -353,6 +360,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 ec = final_state.get("event_context", event_context)
             await self._persist_event_context(ec)
             await self._persist_analysis_only_complete(event_id)
+            await self._schedule_memory_after_close(event_id, ec)
 
             if lifecycle_started:
                 duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
@@ -1272,6 +1280,73 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 exc_info=True,
             )
 
+    async def _schedule_memory_after_close(
+        self,
+        event_id: str,
+        context: EventContext,
+    ) -> asyncio.Task[None] | None:
+        """Refresh the complete snapshot, then start non-blocking consolidation."""
+        if (
+            self.memory_agent is None
+            or self.context_store is None
+            or context.event is None
+            or context.event.status is not EventStatus.CLOSED
+        ):
+            return None
+        try:
+            refreshed = await self.context_store.refresh_closed_snapshot(event_id)
+        except Exception as exc:
+            await self._record_memory_failure(event_id, exc)
+            return None
+
+        task = asyncio.create_task(
+            self._run_memory_after_close(event_id, refreshed),
+            name=f"memory:{event_id}",
+        )
+        self._memory_tasks.add(task)
+        task.add_done_callback(self._memory_tasks.discard)
+        return task
+
+    async def _run_memory_after_close(self, event_id: str, context: EventContext) -> None:
+        """Best-effort background hook; knowledge failures never reopen the event."""
+        memory_agent = self.memory_agent
+        context_store = self.context_store
+        if memory_agent is None or context_store is None:
+            return
+        try:
+            result = _investigation_result_from_context(context)
+            await memory_agent.execute(
+                MemoryAgentInput(
+                    event_id=event_id,
+                    investigation_result=result,
+                )
+            )
+            await context_store.refresh_closed_snapshot(event_id)
+        except Exception as exc:
+            await self._record_memory_failure(event_id, exc)
+
+    async def _record_memory_failure(self, event_id: str, exc: Exception) -> None:
+        logger.warning(
+            "SuperAgent: MemoryAgent failed after close event=%s",
+            event_id,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        if self.audit_service is not None:
+            try:
+                await self.audit_service.log_transition(
+                    event_id,
+                    EventStatus.CLOSED.value,
+                    EventStatus.CLOSED.value,
+                    "MemoryAgent",
+                    f"memory_agent_failed:{type(exc).__name__}:{exc}",
+                )
+            except Exception:
+                logger.warning(
+                    "SuperAgent: failed to audit MemoryAgent error event=%s",
+                    event_id,
+                    exc_info=True,
+                )
+
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -1327,6 +1402,31 @@ def _event_id_from_context(ec: EventContext) -> str:
     if ec.event is not None:
         return ec.event.event_id
     return "unknown"
+
+
+def _investigation_result_from_context(context: EventContext) -> InvestigationResult:
+    event = context.event
+    if event is None:
+        raise ValueError("EventContext.event is required for MemoryAgent")
+    writeback = context.writeback_summary
+    readiness = (
+        writeback.aggregate_readiness if writeback is not None else event.writeback_readiness
+    )
+    overall = event.writeback_overall_status
+    if writeback is not None:
+        overall = writeback.aggregate_status
+    return InvestigationResult(
+        event_id=event.event_id,
+        final_status=event.status,
+        final_verdict=event.final_verdict,
+        escalated=event.escalated,
+        external_unsynced=event.external_unsynced,
+        report_id=context.report.report_id if context.report is not None else None,
+        writeback_required=event.writeback_required,
+        writeback_readiness=readiness,
+        writeback_overall_status=overall,
+        pending_writeback_ids=[],
+    )
 
 
 def _current_status_from_context(ec: EventContext) -> EventStatus | None:

@@ -6,6 +6,7 @@ import json
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -17,6 +18,8 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import Settings
 from app.core.embedding.service import EmbeddingService
+from app.db import models as orm
+from app.db.orm.knowledge import KnowledgeChunkORM
 from app.models.case import (
     FalsePositiveCase,
     HistoryCase,
@@ -95,6 +98,65 @@ def case_kb_service(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> CaseKBService:
     return CaseKBService(knowledge_store, session_factory)
+
+
+async def _seed_closed_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    final_verdict: str = "confirmed_threat",
+    severity: str = "high",
+    risk_score: int = 75,
+    disposition_policy: str = "required",
+    external_unsynced: bool = False,
+    with_report: bool = True,
+) -> str:
+    suffix = uuid4().hex[:8]
+    event_id = f"evt-memory-{suffix}"
+    async with session_factory() as session:
+        async with session.begin():
+            event = orm.SecurityEvent(
+                event_id=event_id,
+                event_type="data_exfiltration",
+                title=f"Memory archival {suffix}",
+                description="CaseKB admission policy test",
+                status="closed",
+                severity=severity,
+                risk_score=risk_score,
+                confidence=0.9,
+                final_verdict=final_verdict,
+                entities={"accounts": ["zhangsan"]},
+                creation_source_ref={"source_object_id": f"alert-{suffix}"},
+                disposition_policy=disposition_policy,
+                external_unsynced=external_unsynced,
+            )
+            session.add(event)
+            await session.flush()
+            if with_report:
+                session.add(
+                    orm.Report(
+                        report_id=f"rpt-{suffix}",
+                        event_id=event_id,
+                        title="Memory archival report",
+                        summary="Closed-case knowledge admission test.",
+                        final_verdict=final_verdict,
+                        risk_score=risk_score,
+                        severity=severity,
+                    )
+                )
+    return event_id
+
+
+async def _load_case_metadata(
+    session_factory: async_sessionmaker[AsyncSession],
+    case_id: str,
+) -> dict[str, object]:
+    async with session_factory() as session:
+        row = await session.get(
+            KnowledgeChunkORM,
+            make_chunk_id(HISTORY_KB_NAME, case_id),
+        )
+        assert row is not None
+        return dict(row.chunk_metadata)
 
 
 # ── Seed helpers ─────────────────────────────────────────────────────
@@ -557,3 +619,123 @@ class TestArchiveEventAsCase:
         """Archiving a non-existent event must raise ValueError."""
         with pytest.raises(ValueError, match="security_event not found"):
             await case_kb_service.archive_event_as_case("evt-nonexistent-ffff")
+
+    @pytest.mark.asyncio
+    async def test_archive_rejects_external_unsynced(
+        self,
+        case_kb_service: CaseKBService,
+        knowledge_store: KnowledgeStore,
+        session_factory: async_sessionmaker[AsyncSession],
+        clean_knowledge: None,
+    ) -> None:
+        event_id = await _seed_closed_event(
+            session_factory,
+            external_unsynced=True,
+        )
+
+        with pytest.raises(ValueError, match="not eligible"):
+            await case_kb_service.archive_event_as_case(event_id)
+
+        assert await knowledge_store.count(HISTORY_KB_NAME) == 0
+
+    @pytest.mark.asyncio
+    async def test_archive_rejects_event_without_report(
+        self,
+        case_kb_service: CaseKBService,
+        knowledge_store: KnowledgeStore,
+        session_factory: async_sessionmaker[AsyncSession],
+        clean_knowledge: None,
+    ) -> None:
+        event_id = await _seed_closed_event(
+            session_factory,
+            with_report=False,
+        )
+
+        with pytest.raises(ValueError, match="not eligible"):
+            await case_kb_service.archive_event_as_case(event_id)
+
+        assert await knowledge_store.count(HISTORY_KB_NAME) == 0
+
+    @pytest.mark.asyncio
+    async def test_archive_allows_low_risk_none_verdict(
+        self,
+        case_kb_service: CaseKBService,
+        session_factory: async_sessionmaker[AsyncSession],
+        clean_knowledge: None,
+    ) -> None:
+        event_id = await _seed_closed_event(
+            session_factory,
+            final_verdict="none",
+            severity="low",
+            risk_score=20,
+            disposition_policy="not_required",
+        )
+
+        case_id = await case_kb_service.archive_event_as_case(event_id)
+        metadata = await _load_case_metadata(session_factory, case_id)
+
+        assert metadata["event_id"] == event_id
+        assert metadata["final_verdict"] == "none"
+        assert metadata["successful_response"] is False
+
+    @pytest.mark.asyncio
+    async def test_successful_response_requires_all_verified_actions(
+        self,
+        case_kb_service: CaseKBService,
+        session_factory: async_sessionmaker[AsyncSession],
+        clean_knowledge: None,
+    ) -> None:
+        event_id = await _seed_closed_event(session_factory)
+        suffix = event_id.rsplit("-", 1)[-1]
+        successful_action_id = f"act-memory-ok-{suffix}"
+        pending_action_id = f"act-memory-pending-{suffix}"
+        async with session_factory() as session:
+            async with session.begin():
+                session.add_all(
+                    [
+                        orm.Action(
+                            action_id=successful_action_id,
+                            event_id=event_id,
+                            action_fingerprint=f"fp-memory-ok-{suffix}",
+                            action_category="response",
+                            action_name="block malicious IP",
+                            tool_name="block_ip",
+                            action_level="l2",
+                            effect_verification_status="verified",
+                            writeback_status="confirmed",
+                        ),
+                        orm.Action(
+                            action_id=pending_action_id,
+                            event_id=event_id,
+                            action_fingerprint=f"fp-memory-pending-{suffix}",
+                            action_category="response",
+                            action_name="disable account",
+                            tool_name="disable_account",
+                            action_level="l2",
+                            effect_verification_status="verified",
+                            writeback_status="accepted",
+                        ),
+                    ]
+                )
+
+        case_id = await case_kb_service.archive_event_as_case(event_id)
+        metadata = await _load_case_metadata(session_factory, case_id)
+        outcomes = {
+            str(item["action_id"]): item
+            for item in metadata["response_outcomes"]  # type: ignore[union-attr]
+        }
+        assert metadata["successful_response"] is False
+        assert outcomes[successful_action_id]["effect_status"] == "verified"
+        assert outcomes[successful_action_id]["writeback_status"] == "confirmed"
+        assert outcomes[successful_action_id]["successful_response"] is True
+        assert outcomes[pending_action_id]["successful_response"] is False
+
+        async with session_factory() as session:
+            async with session.begin():
+                pending = await session.get(orm.Action, pending_action_id)
+                assert pending is not None
+                pending.writeback_status = "confirmed"
+
+        await case_kb_service.archive_event_as_case(event_id)
+        refreshed = await _load_case_metadata(session_factory, case_id)
+        assert refreshed["successful_response"] is True

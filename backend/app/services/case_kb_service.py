@@ -15,7 +15,15 @@ from app.models.case import (
     history_case_to_text,
     make_chunk_id,
 )
-from app.models.enums import EventType, FinalVerdict
+from app.models.enums import (
+    DispositionIntentKind,
+    DispositionPolicy,
+    EventStatus,
+    EventType,
+    FinalVerdict,
+    Severity,
+    WritebackStatus,
+)
 from app.models.knowledge import KnowledgeChunk, RetrievedChunk
 from app.models.workflow import derive_case_label
 from app.services.knowledge_store import KnowledgeStore
@@ -92,11 +100,13 @@ class CaseKBService:
             if row is None:
                 raise ValueError(f"security_event not found: {event_id}")
 
+            report = await session.scalar(select(orm.Report).where(orm.Report.event_id == event_id))
+            if not _is_history_case_eligible(row, report):
+                raise ValueError(f"event is not eligible for history_case_kb: {event_id}")
+
             event_type = EventType(row.event_type)
             verdict = FinalVerdict(row.final_verdict)
             case_label = derive_case_label(verdict)
-
-            report = await session.scalar(select(orm.Report).where(orm.Report.event_id == event_id))
 
             summary = report.summary if report and report.summary else row.title
             resolution = (
@@ -114,6 +124,10 @@ class CaseKBService:
                     rendered = ",".join(_format_entity_item(v) for v in values)
                     entity_parts.append(f"{field}={rendered}")
             key_entities = "; ".join(entity_parts) if entity_parts else "none"
+            response_outcomes = await _load_response_outcomes(session, row)
+            successful_response = bool(response_outcomes) and all(
+                bool(item["successful_response"]) for item in response_outcomes
+            )
 
             history_case = HistoryCase(
                 case_id=case_id,
@@ -126,6 +140,8 @@ class CaseKBService:
                 risk_score=int(row.risk_score or 0),
                 resolution=resolution,
                 closed_at=row.closed_at or datetime.now(UTC),
+                successful_response=successful_response,
+                response_outcomes=response_outcomes,
             )
 
         content = history_case_to_text(history_case)
@@ -140,6 +156,91 @@ class CaseKBService:
         )
         await self._kb.upsert_chunks(HISTORY_KB_NAME, [chunk])
         return case_id
+
+
+def _is_history_case_eligible(event: orm.SecurityEvent, report: orm.Report | None) -> bool:
+    """Apply the closed-case admission policy before knowledge persistence."""
+    if event.status != EventStatus.CLOSED.value or report is None or event.external_unsynced:
+        return False
+    if event.final_verdict != FinalVerdict.NONE.value:
+        return True
+    return event.disposition_policy == DispositionPolicy.NOT_REQUIRED.value and (
+        event.severity == Severity.LOW.value or int(event.risk_score or 0) <= 30
+    )
+
+
+async def _load_response_outcomes(
+    session: AsyncSession,
+    event: orm.SecurityEvent,
+) -> list[dict[str, object]]:
+    actions = list(
+        await session.scalars(
+            select(orm.Action)
+            .where(
+                orm.Action.event_id == event.event_id,
+                orm.Action.action_category == "response",
+                orm.Action.superseded_by_revision.is_(None),
+            )
+            .order_by(orm.Action.created_at.asc(), orm.Action.action_id.asc())
+        )
+    )
+    active_outbox = list(
+        await session.scalars(
+            select(orm.DispositionOutbox)
+            .where(
+                orm.DispositionOutbox.event_id == event.event_id,
+                orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+            )
+            .order_by(
+                orm.DispositionOutbox.updated_at.desc(),
+                orm.DispositionOutbox.outbox_id.asc(),
+            )
+        )
+    )
+    outbox_status_by_action: dict[str, str | None] = {}
+    for row in active_outbox:
+        outbox_status_by_action.setdefault(row.action_id, row.latest_writeback_status)
+    terminal_confirmed = any(
+        row.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value
+        and row.latest_writeback_status == WritebackStatus.CONFIRMED.value
+        for row in active_outbox
+    )
+    policy = DispositionPolicy(event.disposition_policy)
+    outcomes: list[dict[str, object]] = []
+    for action in actions:
+        effect_status = action.effect_verification_status
+        writeback_status = outbox_status_by_action.get(action.action_id) or action.writeback_status
+        successful = _response_succeeded(
+            effect_status=effect_status,
+            writeback_status=writeback_status,
+            policy=policy,
+            terminal_confirmed=terminal_confirmed,
+        )
+        outcomes.append(
+            {
+                "action_id": action.action_id,
+                "tool_name": action.tool_name,
+                "effect_status": effect_status,
+                "writeback_status": writeback_status,
+                "successful_response": successful,
+            }
+        )
+    return outcomes
+
+
+def _response_succeeded(
+    *,
+    effect_status: str | None,
+    writeback_status: str | None,
+    policy: DispositionPolicy,
+    terminal_confirmed: bool,
+) -> bool:
+    effect_verified = effect_status == "verified"
+    writeback_confirmed = writeback_status == WritebackStatus.CONFIRMED.value
+    synchronization_ok = (
+        policy is DispositionPolicy.NOT_REQUIRED or writeback_confirmed or terminal_confirmed
+    )
+    return effect_verified and synchronization_ok
 
 
 def _fp_keyword_query(alert_text: str) -> str:

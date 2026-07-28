@@ -3,9 +3,11 @@
 from app.db.orm.approval import ApprovalRecordORM
 from app.db.orm.graph import GraphEdgeORM, GraphNodeORM
 from app.db.orm.knowledge import KnowledgeChunkORM
+from app.db.orm.profile import EntityProfileORM
 
 __all__ = [
     "ApprovalRecordORM",
+    "EntityProfileORM",
     "GraphEdgeORM",
     "GraphNodeORM",
     "KnowledgeChunkORM",

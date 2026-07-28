@@ -1,0 +1,10 @@
+{
+  "content": {
+    "rule_summary": "Review matching alerts as potential false positives when the same validated operational context is present.",
+    "alert_signature": "false-positive-alert",
+    "confidence": 0.75
+  },
+  "model_name": "mock-model",
+  "prompt_tokens": 64,
+  "completion_tokens": 32
+}

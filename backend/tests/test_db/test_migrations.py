@@ -52,6 +52,7 @@ CORE_TABLES = {
     "graph_node",
     "graph_edge",
     "approval_record",
+    "entity_profile",
 }
 
 

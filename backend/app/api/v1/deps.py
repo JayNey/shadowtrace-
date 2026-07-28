@@ -357,6 +357,7 @@ async def _get_wm() -> Any:
 async def _build_investigation_agents() -> dict[str, Any]:
     """Wire shared P0 agents and services for pipeline / SuperAgent."""
     from app.agents.evidence_agent import EvidenceAgent
+    from app.agents.memory_agent import MemoryAgent
     from app.agents.rag_agent import RAGAgent
     from app.agents.report_agent import ReportAgent
     from app.agents.risk_agent import RiskAgent
@@ -369,6 +370,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.services.case_kb_service import CaseKBService
     from app.services.false_positive_matcher import FalsePositiveMatcher
     from app.services.knowledge_store import KnowledgeStore
+    from app.services.profile_service import ProfileService
     from app.tools.executor import get_tool_executor
 
     settings = get_settings()
@@ -388,6 +390,19 @@ async def _build_investigation_agents() -> dict[str, Any]:
     knowledge_store = KnowledgeStore(session_factory, embed_service)
     case_kb_service = CaseKBService(knowledge_store, session_factory)
     fp_matcher = FalsePositiveMatcher(case_kb_service)
+    profile_service = ProfileService(session_factory)
+    memory = MemoryAgent(
+        case_kb_service=case_kb_service,
+        profile_service=profile_service,
+        context_store=_get_context_store(),
+        llm_client=llm_client,
+        working_memory=wm.for_writer("MemoryAgent"),
+        budget_service=budget_service,
+        output_guard=output_guard,
+        trace_service=trace_service,
+        audit_service=_get_audit_log(),
+        event_bus=_get_event_bus(),
+    )
 
     # ISSUE-075: every stage Agent must receive EventBus so BaseAgent.execute
     # emits schema-valid agent_progress / agent_completed / agent_failed.
@@ -454,6 +469,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         "rag": rag,
         "risk": risk,
         "report": report,
+        "memory": memory,
         "context_store": _get_context_store(),
         "degraded_flags": _get_degraded_flags(),
         "budget_service": budget_service,
@@ -546,6 +562,8 @@ async def get_super_agent() -> Any:
             trace_service=stack["trace_service"],
             react_enabled=settings.react_enabled,
             investigation_graph=investigation_graph,
+            memory_agent=stack["memory"],
+            audit_service=_get_audit_log(),
         )
     return _super_agent
 
