@@ -48,6 +48,7 @@ CORE_ENDPOINTS = {
     ("get", "/api/v1/events/{event_id}/timeline"),
     ("get", "/api/v1/events/{event_id}/graph"),
     ("get", "/api/v1/events/{event_id}/decision-trace"),
+    ("post", "/api/v1/events/{event_id}/chat"),
     ("get", "/api/v1/events/{event_id}/actions"),
     ("post", "/api/v1/actions/{action_id}/approve"),
     ("post", "/api/v1/actions/{action_id}/reject"),
@@ -163,6 +164,21 @@ class _MockEventService:
         evt = self._example_event()
         evt.status = target
         return evt
+
+
+class _MockContextStore:
+    """Return a valid storyline for context-backed endpoint contracts."""
+
+    async def get_full_context(self, event_id: str) -> EventContext:
+        return EventContext(
+            storyline={
+                "storyline_id": "sty-contract-1",
+                "event_id": event_id,
+                "narrative_summary": "Contract-test attack storyline.",
+                "generated_by": "rule",
+                "phases": [],
+            }
+        )
 
 
 class _MockDispositionSyncService:

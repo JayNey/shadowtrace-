@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     llm_primary_model: str = Field(default="mock-model", alias="LLM_PRIMARY_MODEL")
     llm_fallback_models: str = Field(default="", alias="LLM_FALLBACK_MODELS")
     llm_timeout_seconds: int = Field(default=30, alias="LLM_TIMEOUT_SECONDS")
+    event_chat_enabled: bool = Field(default=True, alias="EVENT_CHAT_ENABLED")
 
     embedding_mode: str = Field(default="mock", alias="EMBEDDING_MODE")
     embedding_api_base_url: str = Field(default="", alias="EMBEDDING_API_BASE_URL")

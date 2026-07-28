@@ -1,0 +1,15 @@
+{
+  "content": {
+    "answer": "该事件被判定为高危，主要依据是风险评分中的行为异常、攻击阶段和证据置信度均处于高位，同时关键登录证据支持异常活动判断。",
+    "references": [
+      {
+        "ref_type": "evidence",
+        "ref_id": "evd-event-qa-001"
+      }
+    ]
+  },
+  "model_name": "mock-model",
+  "prompt_tokens": 180,
+  "completion_tokens": 90,
+  "total_tokens": 270
+}

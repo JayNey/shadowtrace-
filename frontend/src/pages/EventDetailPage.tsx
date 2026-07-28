@@ -25,6 +25,7 @@ import RiskScorePanel from "../components/event/RiskScorePanel";
 import EntityGraph from "../components/graph/EntityGraph";
 import StorylineTimeline from "../components/storyline/StorylineTimeline";
 import EventAuditPanel from "../components/audit/EventAuditPanel";
+import EventChatPanel from "../components/chat/EventChatPanel";
 import { useEventDetail, type EventWriteback } from "../hooks/useEventDetail";
 import type { Action } from "../types/action";
 import type {
@@ -43,6 +44,7 @@ const TAB_KEYS = [
   "actions",
   "writeback",
   "audit",
+  "chat",
   "report",
 ] as const;
 
@@ -543,6 +545,11 @@ export default function EventDetailPage() {
       children: (
         <EventAuditPanel eventId={eventId} qualityScores={context?.quality_scores} />
       ),
+    },
+    {
+      key: "chat",
+      label: "问答",
+      children: <EventChatPanel eventId={eventId} />,
     },
     {
       key: "report",

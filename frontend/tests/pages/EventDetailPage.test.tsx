@@ -412,6 +412,16 @@ describe("EventDetailPage", () => {
     });
   });
 
+  it("mounts the optional event Q&A panel in its own tab", async () => {
+    renderPage("/events/evt-70#chat");
+
+    expect(await screen.findByText("事件问答")).toBeInTheDocument();
+    expect(
+      screen.getByText("基于事件上下文、风险评分、证据与决策轨迹回答；引用可直接跳转核验。"),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("事件问题")).toBeInTheDocument();
+  });
+
   it("highlights conflicting evidence and exposes its reason", async () => {
     const user = userEvent.setup();
     renderPage("/events/evt-70#evidence");
