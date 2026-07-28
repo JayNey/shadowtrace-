@@ -256,12 +256,25 @@ async def test_asset_query_failure_uses_medium_estimate() -> None:
     action = _action(tool_name="isolate_host", action_level=ActionLevel.L3, target="10.0.0.1")
 
     result = await svc.assess(action)
-    # Base = 50 (L3), bonus = 0 (no asset info) → 50
+    # Base = 50 (L3), bonus = 0 (medium estimate) → 50
     assert result.impact_score == 50
     assert "medium-estimate fallback" in (result.assessment_detail or "")
-    # Default disruption for isolate_host = medium (without asset info)
     assert result.business_disruption == "medium"
+    assert "asset_value=medium" in result.affected_scope
     assert result.action_id == "act-001"
+
+
+@pytest.mark.asyncio
+async def test_asset_query_returns_none_uses_medium_estimate() -> None:
+    provider = AsyncMock(return_value=None)
+    svc = ImpactAssessmentService(asset_info_provider=provider)
+    action = _action(tool_name="isolate_host", action_level=ActionLevel.L3, target="10.0.0.1")
+
+    result = await svc.assess(action)
+    assert result.impact_score == 50
+    assert "medium-estimate fallback" in (result.assessment_detail or "")
+    assert result.business_disruption == "medium"
+    assert "asset_value=medium" in result.affected_scope
 
 
 @pytest.mark.asyncio
@@ -276,6 +289,7 @@ async def test_no_asset_provider_uses_medium_estimate() -> None:
     result = await svc.assess(action)
     assert result.impact_score == 70  # base only, no bonus
     assert "medium-estimate fallback" in (result.assessment_detail or "")
+    assert "asset_value=medium" in result.affected_scope
 
 
 # --------------------------------------------------------------------------- #

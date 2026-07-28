@@ -66,6 +66,13 @@ _BUSINESS_DISRUPTION_RULES: dict[str, list[tuple[str, str, BusinessDisruption]]]
     ],
 }
 
+# Synthetic asset profile used when query_asset_info is unavailable (ISSUE-079 §降级).
+_MEDIUM_ESTIMATE_ASSET: dict[str, str] = {
+    "asset_value": "medium",
+    "business_role": "",
+    "hostname": "",
+}
+
 # Tools with zero business disruption (purely informational / ticketing).
 _ZERO_DISRUPTION_TOOLS: frozenset[str] = frozenset(
     {
@@ -277,6 +284,8 @@ class ImpactAssessmentService:
         if self._asset_provider is not None and action.target:
             try:
                 asset_info = await self._asset_provider(action.target, action.target_type)
+                if asset_info is None:
+                    degraded = True
             except Exception:
                 logger.warning(
                     "ImpactAssessmentService: asset query failed for target=%s; "
@@ -287,6 +296,12 @@ class ImpactAssessmentService:
                 degraded = True
         elif self._asset_provider is None:
             degraded = True
+
+        if degraded and asset_info is None:
+            asset_info = {
+                **_MEDIUM_ESTIMATE_ASSET,
+                "hostname": action.target or "",
+            }
 
         # --- compute components ---
         base = _base_score(action_level)
