@@ -621,6 +621,7 @@ async def investigate_event(
     settings = get_settings()
     mode = (settings.orchestration_mode or "graph").strip().lower()
     task_mode = (settings.task_mode or "background").strip().lower()
+    include_response = bool(body.include_response_execution) if body else False
 
     if mode == "analysis_only":
 
@@ -656,7 +657,10 @@ async def investigate_event(
     elif task_mode == "celery":
         from app.tasks.investigation_tasks import dispatch_investigation
 
-        task_id = await dispatch_investigation(event_id)
+        task_id = await dispatch_investigation(
+            event_id,
+            include_response_execution=include_response,
+        )
     else:
         lease = get_event_lease()
         from app.orchestration.lease import generate_owner_id
@@ -672,8 +676,6 @@ async def investigate_event(
                 error_code="investigation_in_progress",
                 details={"event_id": event_id},
             )
-
-        include_response = bool(body.include_response_execution) if body else False
 
         async def _run_super_agent() -> None:
             investigate_started = False

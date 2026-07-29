@@ -53,8 +53,8 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
       interval: 10s
       timeout: 5s
-      retries: 10
-      start_period: 15s
+      retries: 12
+      start_period: 45s
 
   frontend:
     build:

@@ -34,21 +34,25 @@ function isStorylineNotReady(error: unknown): boolean {
   );
 }
 
-function buildPhases(storyline: AttackStoryline): StorylinePhase[] {
+function buildPhases(
+  storyline: AttackStoryline,
+): Array<StorylinePhase & { isPlaceholder: boolean }> {
   const byName = new Map(
     storyline.phases.map((phase) => [phase.phase_name, phase]),
   );
   return PHASE_ORDER.map((phaseName, index) => {
     const existing = byName.get(phaseName);
-    return (
-      existing ?? {
-        phase_order: index + 1,
-        phase_name: phaseName,
-        tactic: null,
-        narrative: "",
-        entries: [],
-      }
-    );
+    if (existing) {
+      return { ...existing, isPlaceholder: false };
+    }
+    return {
+      phase_order: index + 1,
+      phase_name: phaseName,
+      tactic: null,
+      narrative: "",
+      entries: [],
+      isPlaceholder: true,
+    };
   });
 }
 
@@ -185,6 +189,7 @@ export default function StorylineTimeline({
           key={phase.phase_name}
           phase={phase}
           evidenceById={evidenceById}
+          isPlaceholder={phase.isPlaceholder}
         />
       ))}
     </Space>

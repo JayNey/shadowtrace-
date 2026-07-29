@@ -12,6 +12,7 @@ from app.api.v1 import schemas as s
 from app.api.v1.deps import _get_session_factory, get_event_service
 from app.api.v1.errors import ResourceNotFoundError
 from app.core.auth import ROLE_ANALYST, CurrentPrincipal, Principal, require_roles
+from app.core.errors import DependencyUnavailableError, ValidationError
 from app.db import models as orm
 from app.models.enums import EventType, Severity, SourceDisposition, SourceObjectKind
 from app.models.source import SourceReference
@@ -19,15 +20,31 @@ from app.models.source import SourceReference
 router = APIRouter(tags=["source"])
 
 
-def _optional_enum(value: Any, enum_cls: type[Any]) -> Any | None:
+def _optional_enum(value: Any, enum_cls: type[Any], *, field_name: str) -> Any | None:
+    """Parse an optional enum; reject unknown values instead of silently dropping."""
     if value is None:
         return None
     if isinstance(value, enum_cls):
         return value
-    try:
-        return enum_cls(str(value))
-    except ValueError:
+    text = str(value).strip()
+    if not text:
         return None
+    candidates = (text, text.lower(), text.upper())
+    for candidate in candidates:
+        try:
+            return enum_cls(candidate)
+        except ValueError:
+            continue
+    # StrEnum members are typically lowercase snake_case; try member name lookup.
+    try:
+        return enum_cls[text.upper()]
+    except KeyError:
+        pass
+    raise ValidationError(
+        f"invalid {field_name} value: {value!r}",
+        error_code="validation_error",
+        details={"field": field_name, "value": str(value)},
+    )
 
 
 def _reference_from_source_object(obj: orm.SourceObject) -> SourceReference:
@@ -68,6 +85,13 @@ async def ingest_source_record(
     raw = dict(body.raw_payload or {})
     title = str(normalized.get("title") or raw.get("title") or "").strip() or None
     description = str(normalized.get("description") or raw.get("description") or "")
+    source_product = str(body.reference.source_product or "").strip()
+    if not source_product:
+        raise ValidationError(
+            "reference.source_product is required",
+            error_code="validation_error",
+            details={"field": "reference.source_product"},
+        )
     result = await event_service.ingest_source_object(
         IngestableSource(
             reference=body.reference,
@@ -75,14 +99,17 @@ async def ingest_source_record(
             normalized=normalized,
             title=title,
             description=description,
-            event_type=_optional_enum(normalized.get("event_type"), EventType),
+            event_type=_optional_enum(
+                normalized.get("event_type"), EventType, field_name="event_type"
+            ),
             severity=_optional_enum(
                 normalized.get("severity") or normalized.get("level"),
                 Severity,
+                field_name="severity",
             ),
             incident_ref=body.incident_ref,
             related_alert_refs=list(body.related_alert_refs or []),
-            source_type=body.reference.source_product or "mock_xdr",
+            source_type=source_product,
         )
     )
     return s.IngestSourceRecordResponse(
@@ -102,7 +129,6 @@ async def get_source_record(
     from app.core.config import get_settings
 
     _ = principal
-    db_error: BaseException | None = None
     try:
         async with session_factory() as session:
             obj = await session.get(orm.SourceObject, source_record_id)
@@ -119,10 +145,15 @@ async def get_source_record(
                     source_sync_state=obj.source_sync_state,
                 )
     except (SQLAlchemyError, OSError, RuntimeError) as exc:
-        db_error = exc
+        # Never mask infrastructure failures with the contract fixture.
+        raise DependencyUnavailableError(
+            message="source record store unavailable",
+            error_code="dependency_unavailable",
+            details={"source_record_id": source_record_id, "dependency": "postgres"},
+        ) from exc
 
     # Contract fixture ID retained for OpenAPI / contract tests (ISSUE-004).
-    # Never mask real DB failures for other IDs, and never in production.
+    # Only when the row is genuinely missing, and never in production.
     if (
         source_record_id == "src-associated-1"
         and get_settings().app_env.strip().lower() != "production"
@@ -132,9 +163,6 @@ async def get_source_record(
             reference=s.example_source_reference(),
             normalized={},
         )
-
-    if db_error is not None:
-        raise db_error
 
     raise ResourceNotFoundError(
         f"source record {source_record_id} not found",
