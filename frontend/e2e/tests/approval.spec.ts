@@ -5,7 +5,19 @@ const BACKEND_BASE_URL =
   process.env.E2E_BACKEND_URL ?? "http://127.0.0.1:8000/api/v1";
 const AUTH_TOKEN = process.env.E2E_AUTH_TOKEN ?? "e2e-token";
 
-async function waitEventLeftWaitingApproval(eventId: string): Promise<string> {
+/** Statuses that mean the plan left waiting_approval without failing. */
+const RECOVERED_STATUSES = new Set([
+  "responding",
+  "monitoring",
+  "verifying",
+  "reporting",
+  "closed",
+  "scoring",
+  "investigating",
+  "triaging",
+]);
+
+async function waitEventRecoveredAfterApproval(eventId: string): Promise<string> {
   const deadline = Date.now() + 60_000;
   let lastStatus = "";
   while (Date.now() < deadline) {
@@ -18,7 +30,15 @@ async function waitEventLeftWaitingApproval(eventId: string): Promise<string> {
     if (res.ok) {
       const body = (await res.json()) as { event?: { status?: string } };
       lastStatus = String(body.event?.status ?? "");
+      if (lastStatus === "failed") {
+        throw new Error(`event ${eventId} entered failed after approval`);
+      }
       if (lastStatus && lastStatus !== "waiting_approval") {
+        if (!RECOVERED_STATUSES.has(lastStatus)) {
+          throw new Error(
+            `event ${eventId} left waiting_approval into unexpected status=${lastStatus}`,
+          );
+        }
         return lastStatus;
       }
     }
@@ -44,10 +64,11 @@ test.describe("path 5 · L4 approval", () => {
 
     await expect(card).toHaveCount(0, { timeout: 60_000 });
 
-    // Event must leave waiting_approval after the plan is fully decided.
+    // Event must leave waiting_approval into a non-failed recovered status.
     // UI label is "待审批" (STATUS_CONFIG), not "等待审批".
-    const status = await waitEventLeftWaitingApproval(approvalEventId);
+    const status = await waitEventRecoveredAfterApproval(approvalEventId);
     expect(status).not.toBe("waiting_approval");
+    expect(status).not.toBe("failed");
 
     await page.goto(`/events/${approvalEventId}`);
     await expect(page.getByTestId("event-overview-card")).toBeVisible();

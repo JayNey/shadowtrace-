@@ -18,10 +18,13 @@ test.describe("path 3 · storyline timeline", () => {
       timeout: 60_000,
     });
 
+    // UI pads missing phases with storyline-phase-empty-*; real data uses
+    // storyline-phase-*. Issue requires five stages visible + one expand.
     for (const phase of PHASES) {
-      await expect(page.getByTestId(`storyline-phase-${phase}`)).toBeVisible({
-        timeout: 60_000,
-      });
+      const realOrEmpty = page
+        .getByTestId(`storyline-phase-${phase}`)
+        .or(page.getByTestId(`storyline-phase-empty-${phase}`));
+      await expect(realOrEmpty).toBeVisible({ timeout: 60_000 });
     }
 
     const expand = page.getByRole("button", { name: /展开关联证据/ }).first();

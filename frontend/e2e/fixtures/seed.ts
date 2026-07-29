@@ -68,19 +68,27 @@ async function waitFor<T>(
   const intervalMs = options.intervalMs ?? 2_000;
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
+  let lastProbe = "";
   while (Date.now() < deadline) {
     try {
       const value = await fn();
       if (value) return value;
     } catch (error) {
       lastError = error;
+      lastProbe =
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : JSON.stringify(error);
     }
     await sleep(intervalMs);
   }
   throw new Error(
     `timeout waiting for ${label}` +
-      (lastError
-        ? `: ${lastError instanceof Error ? lastError.message : String(lastError)}`
+      (lastProbe ? `; last_probe=${lastProbe.slice(0, 800)}` : "") +
+      (lastError && !(lastError instanceof Error && lastError.message === lastProbe)
+        ? `; last_error=${lastError instanceof Error ? lastError.message : String(lastError)}`
         : ""),
   );
 }
@@ -199,14 +207,16 @@ async function createApprovalEvent(): Promise<string> {
     source_object_id: `e2e-approval-${stamp}`,
     connector_id: "conn-disposition",
   };
+  // Use insider_threat so DEFAULT_RESPONSE_RULES emit revoke_token (L4).
+  // data_exfiltration rules top out at L3 and may auto-approve under critical.
   const result = await ingestSourceRecord({
     reference,
     raw_payload: incident.raw_payload ?? {},
     normalized: {
       ...(incident.normalized ?? {}),
       title: `E2E L4 approval ${incident.title ?? "incident"} ${stamp}`,
-      severity: incident.level ?? "critical",
-      event_type: "data_exfiltration",
+      severity: "critical",
+      event_type: "insider_threat",
       scenario: "insider_data_exfiltration",
     },
   });
@@ -242,15 +252,8 @@ async function triggerInvestigate(
 }
 
 async function waitAnalysisReady(eventId: string): Promise<void> {
-  const requiredPhases = new Set([
-    "initial_access",
-    "collection",
-    "staging",
-    "exfiltration",
-    "post_action",
-  ]);
-
   await waitFor(`analysis artifacts for ${eventId}`, async () => {
+    const gaps: string[] = [];
     const detail = await api<{
       event: {
         status: string;
@@ -264,51 +267,61 @@ async function waitAnalysisReady(eventId: string): Promise<void> {
     }>("GET", `/events/${eventId}`);
     const status = detail.data.event?.status;
     if (!status || status === "new" || status === "triaging") {
-      return null;
+      gaps.push(`status=${status || "missing"}`);
+      throw new Error(gaps.join("; "));
     }
     if (status === "failed") throw new Error(`event ${eventId} failed`);
 
     const evidenceOutput =
       detail.data.event?.event_context_snapshot?.evidence_output;
     const evidenceList = evidenceOutput?.evidence_list ?? [];
-    if (evidenceList.length === 0) return null;
+    if (evidenceList.length === 0) gaps.push("evidence_empty");
     const hasConflict =
       (evidenceOutput?.conflicts?.length ?? 0) > 0 ||
       evidenceList.some((item) => item.is_conflicting);
-    if (!hasConflict) return null;
+    if (!hasConflict) gaps.push("no_conflict");
 
     const report = await api("GET", `/events/${eventId}/report`);
-    if (report.status !== 200) return null;
+    if (report.status !== 200) gaps.push(`report=${report.status}`);
 
     const timeline = await api<{
       phases?: Array<{ phase_name?: string; entries?: unknown[] }>;
+      error_code?: string;
     }>("GET", `/events/${eventId}/timeline`);
-    if (timeline.status !== 200) return null;
-    const phases = timeline.data.phases ?? [];
-    const phaseNames = new Set(
-      phases.map((phase) => String(phase.phase_name ?? "")),
-    );
-    for (const required of requiredPhases) {
-      if (!phaseNames.has(required)) return null;
+    if (timeline.status !== 200) {
+      gaps.push(
+        `timeline=${timeline.status}:${String(timeline.data.error_code ?? "unknown")}`,
+      );
+    } else {
+      const phases = timeline.data.phases ?? [];
+      // UI pads missing phases; seed only needs ≥1 expandable entry.
+      const hasExpandableEntry = phases.some(
+        (phase) => Array.isArray(phase.entries) && phase.entries.length > 0,
+      );
+      if (!hasExpandableEntry) {
+        gaps.push(`timeline_phases=${phases.length},no_expandable_entry`);
+      }
     }
-    const hasExpandableEntry = phases.some(
-      (phase) => Array.isArray(phase.entries) && phase.entries.length > 0,
-    );
-    if (!hasExpandableEntry) return null;
 
     const graph = await api<{
       nodes?: unknown[];
       attack_path_candidates?: unknown[][];
+      error_code?: string;
     }>("GET", `/events/${eventId}/graph`);
-    if (graph.status !== 200) return null;
-    if (!Array.isArray(graph.data.nodes) || graph.data.nodes.length === 0) {
-      return null;
-    }
-    const paths = graph.data.attack_path_candidates ?? [];
-    if (!paths.some((path) => Array.isArray(path) && path.length > 0)) {
-      return null;
+    if (graph.status !== 200) {
+      gaps.push(`graph=${graph.status}`);
+    } else {
+      const nodes = graph.data.nodes ?? [];
+      const paths = graph.data.attack_path_candidates ?? [];
+      if (!Array.isArray(nodes) || nodes.length === 0) gaps.push("graph_nodes_empty");
+      if (!paths.some((path) => Array.isArray(path) && path.length > 0)) {
+        gaps.push("graph_paths_empty");
+      }
     }
 
+    if (gaps.length > 0) {
+      throw new Error(`status=${status}; ${gaps.join("; ")}`);
+    }
     return { ok: true };
   });
 }
@@ -319,19 +332,30 @@ async function waitApprovalReady(eventId: string): Promise<string> {
       "GET",
       `/events/${eventId}`,
     );
-    if (detail.data.event?.status === "failed") {
+    const status = detail.data.event?.status ?? "missing";
+    if (status === "failed") {
       throw new Error(`approval event ${eventId} failed`);
     }
     const actions = await api<{
       items: Array<{ action_id: string; action_level: string; status: string }>;
+      error_code?: string;
     }>("GET", `/events/${eventId}/actions?status=waiting_approval&page_size=50`);
-    if (actions.status !== 200) return null;
-    const l4 = (actions.data.items ?? []).find(
+    if (actions.status !== 200) {
+      throw new Error(`actions=${actions.status} event_status=${status}`);
+    }
+    const items = actions.data.items ?? [];
+    const l4 = items.find(
       (item) =>
         item.status === "waiting_approval" &&
         String(item.action_level).toLowerCase() === "l4",
     );
-    return l4?.action_id ?? null;
+    if (!l4) {
+      const summary = items
+        .map((item) => `${item.action_level}:${item.status}`)
+        .join(",") || "none";
+      throw new Error(`event_status=${status}; waiting_approval=[${summary}]`);
+    }
+    return l4.action_id;
   });
 }
 

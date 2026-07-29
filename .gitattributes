@@ -1,0 +1,4 @@
+# Keep shell scripts LF so Docker ENTRYPOINT works on Linux images built
+# from Windows working trees (CRLF → "no such file or directory").
+*.sh text eol=lf
+backend/docker-entrypoint.sh text eol=lf
