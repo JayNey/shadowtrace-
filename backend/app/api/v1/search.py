@@ -32,7 +32,7 @@ async def search(
             description="Search query string.",
         ),
     ],
-    principal: CurrentPrincipal,
+    _principal: CurrentPrincipal,
     search_service: Annotated[Any, Depends(get_search_service)],
     scope: Annotated[
         str,

@@ -46,6 +46,7 @@ packages = ["app"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+addopts = "-m 'not opensearch'"
 markers = [
   "integration: requires real PostgreSQL and Redis services",
   "tool_system: Registry/Executor/Mock tool-system integration chains (ISSUE-025)",

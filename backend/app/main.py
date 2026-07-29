@@ -58,6 +58,15 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
     scan_task = asyncio.create_task(_approval_timeout_scan_loop())
 
+    if settings.opensearch_enabled:
+        try:
+            from app.api.v1.deps import _get_opensearch_client
+
+            opensearch = _get_opensearch_client()
+            await opensearch.initialize_indices()
+        except Exception:
+            logger.warning("OpenSearch index initialization failed", exc_info=True)
+
     try:
         yield
     finally:

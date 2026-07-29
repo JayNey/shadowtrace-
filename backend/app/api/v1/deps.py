@@ -89,7 +89,10 @@ def _get_audit_log() -> Any:
     if _audit_log is None:
         from app.services.event_audit_log_service import EventAuditLogService
 
-        _audit_log = EventAuditLogService(_get_session_factory())
+        _audit_log = EventAuditLogService(
+            _get_session_factory(),
+            opensearch=_get_opensearch_client(),
+        )
     return _audit_log
 
 
@@ -325,13 +328,12 @@ async def get_action_execution() -> Any:
 async def get_rollback_service() -> Any:
     global _rollback_service
     if _rollback_service is None:
-        from app.services.event_audit_log_service import EventAuditLogService
         from app.services.rollback_service import RollbackService, build_execute_rollback_hook
 
         action_execution = await get_action_execution()
         _rollback_service = RollbackService(
             _get_session_factory(),
-            audit=EventAuditLogService(_get_session_factory()),
+            audit=_get_audit_log(),
             execute_rollback=build_execute_rollback_hook(action_execution),
             disposition_sync=await get_disposition_sync(),
             event_bus=_get_event_bus(),
@@ -396,7 +398,8 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.services.false_positive_matcher import FalsePositiveMatcher
     from app.services.knowledge_store import KnowledgeStore
     from app.services.profile_service import ProfileService
-    from app.tools.executor import get_tool_executor
+    from app.services.tool_call_log_service import ToolCallLogService
+    from app.tools.executor import NullAuditService, get_tool_executor
 
     settings = get_settings()
     event_service = await get_event_service()
@@ -409,6 +412,11 @@ async def _build_investigation_agents() -> dict[str, Any]:
     llm_client = get_llm_client(settings=settings, budget_service=budget_service)
     tool_executor = get_tool_executor()
     tool_executor.budget_service = budget_service
+    if isinstance(tool_executor.audit_service, NullAuditService):
+        tool_executor.audit_service = ToolCallLogService(
+            session_factory,
+            opensearch=_get_opensearch_client(),
+        )
 
     # ISSUE-078: wire FalsePositiveMatcher for vector-based FP pre-filter.
     embed_service = EmbeddingService(settings)

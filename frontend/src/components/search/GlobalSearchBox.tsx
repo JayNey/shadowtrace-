@@ -47,6 +47,19 @@ function highlightHtml(text: string): string {
   return text.replace(/<\/?em>/g, "");
 }
 
+function eventDetailTabHash(index: string): string | null {
+  if (index.includes("evidence") || index === "evidence") {
+    return "evidence";
+  }
+  if (index.includes("audit") || index === "event_audit_log") {
+    return "audit";
+  }
+  if (index.includes("tool") || index === "tool_call_log") {
+    return "actions";
+  }
+  return null;
+}
+
 export default function GlobalSearchBox() {
   const navigate = useNavigate();
   const [options, setOptions] = useState<OptionItem[]>([]);
@@ -129,9 +142,13 @@ export default function GlobalSearchBox() {
     (_value: string, option: unknown) => {
       const opt = option as OptionItem;
       const { item } = opt;
-      // Navigate based on index type.
       if (item.event_id) {
-        navigate(`/events/${item.event_id}`);
+        const tabHash = eventDetailTabHash(item.index);
+        navigate(
+          tabHash
+            ? `/events/${item.event_id}#${tabHash}`
+            : `/events/${item.event_id}`,
+        );
       } else if (
         item.index === "shadowtrace-tool-calls" ||
         item.index === "tool_call_log"

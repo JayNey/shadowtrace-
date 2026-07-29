@@ -17,7 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.core.opensearch_client import (
-    ALL_SUFFIXES,
     AUDIT_LOGS_SUFFIX,
     EVIDENCE_SUFFIX,
     TOOL_CALLS_SUFFIX,
@@ -34,6 +33,12 @@ from app.models.search import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Evidence is searchable via ILIKE but not dual-written to OpenSearch yet.
+_OS_INDEXED_SCOPES = frozenset({"tool-calls", "audit-logs"})
+
+# Cap for merging OpenSearch + ILIKE evidence hits in scope=all hybrid mode (P2).
+_HYBRID_FETCH_CAP = 10_000
 
 # Map scope → OpenSearch index suffix and ORM table info for the fallback.
 _SCOPE_CONFIG: dict[str, dict[str, Any]] = {
@@ -116,9 +121,15 @@ class SearchService:
 
         query = q.strip()
 
+        # Evidence has no OpenSearch dual-write yet — always use ILIKE.
+        if scope == "evidence":
+            return await self._search_ilike(query, scope, page, page_size)
+
         # Try OpenSearch path first.
         if self._os_enabled and self._os is not None:
             try:
+                if scope == "all":
+                    return await self._search_all_hybrid(query, page, page_size)
                 return await self._search_opensearch(query, scope, page, page_size)
             except Exception:
                 logger.warning("OpenSearch search failed; falling back to ILIKE", exc_info=True)
@@ -187,6 +198,39 @@ class SearchService:
             degraded=False,
         )
 
+    async def _search_all_hybrid(self, query: str, page: int, page_size: int) -> SearchResponse:
+        """OpenSearch for tool/audit indices; ILIKE for evidence (no dual-write yet)."""
+        os_part = await self._search_opensearch(
+            query,
+            "all",
+            page=1,
+            page_size=_HYBRID_FETCH_CAP,
+        )
+        evidence_part = await self._search_ilike(
+            query,
+            "evidence",
+            page=1,
+            page_size=_HYBRID_FETCH_CAP,
+        )
+        merged = list(os_part.items) + list(evidence_part.items)
+        merged.sort(
+            key=lambda item: (
+                item.occurred_at is not None,
+                item.occurred_at or datetime.min.replace(tzinfo=None),
+            ),
+            reverse=True,
+        )
+        total = len(merged)
+        offset = (page - 1) * page_size
+        page_items = merged[offset : offset + page_size]
+        return SearchResponse(
+            items=page_items,
+            total=total,
+            page=page,
+            page_size=page_size,
+            degraded=False,
+        )
+
     # ------------------------------------------------------------------ #
     # ILIKE fallback path
     # ------------------------------------------------------------------ #
@@ -198,7 +242,7 @@ class SearchService:
 
         Each table is queried independently with ``ILIKE`` on text columns
         and ``::text`` casts for JSONB columns.  Results are combined, sorted
-        by timestamp descending, and paginated.
+        by timestamp descending, and paginated in memory (P2 degraded-path limit).
         """
         pattern = f"%{query}%"
         scopes = self._resolve_fallback_scopes(scope)
@@ -304,7 +348,9 @@ class SearchService:
 
     def _resolve_os_suffixes(self, scope: str) -> list[str]:
         if scope == "all":
-            return list(ALL_SUFFIXES)
+            return [TOOL_CALLS_SUFFIX, AUDIT_LOGS_SUFFIX]
+        if scope not in _OS_INDEXED_SCOPES:
+            return []
         cfg = _SCOPE_CONFIG.get(scope)
         return [cfg["os_suffix"]] if cfg else []
 

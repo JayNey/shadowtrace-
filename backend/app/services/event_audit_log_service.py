@@ -87,7 +87,7 @@ class EventAuditLogService:
                 await session.flush()
         # Fire-and-forget OpenSearch indexing (ISSUE-084).
         if self._opensearch is not None and self._opensearch.enabled:
-            asyncio.ensure_future(self._index_to_opensearch(row))
+            asyncio.create_task(self._index_to_opensearch(row))
         return str(row.id)
 
     async def log_transition_in_session(
@@ -112,7 +112,7 @@ class EventAuditLogService:
         await session.flush()
         # Fire-and-forget OpenSearch indexing (ISSUE-084).
         if self._opensearch is not None and self._opensearch.enabled:
-            asyncio.ensure_future(self._index_to_opensearch(row))
+            asyncio.create_task(self._index_to_opensearch(row))
         return str(row.id)
 
     async def get_logs_by_event(self, event_id: str) -> list[orm.EventAuditLog]:

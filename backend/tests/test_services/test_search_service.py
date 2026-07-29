@@ -385,6 +385,68 @@ class TestSearchServiceFallback:
 
 
 # --------------------------------------------------------------------------- #
+# Audit log dual-write resilience
+# --------------------------------------------------------------------------- #
+
+
+class TestAuditLogOpenSearchDualWrite:
+    """OpenSearch indexing must never block audit log persistence (ISSUE-084)."""
+
+    @pytest.mark.asyncio
+    async def test_log_transition_persisted_when_opensearch_index_fails(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from app.services.event_audit_log_service import EventAuditLogService
+
+        mock_os = AsyncMock()
+        mock_os.enabled = True
+        mock_os.index_document = AsyncMock(side_effect=RuntimeError("index failed"))
+
+        service = EventAuditLogService(session_factory, opensearch=mock_os)
+        event_id = _id("evt")
+        log_id = await service.log_transition(
+            event_id=event_id,
+            from_status="new",
+            to_status="triaging",
+            operator="tester",
+            reason="block_ip escalation",
+        )
+        assert log_id
+
+        async with session_factory() as session:
+            row = await session.get(orm.EventAuditLog, int(log_id))
+            assert row is not None
+            assert row.event_id == event_id
+            assert row.to_status == "triaging"
+
+        mock_os.index_document.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_search_evidence_uses_ilike_when_opensearch_enabled(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        monkeypatch.setenv("OPENSEARCH_ENABLED", "true")
+        mock_os = MagicMock()
+        mock_os.enabled = True
+        mock_os.search = AsyncMock(return_value={"hits": {"total": {"value": 0}, "hits": []}})
+
+        service = SearchService(session_factory, opensearch=mock_os)
+        marker = f"evidence-marker-{uuid.uuid4().hex[:8]}"
+        await _seed_evidence(session_factory, description=f"Detected {marker} in traffic")
+        result = await service.search(marker, scope="evidence")
+        assert result.total >= 1
+        assert result.degraded is True
+        mock_os.search.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
 # OpenSearch tests (opt-in marker)
 # --------------------------------------------------------------------------- #
 
@@ -446,15 +508,14 @@ class TestSearchServiceOpenSearch:
                 "duration_ms": 200,
                 "retry_count": 0,
             },
+            refresh="wait_for",
         )
-        # Allow a brief moment for the document to become searchable.
-        import asyncio
-
-        await asyncio.sleep(1)
 
         result = await os_service.search("block_ip", scope="tool-calls")
         assert result.total >= 1
         assert result.degraded is False
+        assert any(item.highlight for item in result.items)
+        assert any("block_ip" in (item.highlight or item.source_summary) for item in result.items)
 
     @pytest.mark.asyncio
     async def test_opensearch_fallback_when_disabled(

@@ -184,7 +184,14 @@ class OpenSearchClient:
     # Document indexing (fire-and-forget safe)
     # ------------------------------------------------------------------ #
 
-    async def index_document(self, index_suffix: str, doc_id: str, body: dict[str, Any]) -> None:
+    async def index_document(
+        self,
+        index_suffix: str,
+        doc_id: str,
+        body: dict[str, Any],
+        *,
+        refresh: bool | str = False,
+    ) -> None:
         """Index a single document.  Logs warning on failure — never raises.
 
         No-op when ``enabled=False``.
@@ -194,7 +201,12 @@ class OpenSearchClient:
         index_name = self.index_name(index_suffix)
         try:
             client = await self._get_client()
-            await client.index(index=index_name, id=doc_id, body=body, refresh=False)
+            await client.index(
+                index=index_name,
+                id=doc_id,
+                body=body,
+                refresh=refresh,
+            )
             logger.debug("Indexed %s/%s", index_name, doc_id)
         except Exception:
             logger.warning("OpenSearch index failed for %s/%s", index_name, doc_id, exc_info=True)

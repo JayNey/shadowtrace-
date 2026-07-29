@@ -245,7 +245,7 @@ class ToolCallLogService:
 
         # Fire-and-forget OpenSearch indexing (ISSUE-084).
         if self._opensearch is not None and self._opensearch.enabled:
-            asyncio.ensure_future(self._index_to_opensearch(row))
+            asyncio.create_task(self._index_to_opensearch(row))
 
     async def get_logs_by_event(self, event_id: str) -> list[orm.ToolCallLog]:
         async with self._session_factory() as session:
