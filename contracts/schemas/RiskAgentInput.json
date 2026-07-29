@@ -152,6 +152,47 @@
       "title": "CollectionStatus",
       "type": "string"
     },
+    "CrossEventPath": {
+      "additionalProperties": false,
+      "description": "Cross-event association path discovered via Neo4j (ISSUE-083).",
+      "properties": {
+        "path_id": {
+          "title": "Path Id",
+          "type": "string"
+        },
+        "related_event_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Related Event Ids",
+          "type": "array"
+        },
+        "shared_entities": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Shared Entities",
+          "type": "array"
+        },
+        "path_nodes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Path Nodes",
+          "type": "array"
+        },
+        "risk_hint": {
+          "default": "",
+          "title": "Risk Hint",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path_id"
+      ],
+      "title": "CrossEventPath",
+      "type": "object"
+    },
     "DomainEntity": {
       "additionalProperties": false,
       "properties": {
@@ -731,6 +772,13 @@
             "type": "array"
           },
           "title": "Attack Path Candidates",
+          "type": "array"
+        },
+        "cross_event_paths": {
+          "items": {
+            "$ref": "#/$defs/CrossEventPath"
+          },
+          "title": "Cross Event Paths",
           "type": "array"
         }
       },

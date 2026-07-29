@@ -1,4 +1,4 @@
-"""Entity relationship graph endpoint (ISSUE-071)."""
+"""Entity relationship graph endpoint (ISSUE-071 / ISSUE-083)."""
 
 from __future__ import annotations
 
@@ -9,12 +9,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.v1.deps import _get_session_factory, get_event_service
+from app.api.v1.deps import (
+    _get_session_factory,
+    get_attack_path_service,
+    get_event_service,
+)
 from app.api.v1.errors import EventNotFoundError
 from app.core.auth import CurrentPrincipal
 from app.core.errors import DependencyUnavailableError
 from app.db.orm.graph import GraphEdgeORM, GraphNodeORM
 from app.models.agent_io import (
+    CrossEventPath,
     GraphEdge,
     GraphNode,
     GraphOutput,
@@ -31,6 +36,14 @@ class _EventReader(Protocol):
 
 class _GraphReader(Protocol):
     async def read_graph(self, event_id: str) -> GraphOutput: ...
+
+
+class _AttackPathFinder(Protocol):
+    async def find_cross_event_paths(
+        self,
+        event_id: str,
+        max_depth: int = 4,
+    ) -> list[CrossEventPath]: ...
 
 
 class GraphRepository:
@@ -98,6 +111,7 @@ class GraphRepository:
             edges=edges,
             central_entities=compute_central_entities(nodes, edges),
             attack_path_candidates=find_attack_paths(nodes, edges),
+            cross_event_paths=[],
         )
 
 
@@ -111,11 +125,15 @@ async def get_graph(
     principal: CurrentPrincipal,
     event_service: Annotated[_EventReader, Depends(get_event_service)],
     graph_reader: Annotated[_GraphReader, Depends(_get_graph_reader)],
+    attack_paths: Annotated[_AttackPathFinder, Depends(get_attack_path_service)],
 ) -> GraphOutput:
     """Return the persisted entity graph for an event.
 
     A known event without graph rows is a valid, not-yet-generated graph and
-    therefore returns four empty arrays rather than a 404.
+    therefore returns empty arrays rather than a 404.
+
+    ``cross_event_paths`` is filled when NEO4J_ENABLED and overlaps exist;
+    otherwise it is always ``[]`` (ISSUE-083).
     """
 
     event = await event_service.get_event(event_id)
@@ -124,4 +142,8 @@ async def get_graph(
             f"event {event_id} not found",
             details={"event_id": event_id},
         )
-    return await graph_reader.read_graph(event_id)
+    output = await graph_reader.read_graph(event_id)
+    cross = await attack_paths.find_cross_event_paths(event_id)
+    if not cross:
+        return output
+    return output.model_copy(update={"cross_event_paths": cross})
