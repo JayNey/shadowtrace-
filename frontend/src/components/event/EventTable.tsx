@@ -238,6 +238,7 @@ export default function EventTable({
       loading={loading}
       size="middle"
       scroll={{ x: 1280 }}
+      data-testid="event-table"
       pagination={{
         current: page,
         pageSize,
@@ -251,6 +252,7 @@ export default function EventTable({
       onRow={(record) => ({
         onClick: () => onRowClick?.(record.event_id),
         style: { cursor: onRowClick ? "pointer" : "default" },
+        "data-testid": `event-row-${record.event_id}`,
       })}
     />
   );

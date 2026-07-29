@@ -497,7 +497,26 @@ class EventService:
     async def get_event(self, event_id: str) -> SecurityEvent | None:
         async with self._session_factory() as session:
             row = await session.get(orm.SecurityEvent, event_id)
-            return _security_event_from_row(row) if row else None
+            if row is None:
+                return None
+            event = _security_event_from_row(row)
+
+        if not event.event_context_snapshot:
+            try:
+                from app.services.context_service import _context_as_dict, _to_jsonable
+
+                ctx = await self._store.get_full_context(event_id)
+                snapshot = {
+                    key: _to_jsonable(value) for key, value in _context_as_dict(ctx).items()
+                }
+                event = event.model_copy(update={"event_context_snapshot": snapshot})
+            except Exception:
+                logger.debug(
+                    "hydrate event_context_snapshot failed event_id=%s",
+                    event_id,
+                    exc_info=True,
+                )
+        return event
 
     async def get_evidence_query_scope(self, event_id: str) -> EvidenceQueryScope:
         """Derive the only permitted evidence tenant/connectors from trusted event state."""
@@ -1276,12 +1295,38 @@ class EventService:
             primary.connector_id,
         )
         for related, expected_kind in associations:
+            if related.source_kind is not expected_kind:
+                raise ValidationError(
+                    "explicit source association has invalid kind or source scope",
+                    error_code="adapter_validation_error",
+                    details={
+                        "source_object_id": primary.source_object_id,
+                        "related_source_object_id": related.source_object_id,
+                        "expected_kind": expected_kind.value,
+                    },
+                )
+            if expected_kind is SourceObjectKind.INCIDENT:
+                # Logs/assets may arrive on a different connector than the parent incident.
+                if (
+                    related.source_product != primary.source_product
+                    or related.source_tenant_id != primary.source_tenant_id
+                ):
+                    raise ValidationError(
+                        "explicit source association has invalid kind or source scope",
+                        error_code="adapter_validation_error",
+                        details={
+                            "source_object_id": primary.source_object_id,
+                            "related_source_object_id": related.source_object_id,
+                            "expected_kind": expected_kind.value,
+                        },
+                    )
+                continue
             related_scope = (
                 related.source_product,
                 related.source_tenant_id,
                 related.connector_id,
             )
-            if related.source_kind is not expected_kind or related_scope != primary_scope:
+            if related_scope != primary_scope:
                 raise ValidationError(
                     "explicit source association has invalid kind or source scope",
                     error_code="adapter_validation_error",
@@ -1333,9 +1378,13 @@ class EventService:
                         idempotent=True,
                     )
 
-                # Alert with verified parent Incident → try merge into parent event.
-                if ref.source_kind is SourceObjectKind.ALERT and source.incident_ref is not None:
-                    parent_bundle = await self._link_alert_to_incident_event(
+                # Related Alert/Log/Asset with verified incident_ref → link to parent event.
+                if source.incident_ref is not None and ref.source_kind in (
+                    SourceObjectKind.ALERT,
+                    SourceObjectKind.LOG,
+                    SourceObjectKind.ASSET,
+                ):
+                    parent_bundle = await self._link_related_source_to_incident_event(
                         session, source, obj, source_record_id
                     )
                     if parent_bundle is not None:
@@ -1666,14 +1715,14 @@ class EventService:
         )
         return obj
 
-    async def _link_alert_to_incident_event(
+    async def _link_related_source_to_incident_event(
         self,
         session: AsyncSession,
         source: IngestableSource,
-        alert_obj: orm.SourceObject,
-        alert_record_id: str,
+        related_obj: orm.SourceObject,
+        related_record_id: str,
     ) -> _CreateBundle | None:
-        """When Alert carries verified incident_ref and Incident event exists → merge."""
+        """When a related source carries verified incident_ref → link to parent event."""
         assert source.incident_ref is not None
         parent_obj = await self._find_source_by_ref(session, source.incident_ref)
         if parent_obj is None:
@@ -1693,15 +1742,16 @@ class EventService:
         snapshots = list(event.source_reference_snapshots or [])
         snapshots.append(_ref_dump(source.reference))
         event.source_reference_snapshots = snapshots
-        alert_ids = list(event.raw_alert_ids or [])
-        if source.reference.source_object_id not in alert_ids:
-            alert_ids.append(source.reference.source_object_id)
-            event.raw_alert_ids = alert_ids
+        if source.reference.source_kind is SourceObjectKind.ALERT:
+            alert_ids = list(event.raw_alert_ids or [])
+            if source.reference.source_object_id not in alert_ids:
+                alert_ids.append(source.reference.source_object_id)
+                event.raw_alert_ids = alert_ids
         event.row_version = int(event.row_version or 1) + 1
 
         session.add(
             orm.SourceEventLink(
-                source_record_id=alert_record_id,
+                source_record_id=related_record_id,
                 event_id=event.event_id,
                 role=LINK_ROLE_RELATED,
                 promotion_status=PROMOTION_NONE,
@@ -1713,14 +1763,14 @@ class EventService:
                 from_status=event.status,
                 to_status=event.status,
                 operator="EventService",
-                reason="alert_linked_to_incident_event",
+                reason="related_source_linked_to_incident_event",
             )
         )
         await session.flush()
         await session.refresh(event)
         return _CreateBundle(
             event=event,
-            source_record_id=alert_record_id,
+            source_record_id=related_record_id,
             created=False,
             idempotent=False,
         )

@@ -92,6 +92,22 @@ describe("StorylineTimeline", () => {
     }
   });
 
+  it("uses empty testids for phases missing from the storyline payload", () => {
+    const partial = makeStoryline();
+    partial.phases = partial.phases.filter(
+      (phase) => phase.phase_name === "initial_access",
+    );
+    render(<StorylineTimeline storyline={partial} evidence={evidence} />);
+
+    expect(screen.getByTestId("storyline-phase-initial_access")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("storyline-phase-empty-collection"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTestId("storyline-phase-empty-exfiltration"),
+    ).toBeInTheDocument();
+  });
+
   it("expands linked evidence and reveals the ATT&CK technique name", async () => {
     const user = userEvent.setup();
     render(

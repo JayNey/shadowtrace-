@@ -470,6 +470,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.services.knowledge_store import KnowledgeStore
     from app.services.memory_governance import MemoryGovernance
     from app.services.profile_service import ProfileService
+    from app.services.storyline_service import StorylineService
     from app.tools.executor import NullAuditService, get_tool_executor
 
     settings = get_settings()
@@ -574,6 +575,10 @@ async def _build_investigation_agents() -> dict[str, Any]:
         session_factory=session_factory,
         graph_sync_service=graph_sync,
     )
+    storyline_service = StorylineService(
+        llm_client=llm_client,
+        working_memory=wm.for_writer("StorylineService"),
+    )
 
     return {
         "settings": settings,
@@ -588,6 +593,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         "risk": risk,
         "report": report,
         "graph_agent": graph_agent,
+        "storyline_service": storyline_service,
         "memory": memory,
         "context_store": _get_context_store(),
         "degraded_flags": _get_degraded_flags(),
@@ -684,6 +690,7 @@ async def get_super_agent() -> Any:
             memory_agent=stack["memory"],
             audit_service=_get_audit_log(),
             graph_agent=stack["graph_agent"],
+            storyline_service=stack["storyline_service"],
         )
     return _super_agent
 

@@ -82,7 +82,7 @@ def test_run_investigation_eager_executes_task(
     celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def _fake_execute(event_id: str) -> dict[str, str]:
+    async def _fake_execute(event_id: str, **_kwargs: Any) -> dict[str, str]:
         return {"status": "completed", "event_id": event_id}
 
     monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
@@ -96,7 +96,7 @@ def test_duplicate_delivery_is_idempotent(
 ) -> None:
     calls = {"n": 0}
 
-    async def _fake_execute(event_id: str) -> dict[str, str]:
+    async def _fake_execute(event_id: str, **_kwargs: Any) -> dict[str, str]:
         calls["n"] += 1
         if calls["n"] == 1:
             return {"status": "completed", "event_id": event_id}
@@ -108,6 +108,64 @@ def test_duplicate_delivery_is_idempotent(
     second = tasks.run_investigation.apply(args=["evt-dup"]).result
     assert first["status"] == "completed"
     assert second["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_execute_investigation_forwards_include_response_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def _investigate(event_id: str, **kwargs: Any) -> None:
+        seen["event_id"] = event_id
+        seen["include_response_execution"] = kwargs.get("include_response_execution")
+
+    async def _fake_super_agent() -> Any:
+        agent = MagicMock()
+        agent.investigate = _investigate
+        return agent
+
+    monkeypatch.setattr("app.api.v1.deps.get_super_agent", _fake_super_agent)
+    monkeypatch.setattr(
+        "app.services.evidence_projection.bind_evidence_projection",
+        lambda _projection: _null_context(),
+    )
+    monkeypatch.setattr(
+        "app.services.evidence_projection.EvidenceProjection",
+        lambda _factory: MagicMock(),
+    )
+
+    result = await tasks.execute_investigation(
+        "evt-include",
+        include_response_execution=True,
+    )
+    assert result == {"status": "completed", "event_id": "evt-include"}
+    assert seen == {
+        "event_id": "evt-include",
+        "include_response_execution": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_dispatch_investigation_passes_include_response_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tasks, "register_task_metadata", _noop_register)
+    captured: dict[str, Any] = {}
+
+    def _fake_apply_async(*_args: Any, **kwargs: Any) -> MagicMock:
+        captured.update(kwargs)
+        return MagicMock(id=kwargs["task_id"])
+
+    monkeypatch.setattr(tasks.run_investigation, "apply_async", _fake_apply_async)
+
+    task_id = await tasks.dispatch_investigation(
+        "evt-dispatch-include",
+        include_response_execution=True,
+    )
+    assert task_id
+    assert captured["args"] == ["evt-dispatch-include"]
+    assert captured["kwargs"] == {"include_response_execution": True}
 
 
 @pytest.mark.asyncio

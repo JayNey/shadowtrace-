@@ -86,7 +86,7 @@ vi.mock("../../src/services/socketClient", () => ({
 }));
 
 vi.mock("echarts-for-react", () => ({
-  default: () => <div data-testid="risk-radar" />,
+  default: () => <div data-testid="risk-radar-chart" />,
 }));
 
 function makeDetail(overrides: Partial<EventDetailResponse["event"]> = {}): EventDetailResponse {

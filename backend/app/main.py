@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1 import api_router
 from app.api.v1.errors import register_exception_handlers
@@ -85,6 +86,17 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(title="ShadowTrace", version="0.1.0", lifespan=_lifespan)
 register_exception_handlers(app)
+
+# Compose / local dev serves the Vite frontend on a different origin than the API.
+if get_settings().app_env != "production":
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 app.include_router(api_router, prefix="/api/v1")
 
 # ---------------------------------------------------------------------------
