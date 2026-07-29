@@ -3,6 +3,10 @@
  * investigation, and wait until report / timeline / graph / L4 approval are ready.
  *
  * Writes `frontend/e2e/.seed.json` for specs to consume.
+ *
+ * Telemetry is NOT ingested as SecurityEvents — MockXDR (Compose) already loads
+ * `insider_data_exfiltration` for evidence projection. Only incident + linked
+ * alerts are posted so the board stays clean.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -19,7 +23,7 @@ const AUTH_TOKEN = process.env.E2E_AUTH_TOKEN ?? "e2e-token";
 export interface SeedState {
   analysisEventId: string;
   approvalEventId: string;
-  approvalActionId: string | null;
+  approvalActionId: string;
   seededAt: string;
 }
 
@@ -44,7 +48,9 @@ async function api<T = Json>(
   try {
     data = text ? (JSON.parse(text) as T) : ({} as T);
   } catch {
-    throw new Error(`${method} ${route} → ${res.status}: non-JSON body: ${text.slice(0, 200)}`);
+    throw new Error(
+      `${method} ${route} → ${res.status}: non-JSON body: ${text.slice(0, 200)}`,
+    );
   }
   return { status: res.status, data };
 }
@@ -56,10 +62,10 @@ function sleep(ms: number): Promise<void> {
 async function waitFor<T>(
   label: string,
   fn: () => Promise<T | null | undefined>,
-  *,
-  timeoutMs = 180_000,
-  intervalMs = 2_000,
+  options: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? 180_000;
+  const intervalMs = options.intervalMs ?? 2_000;
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
@@ -73,7 +79,9 @@ async function waitFor<T>(
   }
   throw new Error(
     `timeout waiting for ${label}` +
-      (lastError ? `: ${lastError instanceof Error ? lastError.message : String(lastError)}` : ""),
+      (lastError
+        ? `: ${lastError instanceof Error ? lastError.message : String(lastError)}`
+        : ""),
   );
 }
 
@@ -81,6 +89,8 @@ async function ingestSourceRecord(payload: {
   reference: Json;
   raw_payload?: Json;
   normalized?: Json;
+  incident_ref?: Json;
+  related_alert_refs?: Json[];
 }): Promise<{ source_record_id: string; event_id: string | null }> {
   const { status, data } = await api<{
     source_record_id: string;
@@ -113,18 +123,24 @@ async function ingestScenarioPack(): Promise<string> {
       title?: string;
       level?: string;
     }>;
-    alerts?: Array<{ reference: Json; raw_payload?: Json; normalized?: Json }>;
-    assets?: Array<{ reference: Json; raw_payload?: Json; normalized?: Json }>;
-    logs?: Array<{ reference: Json; raw_payload?: Json; normalized?: Json }>;
+    alerts?: Array<{
+      reference: Json;
+      raw_payload?: Json;
+      normalized?: Json;
+      incident_ref?: Json;
+    }>;
   };
 
   let eventId: string | null = null;
+  let incidentRef: Json | null = null;
+
   for (const incident of scenario.incidents ?? []) {
     const normalized = {
       ...(incident.normalized ?? {}),
       title: incident.title,
       severity: incident.level,
       event_type: "data_exfiltration",
+      scenario: "insider_data_exfiltration",
     };
     const result = await ingestSourceRecord({
       reference: incident.reference,
@@ -132,51 +148,23 @@ async function ingestScenarioPack(): Promise<string> {
       normalized,
     });
     if (result.event_id) eventId = result.event_id;
-  }
-  for (const group of [scenario.alerts, scenario.assets, scenario.logs]) {
-    for (const item of group ?? []) {
-      await ingestSourceRecord({
-        reference: item.reference,
-        raw_payload: item.raw_payload ?? {},
-        normalized: item.normalized ?? {},
-      });
-    }
+    incidentRef = incident.reference;
   }
 
-  // Project telemetry channels so EvidenceAgent / Graph / Storyline have data.
-  const telemetryFiles: Array<{ file: string; channel: string }> = [
-    { file: "identity_logs.json", channel: "identity" },
-    { file: "endpoint_logs.json", channel: "endpoint" },
-    { file: "dlp_logs.json", channel: "dlp" },
-    { file: "network_logs.json", channel: "network" },
-    { file: "dns_logs.json", channel: "dns" },
-    { file: "asset_data.json", channel: "asset" },
-    { file: "threat_intel.json", channel: "threat_intel" },
-  ];
-  for (const { file, channel } of telemetryFiles) {
-    const full = path.join(REPO_ROOT, "data", "mock", file);
-    if (!fs.existsSync(full)) continue;
-    const rows = JSON.parse(fs.readFileSync(full, "utf-8")) as Json[];
-    if (!Array.isArray(rows)) continue;
-    for (const [index, row] of rows.entries()) {
-      const recordId = String(
-        row.record_id ?? row.id ?? `${channel}-${index}`,
-      );
-      await ingestSourceRecord({
-        reference: {
-          source_kind: channel === "asset" ? "asset" : "log",
-          source_product: "mock_xdr",
-          source_tenant_id: "tenant-demo",
-          connector_id: "conn-disposition",
-          source_object_type: channel,
-          source_object_id: `e2e-tele-${channel}-${recordId}`,
-          source_disposition: "pending",
-          schema_version: "1",
-        },
-        raw_payload: row,
-        normalized: { ...row, channel },
-      });
+  // Alerts with verified incident_ref merge into the incident event (no new
+  // SecurityEvent). Assets / logs / raw telemetry files are NOT ingested here —
+  // they would spawn orphan events; MockXDR supplies evidence for investigation.
+  for (const alert of scenario.alerts ?? []) {
+    const link = alert.incident_ref ?? incidentRef;
+    if (!link) {
+      throw new Error("scenario alert missing incident_ref and no incident ingested");
     }
+    await ingestSourceRecord({
+      reference: alert.reference,
+      raw_payload: alert.raw_payload ?? {},
+      normalized: alert.normalized ?? {},
+      incident_ref: link,
+    });
   }
 
   if (!eventId) {
@@ -219,6 +207,7 @@ async function createApprovalEvent(): Promise<string> {
       title: `E2E L4 approval ${incident.title ?? "incident"} ${stamp}`,
       severity: incident.level ?? "critical",
       event_type: "data_exfiltration",
+      scenario: "insider_data_exfiltration",
     },
   });
   if (!result.event_id) {
@@ -229,15 +218,14 @@ async function createApprovalEvent(): Promise<string> {
 
 async function triggerInvestigate(
   eventId: string,
-  *,
-  includeResponseExecution = false,
+  options: { includeResponseExecution?: boolean } = {},
 ): Promise<void> {
+  const includeResponseExecution = options.includeResponseExecution ?? false;
   const { status, data } = await api("POST", `/events/${eventId}/investigate`, {
     force_replan: false,
     include_response_execution: includeResponseExecution,
   });
   if (status !== 202 && status !== 200) {
-    // Idempotent: already investigating / not NEW — continue to wait.
     const code =
       data && typeof data === "object" && "error_code" in data
         ? String((data as Json).error_code)
@@ -254,31 +242,78 @@ async function triggerInvestigate(
 }
 
 async function waitAnalysisReady(eventId: string): Promise<void> {
+  const requiredPhases = new Set([
+    "initial_access",
+    "collection",
+    "staging",
+    "exfiltration",
+    "post_action",
+  ]);
+
   await waitFor(`analysis artifacts for ${eventId}`, async () => {
-    const detail = await api<{ event: { status: string } }>(
-      "GET",
-      `/events/${eventId}`,
-    );
+    const detail = await api<{
+      event: {
+        status: string;
+        event_context_snapshot?: {
+          evidence_output?: {
+            evidence_list?: Array<{ is_conflicting?: boolean }>;
+            conflicts?: unknown[];
+          };
+        };
+      };
+    }>("GET", `/events/${eventId}`);
     const status = detail.data.event?.status;
     if (!status || status === "new" || status === "triaging") {
       return null;
     }
     if (status === "failed") throw new Error(`event ${eventId} failed`);
 
+    const evidenceOutput =
+      detail.data.event?.event_context_snapshot?.evidence_output;
+    const evidenceList = evidenceOutput?.evidence_list ?? [];
+    if (evidenceList.length === 0) return null;
+    const hasConflict =
+      (evidenceOutput?.conflicts?.length ?? 0) > 0 ||
+      evidenceList.some((item) => item.is_conflicting);
+    if (!hasConflict) return null;
+
     const report = await api("GET", `/events/${eventId}/report`);
     if (report.status !== 200) return null;
 
-    // Timeline / graph may still be generating; poll briefly but don't hard-fail
-    // the seed if storyline_not_ready (404) — specs tolerate fallback UI.
-    await api("GET", `/events/${eventId}/timeline`);
-    await api("GET", `/events/${eventId}/graph`);
+    const timeline = await api<{
+      phases?: Array<{ phase_name?: string; entries?: unknown[] }>;
+    }>("GET", `/events/${eventId}/timeline`);
+    if (timeline.status !== 200) return null;
+    const phases = timeline.data.phases ?? [];
+    const phaseNames = new Set(
+      phases.map((phase) => String(phase.phase_name ?? "")),
+    );
+    for (const required of requiredPhases) {
+      if (!phaseNames.has(required)) return null;
+    }
+    const hasExpandableEntry = phases.some(
+      (phase) => Array.isArray(phase.entries) && phase.entries.length > 0,
+    );
+    if (!hasExpandableEntry) return null;
+
+    const graph = await api<{
+      nodes?: unknown[];
+      attack_path_candidates?: unknown[][];
+    }>("GET", `/events/${eventId}/graph`);
+    if (graph.status !== 200) return null;
+    if (!Array.isArray(graph.data.nodes) || graph.data.nodes.length === 0) {
+      return null;
+    }
+    const paths = graph.data.attack_path_candidates ?? [];
+    if (!paths.some((path) => Array.isArray(path) && path.length > 0)) {
+      return null;
+    }
+
     return { ok: true };
   });
 }
 
-async function waitApprovalReady(
-  eventId: string,
-): Promise<string | null> {
+async function waitApprovalReady(eventId: string): Promise<string> {
   return waitFor(`L4 waiting_approval for ${eventId}`, async () => {
     const detail = await api<{ event: { status: string } }>(
       "GET",
@@ -296,14 +331,7 @@ async function waitApprovalReady(
         item.status === "waiting_approval" &&
         String(item.action_level).toLowerCase() === "l4",
     );
-    if (!l4) {
-      // Any waiting_approval action is enough for the approval UI path.
-      const any = (actions.data.items ?? []).find(
-        (item) => item.status === "waiting_approval",
-      );
-      return any?.action_id ?? null;
-    }
-    return l4.action_id;
+    return l4?.action_id ?? null;
   });
 }
 
@@ -317,7 +345,9 @@ export default async function globalSetup(): Promise<void> {
 
   console.log("[e2e seed] ingesting insider_data_exfiltration via API…");
   const analysisEventId = await ingestScenarioPack();
-  console.log(`[e2e seed] analysis event=${analysisEventId}; triggering investigate…`);
+  console.log(
+    `[e2e seed] analysis event=${analysisEventId}; triggering investigate…`,
+  );
   await triggerInvestigate(analysisEventId, { includeResponseExecution: false });
   await waitAnalysisReady(analysisEventId);
   console.log("[e2e seed] analysis artifacts ready");
@@ -339,14 +369,20 @@ export default async function globalSetup(): Promise<void> {
   fs.writeFileSync(SEED_STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, "utf-8");
   process.env.E2E_ANALYSIS_EVENT_ID = analysisEventId;
   process.env.E2E_APPROVAL_EVENT_ID = approvalEventId;
-  if (approvalActionId) {
-    process.env.E2E_APPROVAL_ACTION_ID = approvalActionId;
-  }
+  process.env.E2E_APPROVAL_ACTION_ID = approvalActionId;
 }
 
 export function readSeedState(): SeedState {
   if (!fs.existsSync(SEED_STATE_PATH)) {
-    throw new Error(`missing seed state at ${SEED_STATE_PATH}; run global setup first`);
+    throw new Error(
+      `missing seed state at ${SEED_STATE_PATH}; run global setup first`,
+    );
   }
-  return JSON.parse(fs.readFileSync(SEED_STATE_PATH, "utf-8")) as SeedState;
+  const state = JSON.parse(fs.readFileSync(SEED_STATE_PATH, "utf-8")) as SeedState;
+  if (!state.analysisEventId || !state.approvalEventId || !state.approvalActionId) {
+    throw new Error(
+      `incomplete seed state at ${SEED_STATE_PATH}: ${JSON.stringify(state)}`,
+    );
+  }
+  return state;
 }
