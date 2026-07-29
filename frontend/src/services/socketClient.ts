@@ -15,6 +15,8 @@ class SocketClient {
   private envelopeListenerAttached = false;
   /** Event rooms to (re)join once the transport is up. */
   private pendingEventIds = new Set<string>();
+  /** When true, emit join_global on (re)connect — SOC dashboard / list. */
+  private preferGlobalRoom = false;
 
   /** Connect to /events namespace. Safe to call multiple times (dedup). */
   connect(): void {
@@ -63,6 +65,7 @@ class SocketClient {
     this.socket = null;
     this.connected = false;
     this.pendingEventIds.clear();
+    this.preferGlobalRoom = false;
   }
 
   get isConnected(): boolean {
@@ -72,8 +75,10 @@ class SocketClient {
   /**
    * Subscribe to a specific event room (ISSUE-040).
    * Queues until connected so callers need not wait for the handshake.
+   * Clears preferGlobalRoom — detail watch leaves global on the server.
    */
   subscribe(eventId: string): void {
+    this.preferGlobalRoom = false;
     this.pendingEventIds.add(eventId);
     // Use the connect-handler flag: socket.io mocks / race windows may leave
     // ``socket.connected`` false briefly while ``this.connected`` is already true.
@@ -87,8 +92,25 @@ class SocketClient {
     this.pendingEventIds.delete(eventId);
   }
 
+  /**
+   * Re-join the global room after a detail ``subscribe`` left it (ISSUE-085).
+   * Clears pending event rooms so reconnect does not re-subscribe to them.
+   */
+  ensureGlobalRoom(): void {
+    this.preferGlobalRoom = true;
+    this.pendingEventIds.clear();
+    this.connect();
+    if (this.connected && this.socket) {
+      this.socket.emit("join_global", {});
+    }
+  }
+
   private flushSubscriptions(): void {
     if (!this.connected || !this.socket) return;
+    if (this.preferGlobalRoom) {
+      this.socket.emit("join_global", {});
+      return;
+    }
     for (const eventId of this.pendingEventIds) {
       this.socket.emit("subscribe", { event_id: eventId });
     }

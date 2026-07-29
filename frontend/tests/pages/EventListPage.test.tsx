@@ -27,6 +27,7 @@ const mockSocketIsConnected = { current: true };
 vi.mock("../../src/services/socketClient", () => ({
   socketClient: {
     connect: () => mockSocketConnect(),
+    ensureGlobalRoom: () => mockSocketConnect(),
     disconnect: () => mockSocketDisconnect(),
     subscribe: (id: string) => mockSocketSubscribe(id),
     onEvent: (h: (evt: unknown) => void) => {

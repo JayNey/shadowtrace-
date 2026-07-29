@@ -109,7 +109,8 @@ export default function EventListPage() {
 
   // ---- Socket subscription (global) ------------------------------------
   useEffect(() => {
-    socketClient.connect();
+    // Re-join global if a prior detail-page subscribe left it (ISSUE-085).
+    socketClient.ensureGlobalRoom();
     const unsub = socketClient.onEvent((evt) => {
       const current = itemsRef.current;
       if (evt.type === "event_created") {

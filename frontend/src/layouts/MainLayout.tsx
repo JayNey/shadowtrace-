@@ -9,6 +9,7 @@ import {
   CheckCircleOutlined,
   ToolOutlined,
   BellOutlined,
+  DashboardOutlined,
 } from "@ant-design/icons";
 import { useApprovalStore } from "../stores/approvalStore";
 import GlobalSearchBox from "../components/search/GlobalSearchBox";
@@ -19,6 +20,7 @@ const menuItems: MenuProps["items"] = [
   { key: "/events", icon: <UnorderedListOutlined />, label: "事件看板" },
   { key: "/approvals", icon: <CheckCircleOutlined />, label: "审批中心" },
   { key: "/tools-audit", icon: <ToolOutlined />, label: "工具审计" },
+  { key: "/dashboard", icon: <DashboardOutlined />, label: "SOC 大屏" },
 ];
 
 export default function MainLayout() {
@@ -48,7 +50,9 @@ export default function MainLayout() {
       ? "/approvals"
       : location.pathname.startsWith("/tools-audit")
         ? "/tools-audit"
-        : "/events";
+        : location.pathname.startsWith("/dashboard")
+          ? "/dashboard"
+          : "/events";
 
   return (
     <Layout style={{ minHeight: "100vh" }}>

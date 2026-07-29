@@ -1,0 +1,151 @@
+/** SOC dashboard dark theme + ticker animation (ISSUE-085). */
+
+.soc-dark {
+  --soc-bg: #0b1220;
+  --soc-panel: #141c2b;
+  --soc-border: #243044;
+  --soc-text: #e6f4ff;
+  --soc-muted: #8c9bb3;
+  min-height: 100vh;
+  background:
+    radial-gradient(ellipse at top, #152238 0%, transparent 55%),
+    linear-gradient(180deg, #0b1220 0%, #070b14 100%);
+  color: var(--soc-text);
+  padding: 20px 24px 32px;
+  box-sizing: border-box;
+}
+
+.soc-dark .soc-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+  gap: 12px;
+}
+
+.soc-dark .soc-brand {
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--soc-text);
+  margin: 0;
+}
+
+.soc-dark .soc-subtitle {
+  color: var(--soc-muted);
+  margin: 4px 0 0;
+}
+
+.soc-dark .soc-stat-card {
+  background: var(--soc-panel);
+  border: 1px solid var(--soc-border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  min-height: 96px;
+}
+
+.soc-dark .soc-stat-title {
+  color: var(--soc-muted) !important;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.soc-dark .soc-stat-suffix {
+  color: var(--soc-muted) !important;
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+.soc-dark .soc-panel {
+  background: var(--soc-panel);
+  border: 1px solid var(--soc-border);
+  border-radius: 8px;
+  padding: 16px;
+  height: 100%;
+}
+
+.soc-dark .soc-panel-title {
+  color: var(--soc-text) !important;
+  margin: 0 0 12px !important;
+}
+
+.soc-dark .soc-ticker {
+  overflow: hidden;
+}
+
+.soc-dark .soc-ticker-track {
+  overflow: hidden;
+  white-space: nowrap;
+  mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+}
+
+.soc-dark .soc-ticker-scroll {
+  display: inline-flex;
+  gap: 48px;
+  animation: soc-ticker-marquee 28s linear infinite;
+}
+
+.soc-dark .soc-ticker-item {
+  color: var(--soc-text);
+  font-size: 14px;
+}
+
+.soc-dark .soc-ticker-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.soc-dark .soc-agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.soc-dark .soc-agent-row {
+  display: grid;
+  grid-template-columns: 10px minmax(64px, auto) minmax(100px, 140px) 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--soc-border);
+  font-size: 13px;
+}
+
+.soc-dark .soc-agent-row:last-child {
+  border-bottom: none;
+}
+
+.soc-dark .soc-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.soc-dark .soc-agent-label {
+  color: var(--soc-text);
+  font-weight: 600;
+}
+
+.soc-dark .soc-agent-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--soc-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.soc-dark .soc-agent-msg {
+  color: var(--soc-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes soc-ticker-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}

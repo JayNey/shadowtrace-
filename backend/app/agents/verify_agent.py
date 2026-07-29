@@ -23,7 +23,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import InternalError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -362,6 +362,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 phase1_failed=phase1_failed,
             )
 
+        # Denormalize phase-1 effect outcomes onto Action rows so SOC stats /
+        # rollback_service can read effect_verification_status without digging
+        # into EventContext (ISSUE-085 Should-Fix).
+        await self._persist_effect_verification_statuses(phase1_results)
+
         # 3. Phase 2 — terminal writeback activation & verification.
         (
             phase2_results,
@@ -444,6 +449,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
         # 5. Persist verification result to working memory.
         await self._write_verification_result(event_id, result)
+
+        # Phase-1 effect statuses were already denormalized above. Do NOT
+        # re-persist all_results: phase-2 disposition rows reuse
+        # effect_status=VERIFIED for writeback receipt confirmation and
+        # would overwrite the orthogonal effect_verification_status column
+        # (ISSUE-085 Blocker).
 
         # 6. Publish action_verified events.
         await self._publish_action_verified_events(event_id, result)
@@ -1847,6 +1858,67 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             need_manual_resolution=False,
         )
         await self._write_verification_result(event_id, interim)
+
+    async def _persist_effect_verification_statuses(
+        self,
+        results: list[VerificationActionResult],
+    ) -> None:
+        """Write per-action ``effect_status`` onto ``Action.effect_verification_status``.
+
+        Only terminal ``VerificationPhase.EFFECT`` outcomes are persisted
+        (``verified`` / ``failed`` / ``unverifiable``). Phase-2 disposition
+        results reuse ``effect_status=VERIFIED`` for writeback receipt confirmation
+        and must never overwrite the entity-effect column used by SOC stats.
+
+        In-flight ``SKIPPED`` rows (pending execution, waiting approval, deferred
+        activation) are not stamped so reports / KB consumers do not read a
+        premature "skipped" as a finished verification.
+        Failures are logged and never raise — verification routing must not
+        break because a denormalized stats column could not be updated.
+        """
+        if self._session_factory is None or not results:
+            return
+
+        # Matches stats.py ``_EFFECT_JUDGEABLE`` — only conclusive outcomes.
+        _terminal_effect = {
+            EffectStatus.VERIFIED,
+            EffectStatus.FAILED,
+            EffectStatus.UNVERIFIABLE,
+        }
+
+        updates: dict[str, str] = {}
+        for item in results:
+            if item.detail == "deferred_pending_activation":
+                continue
+            # None is treated as EFFECT for legacy callers / unit helpers that
+            # omit verification_phase; DISPOSITION must never land here.
+            if item.verification_phase == VerificationPhase.DISPOSITION:
+                continue
+            if item.effect_status not in _terminal_effect:
+                continue
+            updates[item.action_id] = item.effect_status.value
+        if not updates:
+            return
+
+        now = datetime.now(UTC)
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    for action_id, status in updates.items():
+                        await session.execute(
+                            update(orm.Action)
+                            .where(orm.Action.action_id == action_id)
+                            .values(
+                                effect_verification_status=status,
+                                updated_at=now,
+                            )
+                        )
+        except Exception:
+            logger.warning(
+                "Failed to persist effect_verification_status for %d action(s)",
+                len(updates),
+                exc_info=True,
+            )
 
     async def _write_verification_result(
         self,
