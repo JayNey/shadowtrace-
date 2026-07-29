@@ -361,3 +361,105 @@ async def test_stats_empty_rates_are_null(
         assert body[key]["numerator"] == 0
         assert body[key]["denominator"] == 0
     assert body["avg_investigation_seconds"] is None
+
+
+@pytest.mark.asyncio
+async def test_stats_partial_success_counts_as_execution_failure(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """PARTIAL_SUCCESS enters the execution denominator but not the numerator."""
+    eid = await _seed_event(session_factory, title="partial-success")
+    await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.PARTIAL_SUCCESS,
+        effect_verification_status=None,
+        writeback_required=False,
+    )
+
+    body = client.get("/api/v1/stats", headers=_hdr()).json()
+    aes = body["action_execution_success_rate"]
+    assert aes["numerator"] == 0
+    assert aes["denominator"] == 1
+    assert aes["rate"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_stats_db_unavailable_returns_dependency_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB wiring / aggregation failure → 503 dependency_unavailable (not fake zeros)."""
+    import app.api.v1.stats as stats_mod
+
+    monkeypatch.setattr(stats_mod, "_try_get_session_factory", lambda: None)
+
+    resp = client.get("/api/v1/stats", headers=_hdr())
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["error_code"] == "dependency_unavailable"
+    assert body.get("total_events") is None or "total_events" not in body
+
+
+@pytest.mark.asyncio
+async def test_stats_aggregation_error_returns_dependency_error(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """SQLAlchemy failures surface as 503, not an empty successful payload."""
+    from sqlalchemy.exc import OperationalError
+
+    import app.api.v1.stats as stats_mod
+
+    async def _boom(_session: object) -> object:
+        raise OperationalError("stmt", {}, Exception("db down"))
+
+    monkeypatch.setattr(stats_mod, "_try_get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(stats_mod, "_aggregate_stats", _boom)
+
+    resp = client.get("/api/v1/stats", headers=_hdr())
+    assert resp.status_code == 503
+    assert resp.json()["error_code"] == "dependency_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_stats_effect_rate_after_verify_persist_helper(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """VerifyAgent denormalize helper → effect_verification_rate becomes non-null."""
+    from app.agents.verify_agent import VerifyAgent
+    from app.models.agent_io import EffectStatus, VerificationActionResult, VerificationPhase
+
+    eid = await _seed_event(session_factory, title="verify-persist")
+    aid = await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status=None,
+        writeback_required=False,
+    )
+
+    agent = VerifyAgent(session_factory=session_factory)
+    await agent._persist_effect_verification_statuses(
+        [
+            VerificationActionResult(
+                action_id=aid,
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                writeback_status=None,
+                writeback_ids=[],
+                detail="effect_ok",
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ]
+    )
+
+    body = client.get("/api/v1/stats", headers=_hdr()).json()
+    efr = body["effect_verification_rate"]
+    assert efr["numerator"] == 1
+    assert efr["denominator"] == 1
+    assert efr["rate"] == pytest.approx(1.0)

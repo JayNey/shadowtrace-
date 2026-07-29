@@ -33,6 +33,7 @@ export default function SocDashboardPage() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [ticker, setTicker] = useState<TickerItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const [statsUnavailable, setStatsUnavailable] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const refreshTimer = useRef<number | undefined>(undefined);
@@ -42,8 +43,10 @@ export default function SocDashboardPage() {
     try {
       const res = await getStats();
       setStats(res.data);
+      setStatsUnavailable(false);
     } catch {
-      // apiClient already toasts; keep last good snapshot.
+      // apiClient already toasts; keep last good snapshot, surface degrade.
+      setStatsUnavailable(true);
     } finally {
       setLoading(false);
     }
@@ -176,6 +179,12 @@ export default function SocDashboardPage() {
           </Button>
         </Space>
       </div>
+
+      {statsUnavailable ? (
+        <Typography.Text type="danger" data-testid="soc-stats-unavailable">
+          统计暂不可用{stats ? " · 显示上次成功快照" : ""}
+        </Typography.Text>
+      ) : null}
 
       <StatCardGrid stats={stats} />
 

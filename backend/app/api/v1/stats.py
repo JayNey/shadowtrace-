@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1 import schemas as s
 from app.core.auth import CurrentPrincipal
+from app.core.errors import DependencyUnavailableError
 from app.db import models as orm
 from app.models.enums import ActionStatus, EventStatus, WritebackStatus
 
@@ -56,10 +57,6 @@ def _rate(numerator: int, denominator: int) -> s.RateStat:
         numerator=numerator,
         denominator=denominator,
     )
-
-
-def _empty_stats() -> s.StatsResponse:
-    return s.StatsResponse()
 
 
 async def _aggregate_stats(session: AsyncSession) -> s.StatsResponse:
@@ -131,9 +128,7 @@ async def _aggregate_stats(session: AsyncSession) -> s.StatsResponse:
     pending_approvals = int(
         (
             await session.execute(
-                select(func.count()).where(
-                    orm.Action.status == ActionStatus.WAITING_APPROVAL.value
-                )
+                select(func.count()).where(orm.Action.status == ActionStatus.WAITING_APPROVAL.value)
             )
         ).scalar_one()
         or 0
@@ -178,9 +173,7 @@ async def _aggregate_stats(session: AsyncSession) -> s.StatsResponse:
                     orm.Action.writeback_status == WritebackStatus.CONFIRMED.value,
                 )
                 .label("wb_num"),
-                func.count()
-                .filter(orm.Action.writeback_required.is_(True))
-                .label("wb_den"),
+                func.count().filter(orm.Action.writeback_required.is_(True)).label("wb_den"),
             )
         )
     ).one()
@@ -253,10 +246,18 @@ async def get_stats(principal: CurrentPrincipal) -> s.StatsResponse:
     _ = principal  # auth gate only
     sf = _try_get_session_factory()
     if sf is None:
-        return _empty_stats()
+        raise DependencyUnavailableError(
+            "stats database session factory unavailable",
+            details={"endpoint": "/api/v1/stats"},
+        )
     try:
         async with sf() as session:
             return await _aggregate_stats(session)
+    except DependencyUnavailableError:
+        raise
     except (SQLAlchemyError, OSError, TimeoutError, RuntimeError) as exc:
         logger.warning("Stats aggregation failed: %s", exc, exc_info=True)
-        return _empty_stats()
+        raise DependencyUnavailableError(
+            "stats aggregation failed",
+            details={"endpoint": "/api/v1/stats"},
+        ) from exc
