@@ -23,7 +23,8 @@ export default function EventTrendChart({
   const labels = series.map((b) => {
     const d = new Date(b.hour);
     if (Number.isNaN(d.getTime())) return b.hour;
-    return `${String(d.getHours()).padStart(2, "0")}:00`;
+    // Backend emits UTC hour buckets — keep axis labels in UTC.
+    return `${String(d.getUTCHours()).padStart(2, "0")}:00`;
   });
   const values = series.map((b) => b.count);
 

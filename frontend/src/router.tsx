@@ -7,6 +7,7 @@ import EventDetailPage from "./pages/EventDetailPage";
 import ApprovalPage from "./pages/ApprovalPage";
 import ToolAuditPage from "./pages/ToolAuditPage";
 import SocDashboardPage from "./pages/SocDashboardPage";
+import SocDashboardErrorPage from "./pages/SocDashboardErrorPage";
 
 export const router = createBrowserRouter([
   {
@@ -21,5 +22,9 @@ export const router = createBrowserRouter([
     ],
   },
   // Isolated from MainLayout so SOC wall / missing page cannot break other routes.
-  { path: "/dashboard", element: <SocDashboardPage /> },
+  {
+    path: "/dashboard",
+    element: <SocDashboardPage />,
+    errorElement: <SocDashboardErrorPage />,
+  },
 ]);

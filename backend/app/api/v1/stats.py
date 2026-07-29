@@ -33,9 +33,11 @@ _JUDGEABLE_ACTION_STATUSES = (
 )
 
 # Effect verification outcomes that entered the verification path.
+# ``unverifiable`` stays in the denominator so tool outages do not inflate the rate.
 _EFFECT_VERIFIED = "verified"
 _EFFECT_FAILED = "failed"
-_EFFECT_JUDGEABLE = (_EFFECT_VERIFIED, _EFFECT_FAILED)
+_EFFECT_UNVERIFIABLE = "unverifiable"
+_EFFECT_JUDGEABLE = (_EFFECT_VERIFIED, _EFFECT_FAILED, _EFFECT_UNVERIFIABLE)
 
 
 def _try_get_session_factory() -> async_sessionmaker[AsyncSession] | None:

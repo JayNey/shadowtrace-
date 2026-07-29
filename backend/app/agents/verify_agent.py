@@ -450,9 +450,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         # 5. Persist verification result to working memory.
         await self._write_verification_result(event_id, result)
 
-        # 5b. Refresh Action.effect_verification_status from the final result
-        # set (phase-2 disposition rows may also carry effect_status).
-        await self._persist_effect_verification_statuses(all_results)
+        # Phase-1 effect statuses were already denormalized above. Do NOT
+        # re-persist all_results: phase-2 disposition rows reuse
+        # effect_status=VERIFIED for writeback receipt confirmation and
+        # would overwrite the orthogonal effect_verification_status column
+        # (ISSUE-085 Blocker).
 
         # 6. Publish action_verified events.
         await self._publish_action_verified_events(event_id, result)
@@ -1863,6 +1865,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
     ) -> None:
         """Write per-action ``effect_status`` onto ``Action.effect_verification_status``.
 
+        Only ``VerificationPhase.EFFECT`` rows are persisted. Phase-2 disposition
+        results reuse ``effect_status=VERIFIED`` for writeback receipt confirmation
+        and must never overwrite the entity-effect column used by SOC stats.
+
         Deferred placeholders (``deferred_pending_activation``) are skipped so
         we do not stamp response actions as skipped before they are activated.
         Failures are logged and never raise — verification routing must not
@@ -1874,6 +1880,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         updates: dict[str, str] = {}
         for item in results:
             if item.detail == "deferred_pending_activation":
+                continue
+            # None is treated as EFFECT for legacy callers / unit helpers that
+            # omit verification_phase; DISPOSITION must never land here.
+            if item.verification_phase == VerificationPhase.DISPOSITION:
                 continue
             updates[item.action_id] = item.effect_status.value
         if not updates:

@@ -273,4 +273,10 @@ describe("SocDashboardPage", () => {
     // Last successful rates remain visible.
     expect(screen.getByText("动作执行成功率")).toBeInTheDocument();
   });
+
+  it("exposes a back link to the events board", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("soc-back-events")).toBeInTheDocument());
+    expect(screen.getByTestId("soc-back-events")).toHaveAttribute("href", "/events");
+  });
 });
