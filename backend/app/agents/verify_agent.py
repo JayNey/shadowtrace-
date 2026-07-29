@@ -1865,17 +1865,26 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
     ) -> None:
         """Write per-action ``effect_status`` onto ``Action.effect_verification_status``.
 
-        Only ``VerificationPhase.EFFECT`` rows are persisted. Phase-2 disposition
+        Only terminal ``VerificationPhase.EFFECT`` outcomes are persisted
+        (``verified`` / ``failed`` / ``unverifiable``). Phase-2 disposition
         results reuse ``effect_status=VERIFIED`` for writeback receipt confirmation
         and must never overwrite the entity-effect column used by SOC stats.
 
-        Deferred placeholders (``deferred_pending_activation``) are skipped so
-        we do not stamp response actions as skipped before they are activated.
+        In-flight ``SKIPPED`` rows (pending execution, waiting approval, deferred
+        activation) are not stamped so reports / KB consumers do not read a
+        premature "skipped" as a finished verification.
         Failures are logged and never raise — verification routing must not
         break because a denormalized stats column could not be updated.
         """
         if self._session_factory is None or not results:
             return
+
+        # Matches stats.py ``_EFFECT_JUDGEABLE`` — only conclusive outcomes.
+        _terminal_effect = {
+            EffectStatus.VERIFIED,
+            EffectStatus.FAILED,
+            EffectStatus.UNVERIFIABLE,
+        }
 
         updates: dict[str, str] = {}
         for item in results:
@@ -1884,6 +1893,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # None is treated as EFFECT for legacy callers / unit helpers that
             # omit verification_phase; DISPOSITION must never land here.
             if item.verification_phase == VerificationPhase.DISPOSITION:
+                continue
+            if item.effect_status not in _terminal_effect:
                 continue
             updates[item.action_id] = item.effect_status.value
         if not updates:
