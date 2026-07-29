@@ -32,12 +32,15 @@ _JUDGEABLE_ACTION_STATUSES = (
     ActionStatus.PARTIAL_SUCCESS.value,
 )
 
-# Effect verification outcomes that entered the verification path.
-# ``unverifiable`` stays in the denominator so tool outages do not inflate the rate.
+# Effect verification numerator status.
+# Denominator = executed actions that still need / needed verification
+# (SUCCESS | PARTIAL_SUCCESS), including rows whose effect stamp is still null
+# so incomplete Verify does not inflate the rate to 100%.
 _EFFECT_VERIFIED = "verified"
-_EFFECT_FAILED = "failed"
-_EFFECT_UNVERIFIABLE = "unverifiable"
-_EFFECT_JUDGEABLE = (_EFFECT_VERIFIED, _EFFECT_FAILED, _EFFECT_UNVERIFIABLE)
+_EFFECT_NEED_VERIFICATION_STATUSES = (
+    ActionStatus.SUCCESS.value,
+    ActionStatus.PARTIAL_SUCCESS.value,
+)
 
 
 def _try_get_session_factory() -> async_sessionmaker[AsyncSession] | None:
@@ -140,6 +143,7 @@ async def _aggregate_stats(session: AsyncSession) -> s.StatsResponse:
             await session.execute(
                 select(func.count()).where(
                     orm.Action.writeback_required.is_(True),
+                    orm.Action.writeback_applicable.is_(True),
                     orm.Action.writeback_status.in_(
                         (
                             WritebackStatus.PENDING.value,
@@ -167,15 +171,23 @@ async def _aggregate_stats(session: AsyncSession) -> s.StatsResponse:
                 .filter(orm.Action.effect_verification_status == _EFFECT_VERIFIED)
                 .label("effect_num"),
                 func.count()
-                .filter(orm.Action.effect_verification_status.in_(_EFFECT_JUDGEABLE))
+                .filter(orm.Action.status.in_(_EFFECT_NEED_VERIFICATION_STATUSES))
                 .label("effect_den"),
+                # Closed-loop writeback KPI: only applicable required actions
+                # (§4.5) — REJECTED / never-approved SUPERSEDED stay out.
                 func.count()
                 .filter(
                     orm.Action.writeback_required.is_(True),
+                    orm.Action.writeback_applicable.is_(True),
                     orm.Action.writeback_status == WritebackStatus.CONFIRMED.value,
                 )
                 .label("wb_num"),
-                func.count().filter(orm.Action.writeback_required.is_(True)).label("wb_den"),
+                func.count()
+                .filter(
+                    orm.Action.writeback_required.is_(True),
+                    orm.Action.writeback_applicable.is_(True),
+                )
+                .label("wb_den"),
             )
         )
     ).one()

@@ -28,16 +28,21 @@ vi.mock("../../src/services/eventApi", () => ({
   listEvents: (...args: unknown[]) => mockListEvents(...args),
 }));
 
-let socketHandler: ((evt: unknown) => void) | undefined;
+let socketHandlers: Array<(evt: unknown) => void> = [];
 const mockSocketConnect = vi.fn();
+const mockEnsureGlobalRoom = vi.fn();
 
 vi.mock("../../src/services/socketClient", () => ({
   socketClient: {
     connect: () => mockSocketConnect(),
+    ensureGlobalRoom: () => {
+      mockEnsureGlobalRoom();
+      mockSocketConnect();
+    },
     onEvent: (h: (evt: unknown) => void) => {
-      socketHandler = h;
+      socketHandlers.push(h);
       return () => {
-        socketHandler = undefined;
+        socketHandlers = socketHandlers.filter((x) => x !== h);
       };
     },
     get isConnected() {
@@ -45,6 +50,12 @@ vi.mock("../../src/services/socketClient", () => ({
     },
   },
 }));
+
+function emitSocket(evt: unknown) {
+  for (const h of [...socketHandlers]) {
+    h(evt);
+  }
+}
 
 vi.mock("echarts-for-react", () => ({
   default: ({ option }: { option: unknown }) => (
@@ -98,7 +109,7 @@ describe("SocDashboardPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    socketHandler = undefined;
+    socketHandlers = [];
     mockGetStats.mockResolvedValue({ data: makeStats() });
     mockListEvents.mockResolvedValue({
       data: {
@@ -194,11 +205,11 @@ describe("SocDashboardPage", () => {
 
   it("appends high-risk events from socket into the ticker", async () => {
     renderPage();
-    await waitFor(() => expect(mockSocketConnect).toHaveBeenCalled());
-    await waitFor(() => expect(socketHandler).toBeDefined());
+    await waitFor(() => expect(mockEnsureGlobalRoom).toHaveBeenCalled());
+    await waitFor(() => expect(socketHandlers.length).toBeGreaterThan(0));
 
     act(() => {
-      socketHandler?.({
+      emitSocket({
         type: "event_created",
         event_id: "evt-socket-high",
         payload: {
@@ -214,6 +225,36 @@ describe("SocDashboardPage", () => {
       // Ticker duplicates items for seamless marquee scroll.
       expect(screen.getAllByText("evt-socket-high").length).toBeGreaterThanOrEqual(1);
     });
+  });
+
+  it("renders agent activity strip and appends agent_progress rows", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByTestId("agent-activity-strip")).toBeInTheDocument());
+    expect(screen.getByText("Agent 活动")).toBeInTheDocument();
+    await waitFor(() => expect(socketHandlers.length).toBeGreaterThan(0));
+
+    act(() => {
+      emitSocket({
+        type: "agent_progress",
+        event_id: "evt-agent-1",
+        payload: {
+          agent_name: "triage_agent",
+          message: "分诊中",
+          progress_percent: 40,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("agent-activity-row")).toBeInTheDocument();
+      expect(screen.getByText("分诊")).toBeInTheDocument();
+      expect(screen.getByText("分诊中")).toBeInTheDocument();
+    });
+  });
+
+  it("rejoins global room on mount via ensureGlobalRoom", async () => {
+    renderPage();
+    await waitFor(() => expect(mockEnsureGlobalRoom).toHaveBeenCalled());
   });
 
   it("manual refresh reloads stats", async () => {
