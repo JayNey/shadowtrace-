@@ -1,4 +1,4 @@
-"""Entity relationship graph API tests (ISSUE-071)."""
+"""Entity relationship graph API tests (ISSUE-071 / ISSUE-083)."""
 
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from typing import Any, cast
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.v1.deps import get_event_service
+from app.api.v1.deps import get_attack_path_service, get_event_service
 from app.api.v1.graph import GraphRepository, _get_graph_reader
 from app.core.auth import Principal, get_principal
 from app.db.orm.graph import GraphEdgeORM, GraphNodeORM
 from app.main import app
-from app.models.agent_io import GraphOutput
+from app.models.agent_io import CrossEventPath, GraphOutput
 
 
 class _EventService:
@@ -35,6 +35,21 @@ class _GraphReader:
         return self.output
 
 
+class _AttackPathService:
+    def __init__(self, paths: list[CrossEventPath] | None = None) -> None:
+        self.paths = paths or []
+        self.calls: list[str] = []
+
+    async def find_cross_event_paths(
+        self,
+        event_id: str,
+        max_depth: int = 4,
+    ) -> list[CrossEventPath]:
+        _ = max_depth
+        self.calls.append(event_id)
+        return self.paths
+
+
 @pytest.fixture(autouse=True)
 def _clear_overrides() -> Iterator[None]:
     app.dependency_overrides.clear()
@@ -46,8 +61,10 @@ def _client(
     output: GraphOutput,
     *,
     event_exists: bool = True,
-) -> tuple[TestClient, _GraphReader]:
+    cross_paths: list[CrossEventPath] | None = None,
+) -> tuple[TestClient, _GraphReader, _AttackPathService]:
     reader = _GraphReader(output)
+    attack = _AttackPathService(cross_paths)
 
     async def _principal() -> Principal:
         return Principal(subject="analyst-1", roles=["analyst"])
@@ -58,7 +75,8 @@ def _client(
     app.dependency_overrides[get_principal] = _principal
     app.dependency_overrides[get_event_service] = _event_service
     app.dependency_overrides[_get_graph_reader] = lambda: reader
-    return TestClient(app), reader
+    app.dependency_overrides[get_attack_path_service] = lambda: attack
+    return TestClient(app), reader, attack
 
 
 def _graph_output() -> GraphOutput:
@@ -93,12 +111,13 @@ def _graph_output() -> GraphOutput:
             ],
             "central_entities": ["alice"],
             "attack_path_candidates": [["node-account", "node-host"]],
+            "cross_event_paths": [],
         }
     )
 
 
 def test_graph_returns_persisted_projection() -> None:
-    client, reader = _client(_graph_output())
+    client, reader, attack = _client(_graph_output())
 
     response = client.get("/api/v1/events/evt-071/graph")
 
@@ -108,11 +127,13 @@ def test_graph_returns_persisted_projection() -> None:
     assert payload["edges"][0]["evidence_id"] == "ev-login"
     assert payload["central_entities"] == ["alice"]
     assert payload["attack_path_candidates"] == [["node-account", "node-host"]]
+    assert payload["cross_event_paths"] == []
     assert reader.calls == ["evt-071"]
+    assert attack.calls == ["evt-071"]
 
 
 def test_graph_returns_empty_arrays_when_not_generated() -> None:
-    client, _ = _client(GraphOutput())
+    client, _, _ = _client(GraphOutput())
 
     response = client.get("/api/v1/events/evt-071/graph")
 
@@ -122,17 +143,41 @@ def test_graph_returns_empty_arrays_when_not_generated() -> None:
         "edges": [],
         "central_entities": [],
         "attack_path_candidates": [],
+        "cross_event_paths": [],
     }
 
 
+def test_graph_fills_cross_event_paths_when_service_returns_data() -> None:
+    paths = [
+        CrossEventPath(
+            path_id="cep-demo",
+            related_event_ids=["evt-other"],
+            shared_entities=["198.51.100.77"],
+            path_nodes=["node-ip-a", "node-ip-b"],
+            risk_hint="shared_external_ip",
+        )
+    ]
+    client, _, attack = _client(_graph_output(), cross_paths=paths)
+
+    response = client.get("/api/v1/events/evt-071/graph")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["cross_event_paths"]) == 1
+    assert payload["cross_event_paths"][0]["shared_entities"] == ["198.51.100.77"]
+    assert payload["cross_event_paths"][0]["related_event_ids"] == ["evt-other"]
+    assert attack.calls == ["evt-071"]
+
+
 def test_graph_returns_event_not_found_before_reading_graph() -> None:
-    client, reader = _client(_graph_output(), event_exists=False)
+    client, reader, attack = _client(_graph_output(), event_exists=False)
 
     response = client.get("/api/v1/events/missing/graph")
 
     assert response.status_code == 404
     assert response.json()["error_code"] == "event_not_found"
     assert reader.calls == []
+    assert attack.calls == []
 
 
 class _ScalarRows:
@@ -210,6 +255,7 @@ async def test_repository_rebuilds_central_entities_and_monotonic_paths() -> Non
 
     assert output.central_entities[0] == "host-01"
     assert ["node-a", "node-b", "node-c"] in output.attack_path_candidates
+    assert output.cross_event_paths == []
 
 
 async def test_repository_skips_edges_with_unknown_relation_type() -> None:

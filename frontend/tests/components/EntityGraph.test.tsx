@@ -18,7 +18,7 @@ interface MockChartNode {
 interface MockChartEdge {
   edgeId: string;
   relationLabel: string;
-  lineStyle?: { width?: number; color?: string };
+  lineStyle?: { width?: number; color?: string; type?: string };
 }
 
 interface MockChartOption {
@@ -68,6 +68,7 @@ vi.mock("echarts-for-react", () => ({
             type="button"
             data-testid={`mock-edge-${edge.edgeId}`}
             data-line-width={edge.lineStyle?.width ?? 0}
+            data-line-type={edge.lineStyle?.type ?? "solid"}
             onClick={() =>
               onEvents?.click?.({ dataType: "edge", data: edge })
             }
@@ -258,5 +259,47 @@ describe("EntityGraph", () => {
     );
 
     expect(screen.getByText("图谱未生成")).toBeInTheDocument();
+  });
+
+  it("hides the cross-event overlay toggle when cross_event_paths is empty", () => {
+    render(<EntityGraph graph={makeGraph()} />);
+    expect(
+      screen.queryByTestId("cross-event-path-overlay"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps overlay off by default and draws dashed links when enabled", async () => {
+    const user = userEvent.setup();
+    const graph = makeGraph();
+    graph.cross_event_paths = [
+      {
+        path_id: "cep-demo",
+        related_event_ids: ["evt-other"],
+        shared_entities: ["203.0.113.8"],
+        path_nodes: ["node-ip", "node-remote"],
+        risk_hint: "shared_external_ip",
+      },
+    ];
+
+    render(<EntityGraph graph={graph} />);
+
+    expect(screen.getByTestId("cross-event-path-overlay")).toBeInTheDocument();
+    expect(screen.getByTestId("cross-event-path-toggle")).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(
+      screen.queryByTestId("mock-edge-cross-cep-demo-evt-other"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByTestId("cross-event-path-toggle"));
+
+    const dashed = screen.getByTestId("mock-edge-cross-cep-demo-evt-other");
+    expect(dashed).toHaveAttribute("data-line-type", "dashed");
+    expect(screen.getByTestId("mock-node-node-ip")).toHaveAttribute(
+      "data-symbol-size",
+      "48",
+    );
+    expect(screen.getByTestId("mock-node-rel-evt-evt-other")).toBeInTheDocument();
   });
 });

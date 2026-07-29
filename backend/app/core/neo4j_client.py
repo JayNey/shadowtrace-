@@ -7,6 +7,7 @@ the client is never instantiated and the graph stays PostgreSQL-only.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from neo4j import AsyncDriver, AsyncGraphDatabase
@@ -31,14 +32,19 @@ class Neo4jClient:
         *,
         user: str | None = None,
         password: str | None = None,
+        timeout_seconds: float | None = None,
     ) -> None:
         settings = get_settings()
         self._uri = uri or settings.neo4j_uri
         self._user = user or settings.neo4j_user
         self._password = password or settings.neo4j_password
+        raw_timeout = settings.neo4j_timeout_seconds if timeout_seconds is None else timeout_seconds
+        self._timeout_seconds = max(0.5, float(raw_timeout))
         self._driver = AsyncGraphDatabase.driver(
             self._uri,
             auth=(self._user, self._password),
+            connection_timeout=self._timeout_seconds,
+            connection_acquisition_timeout=self._timeout_seconds,
         )
         self._constraints_ensured: bool = False
 
@@ -87,9 +93,10 @@ class Neo4jClient:
         return self._driver
 
     async def ping(self) -> bool:
-        """Return True when Neo4j is reachable; False on any failure."""
+        """Return True when Neo4j is reachable within the configured timeout."""
         try:
-            await self._driver.verify_connectivity()
+            async with asyncio.timeout(self._timeout_seconds):
+                await self._driver.verify_connectivity()
             return True
         except (ServiceUnavailable, Neo4jError, OSError, TimeoutError):
             return False
@@ -106,11 +113,17 @@ class Neo4jClient:
         """Execute a Cypher query and return the collected records as dicts.
 
         Each record is a plain dict keyed by the alias in the RETURN clause.
-        Uses a short-lived session (auto-closed).
+        Uses a short-lived session (auto-closed). Bounded by ``NEO4J_TIMEOUT_SECONDS``
+        so optional Neo4j cannot stall the main graph API path.
         """
         records: list[dict[str, object]] = []
-        async with self._driver.session() as session:
-            result = await session.run(query, parameters or {})
-            async for record in result:
-                records.append(dict(record))
+
+        async def _collect() -> None:
+            async with self._driver.session() as session:
+                result = await session.run(query, parameters or {})
+                async for record in result:
+                    records.append(dict(record))
+
+        async with asyncio.timeout(self._timeout_seconds):
+            await _collect()
         return records

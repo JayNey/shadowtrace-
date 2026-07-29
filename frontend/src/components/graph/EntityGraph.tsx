@@ -8,6 +8,8 @@ import type {
   GraphOutput,
 } from "../../types/event";
 import AttackPathPlayer from "./AttackPathPlayer";
+import CrossEventPathOverlay from "./CrossEventPathOverlay";
+import { buildCrossEventOverlayHints } from "./crossEventOverlayHints";
 import {
   ENTITY_COLORS,
   ENTITY_LABELS,
@@ -86,6 +88,7 @@ export default function EntityGraph({
   );
   const [activePathNodeIds, setActivePathNodeIds] = useState<string[]>([]);
   const [selectedEdge, setSelectedEdge] = useState<GraphEdge | null>(null);
+  const [crossEventOverlayOn, setCrossEventOverlayOn] = useState(false);
 
   const load = useCallback(async () => {
     if (controlled) {
@@ -131,6 +134,11 @@ export default function EntityGraph({
     return keys;
   }, [activePathNodeIds]);
 
+  const crossEventPaths = useMemo(
+    () => graph?.cross_event_paths ?? [],
+    [graph],
+  );
+
   const chart = useMemo(() => {
     if (!graph) {
       return { option: null, filteredNodeCount: 0, filteredEdgeCount: 0 };
@@ -145,44 +153,101 @@ export default function EntityGraph({
         visibleNodeIds.has(edge.target_node_id),
     );
     const centralEntities = new Set(graph.central_entities);
+    const nodeIdByEntityValue = new Map(
+      filteredNodes.map((node) => [node.entity_value, node.node_id]),
+    );
+    const overlayHints =
+      crossEventOverlayOn && crossEventPaths.length > 0
+        ? buildCrossEventOverlayHints(crossEventPaths, nodeIdByEntityValue)
+        : null;
     const staticLayout = filteredNodes.length > 200;
     const radius = Math.max(260, filteredNodes.length * 3);
-    const nodes = filteredNodes.map((node, index) => {
-      const central =
-        centralEntities.has(node.node_id) ||
-        centralEntities.has(node.entity_value);
-      const active = activeNodeIds.has(node.node_id);
-      const angle =
-        filteredNodes.length > 0
-          ? (Math.PI * 2 * index) / filteredNodes.length
-          : 0;
-      return {
-        id: node.node_id,
-        name: node.entity_value,
-        value: node.entity_value,
-        entityType: node.entity_type,
-        entityLabel: ENTITY_LABELS[node.entity_type],
-        properties: node.properties,
-        category: ENTITY_TYPES.indexOf(node.entity_type),
-        symbolSize: central ? 42 : 28,
-        ...(staticLayout
-          ? {
-              x: Math.cos(angle) * radius,
-              y: Math.sin(angle) * radius,
-            }
-          : {}),
-        itemStyle: {
-          color: ENTITY_COLORS[node.entity_type],
-          borderColor: active ? "#ff4d4f" : central ? "#10239e" : "#ffffff",
-          borderWidth: active ? 4 : central ? 3 : 1,
-          shadowBlur: active ? 14 : central ? 8 : 0,
-          shadowColor: active
-            ? "rgba(255,77,79,.55)"
-            : "rgba(16,35,158,.35)",
-        },
-      };
-    });
-    const links = filteredEdges.map((edge) => {
+    const nodes: Array<Record<string, unknown>> = filteredNodes.map(
+      (node, index) => {
+        const central =
+          centralEntities.has(node.node_id) ||
+          centralEntities.has(node.entity_value);
+        const active = activeNodeIds.has(node.node_id);
+        const shared =
+          overlayHints?.sharedEntityValues.has(node.entity_value) ?? false;
+        const angle =
+          filteredNodes.length > 0
+            ? (Math.PI * 2 * index) / filteredNodes.length
+            : 0;
+        return {
+          id: node.node_id,
+          name: node.entity_value,
+          value: node.entity_value,
+          entityType: node.entity_type,
+          entityLabel: ENTITY_LABELS[node.entity_type],
+          properties: node.properties,
+          category: ENTITY_TYPES.indexOf(node.entity_type),
+          symbolSize: shared ? 48 : central ? 42 : 28,
+          // Double-ring: thick outer amber ring + white inner ring.
+          ...(shared
+            ? {
+                symbol:
+                  "path://M0,-12A12,12,0,1,1,0,12A12,12,0,1,1,0,-12M0,-8A8,8,0,1,0,0,8A8,8,0,1,0,0,-8Z",
+              }
+            : {}),
+          ...(staticLayout
+            ? {
+                x: Math.cos(angle) * radius,
+                y: Math.sin(angle) * radius,
+              }
+            : {}),
+          itemStyle: {
+            color: ENTITY_COLORS[node.entity_type],
+            borderColor: shared
+              ? "#d48806"
+              : active
+                ? "#ff4d4f"
+                : central
+                  ? "#10239e"
+                  : "#ffffff",
+            borderWidth: shared ? 3 : active ? 4 : central ? 3 : 1,
+            shadowBlur: shared ? 10 : active ? 14 : central ? 8 : 0,
+            shadowColor: shared
+              ? "rgba(212,136,6,.55)"
+              : active
+                ? "rgba(255,77,79,.55)"
+                : "rgba(16,35,158,.35)",
+          },
+        };
+      },
+    );
+    if (overlayHints) {
+      for (const [index, anchor] of overlayHints.relatedEventAnchors.entries()) {
+        const total =
+          filteredNodes.length + overlayHints.relatedEventAnchors.length;
+        const angle = (Math.PI * 2 * (filteredNodes.length + index)) / total;
+        nodes.push({
+          id: anchor.id,
+          name: anchor.label,
+          value: anchor.label,
+          entityType: "domain",
+          entityLabel: "关联事件",
+          properties: { related_event_id: anchor.label },
+          category: -1,
+          symbolSize: 34,
+          symbol: "roundRect",
+          ...(staticLayout
+            ? {
+                x: Math.cos(angle) * (radius + 80),
+                y: Math.sin(angle) * (radius + 80),
+              }
+            : {}),
+          itemStyle: {
+            color: "#fff7e6",
+            borderColor: "#d48806",
+            borderWidth: 2,
+            shadowBlur: 6,
+            shadowColor: "rgba(212,136,6,.35)",
+          },
+        });
+      }
+    }
+    const links: Array<Record<string, unknown>> = filteredEdges.map((edge) => {
       const active = activeEdgeKeys.has(
         edgeKey(edge.source_node_id, edge.target_node_id),
       );
@@ -199,9 +264,30 @@ export default function EntityGraph({
           width: active ? 4 : 1.5,
           opacity: active ? 1 : 0.72,
           curveness: 0.08,
+          type: "solid",
         },
       };
     });
+    if (overlayHints) {
+      for (const dashed of overlayHints.dashedLinks) {
+        links.push({
+          source: dashed.source,
+          target: dashed.target,
+          edgeId: dashed.edgeId,
+          relationType: "connected_to",
+          relationLabel: `跨事件 · ${dashed.sharedEntity}`,
+          evidenceId: dashed.relatedEventId,
+          occurredAt: null,
+          lineStyle: {
+            color: "#d48806",
+            width: 2,
+            opacity: 0.9,
+            curveness: 0.2,
+            type: "dashed",
+          },
+        });
+      }
+    }
     return {
       filteredNodeCount: filteredNodes.length,
       filteredEdgeCount: filteredEdges.length,
@@ -249,7 +335,14 @@ export default function EntityGraph({
         ],
       },
     };
-  }, [activeEdgeKeys, activeNodeIds, graph, visibleTypes]);
+  }, [
+    activeEdgeKeys,
+    activeNodeIds,
+    crossEventOverlayOn,
+    crossEventPaths,
+    graph,
+    visibleTypes,
+  ]);
 
   if (loadState === "idle" || loadState === "loading") {
     return (
@@ -318,6 +411,11 @@ export default function EntityGraph({
             candidates={graph.attack_path_candidates}
             nodes={graph.nodes}
             onProgress={handlePathProgress}
+          />
+          <CrossEventPathOverlay
+            paths={crossEventPaths}
+            enabled={crossEventOverlayOn}
+            onEnabledChange={setCrossEventOverlayOn}
           />
           {staticLayout && (
             <Alert
