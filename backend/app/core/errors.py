@@ -120,6 +120,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "qa_unavailable": ErrorCategory.TRANSIENT,
     "memory_review_not_found": ErrorCategory.USER_INPUT,
     "memory_review_conflict": ErrorCategory.PERMANENT,
+    "memory_governance_bypass_blocked": ErrorCategory.USER_INPUT,
     # Generic dependency / domain defaults used by subclasses
     "dependency_unavailable": ErrorCategory.TRANSIENT,
     "task_unavailable": ErrorCategory.TRANSIENT,
