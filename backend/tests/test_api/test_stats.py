@@ -133,10 +133,14 @@ async def _seed_action(
     status: ActionStatus = ActionStatus.SUCCESS,
     effect_verification_status: str | None = None,
     writeback_required: bool = False,
+    writeback_applicable: bool | None = None,
     writeback_status: str | None = None,
     action_id: str | None = None,
 ) -> str:
     aid = action_id or f"act-{_sfx()}"
+    # Default applicable mirrors required so happy-path fixtures enter the
+    # closed-loop writeback denominator; pass False to model rejected candidates.
+    applicable = writeback_required if writeback_applicable is None else writeback_applicable
     async with session_factory() as session:
         async with session.begin():
             session.add(
@@ -157,7 +161,7 @@ async def _seed_action(
                     auto_execute=True,
                     reason="stats fixture",
                     writeback_required=writeback_required,
-                    writeback_applicable=writeback_required,
+                    writeback_applicable=applicable,
                     writeback_readiness=(
                         WritebackReadiness.READY.value
                         if writeback_required
@@ -368,7 +372,11 @@ async def test_stats_partial_success_counts_as_execution_failure(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """PARTIAL_SUCCESS enters the execution denominator but not the numerator."""
+    """PARTIAL_SUCCESS enters the execution denominator but not the numerator.
+
+    It also enters the effect denominator as a still-needed verification
+    (null stamp → incomplete, rate 0) so incomplete Verify cannot look green.
+    """
     eid = await _seed_event(session_factory, title="partial-success")
     await _seed_action(
         session_factory,
@@ -383,6 +391,75 @@ async def test_stats_partial_success_counts_as_execution_failure(
     assert aes["numerator"] == 0
     assert aes["denominator"] == 1
     assert aes["rate"] == pytest.approx(0.0)
+
+    efr = body["effect_verification_rate"]
+    assert efr["numerator"] == 0
+    assert efr["denominator"] == 1
+    assert efr["rate"] == pytest.approx(0.0)
+
+
+@pytest.mark.asyncio
+async def test_stats_effect_rate_includes_pending_unverified_success(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """SUCCESS with null effect stamp still enters the effect denominator."""
+    eid = await _seed_event(session_factory, title="pending-verify")
+    await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status=None,
+        writeback_required=False,
+    )
+    eid2 = await _seed_event(session_factory, title="verified-one")
+    await _seed_action(
+        session_factory,
+        event_id=eid2,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status="verified",
+        writeback_required=False,
+    )
+
+    body = client.get("/api/v1/stats", headers=_hdr()).json()
+    efr = body["effect_verification_rate"]
+    assert efr["numerator"] == 1
+    assert efr["denominator"] == 2
+    assert efr["rate"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_stats_writeback_rate_excludes_non_applicable_candidates(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """required but not applicable (e.g. rejected candidate) must not enter wb den."""
+    eid = await _seed_event(session_factory, title="applicable-confirmed")
+    await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status="verified",
+        writeback_required=True,
+        writeback_applicable=True,
+        writeback_status=WritebackStatus.CONFIRMED.value,
+    )
+    eid2 = await _seed_event(session_factory, title="required-not-applicable")
+    await _seed_action(
+        session_factory,
+        event_id=eid2,
+        status=ActionStatus.WAITING_APPROVAL,
+        effect_verification_status=None,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_status=WritebackStatus.PENDING.value,
+    )
+
+    body = client.get("/api/v1/stats", headers=_hdr()).json()
+    wbr = body["writeback_confirmation_rate"]
+    assert wbr["numerator"] == 1
+    assert wbr["denominator"] == 1
+    assert wbr["rate"] == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio
@@ -529,7 +606,7 @@ async def test_stats_unverifiable_enters_effect_denominator(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """UNVERIFIABLE stays in the effect denominator so outages do not inflate the rate."""
+    """SUCCESS+unverifiable stays in effect den (via SUCCESS) so outages do not inflate."""
     eid = await _seed_event(session_factory, title="effect-unverifiable")
     await _seed_action(
         session_factory,

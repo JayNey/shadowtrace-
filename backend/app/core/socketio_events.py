@@ -89,6 +89,23 @@ def register_handlers(sio: socketio.AsyncServer) -> None:
         await sio.enter_room(sid, room, namespace=SOCKETIO_NAMESPACE)
         logger.debug("socketio subscribe sid=%s → room=%s (left %s)", sid, room, GLOBAL_ROOM)
 
+    @sio.event(namespace=SOCKETIO_NAMESPACE)  # type: ignore[untyped-decorator]
+    async def join_global(sid: str, data: dict[str, Any] | None = None) -> None:  # noqa: ARG001
+        """Re-enter the global room (SOC dashboard / list after detail subscribe).
+
+        Leaves any ``event:*`` rooms for this sid so global broadcasts are not
+        duplicated for the previously watched event.
+        """
+        try:
+            rooms = sio.rooms(sid, namespace=SOCKETIO_NAMESPACE)
+        except KeyError:
+            rooms = []
+        for room in list(rooms):
+            if isinstance(room, str) and room.startswith(EVENT_ROOM_PREFIX):
+                await sio.leave_room(sid, room, namespace=SOCKETIO_NAMESPACE)
+        await sio.enter_room(sid, GLOBAL_ROOM, namespace=SOCKETIO_NAMESPACE)
+        logger.debug("socketio join_global sid=%s → room=%s", sid, GLOBAL_ROOM)
+
 
 __all__ = [
     "GLOBAL_ROOM",

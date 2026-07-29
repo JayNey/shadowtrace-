@@ -23,6 +23,7 @@ import EventTrendChart from "../components/dashboard/EventTrendChart";
 import HighRiskTicker, {
   type TickerItem,
 } from "../components/dashboard/HighRiskTicker";
+import AgentActivityStrip from "../components/dashboard/AgentActivityStrip";
 import "./SocDashboardPage.css";
 
 const REFRESH_MS = 30_000;
@@ -99,9 +100,9 @@ export default function SocDashboardPage() {
     };
   }, [refreshAll]);
 
-  // Socket global room: new high-risk events update ticker; any create refreshes stats.
+  // Socket global room: re-join after detail subscribe may have left it.
   useEffect(() => {
-    socketClient.connect();
+    socketClient.ensureGlobalRoom();
     const unsub = socketClient.onEvent((evt) => {
       if (evt.type === "event_created") {
         const sev = (evt.payload.severity ?? "").toLowerCase();
@@ -202,9 +203,14 @@ export default function SocDashboardPage() {
         </Col>
       </Row>
 
-      <div style={{ marginTop: 16 }}>
-        <HighRiskTicker items={ticker} />
-      </div>
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} lg={12}>
+          <HighRiskTicker items={ticker} />
+        </Col>
+        <Col xs={24} lg={12}>
+          <AgentActivityStrip />
+        </Col>
+      </Row>
 
       <Typography.Paragraph
         style={{ color: "#8c9bb3", marginTop: 16, marginBottom: 0, fontSize: 12 }}

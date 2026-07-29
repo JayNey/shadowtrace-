@@ -94,6 +94,53 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+.soc-dark .soc-agent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.soc-dark .soc-agent-row {
+  display: grid;
+  grid-template-columns: 10px minmax(64px, auto) minmax(100px, 140px) 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--soc-border);
+  font-size: 13px;
+}
+
+.soc-dark .soc-agent-row:last-child {
+  border-bottom: none;
+}
+
+.soc-dark .soc-agent-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.soc-dark .soc-agent-label {
+  color: var(--soc-text);
+  font-weight: 600;
+}
+
+.soc-dark .soc-agent-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--soc-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.soc-dark .soc-agent-msg {
+  color: var(--soc-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @keyframes soc-ticker-marquee {
   from {
     transform: translateX(0);

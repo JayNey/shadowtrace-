@@ -90,6 +90,25 @@ describe("socketClient", () => {
     expect(mockEmit).not.toHaveBeenCalled();
   });
 
+  it("ensureGlobalRoom emits join_global and clears pending event rooms", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    socketClient.connect();
+    connectHandler?.();
+    socketClient.subscribe("evt-detail");
+    mockEmit.mockClear();
+
+    socketClient.ensureGlobalRoom();
+
+    expect(mockEmit).toHaveBeenCalledWith("join_global", {});
+    mockEmit.mockClear();
+    // Reconnect should re-join global, not the forgotten event room.
+    connectHandler?.();
+    expect(mockEmit).toHaveBeenCalledWith("join_global", {});
+    expect(mockEmit).not.toHaveBeenCalledWith("subscribe", {
+      event_id: "evt-detail",
+    });
+  });
+
   it("maps state_change envelope to to_status payload", async () => {
     const { socketClient } = await import("../../src/services/socketClient");
     const handler = vi.fn();

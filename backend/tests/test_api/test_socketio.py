@@ -282,6 +282,32 @@ class TestEventHandlers:
         assert sid not in ns_rooms.get(GLOBAL_ROOM, {}), "subscribe must leave global room"
 
     @pytest.mark.asyncio
+    async def test_join_global_rejoins_after_subscribe(self, sio: socketio.AsyncServer) -> None:
+        """join_global re-enters global and leaves the prior event room."""
+        sid = _fake_sid()
+        event_id = "evt-20260712-rejoinglobal"
+
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        await connect_handler(sid, {})
+
+        sub_h = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
+        assert sub_h is not None
+        await sub_h(sid, {"event_id": event_id})
+
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+        assert sid not in ns_rooms.get(GLOBAL_ROOM, {})
+
+        join_h = sio.handlers[SOCKETIO_NAMESPACE].get("join_global")
+        assert join_h is not None, "join_global handler not registered"
+        await join_h(sid, {})
+
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+        assert sid in ns_rooms.get(GLOBAL_ROOM, {})
+        assert sid not in ns_rooms.get(_event_room(event_id), {})
+
+    @pytest.mark.asyncio
     async def test_subscribe_rejects_missing_event_id(self, sio: socketio.AsyncServer) -> None:
         """subscribe without event_id emits an error, does not join any room."""
         sid = _fake_sid()
