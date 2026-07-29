@@ -726,3 +726,108 @@ class TestAgentRetryPolicy:
             await agent._execute_with_agent_retries(_EVENT_ID, "evidence_agent", factory)
 
         assert calls["n"] == 1
+
+
+class TestLangGraphFrontendArtifactHooks:
+    """ISSUE-077: graph-mode investigate must still produce timeline/graph hooks."""
+
+    async def test_investigation_graph_path_runs_graph_and_storyline_hooks(self) -> None:
+        from app.models.agent_io import AttackStoryline, GraphOutput, StorylineGeneratedBy
+        from app.models.context import EventContext
+        from app.models.security_event import EventSummary
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        event_service = _MockEventService(events)
+        evidence = _make_evidence(_EVENT_ID)
+
+        class _FakeGraph:
+            async def ainvoke(
+                self, _initial: object, _config: object | None = None
+            ) -> dict[str, object]:
+                return {}
+
+        class _FakeContextStore:
+            def __init__(self) -> None:
+                self.saved: EventContext | None = None
+
+            async def get_full_context(self, event_id: str) -> EventContext:
+                if self.saved is not None and self.saved.event is not None:
+                    return self.saved
+                from app.models.enums import FinalVerdict, WritebackReadiness
+
+                ec = EventContext()
+                ec.event = EventSummary(
+                    event_id=event_id,
+                    event_type=EventType.DATA_EXFILTRATION,
+                    title="hook test",
+                    status=EventStatus.REPORTING,
+                    severity=Severity.CRITICAL,
+                    risk_score=90,
+                    final_verdict=FinalVerdict.NONE,
+                    writeback_required=True,
+                    writeback_readiness=WritebackReadiness.CAPABILITY_UNKNOWN,
+                    disposition_policy=DispositionPolicy.REQUIRED,
+                )
+                ec.evidence_output = evidence.model_dump(mode="json")
+                return ec
+
+            async def set_full_context(self, event_id: str, ec: EventContext) -> None:
+                del event_id
+                self.saved = ec
+
+        class _StubGraphAgent:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def execute(self, _input: object) -> GraphOutput:
+                self.calls += 1
+                return GraphOutput(
+                    nodes=[], edges=[], central_entities=[], attack_path_candidates=[]
+                )
+
+        class _StubStoryline:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def generate(self, event_context: dict[str, object]) -> AttackStoryline:
+                self.calls += 1
+                event_id = str(
+                    (event_context.get("event") or {}).get("event_id")  # type: ignore[union-attr]
+                    if isinstance(event_context.get("event"), dict)
+                    else _EVENT_ID
+                )
+                return AttackStoryline(
+                    storyline_id="stl-test",
+                    event_id=event_id,
+                    narrative_summary="hook storyline",
+                    phases=[],
+                    generated_by=StorylineGeneratedBy.RULE,
+                )
+
+        store = _FakeContextStore()
+        graph_agent = _StubGraphAgent()
+        storyline = _StubStoryline()
+        agent = SuperAgent(
+            triage_agent=_StubTriageAgent(_make_triage()),
+            evidence_agent=_StubEvidenceAgent(evidence),
+            planner_agent=_StubPlannerAgent(_make_plan()),  # type: ignore[arg-type]
+            rag_agent=_StubRAGAgent(),  # type: ignore[arg-type]
+            risk_agent=_StubRiskAgent(_make_risk()),
+            report_agent=_StubReportAgent(_make_report()),
+            lease=None,
+            event_service=event_service,  # type: ignore[arg-type]
+            context_store=store,  # type: ignore[arg-type]
+            investigation_graph=_FakeGraph(),  # type: ignore[arg-type]
+            graph_agent=graph_agent,  # type: ignore[arg-type]
+            storyline_service=storyline,
+        )
+
+        await agent.investigate(_EVENT_ID)
+
+        assert graph_agent.calls == 1
+        assert storyline.calls == 1
+        assert store.saved is not None
+        assert store.saved.storyline is not None
+        assert store.saved.graph_output is not None

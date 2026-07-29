@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from app.api.v1 import schemas as s
 from app.api.v1.deps import _get_context_store as _real_get_context_store
+from app.api.v1.deps import _get_session_factory as _real_get_session_factory
 from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
 from app.api.v1.deps import get_event_service as _real_get_event_service
 from app.api.v1.deps import get_state_machine as _real_get_state_machine
@@ -99,6 +100,8 @@ def client() -> TestClient:
     app.dependency_overrides[_real_get_event_service] = lambda: mock_es
     app.dependency_overrides[_real_get_state_machine] = lambda: _MockStateMachine()
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
+    # Source-record GET must not hit real Postgres in contract tests.
+    app.dependency_overrides[_real_get_session_factory] = lambda: _empty_session_factory
 
     async def _mock_disposition_sync() -> _MockDispositionSyncService:
         return _MockDispositionSyncService()
@@ -107,6 +110,23 @@ def client() -> TestClient:
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
     yield TestClient(app)
     app.dependency_overrides.clear()
+
+
+class _EmptyAsyncSession:
+    """Async session stub: always miss so fixture/contract paths stay DB-free."""
+
+    async def get(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def __aenter__(self) -> _EmptyAsyncSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+def _empty_session_factory() -> _EmptyAsyncSession:
+    return _EmptyAsyncSession()
 
 
 def _hdr(role: str = "analyst") -> dict[str, str]:
@@ -154,6 +174,17 @@ class _MockEventService:
 
     async def create_event(self, raw_alert: Any, source_type: str = "file", **kwargs: Any) -> Any:
         return self._example_event()
+
+    async def ingest_source_object(self, source_object: Any) -> Any:
+        from app.services.event_service import IngestResult
+
+        _ = source_object
+        return IngestResult(
+            source_record_id="src-associated-1",
+            event_id=s.EXAMPLE_EVENT_ID,
+            accepted=True,
+            created=True,
+        )
 
     async def get_report(self, *, report_id: str | None = None, event_id: str | None = None) -> Any:
         if event_id == s.EXAMPLE_EVENT_ID:
@@ -514,6 +545,33 @@ def test_domain_error_details_are_redacted_before_api_response() -> None:
     assert "domain-password-secret" not in serialized
     assert "domain-note-secret" not in serialized
     assert "[REDACTED]" in serialized
+
+
+def test_investigate_request_defaults_defer_response_execution() -> None:
+    """ISSUE-077/566: HTTP investigate defaults to analysis-complete (no response)."""
+    req = s.InvestigateRequest()
+    assert req.force_replan is False
+    assert req.include_response_execution is False
+
+
+def test_investigate_request_can_opt_into_response_execution() -> None:
+    req = s.InvestigateRequest.model_validate(
+        {"force_replan": False, "include_response_execution": True}
+    )
+    assert req.include_response_execution is True
+
+
+def test_ingest_source_record_request_accepts_incident_associations() -> None:
+    ref = s.example_source_reference()
+    req = s.IngestSourceRecordRequest.model_validate(
+        {
+            "reference": ref.model_dump(mode="json"),
+            "incident_ref": ref.model_dump(mode="json"),
+            "related_alert_refs": [ref.model_dump(mode="json")],
+        }
+    )
+    assert req.incident_ref is not None
+    assert len(req.related_alert_refs) == 1
 
 
 def test_disposition_command_rejects_analysis_fields() -> None:

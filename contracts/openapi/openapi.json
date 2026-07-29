@@ -1163,6 +1163,7 @@
           "source"
         ],
         "summary": "Ingest Source Record",
+        "description": "Accept one Source* object and upsert/create the linked SecurityEvent.",
         "operationId": "ingest_source_record_api_v1_ingestion_source_records_post",
         "requestBody": {
           "content": {
@@ -1204,6 +1205,7 @@
           "source"
         ],
         "summary": "Get Source Record",
+        "description": "Look up a persisted source object; keep ISSUE-004 fixture id for contracts.",
         "operationId": "get_source_record_api_v1_source_records__source_record_id__get",
         "parameters": [
           {
@@ -4213,6 +4215,23 @@
             "additionalProperties": true,
             "type": "object",
             "title": "Normalized"
+          },
+          "incident_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "related_alert_refs": {
+            "items": {
+              "$ref": "#/components/schemas/SourceReference"
+            },
+            "type": "array",
+            "title": "Related Alert Refs"
           }
         },
         "additionalProperties": false,
@@ -4256,6 +4275,11 @@
           "force_replan": {
             "type": "boolean",
             "title": "Force Replan",
+            "default": false
+          },
+          "include_response_execution": {
+            "type": "boolean",
+            "title": "Include Response Execution",
             "default": false
           }
         },

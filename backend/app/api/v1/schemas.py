@@ -81,6 +81,9 @@ class EventCreateRequest(_StrictRequest):
 
 class InvestigateRequest(_StrictRequest):
     force_replan: bool = False
+    # When true, continue past analysis into ResponseAgent / approval (ISSUE-077 e2e).
+    # Default false keeps ISSUE-566 HTTP investigate analysis-complete at report.
+    include_response_execution: bool = False
 
 
 class EventCloseRequest(_StrictRequest):
@@ -133,6 +136,9 @@ class IngestSourceRecordRequest(_StrictRequest):
     reference: SourceReference
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     normalized: dict[str, Any] = Field(default_factory=dict)
+    # Optional Adapter-verified associations (never inferred client-side).
+    incident_ref: SourceReference | None = None
+    related_alert_refs: list[SourceReference] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

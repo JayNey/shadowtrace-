@@ -267,6 +267,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         owner_id: str | None = None,
         lease_acquired: bool = False,
         publish_lifecycle: bool = True,
+        include_response_execution: bool = False,
     ) -> None:
         """Run the full investigation graph for *event_id*.
 
@@ -278,6 +279,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         ``agent_failed`` for ``super_agent`` (ISSUE-075). Production callers use
         ``investigate()`` directly (not ``BaseAgent.execute``), so this flag
         defaults to True. ``_run`` sets it False to avoid double-publish.
+
+        ``include_response_execution`` (ISSUE-077 / ISSUE-566): when False
+        (default HTTP investigate), analysis completes at report and defers
+        ResponseAgent. When True, continue into response / approval.
         """
         if self.planner_agent is None:
             raise RuntimeError("SuperAgent requires a PlannerAgent")
@@ -331,6 +336,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 initial = await build_initial_investigation_state(
                     event_id,
                     context_store=self.context_store,
+                    defer_response_execution=not include_response_execution,
                 )
                 config = {"configurable": {"thread_id": event_id}}
                 await self._investigation_graph.ainvoke(initial, config)
@@ -356,6 +362,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             #    (API response, frontend, ReportAgent fallback) see latest data.
             if self._investigation_graph is not None:
                 ec = await self._load_event_context(event_id)
+                # LangGraph path has no storyline/graph nodes (ISSUE-077): run the
+                # same P1 post-hooks the legacy report path used so /timeline and
+                # /graph are ready for frontend e2e and UI tabs.
+                await self._run_frontend_artifact_hooks(ec)
             else:
                 ec = final_state.get("event_context", event_context)
             await self._persist_event_context(ec)
@@ -937,9 +947,20 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             raise TypeError("RiskAgent must return RiskAssessment")
         ec.risk_assessment = risk_assessment.model_dump(mode="json")
 
-    async def _run_graph_step(self, ec: EventContext, step: PlanStep) -> None:
-        """Optional GraphAgent step (P1 capability switch)."""
-        if self.graph_agent is None:
+    async def _run_frontend_artifact_hooks(self, ec: EventContext) -> None:
+        """Generate graph + storyline for frontend APIs after LangGraph investigate.
+
+        ``workflow_graph`` stops at report/response and does not include GraphAgent
+        or StorylineService. Without these hooks, ``GET /timeline`` stays
+        ``storyline_not_ready`` and ``GET /graph`` returns empty rows — breaking
+        ISSUE-077 e2e seed and UI tabs. Failures stay non-blocking (P1 降级).
+        """
+        await self._ensure_graph_output(ec)
+        await self._run_storyline_step(ec)
+
+    async def _ensure_graph_output(self, ec: EventContext) -> None:
+        """Run GraphAgent when graph_output is still missing (LangGraph path)."""
+        if self.graph_agent is None or ec.graph_output is not None:
             return
         event_id = _event_id_from_context(ec)
         evidence_data = ec.evidence_output
@@ -962,10 +983,15 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 )
         except Exception:
             logger.warning(
-                "SuperAgent: GraphAgent failed for event=%s — continuing",
+                "SuperAgent: GraphAgent post-hook failed for event=%s — continuing",
                 event_id,
                 exc_info=True,
             )
+
+    async def _run_graph_step(self, ec: EventContext, step: PlanStep) -> None:
+        """Optional GraphAgent step (P1 capability switch)."""
+        _ = step
+        await self._ensure_graph_output(ec)
 
     async def _run_storyline_step(self, ec: EventContext) -> None:
         """Optional StorylineService step (P1 capability switch).

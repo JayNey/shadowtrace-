@@ -14,11 +14,16 @@ export default function ReportExportButtons({ report }: ReportExportButtonsProps
     <Space>
       <Button
         icon={<DownloadOutlined />}
+        data-testid="report-download-markdown"
         onClick={() => downloadReportMarkdown(report)}
       >
         下载 Markdown
       </Button>
-      <Button icon={<PrinterOutlined />} onClick={() => window.print()}>
+      <Button
+        icon={<PrinterOutlined />}
+        data-testid="report-print"
+        onClick={() => window.print()}
+      >
         打印
       </Button>
     </Space>

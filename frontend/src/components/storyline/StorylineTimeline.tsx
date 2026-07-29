@@ -34,21 +34,25 @@ function isStorylineNotReady(error: unknown): boolean {
   );
 }
 
-function buildPhases(storyline: AttackStoryline): StorylinePhase[] {
+function buildPhases(
+  storyline: AttackStoryline,
+): Array<StorylinePhase & { isPlaceholder: boolean }> {
   const byName = new Map(
     storyline.phases.map((phase) => [phase.phase_name, phase]),
   );
   return PHASE_ORDER.map((phaseName, index) => {
     const existing = byName.get(phaseName);
-    return (
-      existing ?? {
-        phase_order: index + 1,
-        phase_name: phaseName,
-        tactic: null,
-        narrative: "",
-        entries: [],
-      }
-    );
+    if (existing) {
+      return { ...existing, isPlaceholder: false };
+    }
+    return {
+      phase_order: index + 1,
+      phase_name: phaseName,
+      tactic: null,
+      narrative: "",
+      entries: [],
+      isPlaceholder: true,
+    };
   });
 }
 
@@ -116,24 +120,35 @@ export default function StorylineTimeline({
   );
 
   if (loadState === "idle" || loadState === "loading") {
-    return <Skeleton active paragraph={{ rows: 8 }} />;
+    return (
+      <div data-testid="storyline-timeline-loading">
+        <Skeleton active paragraph={{ rows: 8 }} />
+      </div>
+    );
   }
 
   if (loadState === "error") {
     return (
-      <Alert
-        type="error"
-        showIcon
-        message="攻击故事线加载失败"
-        description="请检查网络连接后重试。"
-        action={<Button onClick={() => void load()}>重试</Button>}
-      />
+      <div data-testid="storyline-timeline-error">
+        <Alert
+          type="error"
+          showIcon
+          message="攻击故事线加载失败"
+          description="请检查网络连接后重试。"
+          action={<Button onClick={() => void load()}>重试</Button>}
+        />
+      </div>
     );
   }
 
   if (!storyline) {
     return (
-      <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      <Space
+        direction="vertical"
+        size={16}
+        style={{ width: "100%" }}
+        data-testid="storyline-timeline-fallback"
+      >
         <Alert
           type="info"
           showIcon
@@ -148,7 +163,12 @@ export default function StorylineTimeline({
   const phases = buildPhases(storyline);
 
   return (
-    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+    <Space
+      direction="vertical"
+      size={16}
+      style={{ width: "100%" }}
+      data-testid="storyline-timeline"
+    >
       <Card size="small">
         <Space direction="vertical" size={8} style={{ width: "100%" }}>
           <Space wrap>
@@ -169,6 +189,7 @@ export default function StorylineTimeline({
           key={phase.phase_name}
           phase={phase}
           evidenceById={evidenceById}
+          isPlaceholder={phase.isPlaceholder}
         />
       ))}
     </Space>
