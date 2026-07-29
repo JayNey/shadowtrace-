@@ -12,4 +12,5 @@ ISSUE-055 orchestration fixtures follow the same pattern via
 pytest_plugins = [
     "tests.test_tools.tool_system_fixtures",
     "tests.test_orchestration.orchestration_fixtures",
+    "tests.integration.integration_fixtures",
 ]

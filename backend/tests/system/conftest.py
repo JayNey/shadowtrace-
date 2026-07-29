@@ -25,8 +25,6 @@ from app.services.event_disposition_service import EventDispositionService
 from app.services.state_machine_service import StateMachineService
 from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 
-pytest_plugins = ["tests.integration.conftest"]
-
 pytestmark = [pytest.mark.system, pytest.mark.integration]
 
 

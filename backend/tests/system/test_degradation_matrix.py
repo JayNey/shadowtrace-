@@ -25,8 +25,8 @@ from app.models.agent_io import (
     VerificationOverallStatus,
 )
 from app.models.enums import (
-    DispositionPolicy,
     DispositionIntentKind,
+    DispositionPolicy,
     EventStatus,
     ExecutionOwner,
     SourceObjectKind,

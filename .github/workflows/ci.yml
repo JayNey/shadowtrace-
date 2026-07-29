@@ -159,7 +159,7 @@ jobs:
         run: python -m pip install -e ".[dev]"
 
       - name: ISSUE-086 system quality gate
-        run: python -m pytest tests/system/ -m system -v --tb=short
+        run: python -m pytest tests/system/ -m system -v --tb=short -o addopts=
 
   frontend-build:
     name: frontend-build

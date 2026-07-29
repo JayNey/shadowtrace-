@@ -1,7 +1,7 @@
 /** AgentActivityStrip tests (ISSUE-085). */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor, act } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import AgentActivityStrip from "../../src/components/dashboard/AgentActivityStrip";
 
 const mockEnsureGlobalRoom = vi.fn();
