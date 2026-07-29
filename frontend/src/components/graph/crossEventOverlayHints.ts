@@ -1,10 +1,11 @@
 /**
  * Pure helpers for cross-event path overlay rendering (ISSUE-083).
  */
-import type { CrossEventPath } from "../../types/event";
+import type { CrossEventPath, GraphNode } from "../../types/event";
 
 export interface CrossEventOverlayHints {
-  sharedEntityValues: Set<string>;
+  /** Local graph node ids participating in a cross-event path. */
+  sharedNodeIds: Set<string>;
   /** Synthetic dashed edges: source = local node id, target = related-event anchor id */
   dashedLinks: Array<{
     edgeId: string;
@@ -19,28 +20,35 @@ export interface CrossEventOverlayHints {
   }>;
 }
 
+export function entityOverlayKey(entityType: string, entityValue: string): string {
+  return `${entityType}\0${entityValue}`;
+}
+
 export function buildCrossEventOverlayHints(
   paths: CrossEventPath[],
-  nodeIdByEntityValue: Map<string, string>,
+  visibleNodes: GraphNode[],
 ): CrossEventOverlayHints {
-  const sharedEntityValues = new Set<string>();
+  const visibleNodeIds = new Set(visibleNodes.map((node) => node.node_id));
+  const sharedNodeIds = new Set<string>();
   const dashedLinks: CrossEventOverlayHints["dashedLinks"] = [];
   const anchorMap = new Map<string, string>();
 
   for (const path of paths) {
-    for (const entity of path.shared_entities) {
-      sharedEntityValues.add(entity);
+    for (const nodeId of path.path_nodes) {
+      if (visibleNodeIds.has(nodeId)) {
+        sharedNodeIds.add(nodeId);
+      }
     }
     for (const relatedEventId of path.related_event_ids) {
       const anchorId = `rel-evt-${relatedEventId}`;
       if (!anchorMap.has(anchorId)) {
         anchorMap.set(anchorId, relatedEventId);
       }
+      const localNodeId = path.path_nodes[0];
       const primaryShared = path.shared_entities[0];
-      const localNodeId = primaryShared
-        ? nodeIdByEntityValue.get(primaryShared)
-        : undefined;
-      if (!localNodeId || !primaryShared) continue;
+      if (!localNodeId || !primaryShared || !visibleNodeIds.has(localNodeId)) {
+        continue;
+      }
       dashedLinks.push({
         edgeId: `cross-${path.path_id}-${relatedEventId}`,
         source: localNodeId,
@@ -52,7 +60,7 @@ export function buildCrossEventOverlayHints(
   }
 
   return {
-    sharedEntityValues,
+    sharedNodeIds,
     dashedLinks,
     relatedEventAnchors: [...anchorMap.entries()].map(([id, label]) => ({
       id,

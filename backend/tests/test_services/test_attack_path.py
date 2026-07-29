@@ -351,7 +351,49 @@ async def test_cross_event_paths_requires_matching_entity_type(
     assert await svc.find_cross_event_paths("evt-a") == []
     assert client.cypher_calls
     query, _params = client.cypher_calls[0]
-    assert "remote.entity_type = local.entity_type" in query
+    assert "entity_type: local.entity_type" in query
+    assert "entity_value: local.entity_value" in query
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_cross_event_paths_pg_fallback_when_neo4j_empty(
+    session_factory: async_sessionmaker[AsyncSession],
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PostgreSQL probe fills paths while Neo4j sync is still catching up."""
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    event_a = await _seed_event(session_factory, title="pg-fallback-a")
+    event_b = await _seed_event(session_factory, title="pg-fallback-b")
+    await _seed_event_graph_with_ip(
+        session_factory,
+        event_a,
+        host_value="host-pg-a.example.test",
+        ip_value=SHARED_EXTERNAL_IP,
+    )
+    await _seed_event_graph_with_ip(
+        session_factory,
+        event_b,
+        host_value="host-pg-b.example.test",
+        ip_value=SHARED_EXTERNAL_IP,
+    )
+
+    client = _FakeNeo4jClient(records=[])
+    svc = AttackPathService(
+        client=cast(Neo4jClient, client),
+        session_factory=session_factory,
+    )
+    paths = await svc.find_cross_event_paths(event_a)
+    assert len(paths) >= 1
+    matched = next((p for p in paths if event_b in p.related_event_ids), None)
+    assert matched is not None
+    assert SHARED_EXTERNAL_IP in matched.shared_entities
+    assert matched.risk_hint == "shared_external_ip"
     get_settings.cache_clear()
 
 

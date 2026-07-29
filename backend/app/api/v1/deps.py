@@ -446,7 +446,12 @@ async def get_attack_path_service() -> Any:
     """
     from app.services.attack_path_service import AttackPathService
 
-    return AttackPathService(client=_ensure_neo4j_client())
+    settings = get_settings()
+    session_factory = _get_session_factory() if settings.neo4j_enabled else None
+    return AttackPathService(
+        client=_ensure_neo4j_client(),
+        session_factory=session_factory,
+    )
 
 
 async def shutdown_neo4j_client() -> None:

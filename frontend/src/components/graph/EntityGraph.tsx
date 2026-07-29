@@ -153,12 +153,9 @@ export default function EntityGraph({
         visibleNodeIds.has(edge.target_node_id),
     );
     const centralEntities = new Set(graph.central_entities);
-    const nodeIdByEntityValue = new Map(
-      filteredNodes.map((node) => [node.entity_value, node.node_id]),
-    );
     const overlayHints =
       crossEventOverlayOn && crossEventPaths.length > 0
-        ? buildCrossEventOverlayHints(crossEventPaths, nodeIdByEntityValue)
+        ? buildCrossEventOverlayHints(crossEventPaths, filteredNodes)
         : null;
     const staticLayout = filteredNodes.length > 200;
     const radius = Math.max(260, filteredNodes.length * 3);
@@ -168,8 +165,7 @@ export default function EntityGraph({
           centralEntities.has(node.node_id) ||
           centralEntities.has(node.entity_value);
         const active = activeNodeIds.has(node.node_id);
-        const shared =
-          overlayHints?.sharedEntityValues.has(node.entity_value) ?? false;
+        const shared = overlayHints?.sharedNodeIds.has(node.node_id) ?? false;
         const angle =
           filteredNodes.length > 0
             ? (Math.PI * 2 * index) / filteredNodes.length

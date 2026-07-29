@@ -60,12 +60,9 @@ class Neo4jClient:
         """Create uniqueness constraints on first use; no-op thereafter.
 
         Idempotent and guarded by ``_constraints_ensured`` so repeated
-        calls are cheap.  Only ``node_id`` uniqueness is created — it is
-        required by MERGE for index-based lookup.  Property indexes on
-        ``(entity_value, event_id)`` are intentionally omitted because the
-        current ``_SHORTEST_PATH`` Cypher uses label-less MATCH which
-        cannot leverage per-label indexes (future optimisation: make the
-        query label-aware).
+        calls are cheap.  ``node_id`` uniqueness supports MERGE; lookup
+        indexes on ``event_id`` and ``(entity_type, entity_value)`` support
+        ISSUE-083 cross-event path discovery.
         """
         if self._constraints_ensured:
             return
@@ -73,9 +70,17 @@ class Neo4jClient:
             await self._driver.execute_query(
                 f"CREATE CONSTRAINT IF NOT EXISTS FOR (n:`{label}`) REQUIRE n.node_id IS UNIQUE",
             )
+        await self._driver.execute_query(
+            "CREATE INDEX graph_node_event_id IF NOT EXISTS FOR (n) ON (n.event_id)",
+        )
+        await self._driver.execute_query(
+            "CREATE INDEX graph_node_entity_lookup IF NOT EXISTS "
+            "FOR (n) ON (n.entity_type, n.entity_value)",
+        )
         self._constraints_ensured = True
         logger.info(
-            "Neo4j uniqueness constraints verified for %d entity labels", len(self._ENTITY_LABELS)
+            "Neo4j constraints and lookup indexes verified for %d entity labels",
+            len(self._ENTITY_LABELS),
         )
 
     # ------------------------------------------------------------------

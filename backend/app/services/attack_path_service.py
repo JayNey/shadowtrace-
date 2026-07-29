@@ -2,6 +2,9 @@
 
 When ``NEO4J_ENABLED=false`` every method returns an empty list — no Neo4j
 connection is attempted. Single-event PostgreSQL graphs are unaffected.
+
+When Neo4j is enabled but async sync has not finished, results fall back to a
+PostgreSQL shared-entity probe so ``GET /graph`` is not briefly empty.
 """
 
 from __future__ import annotations
@@ -11,8 +14,13 @@ import logging
 from dataclasses import dataclass
 from typing import cast
 
+from sqlalchemy import and_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
+
 from app.core.config import get_settings
 from app.core.neo4j_client import Neo4jClient
+from app.db.orm.graph import GraphNodeORM
 from app.models.agent_io import CrossEventPath
 
 logger = logging.getLogger(__name__)
@@ -21,16 +29,13 @@ logger = logging.getLogger(__name__)
 # Cypher templates
 # ---------------------------------------------------------------------------
 
-# Shared entity_value appearing in the current event and at least one other.
-# Returns one row per (shared_value, related_event_id) pair with both node ids.
+# Shared entity across events. ``remote`` match uses indexed properties first.
 _CROSS_EVENT_SHARED = """
 MATCH (local {event_id: $event_id})
+WHERE local.entity_value IS NOT NULL
 WITH local
-MATCH (remote)
+MATCH (remote {entity_type: local.entity_type, entity_value: local.entity_value})
 WHERE remote.event_id <> $event_id
-  AND remote.entity_value = local.entity_value
-  AND remote.entity_type = local.entity_type
-  AND remote.entity_value IS NOT NULL
 RETURN local.entity_value AS shared_value,
        local.entity_type AS entity_type,
        local.node_id AS local_node_id,
@@ -102,8 +107,14 @@ class LateralMovementHop:
 class AttackPathService:
     """Discover cross-event associations and lateral-movement trails via Neo4j."""
 
-    def __init__(self, *, client: Neo4jClient | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        client: Neo4jClient | None = None,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+    ) -> None:
         self._client = client
+        self._session_factory = session_factory
         self._enabled = get_settings().neo4j_enabled and client is not None
 
     @property
@@ -117,7 +128,8 @@ class AttackPathService:
     ) -> list[CrossEventPath]:
         """Find shared-entity associations between *event_id* and other events.
 
-        Returns ``[]`` when Neo4j is disabled, unreachable, or no overlaps exist.
+        Returns ``[]`` when Neo4j is disabled or unreachable. When Neo4j is
+        enabled but has not yet mirrored graph rows, falls back to PostgreSQL.
         """
         if not self._enabled:
             return []
@@ -131,6 +143,12 @@ class AttackPathService:
             return []
 
         try:
+            await self._client.ensure_constraints()
+        except Exception:
+            logger.debug("Neo4j index ensure skipped", exc_info=True)
+
+        records: list[dict[str, object]] = []
+        try:
             records = await self._client.run_cypher(
                 _CROSS_EVENT_SHARED,
                 {"event_id": event_id},
@@ -140,10 +158,33 @@ class AttackPathService:
                 "Neo4j cross-event query failed for event %s",
                 event_id,
             )
-            return []
 
-        # Aggregate by related_event_id so each related event yields one path
-        # (shared_entities may contain multiple overlapping values).
+        paths = await self._build_paths_from_records(
+            event_id,
+            records,
+            max_depth=max_depth,
+            expand_neighborhood=True,
+        )
+        if paths:
+            return paths
+
+        pg_paths = await self._find_cross_event_paths_pg(event_id)
+        if pg_paths:
+            logger.debug(
+                "cross_event_paths PG fallback for event %s (%d path(s))",
+                event_id,
+                len(pg_paths),
+            )
+        return pg_paths
+
+    async def _build_paths_from_records(
+        self,
+        event_id: str,
+        records: list[dict[str, object]],
+        *,
+        max_depth: int,
+        expand_neighborhood: bool,
+    ) -> list[CrossEventPath]:
         by_related: dict[str, dict[str, object]] = {}
         for rec in records:
             shared_value = str(rec.get("shared_value") or "")
@@ -181,8 +222,7 @@ class AttackPathService:
             path_nodes = cast(list[str], bucket["nodes"])
             types_list = cast(list[str], bucket["types"])
 
-            # Best-effort neighborhood expansion around the first local node.
-            if path_nodes:
+            if expand_neighborhood and path_nodes and self._client is not None:
                 local_nid = path_nodes[0]
                 try:
                     neigh = await self._client.run_cypher(
@@ -214,6 +254,64 @@ class AttackPathService:
             )
 
         return paths
+
+    async def _find_cross_event_paths_pg(self, event_id: str) -> list[CrossEventPath]:
+        """PostgreSQL shared-entity probe used while Neo4j sync is catching up."""
+        if self._session_factory is None:
+            return []
+
+        local_node = aliased(GraphNodeORM)
+        remote_node = aliased(GraphNodeORM)
+
+        try:
+            async with self._session_factory() as session:
+                rows = (
+                    await session.execute(
+                        select(
+                            local_node.entity_value,
+                            local_node.entity_type,
+                            local_node.node_id,
+                            remote_node.node_id,
+                            remote_node.event_id,
+                        )
+                        .select_from(local_node)
+                        .join(
+                            remote_node,
+                            and_(
+                                local_node.entity_type == remote_node.entity_type,
+                                local_node.entity_value == remote_node.entity_value,
+                                local_node.event_id == event_id,
+                                remote_node.event_id != event_id,
+                            ),
+                        )
+                        .where(local_node.entity_value.isnot(None))
+                        .where(local_node.entity_value != "")
+                        .order_by(local_node.entity_value, remote_node.event_id)
+                    )
+                ).all()
+        except Exception:
+            logger.exception(
+                "PostgreSQL cross-event fallback failed for event %s",
+                event_id,
+            )
+            return []
+
+        records: list[dict[str, object]] = [
+            {
+                "shared_value": row[0],
+                "entity_type": row[1],
+                "local_node_id": row[2],
+                "remote_node_id": row[3],
+                "related_event_id": row[4],
+            }
+            for row in rows
+        ]
+        return await self._build_paths_from_records(
+            event_id,
+            records,
+            max_depth=4,
+            expand_neighborhood=False,
+        )
 
     async def find_lateral_movement(self, entity_value: str) -> list[LateralMovementHop]:
         """Return time-ordered host hops for an account/process entity value.
