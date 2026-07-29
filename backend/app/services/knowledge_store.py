@@ -62,40 +62,57 @@ class KnowledgeStore:
     # Public API
     # ------------------------------------------------------------------
 
-    async def upsert_chunks(self, kb_name: str, chunks: list[KnowledgeChunk]) -> None:
-        """Insert or update *chunks* into *kb_name*, computing embeddings inline."""
+    async def upsert_chunks(
+        self,
+        kb_name: str,
+        chunks: list[KnowledgeChunk],
+        *,
+        session: AsyncSession | None = None,
+    ) -> None:
+        """Insert or update chunks, optionally joining a caller-owned transaction."""
         if not chunks:
             return
-        # Validate kb_name consistency and build content list
         contents: list[str] = []
         for c in chunks:
             if c.kb_name != kb_name:
                 raise ValueError(f"chunk {c.chunk_id} kb_name={c.kb_name} != {kb_name}")
             contents.append(c.content)
         vectors = await self._embed.embed_texts(contents)
-        async with self._session_factory() as session:
-            async with session.begin():
-                for chunk, vec in zip(chunks, vectors, strict=True):
-                    stmt = (
-                        pg_insert(KnowledgeChunkORM)
-                        .values(
-                            chunk_id=chunk.chunk_id,
-                            kb_name=kb_name,
-                            content=chunk.content,
-                            chunk_metadata=chunk.metadata,
-                            embedding=vec,
-                        )
-                        .on_conflict_do_update(
-                            index_elements=["chunk_id"],
-                            set_={
-                                "kb_name": kb_name,
-                                "content": chunk.content,
-                                "metadata": chunk.metadata,
-                                "embedding": vec,
-                            },
-                        )
-                    )
-                    await session.execute(stmt)
+        if session is not None:
+            await self._execute_upserts(session, kb_name, chunks, vectors)
+            return
+        async with self._session_factory() as owned_session:
+            async with owned_session.begin():
+                await self._execute_upserts(owned_session, kb_name, chunks, vectors)
+
+    @staticmethod
+    async def _execute_upserts(
+        session: AsyncSession,
+        kb_name: str,
+        chunks: list[KnowledgeChunk],
+        vectors: list[list[float]],
+    ) -> None:
+        for chunk, vec in zip(chunks, vectors, strict=True):
+            stmt = (
+                pg_insert(KnowledgeChunkORM)
+                .values(
+                    chunk_id=chunk.chunk_id,
+                    kb_name=kb_name,
+                    content=chunk.content,
+                    chunk_metadata=chunk.metadata,
+                    embedding=vec,
+                )
+                .on_conflict_do_update(
+                    index_elements=["chunk_id"],
+                    set_={
+                        "kb_name": kb_name,
+                        "content": chunk.content,
+                        "metadata": chunk.metadata,
+                        "embedding": vec,
+                    },
+                )
+            )
+            await session.execute(stmt)
 
     async def vector_search(
         self, kb_name: str, query_embedding: list[float], top_k: int = 10

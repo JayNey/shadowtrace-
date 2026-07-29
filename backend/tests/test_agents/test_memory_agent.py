@@ -11,8 +11,10 @@ import yaml
 from app.agents.memory_agent import MemoryAgent
 from app.agents.super_agent import SuperAgent
 from app.models.agent_io import InvestigationResult, MemoryAgentInput
+from app.models.case import HistoryCase
 from app.models.context import EventContext
 from app.models.enums import (
+    CaseLabel,
     DispositionPolicy,
     EventStatus,
     EventType,
@@ -20,6 +22,7 @@ from app.models.enums import (
     Severity,
     WritebackReadiness,
 )
+from app.models.memory import MemoryCandidate
 from app.models.report import InvestigationReport
 from app.models.security_event import EventSummary
 from app.services.case_kb_service import _response_succeeded
@@ -34,13 +37,23 @@ class _CaseKB:
         self.ineligible = ineligible
         self.archived: list[str] = []
 
-    async def archive_event_as_case(self, event_id: str) -> str:
+    async def prepare_history_case(self, event_id: str) -> HistoryCase:
         if self.fail:
             raise RuntimeError("case archive unavailable")
         if self.ineligible:
             raise ValueError("event is not eligible for history_case_kb")
         self.archived.append(event_id)
-        return "case-acde1234"
+        return HistoryCase(
+            case_id="case-acde1234",
+            event_id=event_id,
+            event_type=EventType.DATA_EXFILTRATION,
+            case_label=CaseLabel.TRUE_POSITIVE,
+            summary="Evidence confirms a WebDAV upload.",
+            key_entities="account=zhangsan",
+            final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+            risk_score=88,
+            resolution="closed",
+        )
 
 
 class _Profiles:
@@ -52,6 +65,40 @@ class _Profiles:
         if self.fail:
             raise RuntimeError("profile store unavailable")
         self.updates.append(update)
+
+
+class _Governance:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.candidates: list[MemoryCandidate] = []
+        self.maintenance: list[tuple[str, str]] = []
+        self.fallback_candidates: list[MemoryCandidate] = []
+
+    async def ingest_candidate(self, candidate: MemoryCandidate) -> str:
+        self.candidates.append(candidate)
+        if self.fail:
+            raise RuntimeError("review queue unavailable")
+        return f"rev-{len(self.candidates):08x}"
+
+    async def persist_pending_fallback(self, candidate: MemoryCandidate) -> str:
+        self.fallback_candidates.append(candidate)
+        if self.fail:
+            raise RuntimeError("review fallback unavailable")
+        return "rev-fallback"
+
+    async def dedupe(self, kb_name: str) -> int:
+        self.maintenance.append(("dedupe", kb_name))
+        return 0
+
+    async def resolve_conflict(self, kb_name: str, key: str) -> None:
+        self.maintenance.append(("resolve", f"{kb_name}:{key}"))
+
+    async def apply_retention(self, kb_name: str) -> int:
+        self.maintenance.append(("retention", kb_name))
+        return 0
+
+    def fingerprint(self, candidate: MemoryCandidate) -> str:
+        return f"{candidate.candidate_type}:fingerprint"
 
 
 class _ContextStore:
@@ -220,10 +267,12 @@ async def test_confirmed_threat_archives_case_updates_profile_and_builds_sigma()
     context = _context(FinalVerdict.CONFIRMED_THREAT)
     cases = _CaseKB()
     profiles = _Profiles()
+    governance = _Governance()
     memory = _WorkingMemory(context)
     agent = MemoryAgent(
         case_kb_service=cases,  # type: ignore[arg-type]
         profile_service=profiles,  # type: ignore[arg-type]
+        memory_governance=governance,  # type: ignore[arg-type]
         context_store=_ContextStore(context),
         working_memory=memory,
     )
@@ -231,10 +280,17 @@ async def test_confirmed_threat_archives_case_updates_profile_and_builds_sigma()
     output = await agent.execute(_input(FinalVerdict.CONFIRMED_THREAT))
 
     assert cases.archived == [EVENT_ID]
-    assert output.case_records[0].archived is True
-    assert [update.entity_value for update in profiles.updates] == ["zhangsan"]
-    assert profiles.updates[0].risk_score == 88
-    assert output.profile_updates == profiles.updates
+    assert output.case_records[0].archived is False
+    assert output.case_records[0].pending_review is True
+    assert output.case_records[0].review_id == "rev-00000001"
+    assert profiles.updates == []
+    assert [update.entity_value for update in output.profile_updates] == ["zhangsan"]
+    assert output.profile_updates[0].risk_score == 88
+    assert output.profile_updates[0].pending_review is True
+    assert [candidate.candidate_type for candidate in governance.candidates] == [
+        "history_case",
+        "profile",
+    ]
     assert len(output.sigma_drafts) == 1
     sigma = yaml.safe_load(output.sigma_drafts[0])
     assert EVENT_ID in sigma["title"]
@@ -246,9 +302,11 @@ async def test_confirmed_threat_archives_case_updates_profile_and_builds_sigma()
 @pytest.mark.asyncio
 async def test_false_positive_candidate_is_pending_review_with_llm_fallback() -> None:
     context = _context(FinalVerdict.FALSE_POSITIVE)
+    governance = _Governance()
     agent = MemoryAgent(
         case_kb_service=_CaseKB(),  # type: ignore[arg-type]
         profile_service=_Profiles(),  # type: ignore[arg-type]
+        memory_governance=governance,  # type: ignore[arg-type]
         context_store=_ContextStore(context),
         working_memory=_WorkingMemory(context),
         llm_client=_UnavailableLLM(),
@@ -259,16 +317,24 @@ async def test_false_positive_candidate_is_pending_review_with_llm_fallback() ->
     assert len(output.fp_rules) == 1
     assert output.fp_rules[0].pending_review is True
     assert output.fp_rules[0].source_event_id == EVENT_ID
+    assert output.fp_rules[0].review_id == "rev-00000002"
     assert output.sigma_drafts == []
+    assert [candidate.candidate_type for candidate in governance.candidates] == [
+        "history_case",
+        "fp_rule",
+        "profile",
+    ]
 
 
 @pytest.mark.asyncio
 async def test_individual_persistence_failures_degrade_without_losing_memory_output() -> None:
     context = _context(FinalVerdict.CONFIRMED_THREAT)
     memory = _WorkingMemory(context)
+    governance = _Governance(fail=True)
     agent = MemoryAgent(
         case_kb_service=_CaseKB(fail=True),  # type: ignore[arg-type]
         profile_service=_Profiles(fail=True),  # type: ignore[arg-type]
+        memory_governance=governance,  # type: ignore[arg-type]
         context_store=_ContextStore(context),
         working_memory=memory,
     )
@@ -276,7 +342,10 @@ async def test_individual_persistence_failures_degrade_without_losing_memory_out
     output = await agent.execute(_input(FinalVerdict.CONFIRMED_THREAT))
 
     assert output.case_records == []
-    assert output.profile_updates == []
+    assert len(output.profile_updates) == 1
+    assert output.profile_updates[0].review_id is None
+    assert output.profile_updates[0].pending_review is True
+    assert len(governance.fallback_candidates) == 1
     assert len(output.sigma_drafts) == 1
     assert memory.writes
 
@@ -300,6 +369,7 @@ async def test_ineligible_case_uses_info_log_without_hiding_other_outputs(
     agent = MemoryAgent(
         case_kb_service=_CaseKB(ineligible=True),  # type: ignore[arg-type]
         profile_service=_Profiles(),  # type: ignore[arg-type]
+        memory_governance=_Governance(),  # type: ignore[arg-type]
         context_store=_ContextStore(context),
         working_memory=memory,
     )
@@ -322,6 +392,7 @@ async def test_external_unsynced_skips_all_consolidation() -> None:
     agent = MemoryAgent(
         case_kb_service=cases,  # type: ignore[arg-type]
         profile_service=profiles,  # type: ignore[arg-type]
+        memory_governance=_Governance(),  # type: ignore[arg-type]
         context_store=_ContextStore(context),
         working_memory=memory,
     )
@@ -464,6 +535,7 @@ async def test_existing_memory_output_makes_replay_idempotent() -> None:
     agent = MemoryAgent(
         case_kb_service=cases,  # type: ignore[arg-type]
         profile_service=profiles,  # type: ignore[arg-type]
+        memory_governance=_Governance(),  # type: ignore[arg-type]
         context_store=_ContextStore(context),
         working_memory=memory,
     )

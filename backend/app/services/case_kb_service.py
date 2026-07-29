@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
 from app.models.case import (
+    FalsePositiveCase,
     HistoryCase,
+    fp_case_metadata,
+    fp_case_to_text,
     history_case_metadata,
     history_case_to_text,
     make_chunk_id,
@@ -88,11 +91,8 @@ class CaseKBService:
     # Archival
     # ------------------------------------------------------------------
 
-    async def archive_event_as_case(self, event_id: str) -> str:
-        """Assemble a ``HistoryCase`` from a closed event and upsert into ``history_case_kb``.
-
-        Returns the new *case_id*.
-        """
+    async def prepare_history_case(self, event_id: str) -> HistoryCase:
+        """Build an immutable review candidate without writing to the retrieval KB."""
         case_id = _derive_case_id(event_id)
 
         async with self._session_factory() as session:
@@ -143,19 +143,44 @@ class CaseKBService:
                 successful_response=successful_response,
                 response_outcomes=response_outcomes,
             )
+        return history_case
 
-        content = history_case_to_text(history_case)
-        chunk_id = make_chunk_id(HISTORY_KB_NAME, case_id)
-        meta = history_case_metadata(history_case)
-
+    async def upsert_history_case(
+        self,
+        history_case: HistoryCase,
+        *,
+        session: AsyncSession | None = None,
+    ) -> str:
+        """Promote a reviewed history case into the searchable history KB."""
         chunk = KnowledgeChunk(
-            chunk_id=chunk_id,
+            chunk_id=make_chunk_id(HISTORY_KB_NAME, history_case.case_id),
             kb_name=HISTORY_KB_NAME,
-            content=content,
-            metadata=meta,
+            content=history_case_to_text(history_case),
+            metadata=history_case_metadata(history_case),
         )
-        await self._kb.upsert_chunks(HISTORY_KB_NAME, [chunk])
-        return case_id
+        await self._kb.upsert_chunks(HISTORY_KB_NAME, [chunk], session=session)
+        return history_case.case_id
+
+    async def upsert_fp_case(
+        self,
+        fp_case: FalsePositiveCase,
+        *,
+        session: AsyncSession | None = None,
+    ) -> str:
+        """Promote a reviewed false-positive rule into the searchable FP KB."""
+        chunk = KnowledgeChunk(
+            chunk_id=make_chunk_id(FP_KB_NAME, fp_case.case_id),
+            kb_name=FP_KB_NAME,
+            content=fp_case_to_text(fp_case),
+            metadata=fp_case_metadata(fp_case),
+        )
+        await self._kb.upsert_chunks(FP_KB_NAME, [chunk], session=session)
+        return fp_case.case_id
+
+    async def archive_event_as_case(self, event_id: str) -> str:
+        """Backward-compatible immediate archival for trusted internal callers."""
+        history_case = await self.prepare_history_case(event_id)
+        return await self.upsert_history_case(history_case)
 
 
 def _is_history_case_eligible(event: orm.SecurityEvent, report: orm.Report | None) -> bool:

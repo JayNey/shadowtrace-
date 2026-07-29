@@ -118,6 +118,8 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "storyline_not_ready": ErrorCategory.USER_INPUT,
     "context_not_ready": ErrorCategory.USER_INPUT,
     "qa_unavailable": ErrorCategory.TRANSIENT,
+    "memory_review_not_found": ErrorCategory.USER_INPUT,
+    "memory_review_conflict": ErrorCategory.PERMANENT,
     # Generic dependency / domain defaults used by subclasses
     "dependency_unavailable": ErrorCategory.TRANSIENT,
     "task_unavailable": ErrorCategory.TRANSIENT,
@@ -393,6 +395,24 @@ class ResourceNotFoundError(ShadowTraceError):
     status_code = 404
     default_error_code = "not_found"
     default_category = ErrorCategory.USER_INPUT
+    default_retryable = False
+
+
+class MemoryReviewNotFoundError(ShadowTraceError):
+    """A memory governance review ID does not exist."""
+
+    status_code = 404
+    default_error_code = "memory_review_not_found"
+    default_category = ErrorCategory.USER_INPUT
+    default_retryable = False
+
+
+class MemoryReviewConflictError(ShadowTraceError):
+    """A decided memory review cannot transition to another terminal state."""
+
+    status_code = 409
+    default_error_code = "memory_review_conflict"
+    default_category = ErrorCategory.PERMANENT
     default_retryable = False
 
 

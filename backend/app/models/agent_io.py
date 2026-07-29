@@ -438,6 +438,8 @@ class CaseRecordSummary(BaseModel):
     event_id: str | None = None
     summary: str = ""
     archived: bool = False
+    pending_review: bool = False
+    review_id: str | None = None
 
 
 class FpRuleCandidate(BaseModel):
@@ -448,6 +450,7 @@ class FpRuleCandidate(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     source_event_id: str
     pending_review: bool = True
+    review_id: str | None = None
 
 
 class ProfileUpdate(BaseModel):
@@ -458,6 +461,8 @@ class ProfileUpdate(BaseModel):
     event_id: str
     risk_score: int | None = Field(default=None, ge=0, le=100)
     behavior_tags: list[str] = Field(default_factory=list)
+    pending_review: bool = False
+    review_id: str | None = None
 
 
 class MemoryOutput(BaseModel):

@@ -53,6 +53,7 @@ CORE_TABLES = {
     "graph_edge",
     "approval_record",
     "entity_profile",
+    "memory_review",
 }
 
 

@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.action import Action
 from app.models.disposition import (
@@ -295,6 +295,18 @@ class DispositionSourceSelectResponse(BaseModel):
     event_version: int
 
 
+class MemoryReviewRejectRequest(_StrictRequest):
+    reason: str = Field(min_length=1, max_length=1000)
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(cls, value: str) -> str:
+        reason = value.strip()
+        if not reason:
+            raise ValueError("reason must contain non-whitespace characters")
+        return reason
+
+
 class ReadinessRecheckResponse(BaseModel):
     event_id: str
     writeback_readiness: WritebackReadiness
@@ -387,6 +399,29 @@ class HourlyEventCount(BaseModel):
 
     hour: str
     count: int = 0
+
+
+class MemoryReviewItem(BaseModel):
+    review_id: str
+    kb_name: str
+    candidate_type: Literal["fp_rule", "history_case", "profile"]
+    payload: dict[str, Any]
+    status: Literal["pending", "promoted", "demoted"]
+    confidence: float
+    created_at: datetime
+    decided_at: datetime | None = None
+    operator: str | None = None
+
+
+class MemoryReviewListResponse(BaseModel):
+    total: int
+    items: list[MemoryReviewItem] = Field(default_factory=list)
+
+
+class MemoryReviewOperationResponse(BaseModel):
+    review_id: str
+    status: Literal["promoted", "demoted"]
+    message: str
 
 
 class StatsResponse(BaseModel):

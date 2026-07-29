@@ -69,6 +69,9 @@ CORE_ENDPOINTS = {
     ("get", "/api/v1/tasks/{task_id}"),
     ("get", "/api/v1/tools"),
     ("get", "/api/v1/knowledge"),
+    ("get", "/api/v1/knowledge/reviews"),
+    ("post", "/api/v1/knowledge/reviews/{review_id}/promote"),
+    ("post", "/api/v1/knowledge/reviews/{review_id}/reject"),
     ("get", "/api/v1/health"),
     ("get", "/api/v1/stats"),
 }

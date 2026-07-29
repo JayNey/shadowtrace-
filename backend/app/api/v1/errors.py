@@ -24,6 +24,8 @@ from app.core.errors import (
     InvalidStateTransitionError,
     InvalidVerdictStatusCombinationError,
     InvestigationInProgressError,
+    MemoryReviewConflictError,
+    MemoryReviewNotFoundError,
     ResourceNotFoundError,
     ShadowTraceError,
     WritebackConflictError,
@@ -48,6 +50,8 @@ __all__ = [
     "WritebackUnsupportedError",
     "DispositionPermissionDenied",
     "InvestigationInProgressError",
+    "MemoryReviewConflictError",
+    "MemoryReviewNotFoundError",
     "ResourceNotFoundError",
     "register_exception_handlers",
 ]

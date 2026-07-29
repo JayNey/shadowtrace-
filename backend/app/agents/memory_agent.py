@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -21,10 +22,13 @@ from app.models.agent_io import (
 )
 from app.models.context import EventContext
 from app.models.enums import EventStatus, FinalVerdict
-from app.services.case_kb_service import CaseKBService
+from app.models.memory import MemoryCandidate
+from app.services.case_kb_service import FP_KB_NAME, HISTORY_KB_NAME, CaseKBService
+from app.services.memory_governance import PROFILE_KB_NAME, MemoryGovernance
 from app.services.profile_service import ProfileService
 
 logger = logging.getLogger(__name__)
+_ENQUEUE_RETRY_DELAYS = (0.05, 0.1)
 
 
 class _FpRuleDraft(BaseModel):
@@ -45,6 +49,7 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
         *,
         case_kb_service: CaseKBService,
         profile_service: ProfileService,
+        memory_governance: MemoryGovernance,
         context_store: Any,
         llm_client: Any | None = None,
         working_memory: Any | None = None,
@@ -65,6 +70,7 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
         )
         self.case_kb_service = case_kb_service
         self.profile_service = profile_service
+        self.memory_governance = memory_governance
         self.context_store: Any = context_store
 
     async def _run(self, input: MemoryAgentInput) -> MemoryOutput:
@@ -76,6 +82,7 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
             return MemoryOutput.model_validate(context.memory_output)
 
         output = MemoryOutput()
+        queued: list[MemoryCandidate] = []
         if input.investigation_result.external_unsynced or (
             context.event is not None and context.event.external_unsynced
         ):
@@ -86,15 +93,23 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
             return await self._persist_output(input.event_id, output)
 
         try:
-            case_id = await self.case_kb_service.archive_event_as_case(input.event_id)
-            output.case_records.append(
-                CaseRecordSummary(
-                    case_id=case_id,
-                    event_id=input.event_id,
-                    summary=_case_summary(context),
-                    archived=True,
-                )
+            history_case = await self.case_kb_service.prepare_history_case(input.event_id)
+            record = CaseRecordSummary(
+                case_id=history_case.case_id,
+                event_id=input.event_id,
+                summary=history_case.summary,
+                archived=False,
+                pending_review=True,
             )
+            candidate = MemoryCandidate(
+                kb_name=HISTORY_KB_NAME,
+                candidate_type="history_case",
+                payload=history_case.model_dump(mode="json"),
+                confidence=_candidate_confidence(context),
+            )
+            record.review_id = await self._queue_candidate(candidate)
+            output.case_records.append(record)
+            queued.append(candidate)
         except ValueError as exc:
             logger.info(
                 "MemoryAgent case archival ineligible event=%s reason=%s",
@@ -110,7 +125,16 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
 
         if input.investigation_result.final_verdict is FinalVerdict.FALSE_POSITIVE:
             try:
-                output.fp_rules.append(await self._build_fp_rule(input.event_id, context))
+                fp_rule = await self._build_fp_rule(input.event_id, context)
+                candidate = MemoryCandidate(
+                    kb_name=FP_KB_NAME,
+                    candidate_type="fp_rule",
+                    payload=fp_rule.model_dump(mode="json"),
+                    confidence=fp_rule.confidence,
+                )
+                fp_rule.review_id = await self._queue_candidate(candidate)
+                output.fp_rules.append(fp_rule)
+                queued.append(candidate)
             except Exception:
                 logger.warning(
                     "MemoryAgent false-positive rule skipped event=%s",
@@ -129,8 +153,16 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
             profile_updates = []
         for update in profile_updates:
             try:
-                await self.profile_service.upsert(update)
+                update.pending_review = True
+                candidate = MemoryCandidate(
+                    kb_name=PROFILE_KB_NAME,
+                    candidate_type="profile",
+                    payload=update.model_dump(mode="json"),
+                    confidence=_candidate_confidence(context),
+                )
+                update.review_id = await self._queue_candidate(candidate)
                 output.profile_updates.append(update)
+                queued.append(candidate)
             except Exception:
                 logger.warning(
                     "MemoryAgent profile update skipped event=%s entity=%s:%s",
@@ -139,6 +171,8 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                     update.entity_value,
                     exc_info=True,
                 )
+
+        await self._maintain_governance(queued)
 
         if input.investigation_result.final_verdict is FinalVerdict.CONFIRMED_THREAT:
             try:
@@ -151,6 +185,52 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                 )
 
         return await self._persist_output(input.event_id, output)
+
+    async def _queue_candidate(self, candidate: MemoryCandidate) -> str | None:
+        for attempt in range(len(_ENQUEUE_RETRY_DELAYS) + 1):
+            try:
+                return await self.memory_governance.ingest_candidate(candidate)
+            except Exception:
+                logger.warning(
+                    "MemoryAgent review enqueue failed candidate_type=%s attempt=%s",
+                    candidate.candidate_type,
+                    attempt + 1,
+                    exc_info=True,
+                )
+                if attempt < len(_ENQUEUE_RETRY_DELAYS):
+                    await asyncio.sleep(_ENQUEUE_RETRY_DELAYS[attempt])
+        try:
+            return await self.memory_governance.persist_pending_fallback(candidate)
+        except Exception:
+            logger.error(
+                "MemoryAgent review fallback persistence failed; retaining dead-letter "
+                "candidate in working memory candidate_type=%s",
+                candidate.candidate_type,
+                exc_info=True,
+            )
+            return None
+
+    async def _maintain_governance(self, candidates: list[MemoryCandidate]) -> None:
+        if not candidates:
+            return
+        by_kb: dict[str, list[MemoryCandidate]] = {}
+        for candidate in candidates:
+            by_kb.setdefault(candidate.kb_name, []).append(candidate)
+        for kb_name, kb_candidates in by_kb.items():
+            try:
+                await self.memory_governance.dedupe(kb_name)
+                for candidate in kb_candidates:
+                    await self.memory_governance.resolve_conflict(
+                        kb_name,
+                        self.memory_governance.fingerprint(candidate),
+                    )
+                await self.memory_governance.apply_retention(kb_name)
+            except Exception:
+                logger.warning(
+                    "MemoryAgent governance maintenance failed kb_name=%s",
+                    kb_name,
+                    exc_info=True,
+                )
 
     async def _persist_output(self, event_id: str, output: MemoryOutput) -> MemoryOutput:
         if self.working_memory is None:
@@ -227,6 +307,12 @@ def _case_summary(context: EventContext) -> str:
     if context.event is not None:
         return context.event.title
     return ""
+
+
+def _candidate_confidence(context: EventContext) -> float:
+    if context.event is None:
+        return 0.0
+    return max(0.0, min(1.0, float(context.event.risk_score) / 100.0))
 
 
 def _alert_signature(context: EventContext) -> str:

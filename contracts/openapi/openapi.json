@@ -1640,6 +1640,149 @@
         }
       }
     },
+    "/api/v1/knowledge/reviews": {
+      "get": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "List Memory Reviews",
+        "operationId": "list_memory_reviews_api_v1_knowledge_reviews_get",
+        "parameters": [
+          {
+            "name": "kb_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kb Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryReviewListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/knowledge/reviews/{review_id}/promote": {
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Promote Memory Review",
+        "operationId": "promote_memory_review_api_v1_knowledge_reviews__review_id__promote_post",
+        "parameters": [
+          {
+            "name": "review_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Review Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryReviewOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/knowledge/reviews/{review_id}/reject": {
+      "post": {
+        "tags": [
+          "knowledge"
+        ],
+        "summary": "Reject Memory Review",
+        "operationId": "reject_memory_review_api_v1_knowledge_reviews__review_id__reject_post",
+        "parameters": [
+          {
+            "name": "review_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Review Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryReviewRejectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryReviewOperationResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/stats": {
       "get": {
         "tags": [
@@ -1771,6 +1914,94 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/GraphOutput"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "tags": [
+          "search"
+        ],
+        "summary": "Search",
+        "description": "Full-text search across tool calls, audit logs, and evidence.\n\nWhen OpenSearch is enabled and reachable the results include highlighted\nsnippets.  Otherwise the endpoint falls back to PostgreSQL ILIKE queries\nand sets ``degraded=true``.",
+        "operationId": "search_api_v1_search_get",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 500,
+              "description": "Search query string.",
+              "title": "Q"
+            },
+            "description": "Search query string."
+          },
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "pattern": "^(tool-calls|audit-logs|evidence|all)$",
+              "description": "Search scope: tool-calls, audit-logs, evidence, or all.",
+              "default": "all",
+              "title": "Scope"
+            },
+            "description": "Search scope: tool-calls, audit-logs, evidence, or all."
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Page number (1-indexed).",
+              "default": 1,
+              "title": "Page"
+            },
+            "description": "Page number (1-indexed)."
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "description": "Results per page.",
+              "default": 20,
+              "title": "Page Size"
+            },
+            "description": "Results per page."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
                 }
               }
             }
@@ -4174,6 +4405,147 @@
         "type": "object",
         "title": "KnowledgeResponse"
       },
+      "MemoryReviewItem": {
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "title": "Review Id"
+          },
+          "kb_name": {
+            "type": "string",
+            "title": "Kb Name"
+          },
+          "candidate_type": {
+            "type": "string",
+            "enum": [
+              "fp_rule",
+              "history_case",
+              "profile"
+            ],
+            "title": "Candidate Type"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Payload"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "promoted",
+              "demoted"
+            ],
+            "title": "Status"
+          },
+          "confidence": {
+            "type": "number",
+            "title": "Confidence"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "operator": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operator"
+          }
+        },
+        "type": "object",
+        "required": [
+          "review_id",
+          "kb_name",
+          "candidate_type",
+          "payload",
+          "status",
+          "confidence",
+          "created_at"
+        ],
+        "title": "MemoryReviewItem"
+      },
+      "MemoryReviewListResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryReviewItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total"
+        ],
+        "title": "MemoryReviewListResponse"
+      },
+      "MemoryReviewOperationResponse": {
+        "properties": {
+          "review_id": {
+            "type": "string",
+            "title": "Review Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "promoted",
+              "demoted"
+            ],
+            "title": "Status"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "review_id",
+          "status",
+          "message"
+        ],
+        "title": "MemoryReviewOperationResponse"
+      },
+      "MemoryReviewRejectRequest": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "title": "MemoryReviewRejectRequest"
+      },
       "ProcessEntity": {
         "properties": {
           "entity_id": {
@@ -4489,6 +4861,99 @@
           "comment"
         ],
         "title": "ResolveWritebackRequest"
+      },
+      "SearchResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SearchResultItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "default": 0
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page",
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size",
+            "default": 20
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "SearchResponse",
+        "description": "Paginated search response from ``GET /api/v1/search``."
+      },
+      "SearchResultItem": {
+        "properties": {
+          "index": {
+            "type": "string",
+            "title": "Index"
+          },
+          "doc_id": {
+            "type": "string",
+            "title": "Doc Id"
+          },
+          "highlight": {
+            "type": "string",
+            "title": "Highlight",
+            "default": ""
+          },
+          "source_summary": {
+            "type": "string",
+            "title": "Source Summary",
+            "default": ""
+          },
+          "event_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Event Id"
+          },
+          "occurred_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Occurred At"
+          },
+          "extra": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extra"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "index",
+          "doc_id"
+        ],
+        "title": "SearchResultItem",
+        "description": "A single search hit — either from OpenSearch or the ILIKE fallback."
       },
       "SecurityEvent": {
         "properties": {

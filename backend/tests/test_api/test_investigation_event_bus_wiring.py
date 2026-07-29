@@ -56,9 +56,11 @@ async def test_build_investigation_agents_wires_event_bus(monkeypatch: pytest.Mo
     monkeypatch.setattr(deps, "_get_redis", lambda: MagicMock())
     monkeypatch.setattr(deps, "_get_context_store", lambda: MagicMock())
     monkeypatch.setattr(deps, "_get_degraded_flags", lambda: MagicMock())
+    monkeypatch.setattr(deps, "get_graph_sync_service", AsyncMock(return_value=MagicMock()))
 
     monkeypatch.setattr("app.agents.triage_agent.TriageAgent", _capture("triage"))
     monkeypatch.setattr("app.agents.evidence_agent.EvidenceAgent", _capture("evidence"))
+    monkeypatch.setattr("app.agents.graph_agent.GraphAgent", _capture("graph"))
     monkeypatch.setattr("app.agents.rag_agent.RAGAgent", _capture("rag"))
     monkeypatch.setattr("app.agents.risk_agent.RiskAgent", _capture("risk"))
     monkeypatch.setattr("app.agents.report_agent.ReportAgent", _capture("report"))
@@ -112,8 +114,9 @@ async def test_build_investigation_agents_wires_event_bus(monkeypatch: pytest.Mo
     assert stack["rag"].event_bus is bus
     assert stack["risk"].event_bus is bus
     assert stack["report"].event_bus is bus
+    assert stack["graph_agent"].event_bus is bus
     assert stack["memory"].event_bus is bus
-    wired = ("triage", "evidence", "rag", "risk", "report", "memory")
+    wired = ("triage", "evidence", "rag", "risk", "report", "graph", "memory")
     assert all(captured[name] is bus for name in wired)
 
 
@@ -164,8 +167,8 @@ async def test_planner_and_response_receive_event_bus(monkeypatch: pytest.Monkey
         "rag": MagicMock(),
         "risk": MagicMock(),
         "report": MagicMock(),
-        "memory": MagicMock(),
         "graph_agent": MagicMock(),
+        "memory": MagicMock(),
         "event_service": MagicMock(),
         "context_store": MagicMock(),
         "tool_executor": MagicMock(),

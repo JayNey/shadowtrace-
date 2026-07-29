@@ -50,6 +50,7 @@ _search_service: Any = None  # SearchService
 _tool_call_log: Any = None  # ToolCallLogService
 _graph_sync_service: Any = None  # GraphSyncService (ISSUE-082)
 _neo4j_client: Any = None  # Neo4jClient (ISSUE-082)
+_memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -172,6 +173,29 @@ async def get_approval_engine() -> Any:
 
 
 ApprovalEngineDep = Annotated[Any, Depends(get_approval_engine)]
+
+
+def get_memory_governance() -> Any:
+    """Return the shared memory review and promotion service."""
+    global _memory_governance
+    if _memory_governance is None:
+        from app.core.embedding.service import EmbeddingService
+        from app.services.case_kb_service import CaseKBService
+        from app.services.knowledge_store import KnowledgeStore
+        from app.services.memory_governance import MemoryGovernance
+        from app.services.profile_service import ProfileService
+
+        session_factory = _get_session_factory()
+        knowledge_store = KnowledgeStore(session_factory, EmbeddingService(get_settings()))
+        _memory_governance = MemoryGovernance(
+            session_factory,
+            case_kb_service=CaseKBService(knowledge_store, session_factory),
+            profile_service=ProfileService(session_factory),
+        )
+    return _memory_governance
+
+
+MemoryGovernanceDep = Annotated[Any, Depends(get_memory_governance)]
 
 
 def _get_adapter_registry() -> Any:
@@ -444,6 +468,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.services.case_kb_service import CaseKBService
     from app.services.false_positive_matcher import FalsePositiveMatcher
     from app.services.knowledge_store import KnowledgeStore
+    from app.services.memory_governance import MemoryGovernance
     from app.services.profile_service import ProfileService
     from app.tools.executor import NullAuditService, get_tool_executor
 
@@ -467,9 +492,15 @@ async def _build_investigation_agents() -> dict[str, Any]:
     case_kb_service = CaseKBService(knowledge_store, session_factory)
     fp_matcher = FalsePositiveMatcher(case_kb_service)
     profile_service = ProfileService(session_factory)
+    memory_governance = MemoryGovernance(
+        session_factory,
+        case_kb_service=case_kb_service,
+        profile_service=profile_service,
+    )
     memory = MemoryAgent(
         case_kb_service=case_kb_service,
         profile_service=profile_service,
+        memory_governance=memory_governance,
         context_store=_get_context_store(),
         llm_client=llm_client,
         working_memory=wm.for_writer("MemoryAgent"),
@@ -666,6 +697,7 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
+    global _memory_governance
     _session_factory = None
     _redis_client = None
     _context_store = None
@@ -691,3 +723,4 @@ def reset_deps() -> None:
     _tool_call_log = None
     _graph_sync_service = None
     _neo4j_client = None
+    _memory_governance = None
