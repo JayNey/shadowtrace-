@@ -188,7 +188,7 @@ async def test_mock_xdr_http_pipeline_persists_queryable_frozen_context(
         )
     ).all()
     assert audit_reasons.count("event_created") == 1
-    assert audit_reasons.count("alert_linked_to_incident_event") == 3
+    assert audit_reasons.count("related_source_linked_to_incident_event") == 3
 
     incident_source = await db_session.scalar(
         select(orm.SourceObject).where(

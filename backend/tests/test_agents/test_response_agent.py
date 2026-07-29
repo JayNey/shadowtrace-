@@ -295,7 +295,7 @@ async def test_main_scenario_has_disable_account_and_block_ip() -> None:
     assert "isolate_host" in tool_names
     assert "create_ticket" in tool_names
     isolate = next(a for a in plan.actions if a.tool_name == "isolate_host")
-    assert isolate.action_level is ActionLevel.L2
+    assert isolate.action_level is ActionLevel.L3
     assert plan.generated_by is ResponsePlanGeneratedBy.LLM
 
 
