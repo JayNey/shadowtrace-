@@ -370,8 +370,41 @@ class KnowledgeResponse(PageMeta):
     items: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class RateStat(BaseModel):
+    """Rate with numerator/denominator; ``rate`` is null when denominator is 0.
+
+    ISSUE-085: the three disposition rates must stay separate — never fold into
+    a single misleading ``action_success_rate``.
+    """
+
+    rate: float | None = None
+    numerator: int = 0
+    denominator: int = 0
+
+
+class HourlyEventCount(BaseModel):
+    """One hour bucket for the SOC trend chart (ISSUE-085)."""
+
+    hour: str
+    count: int = 0
+
+
 class StatsResponse(BaseModel):
+    """Platform statistics (ISSUE-085 SOC dashboard).
+
+    Legacy summary counters (``open_events`` …) remain for pre-085 clients.
+    """
+
     total_events: int = 0
+    by_status: dict[str, int] = Field(default_factory=dict)
+    by_severity: dict[str, int] = Field(default_factory=dict)
+    by_event_type: dict[str, int] = Field(default_factory=dict)
+    action_execution_success_rate: RateStat = Field(default_factory=RateStat)
+    effect_verification_rate: RateStat = Field(default_factory=RateStat)
+    writeback_confirmation_rate: RateStat = Field(default_factory=RateStat)
+    avg_investigation_seconds: float | None = None
+    events_last_24h: list[HourlyEventCount] = Field(default_factory=list)
+    # Legacy counters (ISSUE-004 placeholder fields) — derived from aggregations.
     open_events: int = 0
     closed_events: int = 0
     pending_approvals: int = 0
