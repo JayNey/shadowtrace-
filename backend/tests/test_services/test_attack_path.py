@@ -20,7 +20,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 import pytest
 import pytest_asyncio
@@ -30,6 +30,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from app.core.neo4j_client import Neo4jClient
 from app.db import models as orm
 from app.db.orm.graph import GraphEdgeORM, GraphNodeORM
 from app.models.agent_io import CrossEventPath
@@ -270,6 +271,88 @@ def test_cross_event_path_model_fields() -> None:
     )
     assert path.shared_entities == [SHARED_EXTERNAL_IP]
     assert path.related_event_ids == ["evt-b"]
+
+
+class _FakeNeo4jClient:
+    """Minimal Neo4jClient stand-in for disabled-path / failure-path unit tests."""
+
+    def __init__(
+        self,
+        *,
+        ping_ok: bool = True,
+        records: list[dict[str, object]] | None = None,
+        raise_on_cypher: Exception | None = None,
+    ) -> None:
+        self.ping_ok = ping_ok
+        self.records = records or []
+        self.raise_on_cypher = raise_on_cypher
+        self.cypher_calls: list[tuple[str, dict[str, object]]] = []
+
+    async def ping(self) -> bool:
+        return self.ping_ok
+
+    async def run_cypher(
+        self,
+        query: str,
+        params: dict[str, object] | None = None,
+    ) -> list[dict[str, object]]:
+        self.cypher_calls.append((query, params or {}))
+        if self.raise_on_cypher is not None:
+            raise self.raise_on_cypher
+        return list(self.records)
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_cross_event_paths_empty_when_ping_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    client = _FakeNeo4jClient(ping_ok=False)
+    svc = AttackPathService(client=cast(Neo4jClient, client))
+    assert await svc.find_cross_event_paths("evt-any") == []
+    assert client.cypher_calls == []
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_cross_event_paths_empty_when_cypher_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    client = _FakeNeo4jClient(raise_on_cypher=RuntimeError("bolt down"))
+    svc = AttackPathService(client=cast(Neo4jClient, client))
+    assert await svc.find_cross_event_paths("evt-any") == []
+    assert len(client.cypher_calls) == 1
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_cross_event_paths_requires_matching_entity_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same entity_value with different entity_type must not form a path."""
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    # Simulate Neo4j returning only type-matched rows (service query filters).
+    # Empty records ⇒ no path; also assert query text requires entity_type equality.
+    client = _FakeNeo4jClient(records=[])
+    svc = AttackPathService(client=cast(Neo4jClient, client))
+    assert await svc.find_cross_event_paths("evt-a") == []
+    assert client.cypher_calls
+    query, _params = client.cypher_calls[0]
+    assert "remote.entity_type = local.entity_type" in query
+    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------

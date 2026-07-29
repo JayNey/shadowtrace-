@@ -8,9 +8,8 @@ import type {
   GraphOutput,
 } from "../../types/event";
 import AttackPathPlayer from "./AttackPathPlayer";
-import CrossEventPathOverlay, {
-  buildCrossEventOverlayHints,
-} from "./CrossEventPathOverlay";
+import CrossEventPathOverlay from "./CrossEventPathOverlay";
+import { buildCrossEventOverlayHints } from "./crossEventOverlayHints";
 import {
   ENTITY_COLORS,
   ENTITY_LABELS,
@@ -135,7 +134,10 @@ export default function EntityGraph({
     return keys;
   }, [activePathNodeIds]);
 
-  const crossEventPaths = graph?.cross_event_paths ?? [];
+  const crossEventPaths = useMemo(
+    () => graph?.cross_event_paths ?? [],
+    [graph],
+  );
 
   const chart = useMemo(() => {
     if (!graph) {
