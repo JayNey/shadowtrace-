@@ -30,7 +30,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build
+.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) up -d --build
@@ -49,7 +49,10 @@ down-v:
 # Set LOAD_KB=true to also load knowledge bases (~30-60 s extra).
 # ---------------------------------------------------------------------------
 bootstrap:
-	@bash "$(CURDIR)/scripts/bootstrap.sh"
+	@LOAD_KB="$(LOAD_KB)" bash "$(CURDIR)/scripts/bootstrap.sh"
+
+smoke-bootstrap:
+	@bash "$(CURDIR)/scripts/smoke_bootstrap.sh"
 
 # Apply / roll back the database schema. Override DATABASE_URL to target a host
 # (e.g. DATABASE_URL=postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace).

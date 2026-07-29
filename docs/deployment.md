@@ -20,14 +20,17 @@
 # 1. 启动核心服务（postgres, redis, mock-xdr, backend, frontend）
 make up
 
-# 2. 数据库迁移 + 摄入演示数据 + 触发研判
+# 2. 数据库迁移 + 摄入演示数据 + 自动触发研判
 make bootstrap
 
-# 3. 打开浏览器访问前端看板
+# 3. （可选）冒烟验证
+make smoke-bootstrap
+
+# 4. 打开浏览器访问前端看板
 #    http://localhost:3000
 ```
 
-启动后在前端 **事件看板** 可见 3 个演示事件。按 `触发研判` 即可走完整研判→图谱→报告流程。
+启动后在前端 **事件看板** 可见 3 个演示事件；`make bootstrap` 会自动对 `new` 状态事件 POST `/investigate`，也可在前端手动再次触发。
 
 ---
 
@@ -37,8 +40,9 @@ make bootstrap
 |------|------|
 | `make up` | 启动核心服务（--build 构建镜像） |
 | `make up WORKER=1` | 启动核心服务 + Celery worker（需同时设 `TASK_MODE=celery`） |
-| `make bootstrap` | 迁移 + 摄入演示数据 |
+| `make bootstrap` | 迁移 + mock-xdr 种子 + SourceAdapter 摄取 + 自动触发研判 |
 | `make bootstrap LOAD_KB=true` | 同上 + 加载知识库（约 30-60 秒） |
+| `make smoke-bootstrap` | bootstrap 后冒烟：health + ≥3 事件 + 前端反代 |
 | `make down` | 停止并移除容器（**数据卷保留**） |
 | `make down-v` | 停止并移除容器 + **删除所有数据卷** |
 | `make test` | 运行后端 pytest 健康检查测试 |
@@ -135,7 +139,7 @@ Mock 模式下预期响应（符合 ISSUE-001 契约）：
 
 ## 切换到 Live 模式
 
-如需对接真实 XDR，复制 `infra/.env.live.example` 为项目根目录 `.env.live` 并填入凭证，
+Live 模式**不是** compose profile；通过可选 env 叠加文件启用。复制 `infra/.env.live.example` 为项目根目录 `.env.live` 并填入凭证，
 然后重建 stack（compose 会自动叠加该文件，覆盖 mock 默认值）：
 
 ```bash

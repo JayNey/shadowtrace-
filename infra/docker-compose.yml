@@ -7,7 +7,7 @@
 # Optional profiles:
 #   --profile worker     Celery investigation worker
 #   --profile optional   OpenSearch + Neo4j
-#   --profile live       Optional: copy infra/.env.live.example → ../.env.live for live overrides
+# Live mode: copy infra/.env.live.example → ../.env.live (compose auto-loads when present)
 #
 # Usage:
 #   make up                # start core services
@@ -80,7 +80,7 @@ services:
   # Backend — FastAPI + Socket.IO (ISSUE-088)
   #
   # Default: full-mock mode — no external XDR, LLM, or GPU required.
-  # The live profile disables mock mode and requires explicit credentials.
+  # Live overrides: optional ../.env.live (see infra/.env.live.example).
   # --------------------------------------------------------------------------
   backend:
     build:

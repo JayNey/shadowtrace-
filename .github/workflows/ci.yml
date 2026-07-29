@@ -263,6 +263,7 @@ jobs:
       REDIS_PORT: "6379"
       BACKEND_PORT: "8000"
       FRONTEND_PORT: "5173"
+      MOCK_XDR_PORT: "8100"
     steps:
       - uses: actions/checkout@v4
 
@@ -313,7 +314,7 @@ jobs:
           curl --fail --show-error --silent \
             "http://127.0.0.1:${FRONTEND_PORT}/health" >/dev/null
           curl --fail --show-error --silent \
-            "http://127.0.0.1:8100/mock-xdr/v1/health" >/dev/null
+            "http://127.0.0.1:${MOCK_XDR_PORT}/mock-xdr/v1/health" >/dev/null
 
   # ISSUE-077: optional Playwright e2e — manual only, does not block main pipeline.
   frontend-e2e:

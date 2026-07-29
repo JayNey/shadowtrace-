@@ -3,7 +3,7 @@
 # ShadowTrace bootstrap — one-command demo setup (ISSUE-088)
 #
 # Usage:
-#   make bootstrap          # migrate + seed 3 demo scenarios
+#   make bootstrap               # migrate + seed 3 demo scenarios
 #   LOAD_KB=true make bootstrap  # also load knowledge bases (P1, slower)
 #
 # Prerequisites:
@@ -11,10 +11,10 @@
 #   - ``python3`` available on host for the inline API trigger script.
 #
 # What this does:
-#   1. Wait for backend health endpoint to respond 200.
+#   1. Wait for backend + mock-xdr health endpoints.
 #   2. Run alembic upgrade head inside the backend container (idempotent).
-#   3. Generate & ingest 3 demo scenarios (insider_data_exfiltration,
-#      account_anomaly_fp, suspicious_domain_access).
+#   3. For each demo scenario: seed standalone mock-xdr, then poll-ingest via
+#      SourceAdapter (keeps PostgreSQL + mock-xdr writeback objects aligned).
 #   4. Trigger investigation on ingested events via API (with retry).
 #   5. Optionally load attack/case/playbook knowledge bases.
 #   6. Print access URLs.
@@ -51,7 +51,10 @@ COMPOSE_CMD="docker compose --project-name ${COMPOSE_PROJECT_NAME} -f ${COMPOSE_
 # Ports — match infra/.env.example defaults.
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+MOCK_XDR_PORT="${MOCK_XDR_PORT:-8100}"
+MOCK_XDR_URL="${MOCK_XDR_URL:-http://mock-xdr:8100}"
 BACKEND_HEALTH="http://127.0.0.1:${BACKEND_PORT}/api/v1/health"
+MOCK_XDR_HEALTH="http://127.0.0.1:${MOCK_XDR_PORT}/mock-xdr/v1/health"
 FRONTEND_URL="http://127.0.0.1:${FRONTEND_PORT}"
 
 # Auth token — must match DEV_AUTH_TOKENS in docker-compose.yml.
@@ -71,7 +74,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # --------------------------------------------------------------------------
-# 1. Wait for backend health
+# 1. Wait for backend + mock-xdr health
 # --------------------------------------------------------------------------
 echo "[bootstrap] waiting for backend health at ${BACKEND_HEALTH} ..."
 for i in $(seq 1 90); do
@@ -86,6 +89,19 @@ for i in $(seq 1 90); do
   sleep 2
 done
 
+echo "[bootstrap] waiting for mock-xdr health at ${MOCK_XDR_HEALTH} ..."
+for i in $(seq 1 60); do
+  if curl -sf "${MOCK_XDR_HEALTH}" > /dev/null 2>&1; then
+    echo "[bootstrap] mock-xdr healthy (attempt ${i})"
+    break
+  fi
+  if [ "$i" -eq 60 ]; then
+    echo -e "${RED}[bootstrap] ERROR: mock-xdr did not become healthy within 120 s${NC}" >&2
+    exit 1
+  fi
+  sleep 2
+done
+
 # --------------------------------------------------------------------------
 # 2. Run database migrations (inside backend container)
 # --------------------------------------------------------------------------
@@ -94,34 +110,19 @@ ${COMPOSE_CMD} exec -T backend python3 -m alembic upgrade head
 echo "[bootstrap] migrations complete"
 
 # --------------------------------------------------------------------------
-# 3. Generate & ingest 3 demo scenarios (ISSUE-088 §验收标准 #1)
-#
-#    Each scenario writes telemetry to a separate subdirectory so that
-#    per-scenario filenames (which are identical across scenarios) do not
-#    overwrite each other.  The FileIngester is then called once per
-#    scenario directory.
+# 3. Seed mock-xdr + poll-ingest demo scenarios (ISSUE-088 §验收标准 #1)
 # --------------------------------------------------------------------------
-DEMO_BASE="/tmp/shadowtrace-demo-scenarios"
-${COMPOSE_CMD} exec -T backend rm -rf "${DEMO_BASE}"
-
 for scenario_id in "${DEMO_SCENARIOS[@]}"; do
-  echo "[bootstrap] generating demo scenario: ${scenario_id} ..."
-  ${COMPOSE_CMD} exec -T backend python3 scripts/generate_mock_data.py \
+  echo "[bootstrap] seeding mock-xdr + ingesting scenario: ${scenario_id} ..."
+  ${COMPOSE_CMD} exec -T backend python3 scripts/seed_mock_xdr_and_ingest.py \
     --scenario "${scenario_id}" \
-    --out "${DEMO_BASE}/${scenario_id}" \
+    --mock-xdr-url "${MOCK_XDR_URL}" \
     --seed 42
-
-  echo "[bootstrap] ingesting demo scenario: ${scenario_id} ..."
-  ${COMPOSE_CMD} exec -T backend python3 scripts/ingest_mock_data.py \
-    --path "${DEMO_BASE}/${scenario_id}"
 done
-
-${COMPOSE_CMD} exec -T backend rm -rf "${DEMO_BASE}"
-echo "[bootstrap] 3 demo scenarios generated and ingested"
+echo "[bootstrap] 3 demo scenarios seeded in mock-xdr and ingested"
 
 # --------------------------------------------------------------------------
 # 4. Trigger investigation on all "new" events via the backend API
-#    Includes retry logic for transient API failures.
 # --------------------------------------------------------------------------
 echo "[bootstrap] triggering investigation on demo events ..."
 python3 - "${BACKEND_PORT}" "${AUTH_TOKEN}" << 'PYTHON_SCRIPT'
@@ -134,12 +135,6 @@ backend_port = sys.argv[1]
 auth_token = sys.argv[2]
 
 def api_call(method: str, path: str, body: dict | None = None, max_retries: int = 3):
-    """Make an HTTP API call with retry on transient errors.
-
-    Retries on: connection failures, HTTP 5xx, and malformed (non-JSON)
-    responses.  HTTP 4xx is NOT retried — it indicates a client error
-    that won't be fixed by waiting.
-    """
     last_exc = None
     for attempt in range(1, max_retries + 1):
         try:
@@ -154,12 +149,9 @@ def api_call(method: str, path: str, body: dict | None = None, max_retries: int 
             raw = resp.read()
             conn.close()
 
-            # Server errors and gateway timeouts are transient — retry.
             if resp.status >= 500:
                 raise OSError(f"HTTP {resp.status}")
 
-            # Parse JSON; malformed payloads (e.g. proxy HTML error pages)
-            # are also transient and worth retrying.
             try:
                 data = json.loads(raw.decode()) if raw else {}
             except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -177,10 +169,11 @@ def api_call(method: str, path: str, body: dict | None = None, max_retries: int 
     raise last_exc  # type: ignore[misc]
 
 
-# List events
 resp, events_data = api_call("GET", "/api/v1/events?page_size=50")
 items = events_data.get("items", [])
 print(f"Found {len(items)} event(s)")
+if len(items) < 3:
+    raise SystemExit(f"expected at least 3 demo events, found {len(items)}")
 
 triggered = 0
 for item in items:
@@ -189,7 +182,7 @@ for item in items:
     if status != "new":
         print(f"  [skip] {event_id}: status={status}")
         continue
-    resp, inv_data = api_call(
+    resp, _inv_data = api_call(
         "POST",
         f"/api/v1/events/{event_id}/investigate",
         {},
@@ -208,14 +201,17 @@ PYTHON_SCRIPT
 # --------------------------------------------------------------------------
 if [ "${LOAD_KB:-false}" = "true" ]; then
   echo "[bootstrap] LOAD_KB=true — loading knowledge bases ..."
-  # KB loading is P1 optional; failure must NOT crash the bootstrap.
-  ${COMPOSE_CMD} exec -T backend bash -c 'cd backend && python3 -m scripts.load_attack_kb' || \
-    echo "[bootstrap] WARNING: load_attack_kb failed — continuing"
-  ${COMPOSE_CMD} exec -T backend bash -c 'cd backend && python3 -m scripts.load_case_kb' || \
-    echo "[bootstrap] WARNING: load_case_kb failed — continuing"
-  ${COMPOSE_CMD} exec -T backend bash -c 'cd backend && python3 -m scripts.load_playbook_kb' || \
-    echo "[bootstrap] WARNING: load_playbook_kb failed — continuing"
-  echo "[bootstrap] knowledge bases loading complete (errors above are non-fatal)"
+  kb_failed=0
+  for loader in load_attack_kb load_case_kb load_playbook_kb; do
+    if ! ${COMPOSE_CMD} exec -T backend bash -c "cd backend && python3 -m scripts.${loader}"; then
+      echo -e "${RED}[bootstrap] ERROR: ${loader} failed${NC}" >&2
+      kb_failed=1
+    fi
+  done
+  if [ "${kb_failed}" -ne 0 ]; then
+    exit 1
+  fi
+  echo "[bootstrap] knowledge bases loaded"
 else
   echo "[bootstrap] knowledge bases skipped (set LOAD_KB=true to load)"
 fi
@@ -231,7 +227,9 @@ echo ""
 echo -e "  前端看板:  ${YELLOW}${FRONTEND_URL}${NC}"
 echo -e "  API 文档:  ${YELLOW}http://127.0.0.1:${BACKEND_PORT}/docs${NC}"
 echo -e "  健康检查:  ${YELLOW}${BACKEND_HEALTH}${NC}"
+echo -e "  Mock XDR:  ${YELLOW}${MOCK_XDR_HEALTH}${NC}"
 echo ""
+echo -e "  冒烟验证:  bash scripts/smoke_bootstrap.sh"
 echo -e "  查看日志:  ${COMPOSE_CMD} logs -f backend"
 echo -e "  make down  停止并移除容器（数据卷保留）"
 echo ""
