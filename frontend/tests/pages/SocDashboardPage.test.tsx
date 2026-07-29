@@ -222,4 +222,55 @@ describe("SocDashboardPage", () => {
     expect(screen.getByText("events-ok")).toBeInTheDocument();
     expect(screen.queryByTestId("soc-dashboard")).not.toBeInTheDocument();
   });
+
+  it("survives dashboard fetch failure when navigating to /events", async () => {
+    mockGetStats.mockRejectedValue(new Error("stats down"));
+
+    const { unmount } = render(
+      <AntApp>
+        <MemoryRouter initialEntries={["/dashboard"]}>
+          <Routes>
+            <Route path="/dashboard" element={<SocDashboardPage />} />
+            <Route path="/events" element={<div>events-ok</div>} />
+          </Routes>
+        </MemoryRouter>
+      </AntApp>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("soc-stats-unavailable")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("soc-dashboard")).toBeInTheDocument();
+
+    unmount();
+
+    render(
+      <AntApp>
+        <MemoryRouter initialEntries={["/events"]}>
+          <Routes>
+            <Route path="/dashboard" element={<SocDashboardPage />} />
+            <Route path="/events" element={<div>events-ok</div>} />
+          </Routes>
+        </MemoryRouter>
+      </AntApp>,
+    );
+    expect(screen.getByText("events-ok")).toBeInTheDocument();
+    expect(screen.queryByTestId("soc-dashboard")).not.toBeInTheDocument();
+  });
+
+  it("keeps last good stats snapshot and shows degrade banner on refresh failure", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByText("动作执行成功率")).toBeInTheDocument());
+
+    mockGetStats.mockRejectedValueOnce(new Error("transient"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("soc-stats-unavailable")).toBeInTheDocument();
+    });
+    // Last successful rates remain visible.
+    expect(screen.getByText("动作执行成功率")).toBeInTheDocument();
+  });
 });
