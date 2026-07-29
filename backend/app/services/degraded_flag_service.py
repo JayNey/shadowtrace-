@@ -24,6 +24,9 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         "disposition_activation_failed",
         "verify_degraded",
         "execution_failed_unverified",
+        # ISSUE-081 memory governance degradation
+        "memory_review_enqueue_failed",
+        "memory_governance_maintenance_failed",
     }
 )
 
@@ -36,6 +39,7 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "DegradedFlagService",
         "AnalysisOnlyPipeline",
         "InvestigationGraph",
+        "MemoryAgent",
     }
 )
 

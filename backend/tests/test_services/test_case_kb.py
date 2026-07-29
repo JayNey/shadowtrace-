@@ -18,6 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import Settings
 from app.core.embedding.service import EmbeddingService
+from app.core.errors import ValidationError
 from app.db import models as orm
 from app.db.orm.knowledge import KnowledgeChunkORM
 from app.models.case import (
@@ -45,6 +46,12 @@ DATABASE_URL = os.environ.get(
 
 FP_KB_NAME = "fp_case_kb"
 HISTORY_KB_NAME = "history_case_kb"
+
+
+async def _promote_history_case_direct(case_kb_service: CaseKBService, event_id: str) -> str:
+    """Test helper: simulate post-review promotion into the searchable KB."""
+    history_case = await case_kb_service.prepare_history_case(event_id)
+    return await case_kb_service.upsert_history_case(history_case)
 
 
 def _alembic_config() -> Config:
@@ -534,7 +541,7 @@ class TestArchiveEventAsCase:
         session_factory: async_sessionmaker[AsyncSession],
         clean_knowledge: None,
     ) -> None:
-        """archive_event_as_case() persists a HistoryCase that can be immediately retrieved."""
+        """Direct promotion persists a HistoryCase that can be immediately retrieved."""
         event_id = "evt-archive-test-001"
 
         # Create a minimal security_event row.
@@ -601,7 +608,7 @@ class TestArchiveEventAsCase:
                 )
                 await session.execute(stmt, {"rid": "rpt-archive-test", "eid": event_id})
 
-        case_id = await case_kb_service.archive_event_as_case(event_id)
+        case_id = await _promote_history_case_direct(case_kb_service, event_id)
         assert case_id.startswith("case-")
 
         # Must be immediately retrievable.
@@ -618,7 +625,7 @@ class TestArchiveEventAsCase:
     async def test_archive_nonexistent_event_raises(self, case_kb_service: CaseKBService) -> None:
         """Archiving a non-existent event must raise ValueError."""
         with pytest.raises(ValueError, match="security_event not found"):
-            await case_kb_service.archive_event_as_case("evt-nonexistent-ffff")
+            await _promote_history_case_direct(case_kb_service, "evt-nonexistent-ffff")
 
     @pytest.mark.asyncio
     async def test_archive_rejects_external_unsynced(
@@ -634,7 +641,7 @@ class TestArchiveEventAsCase:
         )
 
         with pytest.raises(ValueError, match="not eligible"):
-            await case_kb_service.archive_event_as_case(event_id)
+            await _promote_history_case_direct(case_kb_service, event_id)
 
         assert await knowledge_store.count(HISTORY_KB_NAME) == 0
 
@@ -652,7 +659,7 @@ class TestArchiveEventAsCase:
         )
 
         with pytest.raises(ValueError, match="not eligible"):
-            await case_kb_service.archive_event_as_case(event_id)
+            await _promote_history_case_direct(case_kb_service, event_id)
 
         assert await knowledge_store.count(HISTORY_KB_NAME) == 0
 
@@ -671,7 +678,7 @@ class TestArchiveEventAsCase:
             disposition_policy="not_required",
         )
 
-        case_id = await case_kb_service.archive_event_as_case(event_id)
+        case_id = await _promote_history_case_direct(case_kb_service, event_id)
         metadata = await _load_case_metadata(session_factory, case_id)
 
         assert metadata["event_id"] == event_id
@@ -718,7 +725,7 @@ class TestArchiveEventAsCase:
                     ]
                 )
 
-        case_id = await case_kb_service.archive_event_as_case(event_id)
+        case_id = await _promote_history_case_direct(case_kb_service, event_id)
         metadata = await _load_case_metadata(session_factory, case_id)
         outcomes = {
             str(item["action_id"]): item
@@ -736,6 +743,14 @@ class TestArchiveEventAsCase:
                 assert pending is not None
                 pending.writeback_status = "confirmed"
 
-        await case_kb_service.archive_event_as_case(event_id)
+        await _promote_history_case_direct(case_kb_service, event_id)
         refreshed = await _load_case_metadata(session_factory, case_id)
         assert refreshed["successful_response"] is True
+
+    @pytest.mark.asyncio
+    async def test_archive_event_as_case_bypass_is_blocked(
+        self,
+        case_kb_service: CaseKBService,
+    ) -> None:
+        with pytest.raises(ValidationError, match="MemoryGovernance.promote"):
+            await case_kb_service.archive_event_as_case("evt-bypass-blocked")

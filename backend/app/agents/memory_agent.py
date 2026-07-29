@@ -58,6 +58,7 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
         trace_service: Any | None = None,
         audit_service: Any | None = None,
         event_bus: Any | None = None,
+        degraded_flags: Any | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -72,6 +73,7 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
         self.profile_service = profile_service
         self.memory_governance = memory_governance
         self.context_store: Any = context_store
+        self.degraded_flags: Any = degraded_flags
 
     async def _run(self, input: MemoryAgentInput) -> MemoryOutput:
         if input.investigation_result.final_status is not EventStatus.CLOSED:
@@ -107,7 +109,9 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                 payload=history_case.model_dump(mode="json"),
                 confidence=_candidate_confidence(context),
             )
-            record.review_id = await self._queue_candidate(candidate)
+            record.review_id = await self._queue_candidate(input.event_id, candidate)
+            if record.review_id is None:
+                record.pending_review = False
             output.case_records.append(record)
             queued.append(candidate)
         except ValueError as exc:
@@ -132,7 +136,9 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                     payload=fp_rule.model_dump(mode="json"),
                     confidence=fp_rule.confidence,
                 )
-                fp_rule.review_id = await self._queue_candidate(candidate)
+                fp_rule.review_id = await self._queue_candidate(input.event_id, candidate)
+                if fp_rule.review_id is None:
+                    fp_rule.pending_review = False
                 output.fp_rules.append(fp_rule)
                 queued.append(candidate)
             except Exception:
@@ -160,7 +166,9 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                     payload=update.model_dump(mode="json"),
                     confidence=_candidate_confidence(context),
                 )
-                update.review_id = await self._queue_candidate(candidate)
+                update.review_id = await self._queue_candidate(input.event_id, candidate)
+                if update.review_id is None:
+                    update.pending_review = False
                 output.profile_updates.append(update)
                 queued.append(candidate)
             except Exception:
@@ -172,7 +180,7 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                     exc_info=True,
                 )
 
-        await self._maintain_governance(queued)
+        await self._maintain_governance(input.event_id, queued)
 
         if input.investigation_result.final_verdict is FinalVerdict.CONFIRMED_THREAT:
             try:
@@ -186,7 +194,7 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
 
         return await self._persist_output(input.event_id, output)
 
-    async def _queue_candidate(self, candidate: MemoryCandidate) -> str | None:
+    async def _queue_candidate(self, event_id: str, candidate: MemoryCandidate) -> str | None:
         for attempt in range(len(_ENQUEUE_RETRY_DELAYS) + 1):
             try:
                 return await self.memory_governance.ingest_candidate(candidate)
@@ -203,14 +211,24 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
             return await self.memory_governance.persist_pending_fallback(candidate)
         except Exception:
             logger.error(
-                "MemoryAgent review fallback persistence failed; retaining dead-letter "
-                "candidate in working memory candidate_type=%s",
+                "MemoryAgent review fallback persistence failed; candidate retained only "
+                "in working memory candidate_type=%s event=%s",
                 candidate.candidate_type,
+                event_id,
                 exc_info=True,
+            )
+            await self._set_degraded_flag(
+                event_id,
+                "memory_review_enqueue_failed",
+                candidate.candidate_type,
             )
             return None
 
-    async def _maintain_governance(self, candidates: list[MemoryCandidate]) -> None:
+    async def _maintain_governance(
+        self,
+        event_id: str,
+        candidates: list[MemoryCandidate],
+    ) -> None:
         if not candidates:
             return
         by_kb: dict[str, list[MemoryCandidate]] = {}
@@ -227,10 +245,34 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                 await self.memory_governance.apply_retention(kb_name)
             except Exception:
                 logger.warning(
-                    "MemoryAgent governance maintenance failed kb_name=%s",
+                    "MemoryAgent governance maintenance failed kb_name=%s event=%s",
                     kb_name,
+                    event_id,
                     exc_info=True,
                 )
+                await self._set_degraded_flag(
+                    event_id,
+                    "memory_governance_maintenance_failed",
+                    kb_name,
+                )
+
+    async def _set_degraded_flag(self, event_id: str, flag_name: str, value: Any) -> None:
+        if self.degraded_flags is None:
+            return
+        try:
+            await self.degraded_flags.set_flag(
+                event_id,
+                flag_name,
+                value,
+                writer="MemoryAgent",
+            )
+        except Exception:
+            logger.warning(
+                "MemoryAgent failed to record degraded flag=%s event=%s",
+                flag_name,
+                event_id,
+                exc_info=True,
+            )
 
     async def _persist_output(self, event_id: str, output: MemoryOutput) -> MemoryOutput:
         if self.working_memory is None:

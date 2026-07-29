@@ -31,6 +31,21 @@ from app.services.profile_service import profile_id_for
 EVENT_ID = "evt-memory-0001"
 
 
+class _DegradedFlags:
+    def __init__(self) -> None:
+        self.flags: list[tuple[str, str, object, str]] = []
+
+    async def set_flag(
+        self,
+        event_id: str,
+        flag_name: str,
+        value: object,
+        writer: str,
+    ) -> list[str]:
+        self.flags.append((event_id, flag_name, value, writer))
+        return [f"{flag_name}={value}"]
+
+
 class _CaseKB:
     def __init__(self, *, fail: bool = False, ineligible: bool = False) -> None:
         self.fail = fail
@@ -344,10 +359,65 @@ async def test_individual_persistence_failures_degrade_without_losing_memory_out
     assert output.case_records == []
     assert len(output.profile_updates) == 1
     assert output.profile_updates[0].review_id is None
-    assert output.profile_updates[0].pending_review is True
+    assert output.profile_updates[0].pending_review is False
     assert len(governance.fallback_candidates) == 1
     assert len(output.sigma_drafts) == 1
     assert memory.writes
+
+
+@pytest.mark.asyncio
+async def test_enqueue_failure_records_degraded_flag() -> None:
+    context = _context(FinalVerdict.CONFIRMED_THREAT)
+    memory = _WorkingMemory(context)
+    governance = _Governance(fail=True)
+    degraded = _DegradedFlags()
+    agent = MemoryAgent(
+        case_kb_service=_CaseKB(fail=True),  # type: ignore[arg-type]
+        profile_service=_Profiles(),  # type: ignore[arg-type]
+        memory_governance=governance,  # type: ignore[arg-type]
+        context_store=_ContextStore(context),
+        working_memory=memory,
+        degraded_flags=degraded,
+    )
+
+    output = await agent.execute(_input(FinalVerdict.CONFIRMED_THREAT))
+
+    assert output.profile_updates[0].pending_review is False
+    assert degraded.flags == [
+        (EVENT_ID, "memory_review_enqueue_failed", "profile", "MemoryAgent"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_governance_maintenance_failure_records_degraded_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = _context(FinalVerdict.FALSE_POSITIVE)
+    memory = _WorkingMemory(context)
+    governance = _Governance()
+    degraded = _DegradedFlags()
+
+    async def fail_dedupe(_kb_name: str) -> int:
+        raise RuntimeError("dedupe unavailable")
+
+    monkeypatch.setattr(governance, "dedupe", fail_dedupe)
+    agent = MemoryAgent(
+        case_kb_service=_CaseKB(),  # type: ignore[arg-type]
+        profile_service=_Profiles(),  # type: ignore[arg-type]
+        memory_governance=governance,  # type: ignore[arg-type]
+        context_store=_ContextStore(context),
+        working_memory=memory,
+        degraded_flags=degraded,
+        llm_client=_UnavailableLLM(),
+    )
+
+    await agent.execute(_input(FinalVerdict.FALSE_POSITIVE))
+
+    assert any(
+        flag_name == "memory_governance_maintenance_failed"
+        for _, flag_name, _, writer in degraded.flags
+        if writer == "MemoryAgent"
+    )
 
 
 @pytest.mark.asyncio

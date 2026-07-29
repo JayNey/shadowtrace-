@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.errors import ValidationError
 from app.db import models as orm
 from app.models.case import (
     FalsePositiveCase,
@@ -178,9 +179,12 @@ class CaseKBService:
         return fp_case.case_id
 
     async def archive_event_as_case(self, event_id: str) -> str:
-        """Backward-compatible immediate archival for trusted internal callers."""
-        history_case = await self.prepare_history_case(event_id)
-        return await self.upsert_history_case(history_case)
+        """Blocked: history cases must enter the KB only via MemoryGovernance.promote."""
+        raise ValidationError(
+            "history_case_kb writes require MemoryGovernance.promote after human review",
+            error_code="memory_governance_bypass_blocked",
+            details={"event_id": event_id, "required_path": "MemoryGovernance.promote"},
+        )
 
 
 def _is_history_case_eligible(event: orm.SecurityEvent, report: orm.Report | None) -> bool:

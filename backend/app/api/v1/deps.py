@@ -509,6 +509,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         trace_service=trace_service,
         audit_service=_get_audit_log(),
         event_bus=_get_event_bus(),
+        degraded_flags=_get_degraded_flags(),
     )
 
     # ISSUE-075: every stage Agent must receive EventBus so BaseAgent.execute
