@@ -22,6 +22,10 @@ node_modules/
 .pnpm-store/
 frontend/dist/
 frontend/.vite/
+frontend/e2e/.seed.json
+frontend/e2e/test-results/
+frontend/e2e/playwright-report/
+frontend/playwright-report/
 *.log
 
 # IDE / OS

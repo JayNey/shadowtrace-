@@ -673,6 +673,8 @@ async def investigate_event(
                 details={"event_id": event_id},
             )
 
+        include_response = bool(body.include_response_execution) if body else False
+
         async def _run_super_agent() -> None:
             investigate_started = False
             try:
@@ -689,6 +691,7 @@ async def investigate_event(
                         event_id,
                         owner_id=owner_id,
                         lease_acquired=True,
+                        include_response_execution=include_response,
                     )
             except InvestigationInProgressError:
                 logger.warning(

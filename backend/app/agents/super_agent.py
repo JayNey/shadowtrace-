@@ -267,6 +267,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         owner_id: str | None = None,
         lease_acquired: bool = False,
         publish_lifecycle: bool = True,
+        include_response_execution: bool = False,
     ) -> None:
         """Run the full investigation graph for *event_id*.
 
@@ -278,6 +279,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         ``agent_failed`` for ``super_agent`` (ISSUE-075). Production callers use
         ``investigate()`` directly (not ``BaseAgent.execute``), so this flag
         defaults to True. ``_run`` sets it False to avoid double-publish.
+
+        ``include_response_execution`` (ISSUE-077 / ISSUE-566): when False
+        (default HTTP investigate), analysis completes at report and defers
+        ResponseAgent. When True, continue into response / approval.
         """
         if self.planner_agent is None:
             raise RuntimeError("SuperAgent requires a PlannerAgent")
@@ -331,6 +336,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 initial = await build_initial_investigation_state(
                     event_id,
                     context_store=self.context_store,
+                    defer_response_execution=not include_response_execution,
                 )
                 config = {"configurable": {"thread_id": event_id}}
                 await self._investigation_graph.ainvoke(initial, config)

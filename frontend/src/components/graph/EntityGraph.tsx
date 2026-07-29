@@ -252,34 +252,47 @@ export default function EntityGraph({
   }, [activeEdgeKeys, activeNodeIds, graph, visibleTypes]);
 
   if (loadState === "idle" || loadState === "loading") {
-    return <Skeleton active paragraph={{ rows: 12 }} />;
+    return (
+      <div data-testid="entity-graph">
+        <Skeleton active paragraph={{ rows: 12 }} />
+      </div>
+    );
   }
 
   if (loadState === "error") {
     return (
-      <Alert
-        type="error"
-        showIcon
-        message="攻击图谱加载失败"
-        description="请检查网络连接后重试。"
-        action={<Button onClick={() => void load()}>重试</Button>}
-      />
+      <div data-testid="entity-graph">
+        <Alert
+          type="error"
+          showIcon
+          message="攻击图谱加载失败"
+          description="请检查网络连接后重试。"
+          action={<Button onClick={() => void load()}>重试</Button>}
+        />
+      </div>
     );
   }
 
   if (!graph || graph.nodes.length === 0) {
     return (
-      <Empty
-        image={Empty.PRESENTED_IMAGE_SIMPLE}
-        description="图谱未生成"
-      />
+      <div data-testid="entity-graph">
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="图谱未生成"
+        />
+      </div>
     );
   }
 
   const staticLayout = chart.filteredNodeCount > 200;
 
   return (
-    <Space direction="vertical" size={16} style={{ width: "100%" }}>
+    <Space
+      direction="vertical"
+      size={16}
+      style={{ width: "100%" }}
+      data-testid="entity-graph"
+    >
       <Card size="small">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Space wrap>

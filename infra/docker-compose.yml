@@ -60,6 +60,13 @@ services:
     build:
       context: ../frontend
       dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:8000/api/v1
+        VITE_SOCKET_URL: http://localhost:8000
+        VITE_DEV_AUTH_TOKEN: e2e-token
+        VITE_AUTH_SUBJECT: e2e-operator
+        VITE_APPROVER_DISPLAY: E2E Operator
+        VITE_EVENT_CHAT_ENABLED: "true"
     ports:
       - "${FRONTEND_PORT:-5173}:80"
     depends_on:

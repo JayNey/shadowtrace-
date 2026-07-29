@@ -4,6 +4,7 @@ import axios, { AxiosError } from "axios";
 import { message } from "antd";
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1";
+const DEV_AUTH_TOKEN = import.meta.env.VITE_DEV_AUTH_TOKEN ?? "";
 
 export interface ApiErrorPayload {
   error_code: string;
@@ -41,6 +42,15 @@ export const apiClient = axios.create({
   baseURL: BASE_URL,
   timeout: 30_000,
   headers: { "Content-Type": "application/json" },
+});
+
+apiClient.interceptors.request.use((config) => {
+  // Local / Compose mock stage: map a fixed bearer token to Principal via
+  // DEV_AUTH_TOKENS. Production rejects DEV_AUTH_TOKENS outright.
+  if (DEV_AUTH_TOKEN && !config.headers?.Authorization) {
+    config.headers.set("Authorization", `Bearer ${DEV_AUTH_TOKEN}`);
+  }
+  return config;
 });
 
 apiClient.interceptors.response.use(
