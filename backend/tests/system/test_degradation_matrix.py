@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.report_agent import GENERATED_BY_TEMPLATE
-from app.core.errors import GuardrailViolationError
+from app.core.errors import BudgetExceededError, GuardrailViolationError
 from app.core.guardrails import (
     GuardrailMode,
     OutboundDispositionGuard,
@@ -18,7 +19,11 @@ from app.core.guardrails import (
 from app.db import models as orm
 from app.ingestion.source_ingester import SourceIngester
 from app.mock_xdr.state import MockXDRState
-from app.models.agent_io import CollectionStatus, ScoringMode
+from app.models.agent_io import (
+    CollectionStatus,
+    ScoringMode,
+    VerificationOverallStatus,
+)
 from app.models.enums import (
     DispositionIntentKind,
     EventStatus,
@@ -26,12 +31,20 @@ from app.models.enums import (
     SourceObjectKind,
 )
 from app.orchestration.convergence_guard import ConvergenceGuard, StopReason
-from app.services.context_service import EventContextStore
+from app.services.context_service import EventContextStore, SetResult
 from app.services.event_service import EventService
 from tests.integration.conftest import DEFAULT_PARTIAL_FAIL_TOOLS, FailingLLMClient
-from tests.system.helpers import ingest_scenario_event, run_rule_fallback_main_chain
+from tests.system.helpers import (
+    assert_event_has_degraded_flag,
+    assert_no_disposition_writeback,
+    ingest_scenario_event,
+    run_rule_fallback_main_chain,
+    run_verify_tool_failure_chain,
+)
 
 pytestmark = [pytest.mark.system, pytest.mark.integration]
+
+VERIFY_FAIL_TOOLS = frozenset({"check_host_isolation_status"})
 
 
 @pytest.mark.usefixtures("clean_state")
@@ -42,6 +55,7 @@ async def test_degradation_llm_failure_rule_fallback(
     source_ingester: SourceIngester,
     event_service: EventService,
     context_store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
     run_graph_investigation: object,
 ) -> None:
     event_id = await ingest_scenario_event(
@@ -50,6 +64,7 @@ async def test_degradation_llm_failure_rule_fallback(
         source_ingester=source_ingester,
         event_service=event_service,
         mock_xdr_state=mock_xdr_state,
+        session_factory=session_factory,
     )
     await run_rule_fallback_main_chain(
         event_id=event_id,
@@ -75,6 +90,7 @@ async def test_degradation_three_data_sources_partial_done(
     source_ingester: SourceIngester,
     event_service: EventService,
     context_store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
     run_graph_investigation: object,
 ) -> None:
     event_id = await ingest_scenario_event(
@@ -83,6 +99,7 @@ async def test_degradation_three_data_sources_partial_done(
         source_ingester=source_ingester,
         event_service=event_service,
         mock_xdr_state=mock_xdr_state,
+        session_factory=session_factory,
     )
     await run_graph_investigation(
         event_id,
@@ -104,6 +121,7 @@ async def test_degradation_redis_context_unavailable_flag(
     degraded_flags: Any,
     event_service: EventService,
 ) -> None:
+    """Unit-level: DegradedFlagService persists redis_context_unavailable."""
     event = await event_service.create_event(
         {"title": "redis degradation probe", "description": "system matrix"},
         source_type="manual",
@@ -125,51 +143,125 @@ async def test_degradation_redis_context_unavailable_flag(
 
 @pytest.mark.usefixtures("clean_state")
 @pytest.mark.asyncio
+async def test_degradation_redis_unavailable_main_chain_completes_with_flag(
+    mock_xdr_state: MockXDRState,
+    source_adapter: object,
+    source_ingester: SourceIngester,
+    event_service: EventService,
+    context_store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    run_graph_investigation: object,
+) -> None:
+    event_id = await ingest_scenario_event(
+        scenario_id="host_compromise",
+        source_adapter=source_adapter,
+        source_ingester=source_ingester,
+        event_service=event_service,
+        mock_xdr_state=mock_xdr_state,
+        session_factory=session_factory,
+    )
+    original_set = context_store.set
+
+    async def _redis_fail_on_event_key(eid: str, key: str, value: Any, **kwargs: Any):
+        if key == "event":
+            return SetResult(redis_ok=False, version=1)
+        return await original_set(eid, key, value, **kwargs)
+
+    with patch.object(context_store, "set", side_effect=_redis_fail_on_event_key):
+        await run_rule_fallback_main_chain(
+            event_id=event_id,
+            run_graph_investigation=run_graph_investigation,
+            scenario_id="host_compromise",
+        )
+
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert event.status in {EventStatus.REPORTING, EventStatus.CLOSED}
+    report = await context_store.get(event_id, "report")
+    assert report is not None
+    await assert_event_has_degraded_flag(
+        session_factory, event_id, "redis_context_unavailable"
+    )
+
+
+@pytest.mark.usefixtures("clean_state")
+@pytest.mark.asyncio
 async def test_degradation_empty_knowledge_base_rag_degraded(
     mock_xdr_state: MockXDRState,
     source_adapter: object,
     source_ingester: SourceIngester,
     event_service: EventService,
     context_store: EventContextStore,
-    run_graph_investigation: object,
+    session_factory: async_sessionmaker[AsyncSession],
+    run_analysis_pipeline: object,
 ) -> None:
     event_id = await ingest_scenario_event(
-        scenario_id="lateral_movement",
+        scenario_id="insider_data_exfiltration",
         source_adapter=source_adapter,
         source_ingester=source_ingester,
         event_service=event_service,
         mock_xdr_state=mock_xdr_state,
+        session_factory=session_factory,
     )
-    await run_graph_investigation(event_id, scenario_id="lateral_movement")
+    result = await run_analysis_pipeline(
+        event_id,
+        llm_client=FailingLLMClient(),
+        scenario_id="insider_data_exfiltration",
+    )
     rag_ctx = await context_store.get(event_id, "rag_output")
     event = await event_service.get_event(event_id)
     assert event is not None
     assert event.status is EventStatus.REPORTING
-    assert rag_ctx is None or isinstance(rag_ctx, dict)
+    assert result.rag_degraded is True
+    assert rag_ctx is not None
+    assert isinstance(rag_ctx, dict)
+    assert rag_ctx.get("degraded") is True
 
 
 @pytest.mark.usefixtures("clean_state")
 @pytest.mark.asyncio
-async def test_degradation_budget_exhausted_still_reports(
+async def test_degradation_budget_exhausted_reports_and_defers_disposition(
     mock_xdr_state: MockXDRState,
     source_adapter: object,
     source_ingester: SourceIngester,
     event_service: EventService,
     context_store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    budget_service: Any,
     run_graph_investigation: object,
 ) -> None:
+    from unittest.mock import patch
+
     event_id = await ingest_scenario_event(
         scenario_id="malicious_process",
         source_adapter=source_adapter,
         source_ingester=source_ingester,
         event_service=event_service,
         mock_xdr_state=mock_xdr_state,
+        session_factory=session_factory,
     )
-    await run_graph_investigation(
-        event_id,
-        llm_client=FailingLLMClient(),
-        scenario_id="malicious_process",
-    )
+    original_check = budget_service.check
+
+    async def _budget_gate(eid: str, agent_name: str) -> None:
+        if agent_name in {"EvidenceAgent", "RAGAgent"}:
+            raise BudgetExceededError(
+                "forced budget cap for system test",
+                error_code="budget_exceeded",
+                details={
+                    "scope": "event",
+                    "event_id": eid,
+                    "agent_name": agent_name,
+                    "metric": "tokens",
+                },
+            )
+        await original_check(eid, agent_name)
+
+    with patch.object(budget_service, "check", side_effect=_budget_gate):
+        await run_graph_investigation(
+            event_id,
+            llm_client=FailingLLMClient(),
+            scenario_id="malicious_process",
+        )
     event = await event_service.get_event(event_id)
     assert event is not None
     assert event.status is EventStatus.REPORTING
@@ -177,6 +269,9 @@ async def test_degradation_budget_exhausted_still_reports(
     assert report is not None
     budget_usage = await context_store.get(event_id, "budget_usage")
     assert budget_usage is not None
+    response_plan = await context_store.get(event_id, "response_plan")
+    assert response_plan is None or not response_plan.get("actions")
+    await assert_no_disposition_writeback(session_factory, event_id)
 
 
 @pytest.mark.asyncio
@@ -253,10 +348,10 @@ async def test_degradation_convergence_guard_oscillation_forces_stop() -> None:
 @pytest.mark.asyncio
 async def test_degradation_verification_tool_failure_marks_degraded_verify(
     session_factory: async_sessionmaker[AsyncSession],
-    context_store: EventContextStore,
     degraded_flags: Any,
     event_service: EventService,
 ) -> None:
+    """Unit-level: verify_degraded flag persistence."""
     event = await event_service.create_event(
         {"title": "verify degradation", "description": "verification tool failure"},
         source_type="manual",
@@ -274,3 +369,47 @@ async def test_degradation_verification_tool_failure_marks_degraded_verify(
     assert row is not None
     flags = [str(item) for item in (row.degraded_flags or [])]
     assert any(item.startswith("verify_degraded=") for item in flags)
+
+
+@pytest.mark.usefixtures("clean_state")
+@pytest.mark.asyncio
+async def test_degradation_verify_tool_failure_main_chain_marks_degraded(
+    mock_xdr_state: MockXDRState,
+    source_adapter: object,
+    source_ingester: SourceIngester,
+    event_service: EventService,
+    context_store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    e2e_tool_executor: Any,
+    working_memory: Any,
+    run_graph_investigation: object,
+) -> None:
+    event_id = await ingest_scenario_event(
+        scenario_id="host_compromise",
+        source_adapter=source_adapter,
+        source_ingester=source_ingester,
+        event_service=event_service,
+        mock_xdr_state=mock_xdr_state,
+        session_factory=session_factory,
+    )
+    await run_rule_fallback_main_chain(
+        event_id=event_id,
+        run_graph_investigation=run_graph_investigation,
+        scenario_id="host_compromise",
+    )
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert event.status is EventStatus.REPORTING
+
+    await run_verify_tool_failure_chain(
+        session_factory=session_factory,
+        context_store=context_store,
+        event_service=event_service,
+        e2e_tool_executor=e2e_tool_executor,
+        working_memory=working_memory,
+        event_id=event_id,
+        fail_tools=VERIFY_FAIL_TOOLS,
+    )
+    verification = await context_store.get(event_id, "verification_result")
+    assert verification is not None
+    assert verification.get("overall_status") != VerificationOverallStatus.SUCCESS.value

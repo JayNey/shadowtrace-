@@ -11,12 +11,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.mock_xdr import MockXDRSourceAdapter
+from app.core.redis_client import RedisClient
 from app.data_generators.scenarios import build_scenario
 from app.db import models as orm
 from app.ingestion.source_ingester import SourceIngester
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
 from app.models.enums import EventStatus, FinalVerdict
+from app.orchestration.lease import LEASE_KEY_PREFIX, EventLease, generate_owner_id
 from app.services.context_service import EventContextStore
 from app.services.event_service import EventService
 from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
@@ -70,7 +72,10 @@ async def test_ten_concurrent_events_reach_terminal_state_without_cross_talk(
     event_service: EventService,
     context_store: EventContextStore,
     build_super_agent: object,
+    redis_client: RedisClient,
 ) -> None:
+    lease = EventLease(redis_client)
+
     async def _ingest_one(index: int) -> tuple[str, str]:
         scenario_id = SCENARIO_IDS[index]
         scenario = build_scenario(scenario_id, seed=42 + index, instance=index)
@@ -104,12 +109,19 @@ async def test_ten_concurrent_events_reach_terminal_state_without_cross_talk(
             return event_id, scenario_id
 
     async def _investigate(event_id: str, scenario_id: str) -> str:
+        owner_id = generate_owner_id()
+        acquired = await lease.acquire(event_id, owner_id)
+        assert acquired is True, f"lease conflict acquiring {event_id}"
         agent, projection = build_super_agent(  # type: ignore[operator]
             llm_client=FailingLLMClient(),
             scenario_id=scenario_id,
+            lease=lease,
         )
-        with bind_evidence_projection(EvidenceProjection(session_factory)):
-            await agent.investigate(event_id)
+        try:
+            with bind_evidence_projection(EvidenceProjection(session_factory)):
+                await agent.investigate(event_id, lease_acquired=True)
+        finally:
+            await lease.release(event_id, owner_id)
         return event_id
 
     seeded = await asyncio.gather(*[_ingest_one(i) for i in range(CONCURRENT_COUNT)])
@@ -152,3 +164,8 @@ async def test_ten_concurrent_events_reach_terminal_state_without_cross_talk(
                 FinalVerdict.NONE,
                 FinalVerdict.POSSIBLE_FALSE_POSITIVE,
             }
+
+    client = redis_client.get_client()
+    for event_id in event_ids:
+        holder = await client.get(f"{LEASE_KEY_PREFIX}{event_id}")
+        assert holder is None, f"orphan lease holder for {event_id}: {holder!r}"

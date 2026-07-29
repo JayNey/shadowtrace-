@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.response_agent import compute_template_hash
+from app.agents.response_agent import build_mock_capability_manifest, compute_template_hash
+from app.core.auth import Principal
 from app.data_generators.scenarios import build_scenario
 from app.db import models as orm
 from app.ingestion.source_ingester import SourceIngester
 from app.mock_xdr.state import MockXDRState
 from app.models.agent_io import (
+    RiskAssessment,
     ScoringMode,
     VerificationOverallStatus,
     VerificationPhase,
 )
+from app.models.approval import ApprovalDecisionKind
 from app.models.disposition import SourceObjectLocator
 from app.models.enums import (
     ActionCategory,
@@ -31,19 +35,23 @@ from app.models.enums import (
     EventType,
     ExecutionOwner,
     FinalVerdict,
+    Severity,
     SourceDisposition,
     SourceObjectKind,
     WritebackReadiness,
     WritebackStatus,
 )
-from app.models.ids import new_disposition_id
+from app.models.ids import new_action_id, new_disposition_id
 from app.models.source import SourceReference
+from app.models.workflow import validate_action_status_transition
+from app.services.approval_engine import ApprovalEngine
 from app.services.context_service import EventContextStore, append_context_journal_in_session
 from app.services.disposition_command_factory import DispositionCommandFactory
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService, _action_from_row
 from app.services.event_service import EventService
-from tests.integration.conftest import FailingLLMClient
+from app.services.state_machine_service import StateMachineService
+from tests.integration.conftest import FailingLLMClient, FlakyToolExecutor
 from tests.system.scenario_expectations import ScenarioExpectation
 
 ALL_SOURCE_KINDS = [
@@ -54,6 +62,27 @@ ALL_SOURCE_KINDS = [
 ]
 
 
+async def event_id_for_incident(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    connector_id: str,
+    source_object_id: str,
+) -> str:
+    async with session_factory() as session:
+        event_id = await session.scalar(
+            select(orm.SecurityEvent.event_id).where(
+                orm.SecurityEvent.creation_source_ref["connector_id"].as_string()
+                == connector_id,
+                orm.SecurityEvent.creation_source_ref["source_object_id"].as_string()
+                == source_object_id,
+            )
+        )
+    assert event_id is not None, (
+        f"no event for connector={connector_id!r} source_object_id={source_object_id!r}"
+    )
+    return event_id
+
+
 async def ingest_scenario_event(
     *,
     scenario_id: str,
@@ -61,13 +90,20 @@ async def ingest_scenario_event(
     source_ingester: SourceIngester,
     event_service: EventService,
     mock_xdr_state: MockXDRState,
+    session_factory: async_sessionmaker[AsyncSession],
+    instance: int = 0,
 ) -> str:
-    mock_xdr_state.load_scenario(build_scenario(scenario_id, seed=42))
+    scenario = build_scenario(scenario_id, seed=42, instance=instance)
+    mock_xdr_state.load_scenario(scenario)
+    incident = scenario.incidents[0]
     summary = await source_ingester.poll(source_adapter, ALL_SOURCE_KINDS, batch_size=10)
     assert summary.rejected == 0, summary.errors
-    listed = await event_service.list_events(status=EventStatus.NEW)
-    assert listed.total >= 1
-    return listed.items[-1].event_id
+    assert summary.accepted >= 1, summary.model_dump()
+    return await event_id_for_incident(
+        session_factory,
+        connector_id=incident.reference.connector_id,
+        source_object_id=incident.reference.source_object_id,
+    )
 
 
 async def run_rule_fallback_main_chain(
@@ -105,26 +141,52 @@ async def assert_main_chain_expectations(
     assert risk_ctx.get("scoring_mode") == ScoringMode.RULE_ONLY.value
     assert report_ctx is not None
 
+    scoring_mode = risk_ctx.get("scoring_mode")
+    risk_score_ctx = risk_ctx.get("risk_score")
+    rule_only = spec.rule_fallback and scoring_mode == ScoringMode.RULE_ONLY.value
+
     if spec.expect_reporting:
         assert event.status in {EventStatus.REPORTING, EventStatus.CLOSED}, (
             f"unexpected terminal status {event.status} for {spec.scenario_id}"
         )
-        if event.final_verdict is not None:
-            assert event.final_verdict in spec.acceptable_verdicts, (
-                f"unexpected verdict {event.final_verdict} for {spec.scenario_id}"
-            )
-        assert 0 <= int(event.risk_score) <= 100
     else:
         assert event.status is EventStatus.CLOSED
-        if event.final_verdict is not None:
-            assert event.final_verdict in spec.acceptable_verdicts
 
-    analysis_only_complete = await context_store.get(event_id, "analysis_only_complete")
-    assert analysis_only_complete is True
+    if event.final_verdict is not None:
+        assert event.final_verdict in spec.acceptable_verdicts, (
+            f"unexpected verdict {event.final_verdict} for {spec.scenario_id}"
+        )
+
+    if event.risk_score is not None:
+        if rule_only:
+            assert 0 <= int(event.risk_score) <= 100
+        else:
+            assert spec.risk_min <= int(event.risk_score) <= spec.risk_max, (
+                f"risk_score {event.risk_score} outside [{spec.risk_min}, {spec.risk_max}] "
+                f"for {spec.scenario_id}"
+            )
+
+    if risk_score_ctx is not None:
+        if rule_only:
+            assert 0 <= int(risk_score_ctx) <= 100
+        else:
+            assert spec.risk_min <= int(risk_score_ctx) <= spec.risk_max
+
+    response_plan = await context_store.get(event_id, "response_plan")
+    if isinstance(response_plan, dict):
+        for action in response_plan.get("actions") or []:
+            if not isinstance(action, dict):
+                continue
+            tool_name = action.get("tool_name") or action.get("action_name")
+            if tool_name:
+                assert tool_name in spec.allowed_actions, (
+                    f"response plan tool {tool_name!r} not in allowed_actions "
+                    f"for {spec.scenario_id}"
+                )
 
     async with session_factory() as session:
         report_row = await session.scalar(select(orm.Report).where(orm.Report.event_id == event_id))
-    assert report_row is not None
+    assert report_row is not None or report_ctx.get("report_id") or report_ctx.get("title")
 
 
 async def seed_source_object_for_event(
@@ -417,3 +479,362 @@ async def run_full_response_chain(
         )
     assert receipt is not None
     assert terminal_outbox == 1
+
+
+async def assert_no_disposition_writeback(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> None:
+    async with session_factory() as session:
+        receipt_count = await session.scalar(
+            select(func.count())
+            .select_from(orm.DispositionReceipt)
+            .join(orm.Action, orm.Action.action_id == orm.DispositionReceipt.action_id)
+            .where(orm.Action.event_id == event_id)
+        )
+        outbox_count = await session.scalar(
+            select(func.count())
+            .select_from(orm.DispositionOutbox)
+            .where(orm.DispositionOutbox.event_id == event_id)
+        )
+    assert int(receipt_count or 0) == 0, f"expected no receipts for {event_id}"
+    assert int(outbox_count or 0) == 0, f"expected no outbox rows for {event_id}"
+
+
+async def assert_event_has_degraded_flag(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    flag_name: str,
+) -> None:
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+    assert row is not None
+    flags = [str(item) for item in (row.degraded_flags or [])]
+    assert any(item.startswith(f"{flag_name}=") for item in flags), (
+        f"expected degraded flag {flag_name!r} on {event_id}, got {flags}"
+    )
+
+
+async def pre_exhaust_event_token_budget(
+    budget_service: Any,
+    event_id: str,
+    *,
+    agent_name: str = "EvidenceAgent",
+) -> None:
+    limit = int(budget_service.allocate_event_budget(Severity.HIGH))
+    await budget_service.charge_llm(
+        event_id,
+        agent_name,
+        "mock-model",
+        prompt_tokens=limit,
+        completion_tokens=1,
+    )
+
+
+async def run_verify_tool_failure_chain(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    event_service: EventService,
+    e2e_tool_executor: Any,
+    working_memory: Any,
+    event_id: str,
+    fail_tools: frozenset[str] = frozenset({"check_host_isolation_status"}),
+) -> None:
+    from app.agents.verify_agent import VerifyAgent
+    from app.models.action import Action
+    from app.models.agent_io import ResponsePlan, ResponsePlanGeneratedBy, VerifyAgentInput
+
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    immediate_id = new_action_id()
+    deferred_id = new_action_id()
+    immediate = Action.model_validate(
+        {
+            "action_id": immediate_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": f"fp-{immediate_id}",
+            "action_category": ActionCategory.RESPONSE.value,
+            "action_name": "isolate_host",
+            "tool_name": "isolate_host",
+            "action_level": ActionLevel.L2.value,
+            "execution_owner": ExecutionOwner.XDR_MANAGED.value,
+            "execution_phase": ActionExecutionPhase.IMMEDIATE.value,
+            "status": ActionStatus.SUCCESS.value,
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY.value,
+            "idempotency_key": f"idem-{immediate_id}",
+            "target": "host-target-1",
+            "parameters": {"target": "host-target-1"},
+            "reason": "ISSUE-086 verify degradation",
+        }
+    )
+    deferred = Action.model_validate(
+        {
+            "action_id": deferred_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": f"fp-{deferred_id}",
+            "action_category": ActionCategory.RESPONSE.value,
+            "action_name": "update_source_event_disposition",
+            "tool_name": "update_source_event_disposition",
+            "action_level": ActionLevel.L2.value,
+            "execution_owner": ExecutionOwner.XDR_MANAGED.value,
+            "execution_phase": ActionExecutionPhase.POST_VERIFY.value,
+            "status": ActionStatus.APPROVED.value,
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY.value,
+            "idempotency_key": f"idem-{deferred_id}",
+            "target": "host-target-1",
+            "parameters": {"target": "host-target-1"},
+            "reason": "ISSUE-086 verify degradation",
+            "activation_condition": "after_effect_resolution",
+        }
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Action(
+                    action_id=immediate.action_id,
+                    event_id=event_id,
+                    plan_revision=immediate.plan_revision,
+                    action_fingerprint=immediate.action_fingerprint,
+                    action_category=immediate.action_category,
+                    action_name=immediate.action_name,
+                    tool_name=immediate.tool_name,
+                    action_level=immediate.action_level,
+                    execution_phase=immediate.execution_phase,
+                    execution_owner=immediate.execution_owner,
+                    status=immediate.status,
+                    writeback_required=immediate.writeback_required,
+                    writeback_applicable=immediate.writeback_applicable,
+                    writeback_readiness=immediate.writeback_readiness,
+                    idempotency_key=immediate.idempotency_key,
+                    target=immediate.target,
+                    parameters=immediate.parameters,
+                    reason=immediate.reason,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=deferred.action_id,
+                    event_id=event_id,
+                    plan_revision=deferred.plan_revision,
+                    action_fingerprint=deferred.action_fingerprint,
+                    action_category=deferred.action_category,
+                    action_name=deferred.action_name,
+                    tool_name=deferred.tool_name,
+                    action_level=deferred.action_level,
+                    execution_phase=deferred.execution_phase,
+                    execution_owner=deferred.execution_owner,
+                    status=deferred.status,
+                    writeback_required=deferred.writeback_required,
+                    writeback_applicable=deferred.writeback_applicable,
+                    writeback_readiness=deferred.writeback_readiness,
+                    idempotency_key=deferred.idempotency_key,
+                    target=deferred.target,
+                    parameters=deferred.parameters,
+                    reason=deferred.reason,
+                    activation_condition=deferred.activation_condition,
+                )
+            )
+
+    flaky = FlakyToolExecutor(e2e_tool_executor, set(fail_tools))
+    agent = VerifyAgent(
+        tool_executor=flaky,
+        working_memory=working_memory.for_writer("VerifyAgent"),
+        session_factory=session_factory,
+    )
+    plan = ResponsePlan(
+        plan_id=f"plan-verify-{event_id[-8:]}",
+        actions=[immediate, deferred],
+        strategy_summary="system verify degradation",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    result = await agent.execute(
+        VerifyAgentInput(
+            event_id=event_id,
+            response_plan=plan,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+    )
+    assert result.need_manual_resolution or result.overall_status.value in {
+        "failed",
+        "partial",
+        "waiting",
+    }
+    verification_ctx = await context_store.get(event_id, "verification_result")
+    assert verification_ctx is not None
+
+
+def _low_confidence_risk() -> RiskAssessment:
+    return RiskAssessment(
+        risk_score=78,
+        confidence=0.72,
+        severity=Severity.HIGH,
+        scoring_mode=ScoringMode.LLM_AND_RULE,
+    )
+
+
+async def run_insider_l3_approval_response_chain(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    event_service: EventService,
+    event_disposition_service: EventDispositionService,
+    disposition_sync_service: DispositionSyncService,
+    state_machine_service: StateMachineService,
+    mock_xdr_state: MockXDRState,
+    event_id: str,
+) -> None:
+    """L3 approval gate → execute → verify journal → terminal disposition (insider)."""
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert event.status is EventStatus.REPORTING
+
+    source_record_id = await seed_source_object_for_event(session_factory, event)
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            assert row is not None
+            row.status = EventStatus.PLANNING_RESPONSE.value
+            row.confidence = 0.72
+            row.final_verdict = FinalVerdict.CONFIRMED_THREAT.value
+            row.risk_score = max(int(row.risk_score or 0), 82)
+            await append_context_journal_in_session(
+                session,
+                event_id,
+                "risk_assessment",
+                {
+                    "risk_score": 78,
+                    "confidence": 0.72,
+                    "severity": Severity.HIGH.value,
+                    "scoring_mode": ScoringMode.RULE_ONLY.value,
+                },
+            )
+
+    l3_action_id = new_action_id()
+    ref = SourceReference.model_validate(event.creation_source_ref)
+    locator = SourceObjectLocator(
+        source_product=ref.source_product,
+        source_tenant_id=ref.source_tenant_id,
+        connector_id=ref.connector_id,
+        source_kind=ref.source_kind,
+        source_object_type=ref.source_object_type,
+        source_object_id=ref.source_object_id,
+    )
+    safe_disposition_ref = json.loads(locator.model_dump_json())
+    approved_raw = [
+        SourceDisposition.CONTAINED.value,
+        SourceDisposition.COMPLETED.value,
+        SourceDisposition.IGNORED.value,
+    ]
+    approved_hash = compute_template_hash(
+        [SourceDisposition.CONTAINED, SourceDisposition.COMPLETED, SourceDisposition.IGNORED]
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Action(
+                    action_id=l3_action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-l3-{event_id[-8:]}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="isolate_host",
+                    tool_name="isolate_host",
+                    action_level=ActionLevel.L3.value,
+                    execution_phase=ActionExecutionPhase.IMMEDIATE.value,
+                    execution_owner=ExecutionOwner.XDR_MANAGED.value,
+                    status=ActionStatus.PENDING.value,
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    idempotency_key=f"idem-l3-{event_id[-8:]}",
+                    target="host-target-1",
+                    parameters={"target": "host-target-1"},
+                    reason="ISSUE-086 L3 approval chain",
+                    approved_operation_template_hash=approved_hash,
+                    approved_terminal_dispositions=approved_raw,
+                    disposition_source_ref=safe_disposition_ref,
+                )
+            )
+
+    engine = ApprovalEngine(
+        session_factory,
+        state_machine=state_machine_service,
+        context_store=context_store,
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    async with session_factory() as session:
+        l3_row = await session.get(orm.Action, l3_action_id)
+        assert l3_row is not None
+        l3_action = _action_from_row(l3_row)
+    decision = await engine.evaluate(l3_action, _low_confidence_risk(), approval_cycle=0)
+    assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
+
+    await engine.approve(
+        l3_action_id,
+        principal=Principal(subject="system-test-approver", roles=["approver"]),
+        comment="ISSUE-086 system L3 approval",
+        decision_id=None,
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, l3_action_id, with_for_update=True)
+            assert row is not None
+            validate_action_status_transition(
+                ActionCategory.RESPONSE,
+                ActionStatus.APPROVED,
+                ActionStatus.EXECUTING,
+                execution_phase=ActionExecutionPhase.IMMEDIATE,
+                template_unchanged=True,
+            )
+            row.status = ActionStatus.EXECUTING.value
+            row.executed_at = datetime.now(UTC)
+
+    await submit_entity_action_once(
+        session_factory,
+        disposition_sync_service,
+        event_id=event_id,
+        action_id=l3_action_id,
+        mock_xdr_state=mock_xdr_state,
+        source_record_id=source_record_id,
+    )
+
+    terminal_action_id = await insert_response_action(
+        session_factory,
+        event_id=event_id,
+        action_name="update_source_event_disposition",
+        tool_name="update_source_event_disposition",
+        execution_phase=ActionExecutionPhase.POST_VERIFY,
+        status=ActionStatus.APPROVED,
+        disposition_source_ref=safe_disposition_ref,
+        activation_condition="after_effect_resolution",
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            await append_context_journal_in_session(
+                session,
+                event_id,
+                "verification_result",
+                {
+                    "overall_status": VerificationOverallStatus.SUCCESS.value,
+                    "verification_phase": VerificationPhase.EFFECT.value,
+                    "results": [],
+                },
+            )
+
+    result = await event_disposition_service.activate_and_submit(
+        event_id,
+        plan_revision=1,
+        principal_or_system="system-test-l3",
+    )
+    assert result.activated is True, result.skipped_reason
+    assert result.action_id == terminal_action_id

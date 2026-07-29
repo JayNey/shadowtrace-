@@ -466,6 +466,7 @@ def build_super_agent(
         fail_tools: set[str] | None = None,
         scenario_id: str | None = "insider_data_exfiltration",
         evidence_mode: str = "sequential",
+        lease: Any | None = None,
     ) -> tuple[Any, EvidenceProjection]:
         effective_llm = mock_llm_client if llm_client is None else llm_client
         effective_executor = e2e_tool_executor
@@ -544,6 +545,7 @@ def build_super_agent(
             convergence_guard=convergence_guard,
             trace_service=agent_trace_service,
             react_enabled=False,
+            lease=lease,
         )
         projection = EvidenceProjection(session_factory)
         return agent, projection
@@ -563,11 +565,13 @@ def run_graph_investigation(
         llm_client: Any | None = None,
         fail_tools: set[str] | None = None,
         scenario_id: str | None = "insider_data_exfiltration",
+        lease: Any | None = None,
     ) -> None:
         agent, projection = build_super_agent(
             llm_client=llm_client,
             fail_tools=fail_tools,
             scenario_id=scenario_id,
+            lease=lease,
         )
         with bind_evidence_projection(projection):
             await agent.investigate(event_id)

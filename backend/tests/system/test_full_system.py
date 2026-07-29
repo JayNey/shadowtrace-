@@ -18,10 +18,13 @@ from app.services.context_service import EventContextStore
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService
 from app.services.event_service import EventService
+from app.services.state_machine_service import StateMachineService
 from tests.system.helpers import (
     assert_main_chain_expectations,
+    assert_no_disposition_writeback,
     ingest_scenario_event,
     run_full_response_chain,
+    run_insider_l3_approval_response_chain,
     run_rule_fallback_main_chain,
 )
 from tests.system.scenario_expectations import (
@@ -90,6 +93,7 @@ async def test_eight_event_types_main_chain_rule_fallback(
         source_ingester=source_ingester,
         event_service=event_service,
         mock_xdr_state=mock_xdr_state,
+        session_factory=session_factory,
     )
     await run_rule_fallback_main_chain(
         event_id=event_id,
@@ -120,6 +124,7 @@ async def test_high_risk_full_response_chain(
     run_graph_investigation: object,
     event_disposition_service: EventDispositionService,
     disposition_sync_service: DispositionSyncService,
+    state_machine_service: StateMachineService,
 ) -> None:
     assert scenario_id in MOCK_WRITEBACK_SCENARIOS
     assert scenario_id not in FILE_ONLY_SCENARIOS
@@ -130,6 +135,7 @@ async def test_high_risk_full_response_chain(
         source_ingester=source_ingester,
         event_service=event_service,
         mock_xdr_state=mock_xdr_state,
+        session_factory=session_factory,
     )
     await run_rule_fallback_main_chain(
         event_id=event_id,
@@ -143,14 +149,63 @@ async def test_high_risk_full_response_chain(
         event_id=event_id,
         spec=SCENARIO_EXPECTATIONS[scenario_id],
     )
-    await run_full_response_chain(
-        session_factory=session_factory,
+    if scenario_id == "insider_data_exfiltration":
+        await run_insider_l3_approval_response_chain(
+            session_factory=session_factory,
+            context_store=context_store,
+            event_service=event_service,
+            event_disposition_service=event_disposition_service,
+            disposition_sync_service=disposition_sync_service,
+            state_machine_service=state_machine_service,
+            mock_xdr_state=mock_xdr_state,
+            event_id=event_id,
+        )
+    else:
+        await run_full_response_chain(
+            session_factory=session_factory,
+            event_service=event_service,
+            event_disposition_service=event_disposition_service,
+            disposition_sync_service=disposition_sync_service,
+            mock_xdr_state=mock_xdr_state,
+            event_id=event_id,
+        )
+
+
+@pytest.mark.usefixtures("clean_state")
+@pytest.mark.parametrize("scenario_id", sorted(FILE_ONLY_SCENARIOS))
+@pytest.mark.asyncio
+async def test_file_only_scenarios_no_disposition_writeback(
+    scenario_id: str,
+    mock_xdr_state: MockXDRState,
+    source_adapter: object,
+    source_ingester: SourceIngester,
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    run_graph_investigation: object,
+) -> None:
+    spec = SCENARIO_EXPECTATIONS[scenario_id]
+    event_id = await ingest_scenario_event(
+        scenario_id=scenario_id,
+        source_adapter=source_adapter,
+        source_ingester=source_ingester,
         event_service=event_service,
-        event_disposition_service=event_disposition_service,
-        disposition_sync_service=disposition_sync_service,
         mock_xdr_state=mock_xdr_state,
-        event_id=event_id,
+        session_factory=session_factory,
     )
+    await run_rule_fallback_main_chain(
+        event_id=event_id,
+        run_graph_investigation=run_graph_investigation,
+        scenario_id=scenario_id,
+    )
+    await assert_main_chain_expectations(
+        event_service=event_service,
+        context_store=context_store,
+        session_factory=session_factory,
+        event_id=event_id,
+        spec=spec,
+    )
+    await assert_no_disposition_writeback(session_factory, event_id)
 
 
 @pytest.mark.parametrize("scenario_id", sorted(MOCK_WRITEBACK_SCENARIOS))
@@ -159,3 +214,8 @@ def test_scenario_builders_registered(scenario_id: str) -> None:
     built = build_scenario(scenario_id, seed=42)
     assert built.scenario_id == scenario_id
     assert built.expected_outcome
+
+
+def test_export_system_scenarios_script_exists() -> None:
+    script = REPO_ROOT / "backend" / "scripts" / "export_system_scenarios.py"
+    assert script.is_file()

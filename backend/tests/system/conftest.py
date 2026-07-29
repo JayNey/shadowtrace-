@@ -17,9 +17,12 @@ from app.core.redis_client import RedisClient
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
 from app.services.context_service import EventContextStore
+from app.services.degraded_flag_service import DegradedFlagService
 from app.services.disposition_command_factory import DispositionCommandFactory
 from app.services.disposition_sync_service import DispositionSyncService
+from app.services.event_audit_log_service import EventAuditLogService
 from app.services.event_disposition_service import EventDispositionService
+from app.services.state_machine_service import StateMachineService
 from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 
 pytest_plugins = ["tests.integration.conftest"]
@@ -86,4 +89,19 @@ async def event_disposition_service(
         factory=DispositionCommandFactory(),
         event_bus=EventBus(redis_client),
         event_disposition_supported=True,
+    )
+
+
+@pytest_asyncio.fixture
+async def state_machine_service(
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    degraded_flags: DegradedFlagService,
+) -> StateMachineService:
+    audit_log = EventAuditLogService(session_factory)
+    return StateMachineService(
+        session_factory,
+        context_store,
+        audit_log=audit_log,
+        degraded_flags=degraded_flags,
     )
