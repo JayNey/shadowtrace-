@@ -360,7 +360,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 ec = final_state.get("event_context", event_context)
             await self._persist_event_context(ec)
             await self._persist_analysis_only_complete(event_id)
-            await self._schedule_memory_after_close(event_id, ec)
+            if ec.event is not None and ec.event.status is EventStatus.CLOSED:
+                await self._schedule_memory_after_close(event_id, ec)
 
             if lifecycle_started:
                 duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
@@ -1321,13 +1322,24 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     investigation_result=result,
                 )
             )
+        except Exception as exc:
+            await self._record_memory_failure(event_id, exc, stage="consolidation")
+            return
+        try:
             await context_store.refresh_closed_snapshot(event_id)
         except Exception as exc:
-            await self._record_memory_failure(event_id, exc)
+            await self._record_memory_failure(event_id, exc, stage="snapshot_refresh")
 
-    async def _record_memory_failure(self, event_id: str, exc: Exception) -> None:
+    async def _record_memory_failure(
+        self,
+        event_id: str,
+        exc: Exception,
+        *,
+        stage: str = "consolidation",
+    ) -> None:
         logger.warning(
-            "SuperAgent: MemoryAgent failed after close event=%s",
+            "SuperAgent: MemoryAgent %s failed after close event=%s",
+            stage,
             event_id,
             exc_info=(type(exc), exc, exc.__traceback__),
         )
@@ -1338,7 +1350,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     EventStatus.CLOSED.value,
                     EventStatus.CLOSED.value,
                     "MemoryAgent",
-                    f"memory_agent_failed:{type(exc).__name__}:{exc}",
+                    f"memory_agent_failed:{stage}:{type(exc).__name__}:{exc}",
                 )
             except Exception:
                 logger.warning(

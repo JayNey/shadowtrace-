@@ -359,7 +359,53 @@ async def test_memory_failure_keeps_event_closed_and_records_audit() -> None:
     _, from_status, to_status, operator, reason = audit.entries[0]
     assert from_status == to_status == EventStatus.CLOSED.value
     assert operator == "MemoryAgent"
-    assert "memory_agent_failed" in reason
+    assert "memory_agent_failed:consolidation" in reason
+
+
+@pytest.mark.asyncio
+async def test_schedule_memory_skipped_when_event_not_closed() -> None:
+    context = _context(FinalVerdict.CONFIRMED_THREAT)
+    context.event.status = EventStatus.ANALYZING  # type: ignore[union-attr]
+    context_store = _ContextStore(context)
+    memory_agent = _SuccessfulMemoryAgent()
+    super_agent = SuperAgent(
+        memory_agent=memory_agent,
+        context_store=context_store,
+    )
+
+    task = await super_agent._schedule_memory_after_close(EVENT_ID, context)
+
+    assert task is None
+    assert memory_agent.inputs == []
+    assert context_store.refresh_count == 0
+
+
+class _RefreshFailAfterFirstContextStore(_ContextStore):
+    async def refresh_closed_snapshot(self, event_id: str) -> EventContext:
+        self.refresh_count += 1
+        if self.refresh_count >= 2:
+            raise RuntimeError("snapshot refresh unavailable")
+        return self.context
+
+
+@pytest.mark.asyncio
+async def test_snapshot_refresh_failure_after_memory_success_is_audited() -> None:
+    context = _context(FinalVerdict.CONFIRMED_THREAT)
+    context_store = _RefreshFailAfterFirstContextStore(context)
+    audit = _Audit()
+    super_agent = SuperAgent(
+        memory_agent=_SuccessfulMemoryAgent(),
+        context_store=context_store,
+        audit_service=audit,
+    )
+
+    task = await super_agent._schedule_memory_after_close(EVENT_ID, context)
+    assert task is not None
+    await task
+
+    assert context_store.refresh_count == 2
+    assert len(audit.entries) == 1
+    assert "memory_agent_failed:snapshot_refresh" in audit.entries[0][4]
 
 
 @pytest.mark.asyncio

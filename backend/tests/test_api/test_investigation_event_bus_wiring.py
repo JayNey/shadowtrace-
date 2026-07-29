@@ -95,6 +95,11 @@ async def test_build_investigation_agents_wires_event_bus(monkeypatch: pytest.Mo
         "app.services.false_positive_matcher.FalsePositiveMatcher",
         lambda *_a, **_k: MagicMock(),
     )
+    monkeypatch.setattr(
+        "app.services.profile_service.ProfileService",
+        lambda *_a, **_k: MagicMock(),
+    )
+    monkeypatch.setattr("app.agents.memory_agent.MemoryAgent", _capture("memory"))
 
     deps.reset_deps()
     try:
@@ -107,7 +112,8 @@ async def test_build_investigation_agents_wires_event_bus(monkeypatch: pytest.Mo
     assert stack["rag"].event_bus is bus
     assert stack["risk"].event_bus is bus
     assert stack["report"].event_bus is bus
-    assert all(captured[name] is bus for name in ("triage", "evidence", "rag", "risk", "report"))
+    assert stack["memory"].event_bus is bus
+    assert all(captured[name] is bus for name in ("triage", "evidence", "rag", "risk", "report", "memory"))
 
 
 @pytest.mark.asyncio
@@ -157,6 +163,7 @@ async def test_planner_and_response_receive_event_bus(monkeypatch: pytest.Monkey
         "rag": MagicMock(),
         "risk": MagicMock(),
         "report": MagicMock(),
+        "memory": MagicMock(),
         "event_service": MagicMock(),
         "context_store": MagicMock(),
         "tool_executor": MagicMock(),
@@ -172,6 +179,7 @@ async def test_planner_and_response_receive_event_bus(monkeypatch: pytest.Monkey
     monkeypatch.setattr(deps, "get_action_execution", AsyncMock(return_value=MagicMock()))
     monkeypatch.setattr(deps, "_get_workflow_runtime", AsyncMock(return_value=MagicMock()))
     monkeypatch.setattr(deps, "_get_redis", lambda: MagicMock())
+    monkeypatch.setattr(deps, "_get_audit_log", lambda: MagicMock())
 
     monkeypatch.setattr("app.agents.planner_agent.PlannerAgent", _FakePlanner)
     monkeypatch.setattr("app.agents.response_agent.ResponseAgent", _FakeResponse)
