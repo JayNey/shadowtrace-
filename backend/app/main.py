@@ -75,6 +75,12 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
             await scan_task
         await _socketio_manager.stop()
         await shutdown_health_clients()
+        try:
+            from app.api.v1.deps import shutdown_neo4j_client
+
+            await shutdown_neo4j_client()
+        except Exception:
+            logger.warning("Neo4j client shutdown failed", exc_info=True)
 
 
 app = FastAPI(title="ShadowTrace", version="0.1.0", lifespan=_lifespan)

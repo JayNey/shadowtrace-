@@ -260,26 +260,48 @@ async def test_query_paths_pg_fallback_no_graph_data(
 
 
 @pytest.mark.asyncio
-async def test_sync_empty_graph_returns_zero_counts(
+async def test_sync_empty_graph_when_disabled_returns_skipped(
     session_factory: async_sessionmaker[AsyncSession],
     cleanup: None,
 ) -> None:
-    """When event has no graph nodes, disabled service returns zero counts."""
+    """Disabled service skips sync even when the event has no graph rows."""
     event_id = await _seed_event(session_factory)
-    # Do NOT seed any graph data
 
     svc = GraphSyncService(session_factory)
     result = await svc.sync_event_graph(event_id)
 
     assert result.skipped is True
     assert result.nodes_synced == 0
+    assert result.edges_synced == 0
 
-    # Verify no graph rows exist
-    async with session_factory() as session:
-        node_count = await session.scalar(
-            select(GraphNodeORM).where(GraphNodeORM.event_id == event_id)
-        )
-        assert node_count is None
+
+@pytest.mark.asyncio
+async def test_sync_empty_graph_when_enabled_returns_zero_not_skipped(
+    session_factory: async_sessionmaker[AsyncSession],
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Enabled service with no graph rows returns zero counts, not skipped."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    event_id = await _seed_event(session_factory)
+    mock_client = MagicMock()
+    mock_client.ping = AsyncMock(return_value=True)
+    mock_client.ensure_constraints = AsyncMock()
+
+    svc = GraphSyncService(session_factory, client=mock_client)
+    result = await svc.sync_event_graph(event_id)
+
+    assert result.skipped is False
+    assert result.nodes_synced == 0
+    assert result.edges_synced == 0
+
+    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------

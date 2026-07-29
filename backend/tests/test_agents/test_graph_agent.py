@@ -614,6 +614,53 @@ class TestGraphAgentIntegration:
         assert degraded["degraded"] is True
         assert degraded["reason"].startswith("graph_persist_failed:")
 
+    async def test_graph_agent_schedules_neo4j_sync_after_persist(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Successful PG persist schedules fire-and-forget Neo4j sync (ISSUE-082)."""
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.models.agent_io import EvidenceOutput
+        from app.services.graph_sync_service import SyncResult
+
+        event_id = f"evt-sync-schedule-{_new_sfx()}"
+        wm = _FakeWorkingMemory()
+        mock_sync = MagicMock()
+        mock_sync.sync_event_graph = AsyncMock(return_value=SyncResult())
+
+        agent = GraphAgent(
+            working_memory=wm,
+            session_factory=None,
+            graph_sync_service=mock_sync,
+        )
+
+        async def _fake_persist(
+            self: GraphAgent,
+            event_id: str,
+            nodes: list[Any],
+            edges: list[Any],
+        ) -> None:
+            self.last_persist_ok = True
+            self.last_persist_error = None
+
+        monkeypatch.setattr(GraphAgent, "_persist_graph", _fake_persist)
+
+        evidence_output = EvidenceOutput(
+            evidence_list=_main_scenario_evidence(event_id),
+            conflicts=[],
+            gaps=[],
+            success_sources=[EvidenceSource.IDENTITY.value],
+            failed_sources=[],
+            overall_confidence=0.85,
+            collection_status=CollectionStatus.COMPLETED,
+        )
+        await agent.execute(GraphAgentInput(event_id=event_id, evidence_output=evidence_output))
+        await asyncio.sleep(0)
+
+        mock_sync.sync_event_graph.assert_awaited_once_with(event_id)
+
 
 # ====================================================================== #
 # DB integration: persist idempotency
