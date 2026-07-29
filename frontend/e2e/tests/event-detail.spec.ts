@@ -12,7 +12,10 @@ test.describe("path 2 · event detail overview / radar / conflicts", () => {
       timeout: 60_000,
     });
     await expect(page.getByTestId("agent-status-panel")).toBeVisible();
-    await expect(page.getByTestId("risk-radar")).toBeVisible();
+    const radar = page.getByTestId("risk-radar");
+    await expect(radar).toBeVisible({ timeout: 60_000 });
+    // Empty assessment uses risk-radar-empty — require a real radar panel.
+    await expect(radar).not.toContainText("暂无数据");
 
     await page.locator(".shadowtrace-event-tabs").getByText("证据").click();
     const evidenceRow = page.locator("[data-testid^=\"evidence-row-\"]").first();

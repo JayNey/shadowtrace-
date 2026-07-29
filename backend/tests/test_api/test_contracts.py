@@ -527,6 +527,33 @@ def test_domain_error_details_are_redacted_before_api_response() -> None:
     assert "[REDACTED]" in serialized
 
 
+def test_investigate_request_defaults_defer_response_execution() -> None:
+    """ISSUE-077/566: HTTP investigate defaults to analysis-complete (no response)."""
+    req = s.InvestigateRequest()
+    assert req.force_replan is False
+    assert req.include_response_execution is False
+
+
+def test_investigate_request_can_opt_into_response_execution() -> None:
+    req = s.InvestigateRequest.model_validate(
+        {"force_replan": False, "include_response_execution": True}
+    )
+    assert req.include_response_execution is True
+
+
+def test_ingest_source_record_request_accepts_incident_associations() -> None:
+    ref = s.example_source_reference()
+    req = s.IngestSourceRecordRequest.model_validate(
+        {
+            "reference": ref.model_dump(mode="json"),
+            "incident_ref": ref.model_dump(mode="json"),
+            "related_alert_refs": [ref.model_dump(mode="json")],
+        }
+    )
+    assert req.incident_ref is not None
+    assert len(req.related_alert_refs) == 1
+
+
 def test_disposition_command_rejects_analysis_fields() -> None:
     # Outbound envelope must never carry Action.parameters/reason/raw etc.
     valid = s.example_disposition_command().model_dump()

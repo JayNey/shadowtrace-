@@ -99,7 +99,10 @@ async def get_source_record(
     session_factory: Annotated[async_sessionmaker[AsyncSession], Depends(_get_session_factory)],
 ) -> s.SourceRecordResponse:
     """Look up a persisted source object; keep ISSUE-004 fixture id for contracts."""
+    from app.core.config import get_settings
+
     _ = principal
+    db_error: BaseException | None = None
     try:
         async with session_factory() as session:
             obj = await session.get(orm.SourceObject, source_record_id)
@@ -115,17 +118,23 @@ async def get_source_record(
                     current_source_disposition=current_disposition,
                     source_sync_state=obj.source_sync_state,
                 )
-    except (SQLAlchemyError, OSError, RuntimeError):
-        # Contract/dev fallback when the session factory cannot reach Postgres.
-        pass
+    except (SQLAlchemyError, OSError, RuntimeError) as exc:
+        db_error = exc
 
     # Contract fixture ID retained for OpenAPI / contract tests (ISSUE-004).
-    if source_record_id == "src-associated-1":
+    # Never mask real DB failures for other IDs, and never in production.
+    if (
+        source_record_id == "src-associated-1"
+        and get_settings().app_env.strip().lower() != "production"
+    ):
         return s.SourceRecordResponse(
             source_record_id=source_record_id,
             reference=s.example_source_reference(),
             normalized={},
         )
+
+    if db_error is not None:
+        raise db_error
 
     raise ResourceNotFoundError(
         f"source record {source_record_id} not found",

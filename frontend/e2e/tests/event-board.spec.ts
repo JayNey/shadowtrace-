@@ -12,7 +12,8 @@ test.describe("path 1 · event board filter → detail", () => {
     });
 
     await page.getByTestId("filter-severity").click();
-    await page.getByRole("option", { name: /严重|critical/i }).click();
+    // SEVERITY_CONFIG.critical.label is "紧急" (not "严重").
+    await page.getByRole("option", { name: /^紧急$/ }).click();
     await expect(page.getByTestId(`event-row-${analysisEventId}`)).toBeVisible();
 
     await page.getByTestId(`event-row-${analysisEventId}`).click();
