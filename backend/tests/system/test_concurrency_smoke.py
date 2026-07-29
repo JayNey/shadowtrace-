@@ -52,8 +52,7 @@ async def _event_id_for_scenario_incident(
     async with session_factory() as session:
         event_id = await session.scalar(
             select(orm.SecurityEvent.event_id).where(
-                orm.SecurityEvent.creation_source_ref["connector_id"].as_string()
-                == connector_id,
+                orm.SecurityEvent.creation_source_ref["connector_id"].as_string() == connector_id,
                 orm.SecurityEvent.creation_source_ref["source_object_id"].as_string()
                 == source_object_id,
             )

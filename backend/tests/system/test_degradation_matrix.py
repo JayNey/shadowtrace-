@@ -189,9 +189,7 @@ async def test_degradation_redis_unavailable_main_chain_completes_with_flag(
     assert event.status in {EventStatus.REPORTING, EventStatus.CLOSED}
     report = await context_store.get(event_id, "report")
     assert report is not None
-    await assert_event_has_degraded_flag(
-        session_factory, event_id, "redis_context_unavailable"
-    )
+    await assert_event_has_degraded_flag(session_factory, event_id, "redis_context_unavailable")
 
 
 @pytest.mark.usefixtures("clean_state")
