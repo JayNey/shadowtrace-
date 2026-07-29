@@ -7,6 +7,7 @@ All tests in this file run against the PostgreSQL ILIKE fallback path by default
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -22,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.core.config import Settings
-from app.core.opensearch_client import OpenSearchClient
+from app.core.opensearch_client import AUDIT_LOGS_SUFFIX, OpenSearchClient
 from app.db import models as orm
 from app.models.search import SearchResponse
 from app.services.search_service import SearchService
@@ -416,6 +417,8 @@ class TestAuditLogOpenSearchDualWrite:
         )
         assert log_id
 
+        await asyncio.sleep(0)
+
         async with session_factory() as session:
             row = await session.get(orm.EventAuditLog, int(log_id))
             assert row is not None
@@ -423,6 +426,123 @@ class TestAuditLogOpenSearchDualWrite:
             assert row.to_status == "triaging"
 
         mock_os.index_document.assert_awaited_once()
+        call_args = mock_os.index_document.await_args.args
+        assert call_args[0] == AUDIT_LOGS_SUFFIX
+        body = call_args[2]
+        assert body["to_status"] == "triaging"
+        assert "block_ip" in (body.get("reason") or "")
+
+    @pytest.mark.asyncio
+    async def test_log_finish_indexes_opensearch_when_enabled(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from app.services.tool_call_log_service import ToolCallLogService
+
+        mock_os = AsyncMock()
+        mock_os.enabled = True
+        mock_os.index_document = AsyncMock()
+
+        service = ToolCallLogService(session_factory, opensearch=mock_os)
+        call_id = _id("call")
+        event_id = _id("evt")
+        await service.log_start(
+            call_id=call_id,
+            event_id=event_id,
+            action_id=None,
+            tool_name="block_ip",
+            tool_category="response",
+            parameters={"target": "10.0.0.1"},
+        )
+        await service.log_finish(
+            call_id=call_id,
+            status="success",
+            result={"outcome": "ok"},
+            error_detail=None,
+            retry_count=0,
+        )
+        await asyncio.sleep(0)
+
+        async with session_factory() as session:
+            row = await session.get(orm.ToolCallLog, call_id)
+            assert row is not None
+            assert row.tool_name == "block_ip"
+
+        mock_os.index_document.assert_awaited_once()
+        call_args = mock_os.index_document.await_args.args
+        assert call_args[2]["tool_name"] == "block_ip"
+        assert call_args[2]["status"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_log_finish_persisted_when_opensearch_index_fails(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from unittest.mock import AsyncMock
+
+        from app.services.tool_call_log_service import ToolCallLogService
+
+        mock_os = AsyncMock()
+        mock_os.enabled = True
+        mock_os.index_document = AsyncMock(side_effect=RuntimeError("index failed"))
+
+        service = ToolCallLogService(session_factory, opensearch=mock_os)
+        call_id = _id("call")
+        await service.log_start(
+            call_id=call_id,
+            event_id=_id("evt"),
+            action_id=None,
+            tool_name="block_ip",
+            tool_category="response",
+            parameters={},
+        )
+        await service.log_finish(
+            call_id=call_id,
+            status="success",
+            result={},
+            error_detail=None,
+            retry_count=0,
+        )
+        await asyncio.sleep(0)
+
+        async with session_factory() as session:
+            row = await session.get(orm.ToolCallLog, call_id)
+            assert row is not None
+            assert row.status == "success"
+
+    @pytest.mark.asyncio
+    async def test_search_all_hybrid_marks_degraded_when_evidence_hits(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        monkeypatch.setenv("OPENSEARCH_ENABLED", "true")
+        mock_os = MagicMock()
+        mock_os.enabled = True
+        mock_os.search = AsyncMock(return_value={"hits": {"total": {"value": 0}, "hits": []}})
+
+        service = SearchService(session_factory, opensearch=mock_os)
+        marker = f"hybrid-evidence-{uuid.uuid4().hex[:8]}"
+        await _seed_evidence(session_factory, description=f"Observed {marker} exfil attempt")
+        result = await service.search(marker, scope="all")
+        assert result.total >= 1
+        assert result.degraded is True
+        assert any(item.index == "evidence" for item in result.items)
+
+    @pytest.mark.asyncio
+    async def test_search_fallback_summary_contains_keywords(
+        self,
+        service: SearchService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _seed_tool_call(session_factory, tool_name="block_ip")
+        result = await service.search("block_ip", scope="tool-calls")
+        assert result.total >= 1
+        assert "block_ip" in result.items[0].source_summary
 
     @pytest.mark.asyncio
     async def test_search_evidence_uses_ilike_when_opensearch_enabled(

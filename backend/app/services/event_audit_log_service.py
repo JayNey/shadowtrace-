@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,29 +36,30 @@ class EventAuditLogService:
         self._session_factory = session_factory
         self._opensearch = opensearch
 
-    async def _index_to_opensearch(self, row: orm.EventAuditLog) -> None:
-        """Fire-and-forget index an audit log row into OpenSearch.
+    async def _index_document_to_opensearch(self, doc_id: str, body: dict[str, Any]) -> None:
+        """Fire-and-forget index an audit log document into OpenSearch.
 
         Never raises — all failures are caught and logged.
         """
         if self._opensearch is None or not self._opensearch.enabled:
             return
         try:
-            await self._opensearch.index_document(
-                AUDIT_LOGS_SUFFIX,
-                str(row.id),
-                {
-                    "id": row.id,
-                    "event_id": row.event_id,
-                    "from_status": row.from_status,
-                    "to_status": row.to_status,
-                    "operator": row.operator,
-                    "reason": row.reason,
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                },
-            )
+            await self._opensearch.index_document(AUDIT_LOGS_SUFFIX, doc_id, body)
         except Exception:
-            logger.warning("OpenSearch index failed for audit log %s", row.id, exc_info=True)
+            logger.warning("OpenSearch index failed for audit log %s", doc_id, exc_info=True)
+
+    @staticmethod
+    def _audit_index_payload(row: orm.EventAuditLog) -> dict[str, Any]:
+        """Snapshot row fields before the session closes (ISSUE-084)."""
+        return {
+            "id": row.id,
+            "event_id": row.event_id,
+            "from_status": row.from_status,
+            "to_status": row.to_status,
+            "operator": row.operator,
+            "reason": row.reason,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+        }
 
     async def log_transition(
         self,
@@ -81,14 +83,23 @@ class EventAuditLogService:
             reason=redact_sensitive_text(reason)[:4096] if reason else None,
             created_at=_utc_now(),
         )
+        index_payload: dict[str, Any] | None = None
+        doc_id: str | None = None
         async with self._session_factory() as session:
             async with session.begin():
                 session.add(row)
                 await session.flush()
+                index_payload = self._audit_index_payload(row)
+                doc_id = str(row.id)
         # Fire-and-forget OpenSearch indexing (ISSUE-084).
-        if self._opensearch is not None and self._opensearch.enabled:
-            asyncio.create_task(self._index_to_opensearch(row))
-        return str(row.id)
+        if (
+            self._opensearch is not None
+            and self._opensearch.enabled
+            and index_payload is not None
+            and doc_id is not None
+        ):
+            asyncio.create_task(self._index_document_to_opensearch(doc_id, index_payload))
+        return doc_id or ""
 
     async def log_transition_in_session(
         self,
@@ -110,10 +121,12 @@ class EventAuditLogService:
         )
         session.add(row)
         await session.flush()
+        index_payload = self._audit_index_payload(row)
+        doc_id = str(row.id)
         # Fire-and-forget OpenSearch indexing (ISSUE-084).
         if self._opensearch is not None and self._opensearch.enabled:
-            asyncio.create_task(self._index_to_opensearch(row))
-        return str(row.id)
+            asyncio.create_task(self._index_document_to_opensearch(doc_id, index_payload))
+        return doc_id
 
     async def get_logs_by_event(self, event_id: str) -> list[orm.EventAuditLog]:
         async with self._session_factory() as session:

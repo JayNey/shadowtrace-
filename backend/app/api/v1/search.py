@@ -56,9 +56,6 @@ async def search(
     snippets.  Otherwise the endpoint falls back to PostgreSQL ILIKE queries
     and sets ``degraded=true``.
     """
-    from app.services.search_service import SearchService
-
-    assert isinstance(search_service, SearchService)
     return await search_service.search(
         q=q.strip(),
         scope=scope,

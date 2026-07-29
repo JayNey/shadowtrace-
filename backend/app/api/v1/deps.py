@@ -47,6 +47,7 @@ _workflow_runtime: Any = None  # WorkflowRuntimeService
 _event_disposition: Any = None  # EventDispositionService
 _opensearch_client: Any = None  # OpenSearchClient
 _search_service: Any = None  # SearchService
+_tool_call_log: Any = None  # ToolCallLogService
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -352,6 +353,19 @@ def _get_opensearch_client() -> Any:
     return _opensearch_client
 
 
+def _get_tool_call_log_service() -> Any:
+    """Return ToolCallLogService with optional OpenSearch dual-write (ISSUE-084)."""
+    global _tool_call_log
+    if _tool_call_log is None:
+        from app.services.tool_call_log_service import ToolCallLogService
+
+        _tool_call_log = ToolCallLogService(
+            _get_session_factory(),
+            opensearch=_get_opensearch_client(),
+        )
+    return _tool_call_log
+
+
 def get_search_service() -> Any:
     """Return the SearchService singleton (ISSUE-084)."""
     global _search_service
@@ -398,7 +412,6 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.services.false_positive_matcher import FalsePositiveMatcher
     from app.services.knowledge_store import KnowledgeStore
     from app.services.profile_service import ProfileService
-    from app.services.tool_call_log_service import ToolCallLogService
     from app.tools.executor import NullAuditService, get_tool_executor
 
     settings = get_settings()
@@ -413,10 +426,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
     tool_executor = get_tool_executor()
     tool_executor.budget_service = budget_service
     if isinstance(tool_executor.audit_service, NullAuditService):
-        tool_executor.audit_service = ToolCallLogService(
-            session_factory,
-            opensearch=_get_opensearch_client(),
-        )
+        tool_executor.audit_service = _get_tool_call_log_service()
 
     # ISSUE-078: wire FalsePositiveMatcher for vector-based FP pre-filter.
     embed_service = EmbeddingService(settings)
@@ -609,7 +619,7 @@ def reset_deps() -> None:
     global _disposition_sync, _action_execution, _rollback_service
     global _adapter_registry, _workflow_runtime, _event_disposition
     global _impact_assessment_service
-    global _opensearch_client, _search_service
+    global _opensearch_client, _search_service, _tool_call_log
     _session_factory = None
     _redis_client = None
     _context_store = None
@@ -632,3 +642,4 @@ def reset_deps() -> None:
     _event_disposition = None
     _opensearch_client = None
     _search_service = None
+    _tool_call_log = None

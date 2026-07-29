@@ -35,6 +35,7 @@ from app.models.search import (
 logger = logging.getLogger(__name__)
 
 # Evidence is searchable via ILIKE but not dual-written to OpenSearch yet.
+# Dual-write for shadowtrace-evidence is deferred to a follow-up Issue.
 _OS_INDEXED_SCOPES = frozenset({"tool-calls", "audit-logs"})
 
 # Cap for merging OpenSearch + ILIKE evidence hits in scope=all hybrid mode (P2).
@@ -52,6 +53,7 @@ _SCOPE_CONFIG: dict[str, dict[str, Any]] = {
         "doc_id_col": "call_id",
         "event_id_col": "event_id",
         "timestamp_col": "completed_at",
+        "summary_fields": ["tool_name", "status"],
     },
     "audit-logs": {
         "os_suffix": AUDIT_LOGS_SUFFIX,
@@ -63,6 +65,7 @@ _SCOPE_CONFIG: dict[str, dict[str, Any]] = {
         "doc_id_col": "id",
         "event_id_col": "event_id",
         "timestamp_col": "created_at",
+        "summary_fields": ["to_status", "reason"],
     },
     "evidence": {
         "os_suffix": EVIDENCE_SUFFIX,
@@ -74,6 +77,7 @@ _SCOPE_CONFIG: dict[str, dict[str, Any]] = {
         "doc_id_col": "evidence_id",
         "event_id_col": "event_id",
         "timestamp_col": "created_at",
+        "summary_fields": ["description", "evidence_type"],
     },
 }
 
@@ -223,12 +227,14 @@ class SearchService:
         total = len(merged)
         offset = (page - 1) * page_size
         page_items = merged[offset : offset + page_size]
+        # Evidence hits always come from ILIKE until dual-write lands (ISSUE-084).
+        degraded = len(evidence_part.items) > 0
         return SearchResponse(
             items=page_items,
             total=total,
             page=page,
             page_size=page_size,
-            degraded=False,
+            degraded=degraded,
         )
 
     # ------------------------------------------------------------------ #
@@ -246,7 +252,7 @@ class SearchService:
         """
         pattern = f"%{query}%"
         scopes = self._resolve_fallback_scopes(scope)
-        all_rows: list[tuple[str, str, str | None, datetime | None, dict[str, Any]]] = []
+        all_rows: list[tuple[str, str, str | None, datetime | None, dict[str, Any], str]] = []
 
         async with self._session_factory() as session:
             for scope_key in scopes:
@@ -276,6 +282,7 @@ class SearchService:
                 doc_id_expr = cast(doc_id_attr, Text) if doc_id_col == "id" else doc_id_attr
                 event_id_col_attr = getattr(model, event_id_col) if event_id_col else None
                 ts_col_attr = getattr(model, ts_col) if ts_col else None
+                summary_fields: list[str] = cfg.get("summary_fields", [])
 
                 # Build columns tuple dynamically to satisfy mypy.
                 select_cols: list[Any] = [doc_id_expr]
@@ -283,6 +290,10 @@ class SearchService:
                     select_cols.append(event_id_col_attr)
                 if ts_col_attr is not None:
                     select_cols.append(ts_col_attr)
+                for col_name in summary_fields:
+                    col = getattr(model, col_name, None)
+                    if col is not None:
+                        select_cols.append(col)
                 select_cols.append(func.count().over().label("_total"))
 
                 stmt = (
@@ -298,13 +309,29 @@ class SearchService:
                 result = await session.execute(stmt)
                 rows = result.all()
                 for row in rows:
+                    idx = 0
+                    doc_id = str(row[idx])
+                    idx += 1
+                    event_id_val = (
+                        str(row[idx]) if len(row) > idx and row[idx] is not None else None
+                    )
+                    idx += 1
+                    ts_val = row[idx] if len(row) > idx and row[idx] is not None else None
+                    idx += 1
+                    field_values: dict[str, Any] = {}
+                    for col_name in summary_fields:
+                        if len(row) > idx:
+                            field_values[col_name] = row[idx]
+                            idx += 1
+                    summary = self._build_fallback_summary(table_name, doc_id, field_values)
                     all_rows.append(
                         (
                             table_name,
-                            str(row[0]),
-                            str(row[1]) if row[1] is not None else None,
-                            row[2] if len(row) > 2 and row[2] is not None else None,
-                            {},  # extra (no raw source in fallback)
+                            doc_id,
+                            event_id_val,
+                            ts_val,
+                            field_values,
+                            summary,
                         )
                     )
 
@@ -321,13 +348,13 @@ class SearchService:
         page_rows = all_rows[offset : offset + page_size]
 
         items: list[SearchResultItem] = []
-        for table_name, doc_id, event_id, ts, extra in page_rows:
+        for table_name, doc_id, event_id, ts, extra, summary in page_rows:
             items.append(
                 SearchResultItem(
                     index=table_name,
                     doc_id=doc_id,
                     highlight="",  # No highlighting in ILIKE fallback.
-                    source_summary=self._build_fallback_summary(table_name, doc_id),
+                    source_summary=summary,
                     event_id=event_id,
                     occurred_at=ts,
                     extra=extra,
@@ -376,8 +403,28 @@ class SearchService:
             return f"[证据] {snippet}"
         return ""
 
-    def _build_fallback_summary(self, table_name: str, doc_id: str) -> str:
+    def _build_fallback_summary(
+        self,
+        table_name: str,
+        doc_id: str,
+        fields: dict[str, Any] | None = None,
+    ) -> str:
         """One-line summary for ILIKE fallback results."""
+        if fields:
+            if table_name == "tool_call_log":
+                tool = fields.get("tool_name") or "?"
+                status = fields.get("status") or "?"
+                return f"[工具调用] {tool} ({status})"
+            if table_name == "event_audit_log":
+                to_status = fields.get("to_status") or "?"
+                reason = str(fields.get("reason") or "")
+                snippet = reason[:80] + "…" if len(reason) > 80 else reason
+                return f"[审计] →{to_status} {snippet}".strip()
+            if table_name == "evidence":
+                desc = fields.get("description") or fields.get("evidence_type") or "?"
+                snippet = str(desc)
+                snippet = snippet[:80] + "…" if len(snippet) > 80 else snippet
+                return f"[证据] {snippet}"
         labels = {
             "tool_call_log": "工具调用",
             "event_audit_log": "审计日志",
