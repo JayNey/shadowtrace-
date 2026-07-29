@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from app.api.v1 import schemas as s
 from app.api.v1.deps import _get_context_store as _real_get_context_store
+from app.api.v1.deps import _get_session_factory as _real_get_session_factory
 from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
 from app.api.v1.deps import get_event_service as _real_get_event_service
 from app.api.v1.deps import get_state_machine as _real_get_state_machine
@@ -99,6 +100,8 @@ def client() -> TestClient:
     app.dependency_overrides[_real_get_event_service] = lambda: mock_es
     app.dependency_overrides[_real_get_state_machine] = lambda: _MockStateMachine()
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
+    # Source-record GET must not hit real Postgres in contract tests.
+    app.dependency_overrides[_real_get_session_factory] = lambda: _empty_session_factory
 
     async def _mock_disposition_sync() -> _MockDispositionSyncService:
         return _MockDispositionSyncService()
@@ -107,6 +110,23 @@ def client() -> TestClient:
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
     yield TestClient(app)
     app.dependency_overrides.clear()
+
+
+class _EmptyAsyncSession:
+    """Async session stub: always miss so fixture/contract paths stay DB-free."""
+
+    async def get(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def __aenter__(self) -> _EmptyAsyncSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+def _empty_session_factory() -> _EmptyAsyncSession:
+    return _EmptyAsyncSession()
 
 
 def _hdr(role: str = "analyst") -> dict[str, str]:

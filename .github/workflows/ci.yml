@@ -347,6 +347,11 @@ jobs:
             --project-name "${COMPOSE_PROJECT_NAME}" \
             -f "${GITHUB_WORKSPACE}/infra/docker-compose.yml" \
             up -d --build --wait --wait-timeout 180
+          # Defense in depth: entrypoint migrates, but assert schema is ready.
+          docker compose \
+            --project-name "${COMPOSE_PROJECT_NAME}" \
+            -f "${GITHUB_WORKSPACE}/infra/docker-compose.yml" \
+            exec -T backend python -m alembic upgrade head
           curl --fail --show-error --silent \
             "http://127.0.0.1:${BACKEND_PORT}/api/v1/health" >/dev/null
           curl --fail --show-error --silent \

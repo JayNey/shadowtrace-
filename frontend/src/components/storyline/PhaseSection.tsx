@@ -14,9 +14,12 @@ function timestampValue(value: string): number {
 export default function PhaseSection({
   phase,
   evidenceById,
+  isPlaceholder = false,
 }: {
   phase: StorylinePhase;
   evidenceById: Map<string, Evidence>;
+  /** Synthetic empty shell padded by the timeline layout — not real storyline data. */
+  isPlaceholder?: boolean;
 }) {
   const color = PHASE_COLORS[phase.phase_name];
   const entries = [...phase.entries].sort(
@@ -27,7 +30,11 @@ export default function PhaseSection({
   return (
     <Card
       size="small"
-      data-testid={`storyline-phase-${phase.phase_name}`}
+      data-testid={
+        isPlaceholder
+          ? `storyline-phase-empty-${phase.phase_name}`
+          : `storyline-phase-${phase.phase_name}`
+      }
       style={{ borderLeft: `4px solid ${color}` }}
       title={
         <Space wrap>
