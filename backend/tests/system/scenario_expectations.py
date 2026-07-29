@@ -27,12 +27,7 @@ FULL_RESPONSE_SCENARIOS = frozenset(
     }
 )
 
-L3_APPROVAL_RESPONSE_SCENARIOS = frozenset(
-    {
-        "insider_data_exfiltration",
-        "lateral_movement",
-    }
-)
+L3_APPROVAL_RESPONSE_SCENARIOS = frozenset(FULL_RESPONSE_SCENARIOS)
 
 MOCK_WRITEBACK_SCENARIOS = frozenset(
     {

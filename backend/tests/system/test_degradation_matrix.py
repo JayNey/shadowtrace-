@@ -196,7 +196,7 @@ async def test_degradation_redis_unavailable_main_chain_completes_with_flag(
 
 @pytest.mark.usefixtures("clean_state")
 @pytest.mark.asyncio
-async def test_degradation_empty_knowledge_base_rag_degraded(
+async def test_empty_knowledge_base_completes_with_empty_rag_sections(
     mock_xdr_state: MockXDRState,
     source_adapter: object,
     source_ingester: SourceIngester,
@@ -205,6 +205,7 @@ async def test_degradation_empty_knowledge_base_rag_degraded(
     session_factory: async_sessionmaker[AsyncSession],
     run_analysis_pipeline: object,
 ) -> None:
+    """Empty KB hits are not RAG degradation — pipeline succeeds with empty sections."""
     event_id = await ingest_scenario_event(
         scenario_id="insider_data_exfiltration",
         source_adapter=source_adapter,
