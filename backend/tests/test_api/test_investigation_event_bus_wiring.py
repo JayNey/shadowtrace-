@@ -113,7 +113,8 @@ async def test_build_investigation_agents_wires_event_bus(monkeypatch: pytest.Mo
     assert stack["risk"].event_bus is bus
     assert stack["report"].event_bus is bus
     assert stack["memory"].event_bus is bus
-    assert all(captured[name] is bus for name in ("triage", "evidence", "rag", "risk", "report", "memory"))
+    wired = ("triage", "evidence", "rag", "risk", "report", "memory")
+    assert all(captured[name] is bus for name in wired)
 
 
 @pytest.mark.asyncio
