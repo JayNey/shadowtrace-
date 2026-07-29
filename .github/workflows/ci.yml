@@ -290,7 +290,7 @@ jobs:
           compose build
           compose up -d --wait --wait-timeout 180
 
-          for service in postgres redis backend frontend; do
+          for service in postgres redis mock-xdr backend frontend; do
             container_id="$(compose ps -q "${service}")"
             if [[ -z "${container_id}" ]]; then
               echo "${service} container is missing"
@@ -312,6 +312,8 @@ jobs:
             "http://127.0.0.1:${BACKEND_PORT}/api/v1/health" >/dev/null
           curl --fail --show-error --silent \
             "http://127.0.0.1:${FRONTEND_PORT}/health" >/dev/null
+          curl --fail --show-error --silent \
+            "http://127.0.0.1:8100/mock-xdr/v1/health" >/dev/null
 
   # ISSUE-077: optional Playwright e2e — manual only, does not block main pipeline.
   frontend-e2e:

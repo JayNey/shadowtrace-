@@ -7,14 +7,20 @@ COMPOSE_PROJECT_NAME ?= shadowtrace-$(WORKTREE_ID)
 POSTGRES_PORT ?= 5432
 REDIS_PORT ?= 6379
 BACKEND_PORT ?= 8000
-FRONTEND_PORT ?= 5173
+FRONTEND_PORT ?= 3000
+MOCK_XDR_PORT ?= 8100
 
 COMPOSE_FILE := $(CURDIR)/infra/docker-compose.yml
 COMPOSE := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 	POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \
 	BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
+	MOCK_XDR_PORT="$(MOCK_XDR_PORT)" \
 	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
 	-f "$(COMPOSE_FILE)"
+
+# Optional: set WORKER=1 to include the Celery investigation worker.
+WORKER ?=
+WORKER_PROFILE = $(if $(WORKER),--profile worker,)
 
 INTEGRATION_PROJECT_NAME ?= $(COMPOSE_PROJECT_NAME)-integration
 CI_TEST_PROJECT_NAME ?= $(COMPOSE_PROJECT_NAME)-ci-test
@@ -24,13 +30,26 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down test lint fmt migrate migrate-down load-kb integration-test orchestration-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build
+.PHONY: up down down-v bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build
 
 up:
-	$(COMPOSE) up -d --build
+	$(COMPOSE) $(WORKER_PROFILE) up -d --build
 
 down:
 	$(COMPOSE) down
+
+# Remove containers AND volumes (ISSUE-088 — full reset).
+down-v:
+	$(COMPOSE) down -v
+
+# ---------------------------------------------------------------------------
+# One-command bootstrap: migrate + seed demo scenarios (ISSUE-088)
+#
+# Requires core services already healthy (make up first).
+# Set LOAD_KB=true to also load knowledge bases (~30-60 s extra).
+# ---------------------------------------------------------------------------
+bootstrap:
+	@bash "$(CURDIR)/scripts/bootstrap.sh"
 
 # Apply / roll back the database schema. Override DATABASE_URL to target a host
 # (e.g. DATABASE_URL=postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace).
@@ -300,7 +319,7 @@ ci-build:
 	trap cleanup EXIT INT TERM; \
 	compose build; \
 	compose up -d --wait --wait-timeout 180; \
-	for service in postgres redis backend frontend; do \
+	for service in postgres redis mock-xdr backend frontend; do \
 		container_id=$$(compose ps -q "$$service"); \
 		if [ -z "$$container_id" ]; then \
 			echo "$$service container is missing"; \
@@ -316,4 +335,6 @@ ci-build:
 	curl --fail --show-error --silent \
 		"http://127.0.0.1:$(BACKEND_PORT)/api/v1/health" >/dev/null; \
 	curl --fail --show-error --silent \
-		"http://127.0.0.1:$(FRONTEND_PORT)/health" >/dev/null
+		"http://127.0.0.1:$(FRONTEND_PORT)/health" >/dev/null; \
+	curl --fail --show-error --silent \
+		"http://127.0.0.1:$(MOCK_XDR_PORT)/mock-xdr/v1/health" >/dev/null
