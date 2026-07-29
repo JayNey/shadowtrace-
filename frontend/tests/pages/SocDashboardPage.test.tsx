@@ -146,9 +146,30 @@ describe("SocDashboardPage", () => {
     expect(screen.queryByText("处置成功率")).not.toBeInTheDocument();
     expect(screen.queryByText(/action_success_rate/i)).not.toBeInTheDocument();
 
+    // Orthogonal rate numerators/denominators from makeStats() fixture.
+    await waitFor(() => {
+      expect(screen.getByText("1/1")).toBeInTheDocument();
+      expect(screen.getByText("0/1")).toBeInTheDocument();
+    });
+    // Null writeback rate shows em dash, not a fake 0%.
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(1);
+
     expect(screen.getByTestId("severity-pie-chart")).toBeInTheDocument();
     expect(screen.getByTestId("event-trend-chart")).toBeInTheDocument();
     expect(screen.getByTestId("high-risk-ticker")).toBeInTheDocument();
+  });
+
+  it("shows placeholders when stats never loaded", async () => {
+    mockGetStats.mockRejectedValue(new Error("stats down"));
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByTestId("soc-stats-unavailable")).toBeInTheDocument();
+    });
+    const grid = screen.getByTestId("stat-card-grid");
+    // Event totals must not flash "0" as if the warehouse were empty.
+    expect(grid).toHaveTextContent("—");
+    expect(grid).not.toHaveTextContent("0/0");
   });
 
   it("shows fullscreen toggle button", async () => {

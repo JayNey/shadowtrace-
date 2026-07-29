@@ -552,3 +552,52 @@ async def test_stats_unverifiable_enters_effect_denominator(
     assert efr["numerator"] == 1
     assert efr["denominator"] == 2
     assert efr["rate"] == pytest.approx(0.5)
+
+
+@pytest.mark.asyncio
+async def test_persist_skips_pending_skipped_statuses(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """In-flight SKIPPED must not stamp effect_verification_status (stay null)."""
+    from sqlalchemy import select
+
+    from app.agents.verify_agent import VerifyAgent
+    from app.models.agent_io import EffectStatus, VerificationActionResult, VerificationPhase
+
+    eid = await _seed_event(session_factory, title="pending-skipped")
+    aid = await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.PENDING,
+        effect_verification_status=None,
+        writeback_required=False,
+    )
+
+    agent = VerifyAgent(session_factory=session_factory)
+    await agent._persist_effect_verification_statuses(
+        [
+            VerificationActionResult(
+                action_id=aid,
+                effect_status=EffectStatus.SKIPPED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                writeback_status=None,
+                writeback_ids=[],
+                detail="pending_execution",
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ]
+    )
+
+    async with session_factory() as session:
+        row = (
+            await session.execute(select(orm.Action).where(orm.Action.action_id == aid))
+        ).scalar_one()
+        assert row.effect_verification_status is None
+
+    body = client.get("/api/v1/stats", headers=_hdr()).json()
+    efr = body["effect_verification_rate"]
+    assert efr["numerator"] == 0
+    assert efr["denominator"] == 0
+    assert efr["rate"] is None
