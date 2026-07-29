@@ -29,6 +29,7 @@ export default function AgentActivityStrip() {
   const [rows, setRows] = useState<AgentActivityRow[]>([]);
 
   useEffect(() => {
+    socketClient.ensureGlobalRoom();
     const unsub = socketClient.onEvent((evt) => {
       if (
         evt.type !== "agent_progress" &&
