@@ -1646,6 +1646,7 @@
           "stats"
         ],
         "summary": "Get Stats",
+        "description": "Return SOC dashboard aggregations (ISSUE-085).",
         "operationId": "get_stats_api_v1_stats_get",
         "responses": {
           "200": {
@@ -3820,6 +3821,25 @@
         ],
         "title": "HostEntity"
       },
+      "HourlyEventCount": {
+        "properties": {
+          "hour": {
+            "type": "string",
+            "title": "Hour"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "hour"
+        ],
+        "title": "HourlyEventCount",
+        "description": "One hour bucket for the SOC trend chart (ISSUE-085)."
+      },
       "IPEntity": {
         "properties": {
           "entity_id": {
@@ -4229,6 +4249,34 @@
           "entity_id"
         ],
         "title": "ProcessEntity"
+      },
+      "RateStat": {
+        "properties": {
+          "rate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rate"
+          },
+          "numerator": {
+            "type": "integer",
+            "title": "Numerator",
+            "default": 0
+          },
+          "denominator": {
+            "type": "integer",
+            "title": "Denominator",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "RateStat",
+        "description": "Rate with numerator/denominator; ``rate`` is null when denominator is 0.\n\nISSUE-085: the three disposition rates must stay separate — never fold into\na single misleading ``action_success_rate``."
       },
       "ReadinessRecheckResponse": {
         "properties": {
@@ -4961,6 +5009,54 @@
             "title": "Total Events",
             "default": 0
           },
+          "by_status": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Status"
+          },
+          "by_severity": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Severity"
+          },
+          "by_event_type": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "By Event Type"
+          },
+          "action_execution_success_rate": {
+            "$ref": "#/components/schemas/RateStat"
+          },
+          "effect_verification_rate": {
+            "$ref": "#/components/schemas/RateStat"
+          },
+          "writeback_confirmation_rate": {
+            "$ref": "#/components/schemas/RateStat"
+          },
+          "avg_investigation_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Investigation Seconds"
+          },
+          "events_last_24h": {
+            "items": {
+              "$ref": "#/components/schemas/HourlyEventCount"
+            },
+            "type": "array",
+            "title": "Events Last 24H"
+          },
           "open_events": {
             "type": "integer",
             "title": "Open Events",
@@ -4988,7 +5084,8 @@
           }
         },
         "type": "object",
-        "title": "StatsResponse"
+        "title": "StatsResponse",
+        "description": "Platform statistics (ISSUE-085 SOC dashboard).\n\nLegacy summary counters (``open_events`` …) remain for pre-085 clients."
       },
       "StorylineGeneratedBy": {
         "type": "string",

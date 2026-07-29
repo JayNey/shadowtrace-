@@ -1,4 +1,4 @@
-/** Application router (ISSUE-067). */
+/** Application router (ISSUE-067 / ISSUE-085). */
 
 import { createBrowserRouter } from "react-router-dom";
 import MainLayout from "./layouts/MainLayout";
@@ -6,6 +6,7 @@ import EventListPage from "./pages/EventListPage";
 import EventDetailPage from "./pages/EventDetailPage";
 import ApprovalPage from "./pages/ApprovalPage";
 import ToolAuditPage from "./pages/ToolAuditPage";
+import SocDashboardPage from "./pages/SocDashboardPage";
 
 export const router = createBrowserRouter([
   {
@@ -19,4 +20,6 @@ export const router = createBrowserRouter([
       { path: "tools-audit", element: <ToolAuditPage /> },
     ],
   },
+  // Isolated from MainLayout so SOC wall / missing page cannot break other routes.
+  { path: "/dashboard", element: <SocDashboardPage /> },
 ]);
