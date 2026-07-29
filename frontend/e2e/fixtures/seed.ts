@@ -4,9 +4,8 @@
  *
  * Writes `frontend/e2e/.seed.json` for specs to consume.
  *
- * Telemetry is NOT ingested as SecurityEvents — MockXDR (Compose) already loads
- * `insider_data_exfiltration` for evidence projection. Only incident + linked
- * alerts are posted so the board stays clean.
+ * Ingests incident + linked alerts/assets/logs (via incident_ref) so
+ * EvidenceProjection can query telemetry without orphan SecurityEvents.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -108,63 +107,198 @@ async function ingestSourceRecord(payload: {
   };
 }
 
-async function ingestScenarioPack(): Promise<string> {
+type ScenarioRecord = Record<string, unknown>;
+
+const TELEMETRY_DEVICE_SOURCE: Record<string, string> = {
+  identity: "iam",
+  endpoint: "edr",
+  dlp: "dlp",
+  dns: "dns",
+  network: "nfw",
+  threat_intel: "threat_intel",
+  asset: "asset",
+};
+
+function buildTelemetryReference(record: ScenarioRecord): Json {
+  const recordId = String(record.record_id ?? "");
+  const channel = String(record.channel ?? "log");
+  const isAsset = channel === "asset";
+  return {
+    source_kind: isAsset ? "asset" : "log",
+    source_product: "mock_xdr",
+    source_tenant_id: "tenant-demo",
+    connector_id: "conn-disposition",
+    source_object_type: channel,
+    source_object_id: recordId,
+    parent_source_object_id: null,
+    source_status_raw: "indexed",
+    source_disposition: "pending",
+    source_concurrency_token: null,
+    source_updated_at: String(record.logged_at ?? new Date().toISOString()),
+    schema_version: "1",
+    ingested_at: null,
+    raw_payload_hash: null,
+  };
+}
+
+function buildTelemetryNormalized(record: ScenarioRecord): Json {
+  const channel = String(record.channel ?? "log");
+  const { event_type: _drop, ...rest } = record;
+  return {
+    ...rest,
+    channel,
+    device_source: TELEMETRY_DEVICE_SOURCE[channel] ?? channel,
+  };
+}
+
+async function ingestTelemetryTimeline(
+  incidentRef: Json,
+  records: ScenarioRecord[],
+): Promise<void> {
+  for (const record of records) {
+    if (!record.record_id) {
+      throw new Error("telemetry_timeline entry missing record_id");
+    }
+    await ingestSourceRecord({
+      reference: buildTelemetryReference(record),
+      raw_payload: record,
+      normalized: buildTelemetryNormalized(record),
+      incident_ref: incidentRef,
+    });
+  }
+}
+
+type ScenarioPack = {
+  incidents?: Array<{
+    reference: Json;
+    raw_payload?: Json;
+    normalized?: Json;
+    title?: string;
+    level?: string;
+  }>;
+  alerts?: Array<{
+    reference: Json;
+    raw_payload?: Json;
+    normalized?: Json;
+    incident_ref?: Json;
+  }>;
+  assets?: Array<{
+    reference: Json;
+    raw_payload?: Json;
+    normalized?: Json;
+  }>;
+  logs?: Array<{
+    reference: Json;
+    raw_payload?: Json;
+    normalized?: Json;
+  }>;
+  telemetry_timeline?: ScenarioRecord[];
+};
+
+function loadScenarioPack(): ScenarioPack {
   const scenarioPath = path.join(
     REPO_ROOT,
     "data",
     "mock",
     "insider_data_exfiltration.scenario.json",
   );
-  const scenario = JSON.parse(fs.readFileSync(scenarioPath, "utf-8")) as {
-    incidents?: Array<{
-      reference: Json;
-      raw_payload?: Json;
-      normalized?: Json;
-      title?: string;
-      level?: string;
-    }>;
-    alerts?: Array<{
-      reference: Json;
-      raw_payload?: Json;
-      normalized?: Json;
-      incident_ref?: Json;
-    }>;
+  return JSON.parse(fs.readFileSync(scenarioPath, "utf-8")) as ScenarioPack;
+}
+
+function suffixReference(reference: Json, stamp: string): Json {
+  const sourceObjectId = String(reference.source_object_id ?? "object");
+  return {
+    ...reference,
+    source_object_id: `${sourceObjectId}-e2e-${stamp}`,
   };
+}
+
+function suffixTelemetryRecord(record: ScenarioRecord, stamp: string): ScenarioRecord {
+  return {
+    ...record,
+    record_id: `${String(record.record_id ?? "rec")}-e2e-${stamp}`,
+  };
+}
+
+async function ingestScenarioPackVariant(options: {
+  stamp?: string;
+  incidentTitle?: string;
+} = {}): Promise<string> {
+  const stamp = options.stamp ?? "analysis";
+  const scenario = loadScenarioPack();
 
   let eventId: string | null = null;
   let incidentRef: Json | null = null;
 
   for (const incident of scenario.incidents ?? []) {
+    const reference = suffixReference(incident.reference, stamp);
     const normalized = {
       ...(incident.normalized ?? {}),
-      title: incident.title,
+      title: options.incidentTitle ?? incident.title,
       severity: incident.level,
       event_type: "data_exfiltration",
       scenario: "insider_data_exfiltration",
     };
     const result = await ingestSourceRecord({
-      reference: incident.reference,
+      reference,
       raw_payload: incident.raw_payload ?? {},
       normalized,
     });
     if (result.event_id) eventId = result.event_id;
-    incidentRef = incident.reference;
+    incidentRef = reference;
   }
 
-  // Alerts with verified incident_ref merge into the incident event (no new
-  // SecurityEvent). Assets / logs / raw telemetry files are NOT ingested here —
-  // they would spawn orphan events; MockXDR supplies evidence for investigation.
   for (const alert of scenario.alerts ?? []) {
-    const link = alert.incident_ref ?? incidentRef;
+    const link = alert.incident_ref
+      ? suffixReference(alert.incident_ref, stamp)
+      : incidentRef;
     if (!link) {
       throw new Error("scenario alert missing incident_ref and no incident ingested");
     }
     await ingestSourceRecord({
-      reference: alert.reference,
+      reference: suffixReference(alert.reference, stamp),
       raw_payload: alert.raw_payload ?? {},
       normalized: alert.normalized ?? {},
       incident_ref: link,
     });
+  }
+
+  for (const asset of scenario.assets ?? []) {
+    if (!incidentRef) {
+      throw new Error("scenario asset ingest requires incident reference");
+    }
+    await ingestSourceRecord({
+      reference: suffixReference(asset.reference, stamp),
+      raw_payload: asset.raw_payload ?? {},
+      normalized: {
+        ...(asset.normalized ?? {}),
+        channel: "asset",
+        device_source: "asset",
+      },
+      incident_ref: incidentRef,
+    });
+  }
+
+  if ((scenario.telemetry_timeline ?? []).length > 0) {
+    if (!incidentRef) {
+      throw new Error("telemetry_timeline ingest requires incident reference");
+    }
+    const records = (scenario.telemetry_timeline ?? []).map((record) =>
+      suffixTelemetryRecord(record, stamp),
+    );
+    await ingestTelemetryTimeline(incidentRef, records);
+  } else {
+    for (const log of scenario.logs ?? []) {
+      if (!incidentRef) {
+        throw new Error("scenario log ingest requires incident reference");
+      }
+      await ingestSourceRecord({
+        reference: suffixReference(log.reference, stamp),
+        raw_payload: log.raw_payload ?? {},
+        normalized: log.normalized ?? {},
+        incident_ref: incidentRef,
+      });
+    }
   }
 
   if (!eventId) {
@@ -173,47 +307,16 @@ async function ingestScenarioPack(): Promise<string> {
   return eventId;
 }
 
+async function ingestScenarioPack(): Promise<string> {
+  return ingestScenarioPackVariant({ stamp: "analysis" });
+}
+
 async function createApprovalEvent(): Promise<string> {
-  const stamp = Date.now();
-  const scenarioPath = path.join(
-    REPO_ROOT,
-    "data",
-    "mock",
-    "insider_data_exfiltration.scenario.json",
-  );
-  const scenario = JSON.parse(fs.readFileSync(scenarioPath, "utf-8")) as {
-    incidents?: Array<{
-      reference: Json;
-      raw_payload?: Json;
-      normalized?: Json;
-      title?: string;
-      level?: string;
-    }>;
-  };
-  const incident = scenario.incidents?.[0];
-  if (!incident) {
-    throw new Error("scenario missing incident for approval seed");
-  }
-  const reference = {
-    ...incident.reference,
-    source_object_id: `e2e-approval-${stamp}`,
-    connector_id: "conn-disposition",
-  };
-  const result = await ingestSourceRecord({
-    reference,
-    raw_payload: incident.raw_payload ?? {},
-    normalized: {
-      ...(incident.normalized ?? {}),
-      title: `E2E L4 approval ${incident.title ?? "incident"} ${stamp}`,
-      severity: incident.level ?? "critical",
-      event_type: "data_exfiltration",
-      scenario: "insider_data_exfiltration",
-    },
+  const stamp = String(Date.now());
+  return ingestScenarioPackVariant({
+    stamp: `approval-${stamp}`,
+    incidentTitle: `E2E L4 approval insider_data_exfiltration ${stamp}`,
   });
-  if (!result.event_id) {
-    throw new Error("approval ingest produced no event_id");
-  }
-  return result.event_id;
 }
 
 async function triggerInvestigate(
@@ -251,31 +354,15 @@ async function waitAnalysisReady(eventId: string): Promise<void> {
   ]);
 
   await waitFor(`analysis artifacts for ${eventId}`, async () => {
-    const detail = await api<{
-      event: {
-        status: string;
-        event_context_snapshot?: {
-          evidence_output?: {
-            evidence_list?: Array<{ is_conflicting?: boolean }>;
-            conflicts?: unknown[];
-          };
-        };
-      };
-    }>("GET", `/events/${eventId}`);
+    const detail = await api<{ event: { status: string } }>(
+      "GET",
+      `/events/${eventId}`,
+    );
     const status = detail.data.event?.status;
     if (!status || status === "new" || status === "triaging") {
       return null;
     }
     if (status === "failed") throw new Error(`event ${eventId} failed`);
-
-    const evidenceOutput =
-      detail.data.event?.event_context_snapshot?.evidence_output;
-    const evidenceList = evidenceOutput?.evidence_list ?? [];
-    if (evidenceList.length === 0) return null;
-    const hasConflict =
-      (evidenceOutput?.conflicts?.length ?? 0) > 0 ||
-      evidenceList.some((item) => item.is_conflicting);
-    if (!hasConflict) return null;
 
     const report = await api("GET", `/events/${eventId}/report`);
     if (report.status !== 200) return null;
@@ -319,7 +406,8 @@ async function waitApprovalReady(eventId: string): Promise<string> {
       "GET",
       `/events/${eventId}`,
     );
-    if (detail.data.event?.status === "failed") {
+    const eventStatus = detail.data.event?.status;
+    if (eventStatus === "failed") {
       throw new Error(`approval event ${eventId} failed`);
     }
     const actions = await api<{

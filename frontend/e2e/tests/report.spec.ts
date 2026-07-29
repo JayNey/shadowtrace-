@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import fs from "node:fs";
 import path from "node:path";
 import { readSeedState } from "../fixtures/seed";
 
@@ -22,5 +23,6 @@ test.describe("path 6 · report viewer", () => {
       suggested || "report.md",
     );
     await download.saveAs(target);
+    expect(fs.statSync(target).size).toBeGreaterThan(100);
   });
 });

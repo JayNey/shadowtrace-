@@ -187,6 +187,43 @@ async def test_entity_target_present_passes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_non_entity_target_tools_skip_entity_guard() -> None:
+    guard = OutputGuard(mode=GuardrailMode.ENFORCE)
+    ticket = Action.model_validate(
+        {
+            "action_id": "act-ticket",
+            "event_id": "evt-1",
+            "plan_revision": 1,
+            "action_fingerprint": "fp-ticket",
+            "action_category": ActionCategory.RESPONSE.value,
+            "action_name": "create_ticket",
+            "tool_name": "create_ticket",
+            "action_level": ActionLevel.L1.value,
+            "execution_owner": ExecutionOwner.XDR_MANAGED.value,
+            "status": "pending",
+            "writeback_required": False,
+            "writeback_applicable": False,
+            "writeback_readiness": WritebackReadiness.NOT_REQUIRED.value,
+            "target": "ticket",
+            "parameters": {"title": "t", "description": "d"},
+            "reason": "track work",
+        }
+    )
+    plan = ResponsePlan(
+        plan_id="plan-ticket",
+        actions=[ticket],
+        strategy_summary="ticket only",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    result = await guard.validate(
+        "response_agent",
+        plan,
+        {"event_id": "evt-ticket", "entities": EntitySet()},
+    )
+    assert result.passed is True
+
+
+@pytest.mark.asyncio
 async def test_warn_only_demotes_quality_blocks_and_returns_sanitized_output() -> None:
     writer = InMemoryGuardViolationWriter()
     guard = OutputGuard(mode=GuardrailMode.WARN_ONLY, violation_writer=writer)

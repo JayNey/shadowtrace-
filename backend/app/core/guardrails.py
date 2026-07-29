@@ -341,6 +341,8 @@ def _check_entity_target_exists(
     targets: list[str] = []
     for action in actions:
         payload = action if isinstance(action, Action) else Action.model_validate(action)
+        if payload.tool_name in _NON_ENTITY_TARGET_TOOLS:
+            continue
         if payload.target:
             targets.append(payload.target)
         for key in ("canonical_target", "target", "ip", "hostname", "username", "fqdn"):
@@ -459,6 +461,16 @@ _RULE_CHECKERS: dict[str, RuleChecker] = {
     "citation_present": _check_citation_present,
     "no_pii_leak": _check_no_pii_leak,
 }
+
+# Response tools whose targets are synthetic (ticket/channel/source object id),
+# not EntitySet identities — skip entity_target_exists for these.
+_NON_ENTITY_TARGET_TOOLS = frozenset(
+    {
+        "create_ticket",
+        "notify_security_team",
+        "update_source_event_disposition",
+    }
+)
 
 
 def _quality_rules(*names: str, severity: GuardSeverity = "block") -> list[GuardRule]:

@@ -2,18 +2,18 @@
   "content": {
     "actions": [
       {
-        "tool_name": "disable_account",
+        "tool_name": "reset_password",
         "target_type": "account",
-        "target": "svc-backup",
+        "target": "zhangsan",
         "parameters": {},
-        "reason": "Disable suspected compromised service account"
+        "reason": "Reset credentials for suspected insider account"
       },
       {
-        "tool_name": "block_ip",
-        "target_type": "ip",
-        "target": "203.0.113.50",
+        "tool_name": "isolate_host",
+        "target_type": "host",
+        "target": "PC-FIN-023",
         "parameters": {},
-        "reason": "Block external exfil destination"
+        "reason": "Isolate finance endpoint pending investigation"
       },
       {
         "tool_name": "create_ticket",
@@ -26,7 +26,7 @@
         "reason": "Track investigation actions"
       }
     ],
-    "strategy_summary": "Contain compromised account and block external exfil endpoint"
+    "strategy_summary": "Reset insider account credentials and isolate finance endpoint"
   },
   "model_name": "mock-model",
   "prompt_tokens": 180,

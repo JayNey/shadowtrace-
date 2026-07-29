@@ -216,18 +216,13 @@ update-baseline:
 # --- ISSUE-077 frontend Playwright e2e (optional; does not block P0 CI) --- #
 # Requires a healthy Compose stack (postgres/redis/backend/frontend).
 # Usage: docker compose up -d && make test-e2e-frontend
-# Backend container entrypoint runs alembic; this target also migrates from the
-# host as defense in depth against stale volumes.
+# Backend container entrypoint applies alembic on boot.
 E2E_FRONTEND_URL ?= http://127.0.0.1:$(FRONTEND_PORT)
 E2E_BACKEND_URL ?= http://127.0.0.1:$(BACKEND_PORT)/api/v1
 E2E_AUTH_TOKEN ?= e2e-token
 
 test-e2e-frontend:
 	@set -eu; \
-	echo "Ensuring database schema is at head …"; \
-	cd "$(CURDIR)/backend" && \
-		DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
-		$(PYTHON) -m alembic upgrade head; \
 	echo "Checking frontend health at $(E2E_FRONTEND_URL)/health …"; \
 	curl --fail --show-error --silent "$(E2E_FRONTEND_URL)/health" >/dev/null; \
 	echo "Checking backend health at $(E2E_BACKEND_URL)/health …"; \

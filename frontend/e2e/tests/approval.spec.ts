@@ -35,14 +35,49 @@ test.describe("path 5 · L4 approval", () => {
   }) => {
     const { approvalEventId, approvalActionId } = readSeedState();
 
+    async function fetchWaitingActionIds(): Promise<string[]> {
+      const res = await fetch(
+        `${BACKEND_BASE_URL}/events/${approvalEventId}/actions?status=waiting_approval&page_size=50`,
+        {
+          headers: {
+            Authorization: `Bearer ${AUTH_TOKEN}`,
+            Accept: "application/json",
+          },
+        },
+      );
+      if (!res.ok) {
+        throw new Error(`actions fetch failed (${res.status})`);
+      }
+      const body = (await res.json()) as {
+        items?: Array<{ action_id?: string }>;
+      };
+      return (body.items ?? [])
+        .map((item) => item.action_id)
+        .filter((id): id is string => Boolean(id));
+    }
+
+    async function confirmApprovalDialog(): Promise<void> {
+      const dialog = page.getByRole("dialog", { name: "批准动作" });
+      await expect(dialog).toBeVisible();
+      await dialog.getByRole("button", { name: /批\s*准/ }).click();
+      await expect(dialog).toHaveCount(0);
+    }
+
     await page.goto("/approvals");
-    const card = page.getByTestId(`approval-card-${approvalActionId}`);
-    await expect(card).toBeVisible({ timeout: 60_000 });
 
-    await card.getByText("批准").click();
-    await page.getByRole("button", { name: "批准" }).click();
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const waitingIds = await fetchWaitingActionIds();
+      if (waitingIds.length === 0) {
+        break;
+      }
+      const actionId = waitingIds[0];
+      const card = page.getByTestId(`approval-card-${actionId}`);
+      await expect(card).toBeVisible({ timeout: 60_000 });
+      await card.getByText("批准", { exact: true }).click();
+      await confirmApprovalDialog();
+    }
 
-    await expect(card).toHaveCount(0, { timeout: 60_000 });
+    expect(await fetchWaitingActionIds()).not.toContain(approvalActionId);
 
     // Event must leave waiting_approval after the plan is fully decided.
     // UI label is "待审批" (STATUS_CONFIG), not "等待审批".

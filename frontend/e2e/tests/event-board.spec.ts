@@ -12,8 +12,12 @@ test.describe("path 1 · event board filter → detail", () => {
     });
 
     await page.getByTestId("filter-severity").click();
-    // SEVERITY_CONFIG.critical.label is "紧急" (not "严重").
-    await page.getByRole("option", { name: /^紧急$/ }).click();
+    // Seeded analysis event severity is `high` (risk agent output), not incident `critical`.
+    await page
+      .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
+      .getByText("高", { exact: true })
+      .click();
+    await expect(page).toHaveURL(/severity=high/);
     await expect(page.getByTestId(`event-row-${analysisEventId}`)).toBeVisible();
 
     await page.getByTestId(`event-row-${analysisEventId}`).click();

@@ -362,6 +362,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             #    (API response, frontend, ReportAgent fallback) see latest data.
             if self._investigation_graph is not None:
                 ec = await self._load_event_context(event_id)
+                ec = await self._finalize_analysis_artifacts(ec)
             else:
                 ec = final_state.get("event_context", event_context)
             await self._persist_event_context(ec)
@@ -972,6 +973,31 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 event_id,
                 exc_info=True,
             )
+
+    async def _finalize_analysis_artifacts(self, ec: EventContext) -> EventContext:
+        """Run GraphAgent + StorylineService after LangGraph analysis (ISSUE-077).
+
+        Production ``workflow_graph`` stops at report when response execution is
+        deferred; frontend e2e and timeline/graph tabs still need persisted artifacts.
+        """
+        if self._investigation_graph is None:
+            return ec
+        event_id = _event_id_from_context(ec)
+        dummy_step = PlanStep(
+            step_order=0,
+            assigned_agent="graph_agent",
+            step_goal="post_report_graph",
+        )
+        await self._run_graph_step(ec, dummy_step)
+        await self._run_storyline_step(ec)
+        logger.info(
+            "SuperAgent: finalized analysis artifacts for event=%s "
+            "(graph=%s storyline=%s)",
+            event_id,
+            ec.graph_output is not None,
+            ec.storyline is not None,
+        )
+        return ec
 
     async def _run_storyline_step(self, ec: EventContext) -> None:
         """Optional StorylineService step (P1 capability switch).

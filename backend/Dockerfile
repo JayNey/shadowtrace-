@@ -5,10 +5,11 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml alembic.ini ./
-COPY app ./app
-COPY migrations ./migrations
-COPY docker-entrypoint.sh /docker-entrypoint.sh
+COPY backend/pyproject.toml backend/alembic.ini ./
+COPY backend/app ./app
+COPY backend/migrations ./migrations
+COPY backend/docker-entrypoint.sh /docker-entrypoint.sh
+COPY contracts /contracts
 RUN chmod +x /docker-entrypoint.sh \
     && pip install --no-cache-dir -e ".[dev]"
 

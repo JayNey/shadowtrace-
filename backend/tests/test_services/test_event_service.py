@@ -704,6 +704,48 @@ async def test_alert_with_verified_incident_ref_merges(
 
 
 @pytest.mark.asyncio
+async def test_log_with_verified_incident_ref_links_without_new_event(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sfx = _sfx()
+    incident_ref = _ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-log-{sfx}")
+    log_ref = _ref(
+        kind=SourceObjectKind.LOG,
+        object_id=f"LOG-{sfx}",
+        connector_id=f"conn-log-{sfx}",
+    )
+
+    inc = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=incident_ref,
+            title="inc-for-log",
+            source_type="mock_xdr",
+        )
+    )
+    linked = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=log_ref,
+            title="telemetry-log",
+            source_type="mock_xdr",
+            incident_ref=incident_ref,
+        )
+    )
+    assert linked.event_id == inc.event_id
+    assert linked.created is False
+
+    async with session_factory() as session:
+        links = (
+            await session.scalars(
+                select(orm.SourceEventLink.event_id).where(
+                    orm.SourceEventLink.source_record_id == linked.source_record_id
+                )
+            )
+        ).all()
+        assert links == [inc.event_id]
+
+
+@pytest.mark.asyncio
 async def test_file_create_event_not_required_and_idempotent(
     event_service: EventService,
 ) -> None:

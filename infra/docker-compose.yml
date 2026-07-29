@@ -28,8 +28,8 @@ services:
 
   backend:
     build:
-      context: ../backend
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: backend/Dockerfile
     env_file:
       - ../.env.example
     environment:
@@ -61,8 +61,8 @@ services:
       context: ../frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE_URL: http://localhost:8000/api/v1
-        VITE_SOCKET_URL: http://localhost:8000
+        VITE_API_BASE_URL: http://localhost:${BACKEND_PORT:-8000}/api/v1
+        VITE_SOCKET_URL: http://localhost:${BACKEND_PORT:-8000}
         VITE_DEV_AUTH_TOKEN: e2e-token
         VITE_AUTH_SUBJECT: e2e-operator
         VITE_APPROVER_DISPLAY: E2E Operator
@@ -82,8 +82,8 @@ services:
   worker:
     profiles: ["worker"]
     build:
-      context: ../backend
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: backend/Dockerfile
     env_file:
       - ../.env.example
     environment:
