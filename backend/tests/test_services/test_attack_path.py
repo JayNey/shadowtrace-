@@ -355,6 +355,21 @@ async def test_cross_event_paths_requires_matching_entity_type(
     get_settings.cache_clear()
 
 
+@pytest.mark.asyncio
+async def test_cross_event_paths_empty_when_cypher_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TimeoutError from Neo4j must degrade to [] (graph API stays available)."""
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    client = _FakeNeo4jClient(raise_on_cypher=TimeoutError("neo4j soft timeout"))
+    svc = AttackPathService(client=cast(Neo4jClient, client))
+    assert await svc.find_cross_event_paths("evt-any") == []
+    get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # Neo4j integration
 # ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ export default function CrossEventPathOverlay({
     <Space wrap data-testid="cross-event-path-overlay">
       <Switch
         checked={enabled}
-        onChange={onEnabledChange}
+        onChange={(checked) => onEnabledChange(checked)}
         data-testid="cross-event-path-toggle"
         aria-label="叠加跨事件路径"
       />

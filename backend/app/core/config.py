@@ -90,6 +90,8 @@ class Settings(BaseSettings):
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
     neo4j_password: str = Field(default="shadowtrace", alias="NEO4J_PASSWORD")
+    # Soft bound for optional Neo4j so graph API degrades quickly when Bolt hangs.
+    neo4j_timeout_seconds: float = Field(default=3.0, alias="NEO4J_TIMEOUT_SECONDS")
 
     def model_post_init(self, __context: object) -> None:
         if not (self.celery_broker_url or "").strip():
