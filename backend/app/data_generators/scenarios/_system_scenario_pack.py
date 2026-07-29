@@ -505,7 +505,7 @@ def _build_timeline(*, spec: SystemScenarioSpec, base: datetime, seed: int) -> l
 
 def build_host_compromise(
     *, seed: int = 42, variant: ScenarioVariant | str = ScenarioVariant.NORMAL, instance: int = 0
-):
+) -> MockXDRScenario:
     return build_system_scenario(
         HOST_COMPROMISE_SPEC, seed=seed, variant=variant, instance=instance
     )
@@ -513,7 +513,7 @@ def build_host_compromise(
 
 def build_malicious_process(
     *, seed: int = 42, variant: ScenarioVariant | str = ScenarioVariant.NORMAL, instance: int = 0
-):
+) -> MockXDRScenario:
     return build_system_scenario(
         MALICIOUS_PROCESS_SPEC, seed=seed, variant=variant, instance=instance
     )
@@ -521,7 +521,7 @@ def build_malicious_process(
 
 def build_insider_privilege_abuse(
     *, seed: int = 42, variant: ScenarioVariant | str = ScenarioVariant.NORMAL, instance: int = 0
-):
+) -> MockXDRScenario:
     return build_system_scenario(
         INSIDER_PRIVILEGE_ABUSE_SPEC, seed=seed, variant=variant, instance=instance
     )
@@ -529,7 +529,7 @@ def build_insider_privilege_abuse(
 
 def build_lateral_movement(
     *, seed: int = 42, variant: ScenarioVariant | str = ScenarioVariant.NORMAL, instance: int = 0
-):
+) -> MockXDRScenario:
     return build_system_scenario(
         LATERAL_MOVEMENT_SPEC, seed=seed, variant=variant, instance=instance
     )
@@ -537,7 +537,7 @@ def build_lateral_movement(
 
 def build_other_unclassified(
     *, seed: int = 42, variant: ScenarioVariant | str = ScenarioVariant.NORMAL, instance: int = 0
-):
+) -> MockXDRScenario:
     return build_system_scenario(
         OTHER_UNCLASSIFIED_SPEC, seed=seed, variant=variant, instance=instance
     )
