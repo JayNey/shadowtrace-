@@ -253,7 +253,7 @@ export default function EntityGraph({
 
   if (loadState === "idle" || loadState === "loading") {
     return (
-      <div data-testid="entity-graph">
+      <div data-testid="entity-graph-loading">
         <Skeleton active paragraph={{ rows: 12 }} />
       </div>
     );
@@ -261,7 +261,7 @@ export default function EntityGraph({
 
   if (loadState === "error") {
     return (
-      <div data-testid="entity-graph">
+      <div data-testid="entity-graph-error">
         <Alert
           type="error"
           showIcon
@@ -275,7 +275,7 @@ export default function EntityGraph({
 
   if (!graph || graph.nodes.length === 0) {
     return (
-      <div data-testid="entity-graph">
+      <div data-testid="entity-graph-empty">
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
           description="图谱未生成"

@@ -117,7 +117,7 @@ export default function StorylineTimeline({
 
   if (loadState === "idle" || loadState === "loading") {
     return (
-      <div data-testid="storyline-timeline">
+      <div data-testid="storyline-timeline-loading">
         <Skeleton active paragraph={{ rows: 8 }} />
       </div>
     );
@@ -125,7 +125,7 @@ export default function StorylineTimeline({
 
   if (loadState === "error") {
     return (
-      <div data-testid="storyline-timeline">
+      <div data-testid="storyline-timeline-error">
         <Alert
           type="error"
           showIcon
@@ -143,7 +143,7 @@ export default function StorylineTimeline({
         direction="vertical"
         size={16}
         style={{ width: "100%" }}
-        data-testid="storyline-timeline"
+        data-testid="storyline-timeline-fallback"
       >
         <Alert
           type="info"

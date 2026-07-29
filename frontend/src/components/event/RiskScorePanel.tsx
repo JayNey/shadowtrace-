@@ -41,7 +41,7 @@ export default function RiskScorePanel({
     return (
       <Card
         title={`六维风险${fallbackScore === undefined ? "" : ` · ${fallbackScore}`}`}
-        data-testid="risk-radar"
+        data-testid="risk-radar-empty"
         style={{ height: "100%" }}
       >
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
