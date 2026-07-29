@@ -81,6 +81,9 @@ class EventCreateRequest(_StrictRequest):
 
 class InvestigateRequest(_StrictRequest):
     force_replan: bool = False
+    # When true, continue past analysis into ResponseAgent / approval (ISSUE-077 e2e).
+    # Default false keeps ISSUE-566 HTTP investigate analysis-complete at report.
+    include_response_execution: bool = False
 
 
 class EventCloseRequest(_StrictRequest):

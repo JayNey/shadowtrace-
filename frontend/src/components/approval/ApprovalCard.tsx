@@ -73,6 +73,7 @@ function ApprovalCard({
     <Card
       size="small"
       style={cardStyle}
+      data-testid={`approval-card-${action.action_id}`}
       title={
         <Space wrap>
           <Text strong>{action.action_name || action.tool_name}</Text>

@@ -80,6 +80,7 @@ export default function AttackPathPlayer({
         type="primary"
         icon={currentStep >= 0 ? <ReloadOutlined /> : <CaretRightOutlined />}
         aria-label={currentStep >= 0 ? "重新播放" : "播放路径"}
+        data-testid="attack-path-play"
         disabled={selectedPath.length === 0 || playing}
         onClick={() => {
           setCurrentStep(0);

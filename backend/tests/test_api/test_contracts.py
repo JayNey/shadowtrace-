@@ -155,6 +155,17 @@ class _MockEventService:
     async def create_event(self, raw_alert: Any, source_type: str = "file", **kwargs: Any) -> Any:
         return self._example_event()
 
+    async def ingest_source_object(self, source_object: Any) -> Any:
+        from app.services.event_service import IngestResult
+
+        _ = source_object
+        return IngestResult(
+            source_record_id="src-associated-1",
+            event_id=s.EXAMPLE_EVENT_ID,
+            accepted=True,
+            created=True,
+        )
+
     async def get_report(self, *, report_id: str | None = None, event_id: str | None = None) -> Any:
         if event_id == s.EXAMPLE_EVENT_ID:
             return s.example_report(event_id)

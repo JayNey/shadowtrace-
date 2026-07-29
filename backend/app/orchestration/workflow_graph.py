@@ -425,6 +425,7 @@ async def build_initial_investigation_state(
     event_id: str,
     *,
     context_store: EventContextStore,
+    defer_response_execution: bool = True,
 ) -> InvestigationState:
     """Build LangGraph initial state from persisted EventContext + event row."""
     context = await context_store.get_full_context(event_id)
@@ -456,7 +457,8 @@ async def build_initial_investigation_state(
         "needs_approval_wait": False,
         # ISSUE-566: initial HTTP investigate completes analysis at report;
         # response/approval/execute/verify resume via approval_engine hooks.
-        "defer_response_execution": True,
+        # ISSUE-077 may set defer_response_execution=False to reach L4 approval.
+        "defer_response_execution": defer_response_execution,
     }
     if context.triage_result is not None:
         state["triage_result"] = context.triage_result

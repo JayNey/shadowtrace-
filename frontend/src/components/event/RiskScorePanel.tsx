@@ -39,7 +39,11 @@ export default function RiskScorePanel({
 }) {
   if (!assessment) {
     return (
-      <Card title={`六维风险${fallbackScore === undefined ? "" : ` · ${fallbackScore}`}`} style={{ height: "100%" }}>
+      <Card
+        title={`六维风险${fallbackScore === undefined ? "" : ` · ${fallbackScore}`}`}
+        data-testid="risk-radar"
+        style={{ height: "100%" }}
+      >
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无数据" />
       </Card>
     );
@@ -75,7 +79,7 @@ export default function RiskScorePanel({
   return (
     <Card
       title={`六维风险 · ${assessment.risk_score}`}
-      data-testid="risk-score-panel"
+      data-testid="risk-radar"
       style={{ height: "100%" }}
     >
       <ReactECharts option={option} style={{ height: 260 }} />
