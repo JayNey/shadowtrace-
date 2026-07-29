@@ -15,13 +15,10 @@ test.describe("path 2 · event detail overview / radar / conflicts", () => {
     await expect(page.getByTestId("risk-radar")).toBeVisible();
 
     await page.locator(".shadowtrace-event-tabs").getByText("证据").click();
-    // Conflict tags appear when EvidenceAgent detected conflicts; tolerate
-    // absent conflicts when telemetry projection is sparse, but the evidence
-    // tab must render.
-    const conflict = page.locator("[data-testid^=\"evidence-conflict-\"]").first();
     const evidenceRow = page.locator("[data-testid^=\"evidence-row-\"]").first();
-    await expect(conflict.or(evidenceRow).or(page.getByText("暂无数据"))).toBeVisible({
-      timeout: 30_000,
-    });
+    await expect(evidenceRow).toBeVisible({ timeout: 30_000 });
+
+    const conflict = page.locator("[data-testid^=\"evidence-conflict-\"]").first();
+    await expect(conflict).toBeVisible({ timeout: 30_000 });
   });
 });

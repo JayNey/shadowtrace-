@@ -18,29 +18,17 @@ test.describe("path 3 · storyline timeline", () => {
       timeout: 60_000,
     });
 
-    const phasesReady = await page
-      .getByTestId("storyline-phase-initial_access")
-      .isVisible()
-      .catch(() => false);
-
-    if (!phasesReady) {
-      // Fallback evidence view when storyline_not_ready — still freezes the tab.
-      await expect(
-        page.getByText(/故事线未生成|攻击故事线/),
-      ).toBeVisible();
-      return;
-    }
-
     for (const phase of PHASES) {
-      await expect(page.getByTestId(`storyline-phase-${phase}`)).toBeVisible();
+      await expect(page.getByTestId(`storyline-phase-${phase}`)).toBeVisible({
+        timeout: 60_000,
+      });
     }
 
     const expand = page.getByRole("button", { name: /展开关联证据/ }).first();
-    if (await expand.count()) {
-      await expand.click();
-      await expect(
-        page.locator("[data-testid^=\"timeline-evidence-\"]").first(),
-      ).toBeVisible();
-    }
+    await expect(expand).toBeVisible({ timeout: 30_000 });
+    await expand.click();
+    await expect(
+      page.locator("[data-testid^=\"timeline-evidence-\"]").first(),
+    ).toBeVisible();
   });
 });

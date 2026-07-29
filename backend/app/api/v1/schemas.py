@@ -136,6 +136,9 @@ class IngestSourceRecordRequest(_StrictRequest):
     reference: SourceReference
     raw_payload: dict[str, Any] = Field(default_factory=dict)
     normalized: dict[str, Any] = Field(default_factory=dict)
+    # Optional Adapter-verified associations (never inferred client-side).
+    incident_ref: SourceReference | None = None
+    related_alert_refs: list[SourceReference] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
