@@ -21,3 +21,46 @@ export interface InvestigationReport {
   generated_at: string | null;
   updated_at: string | null;
 }
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/** Narrow EventContext.report into InvestigationReport when structurally valid. */
+export function coerceInvestigationReport(value: unknown): InvestigationReport | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.report_id !== "string" || typeof value.event_id !== "string") {
+    return null;
+  }
+  if (typeof value.title !== "string" || !Array.isArray(value.sections)) {
+    return null;
+  }
+  const sections = value.sections.filter((section): section is ReportSection => {
+    if (!isRecord(section)) return false;
+    return (
+      typeof section.key === "string" &&
+      typeof section.title === "string" &&
+      typeof section.content === "string"
+    );
+  });
+  if (sections.length === 0) return null;
+  return {
+    report_id: value.report_id,
+    event_id: value.event_id,
+    title: value.title,
+    summary: typeof value.summary === "string" ? value.summary : "",
+    sections: sections.map((section) => ({
+      key: section.key,
+      title: section.title,
+      content: section.content,
+      data: isRecord(section.data) ? section.data : {},
+    })),
+    final_verdict: typeof value.final_verdict === "string" ? value.final_verdict : "none",
+    risk_score: typeof value.risk_score === "number" ? value.risk_score : 0,
+    severity: typeof value.severity === "string" ? value.severity : "low",
+    version: typeof value.version === "number" ? value.version : 1,
+    generated_by: typeof value.generated_by === "string" ? value.generated_by : null,
+    generated_at: typeof value.generated_at === "string" ? value.generated_at : null,
+    updated_at: typeof value.updated_at === "string" ? value.updated_at : null,
+  };
+}

@@ -11,13 +11,15 @@ import { FileTextOutlined } from "@ant-design/icons";
 import type { InvestigationReport } from "../../types/report";
 import ReportToc from "./ReportToc";
 import ReportExportButtons from "./ReportExportButtons";
+import ReportSectionContent from "./ReportSectionContent";
 
 const { Title, Text } = Typography;
 
 /** Print stylesheet — injected once per page lifecycle. */
 const PRINT_STYLES = `
 @media print {
-  .shadowtrace-sidebar, .shadowtrace-header, .shadowtrace-toc, .shadowtrace-export-btns {
+  .shadowtrace-sidebar, .shadowtrace-header, .shadowtrace-toc, .shadowtrace-export-btns,
+  .shadowtrace-event-toolbar, .shadowtrace-event-tabs .ant-tabs-nav {
     display: none !important;
   }
   .shadowtrace-report-viewer { padding: 0 !important; max-width: 100% !important; }
@@ -75,7 +77,7 @@ export default function ReportViewer({ report, loading, eventStatus }: ReportVie
   const isTemplate = report.generated_by === "template";
 
   return (
-    <div style={{ display: "flex", gap: 24 }}>
+    <div data-testid="report-viewer" style={{ display: "flex", gap: 24 }}>
       <div className="shadowtrace-toc">
         <ReportToc report={report} />
       </div>
@@ -109,7 +111,7 @@ export default function ReportViewer({ report, loading, eventStatus }: ReportVie
             <Title level={5} id={`${section.key}-title`}>
               {section.title}
             </Title>
-            <Text style={{ whiteSpace: "pre-wrap" }}>{section.content}</Text>
+            <ReportSectionContent content={section.content} />
           </div>
         ))}
       </div>

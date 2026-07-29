@@ -18,7 +18,7 @@ import { useEffect, useMemo } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import type { ColumnsType } from "antd/es/table";
 import ReportViewer from "../components/report/ReportViewer";
-import type { InvestigationReport } from "../types/report";
+import { coerceInvestigationReport } from "../types/report";
 import EventOverviewCard from "../components/event/EventOverviewCard";
 import EntityList from "../components/event/EntityList";
 import EvidenceList from "../components/event/EvidenceList";
@@ -560,13 +560,19 @@ export default function EventDetailPage() {
     {
       key: "report",
       label: "报告",
-      children: <ReportViewer report={context?.report as InvestigationReport | null ?? null} loading={loading} eventStatus={event.event.status} />,
+      children: (
+        <ReportViewer
+          report={coerceInvestigationReport(context?.report)}
+          loading={loading}
+          eventStatus={event.event.status}
+        />
+      ),
     },
   ];
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Space>
+      <Space className="shadowtrace-event-toolbar">
         <Button icon={<ArrowLeftOutlined />} onClick={() => navigate("/events")}>
           返回事件列表
         </Button>
@@ -596,7 +602,7 @@ export default function EventDetailPage() {
           />
         </Col>
       </Row>
-      <Card>
+      <Card className="shadowtrace-event-tabs">
         <Tabs
           activeKey={selectedTab}
           destroyOnHidden
