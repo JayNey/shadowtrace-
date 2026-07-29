@@ -30,6 +30,19 @@ from app.services.graph_projection import find_attack_paths as _find_attack_path
 logger = logging.getLogger(__name__)
 
 
+def _log_background_task_failure(task: asyncio.Task[Any]) -> None:
+    """Log uncaught exceptions from fire-and-forget background tasks."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "Background task %s failed",
+            task.get_name(),
+            exc_info=exc,
+        )
+
+
 class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
     """Transform evidence into an entity-relationship graph.
 
@@ -118,10 +131,11 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
         # PostgreSQL, there is nothing to mirror to Neo4j.
         if self._graph_sync_service is not None and self.last_persist_ok:
             try:
-                asyncio.create_task(
+                task = asyncio.create_task(
                     self._graph_sync_service.sync_event_graph(event_id),
                     name=f"neo4j-sync-{event_id}",
                 )
+                task.add_done_callback(_log_background_task_failure)
             except Exception:
                 logger.warning(
                     "Failed to schedule Neo4j sync for event=%s",
