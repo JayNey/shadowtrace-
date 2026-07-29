@@ -9,13 +9,14 @@ response with ``degraded=true``.
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
 from app.api.v1.deps import get_search_service
 from app.core.auth import CurrentPrincipal
 from app.models.search import SearchResponse
+from app.services.search_service import SearchService
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ async def search(
         ),
     ],
     _principal: CurrentPrincipal,
-    search_service: Annotated[Any, Depends(get_search_service)],
+    search_service: Annotated[SearchService, Depends(get_search_service)],
     scope: Annotated[
         str,
         Query(

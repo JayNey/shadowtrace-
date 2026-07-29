@@ -463,3 +463,92 @@ async def test_stats_effect_rate_after_verify_persist_helper(
     assert efr["numerator"] == 1
     assert efr["denominator"] == 1
     assert efr["rate"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_persist_effect_status_ignores_disposition_phase(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Phase-2 disposition VERIFIED must not overwrite phase-1 effect failure."""
+    from app.agents.verify_agent import VerifyAgent
+    from app.models.agent_io import EffectStatus, VerificationActionResult, VerificationPhase
+
+    eid = await _seed_event(session_factory, title="phase2-no-overwrite")
+    aid = await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status=None,
+        writeback_required=True,
+        writeback_status=WritebackStatus.CONFIRMED.value,
+    )
+
+    agent = VerifyAgent(session_factory=session_factory)
+    await agent._persist_effect_verification_statuses(
+        [
+            VerificationActionResult(
+                action_id=aid,
+                effect_status=EffectStatus.FAILED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+                writeback_status=WritebackStatus.CONFIRMED,
+                writeback_ids=[],
+                detail="effect_failed",
+                verification_phase=VerificationPhase.EFFECT,
+            ),
+            # Mimics phase-2 writeback receipt confirmed — must be ignored.
+            VerificationActionResult(
+                action_id=aid,
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+                writeback_status=WritebackStatus.CONFIRMED,
+                writeback_ids=[f"wbk-{_sfx()}"],
+                detail="writeback_confirmed",
+                verification_phase=VerificationPhase.DISPOSITION,
+            ),
+        ]
+    )
+
+    body = client.get("/api/v1/stats", headers=_hdr()).json()
+
+    efr = body["effect_verification_rate"]
+    assert efr["numerator"] == 0
+    assert efr["denominator"] == 1
+    assert efr["rate"] == pytest.approx(0.0)
+
+    wbr = body["writeback_confirmation_rate"]
+    assert wbr["numerator"] == 1
+    assert wbr["denominator"] == 1
+    assert wbr["rate"] == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_stats_unverifiable_enters_effect_denominator(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """UNVERIFIABLE stays in the effect denominator so outages do not inflate the rate."""
+    eid = await _seed_event(session_factory, title="effect-unverifiable")
+    await _seed_action(
+        session_factory,
+        event_id=eid,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status="unverifiable",
+        writeback_required=False,
+    )
+    eid2 = await _seed_event(session_factory, title="effect-verified")
+    await _seed_action(
+        session_factory,
+        event_id=eid2,
+        status=ActionStatus.SUCCESS,
+        effect_verification_status="verified",
+        writeback_required=False,
+    )
+
+    body = client.get("/api/v1/stats", headers=_hdr()).json()
+    efr = body["effect_verification_rate"]
+    assert efr["numerator"] == 1
+    assert efr["denominator"] == 2
+    assert efr["rate"] == pytest.approx(0.5)

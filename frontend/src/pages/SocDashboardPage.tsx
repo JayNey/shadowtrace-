@@ -5,8 +5,10 @@
 */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { Button, Col, Row, Space, Typography, message } from "antd";
 import {
+  ArrowLeftOutlined,
   FullscreenExitOutlined,
   FullscreenOutlined,
   ReloadOutlined,
@@ -162,6 +164,9 @@ export default function SocDashboardPage() {
           </p>
         </div>
         <Space>
+          <Link to="/events" data-testid="soc-back-events">
+            <Button icon={<ArrowLeftOutlined />}>返回事件看板</Button>
+          </Link>
           <Button
             icon={<ReloadOutlined />}
             onClick={() => void refreshAll()}
