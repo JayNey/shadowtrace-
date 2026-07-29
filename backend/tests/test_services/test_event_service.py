@@ -134,11 +134,12 @@ def _ref(
     object_id: str,
     connector_id: str = "conn-mock",
     product: str = "mock_xdr",
+    source_tenant_id: str = "tenant-1",
 ) -> SourceReference:
     return SourceReference(
         source_kind=kind,
         source_product=product,
-        source_tenant_id="tenant-1",
+        source_tenant_id=source_tenant_id,
         connector_id=connector_id,
         source_object_id=object_id,
         ingested_at=datetime.now(UTC),
@@ -536,6 +537,7 @@ async def test_cross_connector_association_is_rejected(
                     kind=SourceObjectKind.INCIDENT,
                     object_id=f"INC-cross-{sfx}",
                     connector_id=f"conn-b-{sfx}",
+                    source_tenant_id=f"tenant-other-{sfx}",
                 ),
                 source_type="mock_xdr",
             )

@@ -1,4 +1,25 @@
+# ============================================================================
+# ShadowTrace docker-compose — one-command deployment (ISSUE-088)
+#
+# Core services (no profile):
+#   postgres  redis  mock-xdr  backend  frontend
+#
+# Optional profiles:
+#   --profile worker     Celery investigation worker
+#   --profile optional   OpenSearch + Neo4j
+# Live mode: copy infra/.env.live.example → ../.env.live (compose auto-loads when present)
+#
+# Usage:
+#   make up                # start core services
+#   make up WORKER=1       # start with Celery worker
+#   make bootstrap         # migrate + seed demo data
+#   make down              # stop everything, keep volumes
+# ============================================================================
+
 services:
+  # --------------------------------------------------------------------------
+  # PostgreSQL 16 + pgvector — required, always started
+  # --------------------------------------------------------------------------
   postgres:
     image: pgvector/pgvector:pg16
     environment:
@@ -16,6 +37,9 @@ services:
       timeout: 5s
       retries: 10
 
+  # --------------------------------------------------------------------------
+  # Redis 7 — required, always started
+  # --------------------------------------------------------------------------
   redis:
     image: redis:7
     ports:
@@ -26,22 +50,76 @@ services:
       timeout: 3s
       retries: 10
 
+  # --------------------------------------------------------------------------
+  # Mock XDR — standalone source + disposition simulator (ISSUE-088)
+  # Provides /mock-xdr/v1 read & write endpoints for the demo loop.
+  # --------------------------------------------------------------------------
+  mock-xdr:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    environment:
+      SKIP_DB_MIGRATE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["python", "-m", "uvicorn"]
+    command:
+      [
+        "app.mock_xdr.api:app",
+        "--host", "0.0.0.0",
+        "--port", "8100",
+        "--log-level", "info",
+      ]
+    ports:
+      - "${MOCK_XDR_PORT:-8100}:8100"
+    healthcheck:
+      test:
+        ["CMD", "curl", "-f", "http://localhost:8100/mock-xdr/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # --------------------------------------------------------------------------
+  # Backend — FastAPI + Socket.IO (ISSUE-088)
+  #
+  # Default: full-mock mode — no external XDR, LLM, or GPU required.
+  # Live overrides: optional ../.env.live (see infra/.env.live.example).
+  # --------------------------------------------------------------------------
   backend:
     build:
       context: ..
       dockerfile: backend/Dockerfile
     env_file:
       - ../.env.example
+      - path: ../.env.live
+        required: false
     environment:
+      # --- Database & cache ---
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace
       REDIS_URL: redis://redis:6379/0
+
+      # --- Mock mode defaults (ISSUE-088 §实现步骤 point 2) ---
       SOURCE_MODE: mock_xdr
       DISPOSITION_MODE: mock_xdr
       TOOL_MODE: mock
       LLM_MODE: mock
       SIMULATION_ENABLED: "true"
+      TASK_MODE: background
+
+      # --- Mock XDR connection ---
+      DISPOSITION_BASE_URL: http://mock-xdr:8100
+
+      # --- Safety gates (live mode only) ---
       ALLOW_LIVE_SIDE_EFFECTS: "false"
       ALLOW_XDR_WRITEBACK: "false"
+
+      # --- Dev auth (ISSUE-088 bootstrap + ISSUE-077 e2e compatibility) ---
+      DEV_AUTH_TOKENS: '{"bootstrap-token":{"subject":"bootstrap","roles":["analyst","admin","approver","disposition_operator"]},"e2e-token":{"subject":"e2e-operator","display_name":"E2E Operator","roles":["analyst","approver"]}}'
+
+      # --- Optional graph mirror (override host default when neo4j profile is on) ---
+      NEO4J_URI: bolt://neo4j:7687
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:
@@ -49,36 +127,52 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mock-xdr:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      test:
+        ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 45s
 
+  # --------------------------------------------------------------------------
+  # Frontend — React SPA served by nginx with /api + /socket.io proxy
+  # --------------------------------------------------------------------------
   frontend:
     build:
       context: ../frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE_URL: http://localhost:${BACKEND_PORT:-8000}/api/v1
-        VITE_SOCKET_URL: http://localhost:${BACKEND_PORT:-8000}
-        VITE_DEV_AUTH_TOKEN: e2e-token
-        VITE_AUTH_SUBJECT: e2e-operator
-        VITE_APPROVER_DISPLAY: E2E Operator
-        VITE_EVENT_CHAT_ENABLED: "true"
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+        VITE_SOCKET_URL: ${VITE_SOCKET_URL:-}
+        VITE_DEV_AUTH_TOKEN: ${VITE_DEV_AUTH_TOKEN:-bootstrap-token}
+        VITE_AUTH_SUBJECT: ${VITE_AUTH_SUBJECT:-bootstrap}
+        VITE_APPROVER_DISPLAY: ${VITE_APPROVER_DISPLAY:-Bootstrap Operator}
+        VITE_EVENT_CHAT_ENABLED: ${VITE_EVENT_CHAT_ENABLED:-true}
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "${FRONTEND_PORT:-3000}:80"
     depends_on:
       backend:
         condition: service_healthy
+      mock-xdr:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/health"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1/health"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 5s
 
+  # ==========================================================================
+  # Optional profiles
+  # ==========================================================================
+
+  # --------------------------------------------------------------------------
+  # Celery worker — async investigation execution
+  #   docker compose --profile worker up -d
+  # --------------------------------------------------------------------------
   worker:
     profiles: ["worker"]
     build:
@@ -86,6 +180,8 @@ services:
       dockerfile: backend/Dockerfile
     env_file:
       - ../.env.example
+      - path: ../.env.live
+        required: false
     environment:
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace
       REDIS_URL: redis://redis:6379/0
@@ -96,13 +192,29 @@ services:
       SIMULATION_ENABLED: "true"
       ALLOW_LIVE_SIDE_EFFECTS: "false"
       ALLOW_XDR_WRITEBACK: "false"
-    command: ["celery", "-A", "app.core.celery_app", "worker", "-Q", "investigation", "-c", "2"]
+      DISPOSITION_BASE_URL: http://mock-xdr:8100
+      TASK_MODE: celery
+      CELERY_BROKER_URL: redis://redis:6379/0
+    command:
+      [
+        "python", "-m", "celery",
+        "-A", "app.core.celery_app",
+        "worker",
+        "-Q", "investigation",
+        "-c", "2",
+      ]
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mock-xdr:
+        condition: service_healthy
 
+  # --------------------------------------------------------------------------
+  # OpenSearch — full-text search backend (ISSUE-084)
+  #   docker compose --profile optional up -d opensearch
+  # --------------------------------------------------------------------------
   opensearch:
     profiles: ["optional"]
     image: opensearchproject/opensearch:2.17.0
@@ -116,7 +228,8 @@ services:
     volumes:
       - opensearch_data:/usr/share/opensearch/data
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      test:
+        ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -126,6 +239,10 @@ services:
         soft: -1
         hard: -1
 
+  # --------------------------------------------------------------------------
+  # Neo4j — graph mirror backend (ISSUE-082)
+  #   docker compose --profile optional up -d neo4j
+  # --------------------------------------------------------------------------
   neo4j:
     profiles: ["optional"]
     image: neo4j:5

@@ -991,8 +991,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         await self._run_graph_step(ec, dummy_step)
         await self._run_storyline_step(ec)
         logger.info(
-            "SuperAgent: finalized analysis artifacts for event=%s "
-            "(graph=%s storyline=%s)",
+            "SuperAgent: finalized analysis artifacts for event=%s (graph=%s storyline=%s)",
             event_id,
             ec.graph_output is not None,
             ec.storyline is not None,

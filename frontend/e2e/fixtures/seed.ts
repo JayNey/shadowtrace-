@@ -143,7 +143,8 @@ function buildTelemetryReference(record: ScenarioRecord): Json {
 
 function buildTelemetryNormalized(record: ScenarioRecord): Json {
   const channel = String(record.channel ?? "log");
-  const { event_type: _drop, ...rest } = record;
+  const { event_type, ...rest } = record;
+  void event_type;
   return {
     ...rest,
     channel,

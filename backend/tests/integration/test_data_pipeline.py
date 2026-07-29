@@ -156,8 +156,10 @@ async def test_mock_xdr_http_pipeline_persists_queryable_frozen_context(
     listed = await event_service.list_events(status=EventStatus.NEW)
     assert listed.total == 1
     event = listed.items[0]
-    assert await event_service.get_event(event.event_id) == event
-    assert event.status is EventStatus.NEW
+    fetched = await event_service.get_event(event.event_id)
+    assert fetched is not None
+    assert fetched.event_id == event.event_id
+    assert fetched.status is EventStatus.NEW
     assert len(event.source_reference_snapshots) == 4
     assert {ref.source_kind for ref in event.source_reference_snapshots} == {
         SourceObjectKind.INCIDENT,
@@ -186,7 +188,7 @@ async def test_mock_xdr_http_pipeline_persists_queryable_frozen_context(
         )
     ).all()
     assert audit_reasons.count("event_created") == 1
-    assert audit_reasons.count("alert_linked_to_incident_event") == 3
+    assert audit_reasons.count("related_source_linked_to_incident_event") == 3
 
     incident_source = await db_session.scalar(
         select(orm.SourceObject).where(

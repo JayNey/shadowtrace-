@@ -168,6 +168,7 @@ async def test_planner_and_response_receive_event_bus(monkeypatch: pytest.Monkey
         "risk": MagicMock(),
         "report": MagicMock(),
         "graph_agent": MagicMock(),
+        "storyline_service": MagicMock(),
         "memory": MagicMock(),
         "event_service": MagicMock(),
         "context_store": MagicMock(),
