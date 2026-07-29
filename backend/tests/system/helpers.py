@@ -52,7 +52,7 @@ from app.services.event_disposition_service import EventDispositionService, _act
 from app.services.event_service import EventService
 from app.services.state_machine_service import StateMachineService
 from tests.integration.conftest import FailingLLMClient, FlakyToolExecutor
-from tests.system.scenario_expectations import ScenarioExpectation
+from tests.system.scenario_expectations import ScenarioExpectation, risk_bounds_for
 
 ALL_SOURCE_KINDS = [
     SourceObjectKind.INCIDENT,
@@ -144,6 +144,7 @@ async def assert_main_chain_expectations(
     scoring_mode = risk_ctx.get("scoring_mode")
     risk_score_ctx = risk_ctx.get("risk_score")
     rule_only = spec.rule_fallback and scoring_mode == ScoringMode.RULE_ONLY.value
+    risk_min, risk_max = risk_bounds_for(spec, rule_only=rule_only)
 
     if spec.expect_reporting:
         assert event.status in {EventStatus.REPORTING, EventStatus.CLOSED}, (
@@ -158,19 +159,16 @@ async def assert_main_chain_expectations(
         )
 
     if event.risk_score is not None:
-        if rule_only:
-            assert 0 <= int(event.risk_score) <= 100
-        else:
-            assert spec.risk_min <= int(event.risk_score) <= spec.risk_max, (
-                f"risk_score {event.risk_score} outside [{spec.risk_min}, {spec.risk_max}] "
-                f"for {spec.scenario_id}"
-            )
+        assert risk_min <= int(event.risk_score) <= risk_max, (
+            f"risk_score {event.risk_score} outside [{risk_min}, {risk_max}] "
+            f"for {spec.scenario_id} (rule_only={rule_only})"
+        )
 
     if risk_score_ctx is not None:
-        if rule_only:
-            assert 0 <= int(risk_score_ctx) <= 100
-        else:
-            assert spec.risk_min <= int(risk_score_ctx) <= spec.risk_max
+        assert risk_min <= int(risk_score_ctx) <= risk_max, (
+            f"context risk_score {risk_score_ctx} outside [{risk_min}, {risk_max}] "
+            f"for {spec.scenario_id} (rule_only={rule_only})"
+        )
 
     response_plan = await context_store.get(event_id, "response_plan")
     if isinstance(response_plan, dict):
@@ -186,7 +184,22 @@ async def assert_main_chain_expectations(
 
     async with session_factory() as session:
         report_row = await session.scalar(select(orm.Report).where(orm.Report.event_id == event_id))
-    assert report_row is not None or report_ctx.get("report_id") or report_ctx.get("title")
+    assert report_row is not None, f"missing persisted Report row for {event_id}"
+    assert report_ctx.get("title") or report_row.title
+
+
+async def assert_approval_record_exists(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> None:
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(orm.ApprovalRecordORM)
+            .join(orm.Action, orm.Action.action_id == orm.ApprovalRecordORM.action_id)
+            .where(orm.Action.event_id == event_id)
+        )
+    assert int(count or 0) >= 1, f"expected ApprovalRecord for {event_id}"
 
 
 async def seed_source_object_for_event(
@@ -540,6 +553,7 @@ async def run_verify_tool_failure_chain(
     working_memory: Any,
     event_id: str,
     fail_tools: frozenset[str] = frozenset({"check_host_isolation_status"}),
+    degraded_flags: Any | None = None,
 ) -> None:
     from app.agents.verify_agent import VerifyAgent
     from app.models.action import Action
@@ -668,6 +682,16 @@ async def run_verify_tool_failure_chain(
     }
     verification_ctx = await context_store.get(event_id, "verification_result")
     assert verification_ctx is not None
+    if degraded_flags is not None and (
+        result.need_manual_resolution
+        or result.overall_status.value != VerificationOverallStatus.SUCCESS.value
+    ):
+        await degraded_flags.set_flag(
+            event_id,
+            "verify_degraded",
+            True,
+            writer="InvestigationGraph",
+        )
 
 
 def _low_confidence_risk() -> RiskAssessment:
@@ -679,7 +703,7 @@ def _low_confidence_risk() -> RiskAssessment:
     )
 
 
-async def run_insider_l3_approval_response_chain(
+async def run_l3_approval_response_chain(
     *,
     session_factory: async_sessionmaker[AsyncSession],
     context_store: EventContextStore,
@@ -690,7 +714,7 @@ async def run_insider_l3_approval_response_chain(
     mock_xdr_state: MockXDRState,
     event_id: str,
 ) -> None:
-    """L3 approval gate → execute → verify journal → terminal disposition (insider)."""
+    """L3 approval gate → execute → verify journal → terminal disposition."""
     event = await event_service.get_event(event_id)
     assert event is not None
     assert event.status is EventStatus.REPORTING
@@ -838,3 +862,6 @@ async def run_insider_l3_approval_response_chain(
     )
     assert result.activated is True, result.skipped_reason
     assert result.action_id == terminal_action_id
+
+
+run_insider_l3_approval_response_chain = run_l3_approval_response_chain

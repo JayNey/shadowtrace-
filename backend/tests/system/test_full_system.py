@@ -20,19 +20,22 @@ from app.services.event_disposition_service import EventDispositionService
 from app.services.event_service import EventService
 from app.services.state_machine_service import StateMachineService
 from tests.system.helpers import (
+    assert_approval_record_exists,
     assert_main_chain_expectations,
     assert_no_disposition_writeback,
     ingest_scenario_event,
     run_full_response_chain,
-    run_insider_l3_approval_response_chain,
+    run_l3_approval_response_chain,
     run_rule_fallback_main_chain,
 )
 from tests.system.scenario_expectations import (
     FILE_ONLY_SCENARIOS,
     FULL_RESPONSE_SCENARIOS,
+    L3_APPROVAL_RESPONSE_SCENARIOS,
     MOCK_WRITEBACK_SCENARIOS,
     SCENARIO_EXPECTATIONS,
     SCENARIO_TO_EVENT_TYPE,
+    risk_bounds_for,
 )
 
 pytestmark = [pytest.mark.system, pytest.mark.integration]
@@ -149,8 +152,8 @@ async def test_high_risk_full_response_chain(
         event_id=event_id,
         spec=SCENARIO_EXPECTATIONS[scenario_id],
     )
-    if scenario_id == "insider_data_exfiltration":
-        await run_insider_l3_approval_response_chain(
+    if scenario_id in L3_APPROVAL_RESPONSE_SCENARIOS:
+        await run_l3_approval_response_chain(
             session_factory=session_factory,
             context_store=context_store,
             event_service=event_service,
@@ -160,6 +163,7 @@ async def test_high_risk_full_response_chain(
             mock_xdr_state=mock_xdr_state,
             event_id=event_id,
         )
+        await assert_approval_record_exists(session_factory, event_id)
     else:
         await run_full_response_chain(
             session_factory=session_factory,
@@ -169,6 +173,16 @@ async def test_high_risk_full_response_chain(
             mock_xdr_state=mock_xdr_state,
             event_id=event_id,
         )
+
+
+def test_rule_fallback_risk_bounds_reject_misconfigured_min() -> None:
+    """Changing rule_fallback_risk_min to 999 must fall outside observed rule scores."""
+    spec = SCENARIO_EXPECTATIONS["host_compromise"]
+    observed_rule_score = 20
+    bad_min = 999
+    good_min, good_max = risk_bounds_for(spec, rule_only=True)
+    assert good_min <= observed_rule_score <= good_max
+    assert not (bad_min <= observed_rule_score <= good_max)
 
 
 @pytest.mark.usefixtures("clean_state")
@@ -216,6 +230,26 @@ def test_scenario_builders_registered(scenario_id: str) -> None:
     assert built.expected_outcome
 
 
-def test_export_system_scenarios_script_exists() -> None:
+def test_export_system_scenarios_script_smoke() -> None:
+    import subprocess
+    import sys
+
     script = REPO_ROOT / "backend" / "scripts" / "export_system_scenarios.py"
     assert script.is_file()
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        cwd=REPO_ROOT / "backend",
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "Wrote" in result.stdout
+    for scenario_id in (
+        "host_compromise",
+        "malicious_process",
+        "insider_privilege_abuse",
+        "lateral_movement",
+        "other_unclassified",
+    ):
+        dump = DATA_SCENARIOS / scenario_id / f"{scenario_id}.scenario.json"
+        assert dump.is_file(), f"missing exported pack after smoke run: {dump}"

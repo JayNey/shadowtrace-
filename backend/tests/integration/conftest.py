@@ -337,6 +337,9 @@ class FailingLLMClient:
         raise RuntimeError("llm unavailable")
 
 
+_RAG_PIPELINE_UNSET = object()
+
+
 @pytest.fixture
 def e2e_tool_executor(tool_executor: Any, budget_service: BudgetService) -> Any:
     tool_executor.budget_service = budget_service
@@ -366,6 +369,7 @@ def build_analysis_pipeline(
         fail_tools: set[str] | None = None,
         scenario_id: str | None = "insider_data_exfiltration",
         evidence_mode: str = "sequential",
+        rag_pipeline: Any | None | object = _RAG_PIPELINE_UNSET,
     ) -> tuple[AnalysisOnlyPipeline, EvidenceProjection]:
         effective_llm = mock_llm_client if llm_client is None else llm_client
         effective_executor = e2e_tool_executor
@@ -398,9 +402,10 @@ def build_analysis_pipeline(
             session_factory=session_factory,
             evidence_mode=evidence_mode,
         )
+        effective_rag_pipeline = None if rag_pipeline is _RAG_PIPELINE_UNSET else rag_pipeline
         rag = RAGAgent(
             working_memory=working_memory.for_writer("RAGAgent"),
-            pipeline=None,
+            pipeline=effective_rag_pipeline,
             budget_service=budget_service,
             output_guard=output_guard,
             trace_service=agent_trace_service,
@@ -591,11 +596,13 @@ def run_analysis_pipeline(
         llm_client: Any | None = None,
         fail_tools: set[str] | None = None,
         scenario_id: str | None = "insider_data_exfiltration",
+        rag_pipeline: Any | None | object = _RAG_PIPELINE_UNSET,
     ) -> Any:
         pipeline, projection = build_analysis_pipeline(
             llm_client=llm_client,
             fail_tools=fail_tools,
             scenario_id=scenario_id,
+            rag_pipeline=rag_pipeline,
         )
         with bind_evidence_projection(projection):
             return await pipeline.run(event_id)

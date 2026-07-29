@@ -87,9 +87,6 @@ jobs:
           python -m pytest --cov=app --cov-report=term
           --cov-report=xml:coverage.xml
 
-      - name: ISSUE-086 system quality gate
-        run: python -m pytest tests/system/ -m system -v --tb=short
-
       - name: ISSUE-055 orchestration coverage gate
         run: >
           python -m coverage report
@@ -115,6 +112,54 @@ jobs:
           name: backend-coverage
           path: backend/coverage.xml
           if-no-files-found: warn
+
+  backend-system-test:
+    name: backend-system-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shadowtrace
+          POSTGRES_PASSWORD: shadowtrace
+          POSTGRES_DB: shadowtrace
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowtrace -d shadowtrace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/pyproject.toml
+
+      - name: Install backend (dev extras)
+        run: python -m pip install -e ".[dev]"
+
+      - name: ISSUE-086 system quality gate
+        run: python -m pytest tests/system/ -m system -v --tb=short
 
   frontend-build:
     name: frontend-build
