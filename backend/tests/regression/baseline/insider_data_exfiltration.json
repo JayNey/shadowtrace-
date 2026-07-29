@@ -1,25 +1,38 @@
 {
-  "dispositions": [],
+  "dispositions": [
+    {
+      "execution_owner": "xdr_managed",
+      "operation": "set_event_disposition",
+      "writeback_status": "confirmed"
+    },
+    {
+      "execution_owner": "xdr_managed",
+      "operation": "submit_entity_action",
+      "writeback_status": "accepted"
+    }
+  ],
   "event_id": "evt-20240615-420918b5",
   "event_status": "reporting",
-  "executed_actions": [],
+  "executed_actions": [
+    "isolate_host",
+    "update_source_event_disposition"
+  ],
   "final_verdict": "confirmed_threat",
   "insufficient_trace": false,
   "quality_scores": {
     "evidence": 1.0,
-    "report": 0.49,
-    "risk": 0.715,
+    "report": 0.595,
+    "risk": 0.64,
     "triage": 0.865
   },
-  "risk_score": 87,
+  "risk_score": 85,
   "scenario_id": "insider_data_exfiltration",
   "schema_version": 1,
   "trajectory_metrics": {
-    "avg_agent_latency_ms": 507.2,
     "evidence_yield": 0.0,
     "loop_suspected": 0.0,
     "redundant_tool_calls": 0.0,
     "replan_effectiveness": 0.0,
-    "steps_to_verdict": 15.0
+    "steps_to_verdict": 18.0
   }
 }

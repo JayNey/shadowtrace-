@@ -1,6 +1,15 @@
-"""Regression scenario registry (ISSUE-087)."""
+"""Regression scenario registry (ISSUE-087).
+
+Golden baselines cover the SuperAgent **analysis chain** (MockLLM deterministic
+path) for all eight EventType packs. ``FULL_RESPONSE_SCENARIOS`` additionally
+run the ISSUE-086 L3 approval response chain so ``executed_actions`` and
+``dispositions`` are exercised in integration drift tests. End-to-end writeback
+semantics remain owned by ISSUE-086 system tests.
+"""
 
 from __future__ import annotations
+
+from tests.system.scenario_expectations import FULL_RESPONSE_SCENARIOS
 
 # Three legacy demo scenarios (ISSUE-039) — subset of the eight EventType packs.
 DEMO_SCENARIOS: tuple[str, ...] = (
@@ -24,3 +33,11 @@ EVENT_TYPE_SCENARIOS: tuple[str, ...] = (
 REGRESSION_SCENARIOS: tuple[str, ...] = EVENT_TYPE_SCENARIOS
 
 SNAPSHOT_SCHEMA_VERSION = 1
+
+__all__ = [
+    "DEMO_SCENARIOS",
+    "EVENT_TYPE_SCENARIOS",
+    "FULL_RESPONSE_SCENARIOS",
+    "REGRESSION_SCENARIOS",
+    "SNAPSHOT_SCHEMA_VERSION",
+]

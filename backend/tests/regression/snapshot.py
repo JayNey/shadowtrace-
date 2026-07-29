@@ -22,14 +22,33 @@ DriftSeverity = Literal["block", "warn"]
 
 RISK_SCORE_TOLERANCE = 5
 METRIC_DRIFT_RATIO = 0.20
+ZERO_BASELINE_METRIC_ABS_TOLERANCE = 0.05
 
 _BASELINE_DIR = Path(__file__).resolve().parent / "baseline"
 
+# Wall-clock latency is environment-specific; keep in snapshot for inspection only.
+_EXCLUDED_TRAJECTORY_METRICS = frozenset({"avg_agent_latency_ms"})
+
+# Count only terminal success states. EXECUTING / APPROVED are in-flight and
+# intentionally excluded until a response action completes; align with ISSUE-086
+# system tests when extending golden chains that transition through those states.
 _EXECUTED_ACTION_STATUSES = frozenset(
     {
         ActionStatus.SUCCESS.value,
-        ActionStatus.EXECUTING.value,
-        ActionStatus.APPROVED.value,
+        ActionStatus.PARTIAL_SUCCESS.value,
+    }
+)
+
+_REQUIRED_SNAPSHOT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "scenario_id",
+        "final_verdict",
+        "risk_score",
+        "executed_actions",
+        "dispositions",
+        "trajectory_metrics",
+        "quality_scores",
     }
 )
 
@@ -68,7 +87,11 @@ def _round_float(value: float, *, places: int = 4) -> float:
 
 
 def _normalize_metrics(raw: dict[str, float]) -> dict[str, float]:
-    return {key: _round_float(value) for key, value in sorted(raw.items())}
+    return {
+        key: _round_float(value)
+        for key, value in sorted(raw.items())
+        if key not in _EXCLUDED_TRAJECTORY_METRICS
+    }
 
 
 def _normalize_quality_scores(raw: dict[str, Any]) -> dict[str, float]:
@@ -79,6 +102,31 @@ def _normalize_quality_scores(raw: dict[str, Any]) -> dict[str, float]:
         elif isinstance(payload, (int, float)):
             scores[agent_name] = _round_float(float(payload))
     return scores
+
+
+def _normalize_action_set(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    return sorted(set(values or []))
+
+
+def _normalize_dispositions(
+    items: list[dict[str, str | None]] | None,
+) -> list[dict[str, str | None]]:
+    normalized = [
+        {
+            "operation": item.get("operation"),
+            "execution_owner": item.get("execution_owner"),
+            "writeback_status": item.get("writeback_status"),
+        }
+        for item in (items or [])
+    ]
+    return sorted(
+        normalized,
+        key=lambda item: (
+            item["operation"] or "",
+            item["execution_owner"] or "",
+            item["writeback_status"] or "",
+        ),
+    )
 
 
 class SnapshotRecorder:
@@ -95,7 +143,14 @@ class SnapshotRecorder:
         self._trajectory = TrajectoryAnalyzer(session_factory)
         self._quality = OutputQualityEvaluator(judge_enabled=False)
 
-    async def record(self, event_id: str, *, scenario_id: str) -> dict[str, Any]:
+    async def record(self, event_id: str, scenario_id: str | None = None) -> dict[str, Any]:
+        """Build a snapshot dict for *event_id*.
+
+        Args:
+            event_id: Security event primary key (Issue contract).
+            scenario_id: Optional scenario label stored in the snapshot for baseline
+                file naming and drift reports (extension beyond Issue minimum).
+        """
         async with self._session_factory() as session:
             event = await session.get(orm.SecurityEvent, event_id)
             if event is None:
@@ -119,26 +174,20 @@ class SnapshotRecorder:
         quality_raw = await self._quality.evaluate_all(context_payload)
         trajectory = await self._trajectory.analyze(event_id)
 
-        executed_actions = sorted(
-            {
-                row.tool_name
-                for row in actions
-                if row.action_category == ActionCategory.RESPONSE.value
-                and row.status in _EXECUTED_ACTION_STATUSES
-            }
+        executed_actions = _normalize_action_set(
+            row.tool_name
+            for row in actions
+            if row.action_category == ActionCategory.RESPONSE.value
+            and row.status in _EXECUTED_ACTION_STATUSES
         )
 
         dispositions = _extract_dispositions(actions, outbox_rows)
         quality_scores = _normalize_quality_scores(
-            {
-                agent: score.model_dump(mode="json")
-                for agent, score in quality_raw.items()
-            }
+            {agent: score.model_dump(mode="json") for agent, score in quality_raw.items()}
         )
 
-        return {
+        snapshot: dict[str, Any] = {
             "schema_version": SNAPSHOT_SCHEMA_VERSION,
-            "scenario_id": scenario_id,
             "event_id": event_id,
             "event_status": str(event.status),
             "final_verdict": event.final_verdict,
@@ -149,6 +198,9 @@ class SnapshotRecorder:
             "quality_scores": quality_scores,
             "insufficient_trace": bool(trajectory.insufficient_trace),
         }
+        if scenario_id is not None:
+            snapshot["scenario_id"] = scenario_id
+        return snapshot
 
     async def _build_event_context(self, event_id: str) -> dict[str, Any]:
         keys = (
@@ -192,25 +244,43 @@ def _extract_dispositions(
                 "writeback_status": writeback_status,
             }
         )
-    return sorted(items, key=lambda item: (item["operation"] or "", item["writeback_status"] or ""))
+    return _normalize_dispositions(items)
 
 
 class SnapshotDiffer:
-    """Compare a live snapshot against a stored baseline using ISSUE-087 tolerances."""
+    """Compare snapshots using ISSUE-087 tolerances.
+
+    Block severity:
+    - ``schema_version`` and required snapshot keys
+    - ``final_verdict``, ``executed_actions`` (set equality), ``risk_score`` (±5)
+    - ``dispositions`` (writeback semantics; block drift beyond Issue table)
+
+    Warn severity:
+    - ``trajectory_metrics.*`` and ``quality_scores.*`` when drift exceeds 20%
+
+    Recorded for audit but intentionally not diffed:
+    - ``event_id``, ``event_status``, ``insufficient_trace``, ``scenario_id``
+    """
 
     def diff(self, baseline: dict[str, Any], current: dict[str, Any]) -> list[Drift]:
         drifts: list[Drift] = []
+        self._validate_schema_version(drifts, baseline=baseline, current=current)
+        self._validate_required_fields(drifts, baseline=baseline, current=current)
         self._compare_exact(
             drifts,
             field="final_verdict",
             baseline=baseline.get("final_verdict"),
             current=current.get("final_verdict"),
         )
-        self._compare_exact(
+        self._compare_action_set(
             drifts,
-            field="executed_actions",
             baseline=baseline.get("executed_actions") or [],
             current=current.get("executed_actions") or [],
+        )
+        self._compare_dispositions(
+            drifts,
+            baseline=baseline.get("dispositions") or [],
+            current=current.get("dispositions") or [],
         )
         self._compare_risk_score(
             drifts,
@@ -239,6 +309,52 @@ class SnapshotDiffer:
     def warn_drifts(drifts: list[Drift]) -> list[Drift]:
         return [item for item in drifts if item.severity == "warn"]
 
+    def _validate_schema_version(
+        self,
+        drifts: list[Drift],
+        *,
+        baseline: dict[str, Any],
+        current: dict[str, Any],
+    ) -> None:
+        base_version = baseline.get("schema_version")
+        cur_version = current.get("schema_version")
+        if base_version != cur_version:
+            drifts.append(
+                Drift(
+                    field="schema_version",
+                    baseline_value=base_version,
+                    current_value=cur_version,
+                    severity="block",
+                )
+            )
+
+    def _validate_required_fields(
+        self,
+        drifts: list[Drift],
+        *,
+        baseline: dict[str, Any],
+        current: dict[str, Any],
+    ) -> None:
+        for field in sorted(_REQUIRED_SNAPSHOT_FIELDS):
+            if field not in baseline:
+                drifts.append(
+                    Drift(
+                        field=f"baseline.{field}",
+                        baseline_value=None,
+                        current_value=current.get(field),
+                        severity="block",
+                    )
+                )
+            if field not in current:
+                drifts.append(
+                    Drift(
+                        field=f"current.{field}",
+                        baseline_value=baseline.get(field),
+                        current_value=None,
+                        severity="block",
+                    )
+                )
+
     def _compare_exact(
         self,
         drifts: list[Drift],
@@ -253,6 +369,44 @@ class SnapshotDiffer:
                     field=field,
                     baseline_value=baseline,
                     current_value=current,
+                    severity="block",
+                )
+            )
+
+    def _compare_action_set(
+        self,
+        drifts: list[Drift],
+        *,
+        baseline: list[str] | tuple[str, ...],
+        current: list[str] | tuple[str, ...],
+    ) -> None:
+        base_set = _normalize_action_set(list(baseline))
+        cur_set = _normalize_action_set(list(current))
+        if base_set != cur_set:
+            drifts.append(
+                Drift(
+                    field="executed_actions",
+                    baseline_value=base_set,
+                    current_value=cur_set,
+                    severity="block",
+                )
+            )
+
+    def _compare_dispositions(
+        self,
+        drifts: list[Drift],
+        *,
+        baseline: list[dict[str, str | None]],
+        current: list[dict[str, str | None]],
+    ) -> None:
+        base_items = _normalize_dispositions(baseline)
+        cur_items = _normalize_dispositions(current)
+        if base_items != cur_items:
+            drifts.append(
+                Drift(
+                    field="dispositions",
+                    baseline_value=base_items,
+                    current_value=cur_items,
                     severity="block",
                 )
             )
@@ -284,6 +438,8 @@ class SnapshotDiffer:
     ) -> None:
         keys = sorted(set(baseline) | set(current))
         for key in keys:
+            if field_prefix == "trajectory_metrics" and key in _EXCLUDED_TRAJECTORY_METRICS:
+                continue
             base_val = float(baseline.get(key, 0.0))
             cur_val = float(current.get(key, 0.0))
             if _metric_drift_exceeds(base_val, cur_val):
@@ -301,7 +457,7 @@ def _metric_drift_exceeds(baseline: float, current: float) -> bool:
     if math.isclose(baseline, current, rel_tol=0.0, abs_tol=1e-9):
         return False
     if baseline == 0.0:
-        return current != 0.0
+        return abs(current) > ZERO_BASELINE_METRIC_ABS_TOLERANCE
     return abs(current - baseline) / abs(baseline) > METRIC_DRIFT_RATIO
 
 

@@ -7,15 +7,14 @@
   "insufficient_trace": false,
   "quality_scores": {
     "evidence": 0.45,
-    "report": 0.49,
-    "risk": 0.715,
+    "report": 0.595,
+    "risk": 0.775,
     "triage": 0.865
   },
-  "risk_score": 26,
+  "risk_score": 61,
   "scenario_id": "malicious_process",
   "schema_version": 1,
   "trajectory_metrics": {
-    "avg_agent_latency_ms": 393.0,
     "evidence_yield": 0.0,
     "loop_suspected": 0.0,
     "redundant_tool_calls": 0.0,

@@ -7,15 +7,14 @@
   "insufficient_trace": false,
   "quality_scores": {
     "evidence": 0.45,
-    "report": 0.49,
-    "risk": 0.865,
+    "report": 0.595,
+    "risk": 0.775,
     "triage": 0.865
   },
-  "risk_score": 20,
+  "risk_score": 58,
   "scenario_id": "insider_privilege_abuse",
   "schema_version": 1,
   "trajectory_metrics": {
-    "avg_agent_latency_ms": 369.8,
     "evidence_yield": 0.0,
     "loop_suspected": 0.0,
     "redundant_tool_calls": 0.0,

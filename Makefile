@@ -201,10 +201,17 @@ update-baseline:
 		exit "$$status"; \
 	}; \
 	trap cleanup EXIT INT TERM; \
+	printf 'This will overwrite all regression baselines under backend/tests/regression/baseline/.\n'; \
+	printf 'Type ISSUE-087 to confirm: '; \
+	read confirm; \
+	if [ "$$confirm" != "ISSUE-087" ]; then \
+		echo "Aborted baseline refresh (confirmation mismatch)." >&2; \
+		exit 1; \
+	fi; \
 	compose up -d --wait --wait-timeout 120 postgres redis; \
 	cd "$(CURDIR)/backend"; \
 	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
-		UPDATE_BASELINE=1 $(PYTHON) -m scripts.update_regression_baseline
+		UPDATE_BASELINE=1 UPDATE_BASELINE_CONFIRM=ISSUE-087 $(PYTHON) -m scripts.update_regression_baseline
 
 # --- ISSUE-009 local / CI parity gates ------------------------------------ #
 ci-lint:
