@@ -1,0 +1,25 @@
+{
+  "dispositions": [],
+  "event_id": "evt-20240615-a21c0948",
+  "event_status": "closed",
+  "executed_actions": [],
+  "final_verdict": "none",
+  "insufficient_trace": false,
+  "quality_scores": {
+    "evidence": 0.45,
+    "report": 0.49,
+    "risk": 0.865,
+    "triage": 0.865
+  },
+  "risk_score": 20,
+  "scenario_id": "suspicious_domain_access",
+  "schema_version": 1,
+  "trajectory_metrics": {
+    "avg_agent_latency_ms": 355.6,
+    "evidence_yield": 0.0,
+    "loop_suspected": 0.0,
+    "redundant_tool_calls": 0.0,
+    "replan_effectiveness": 0.0,
+    "steps_to_verdict": 12.0
+  }
+}
