@@ -1,0 +1,15 @@
+[
+  {
+    "record_id": "net-host_compromise-42-0001",
+    "channel": "network",
+    "logged_at": "2024-06-15T09:02:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "src_ip": "10.60.1.10",
+    "dst_ip": "198.51.100.55",
+    "dst_port": 443,
+    "bytes_out": 120000,
+    "hostname": "WKS-HOST-007",
+    "domain": "beacon-example.test"
+  }
+]

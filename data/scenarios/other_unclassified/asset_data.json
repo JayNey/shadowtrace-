@@ -1,0 +1,12 @@
+[
+  {
+    "record_id": "asset-other_unclassified-42-0004",
+    "channel": "asset",
+    "logged_at": "2024-06-15T09:00:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "numeric_asset_id": "990099",
+    "hostname": "WKS-GEN-099",
+    "agent_status": "online"
+  }
+]

@@ -1,0 +1,14 @@
+[
+  {
+    "record_id": "dlp-malicious_process-42-0003",
+    "channel": "dlp",
+    "logged_at": "2024-06-15T09:02:20+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "file_name": "sensitive.dat",
+    "action": "read",
+    "bytes": 4096,
+    "account": "dev-user-012",
+    "hostname": "DEV-WKS-012"
+  }
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "record_id": "asset-host_compromise-42-0004",
+    "channel": "asset",
+    "logged_at": "2024-06-15T09:00:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "numeric_asset_id": "asset_ho",
+    "hostname": "WKS-HOST-007",
+    "agent_status": "online"
+  }
+]

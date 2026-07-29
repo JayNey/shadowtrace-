@@ -1,0 +1,612 @@
+{
+  "scenario_id": "other_unclassified",
+  "name": "Unclassified low-confidence alert [normal]",
+  "variant": "normal",
+  "base_time": "2024-06-15T09:00:00Z",
+  "source_tenant_id": "tenant-demo",
+  "incidents": [
+    {
+      "reference": {
+        "source_kind": "incident",
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-demo",
+        "connector_id": "conn-disp-other_unclassified",
+        "source_object_type": null,
+        "source_object_id": "770099",
+        "parent_source_object_id": null,
+        "source_status_raw": "open",
+        "source_disposition": "pending",
+        "source_concurrency_token": null,
+        "source_updated_at": "2024-06-15T09:00:00Z",
+        "schema_version": "1",
+        "ingested_at": null,
+        "raw_payload_hash": null
+      },
+      "raw_payload": {},
+      "normalized": {
+        "event_type": "other",
+        "risk_score": 25,
+        "description": "Ambiguous telemetry without a clear event type classification"
+      },
+      "title": "Unclassified security signal — insufficient context",
+      "level": "low",
+      "gpt_verdict_label": "other",
+      "impacted_asset_refs": [
+        {
+          "source_kind": "asset",
+          "source_product": "mock_xdr",
+          "source_tenant_id": "tenant-demo",
+          "connector_id": "conn-disp-other_unclassified",
+          "source_object_type": "endpoint",
+          "source_object_id": "990099",
+          "parent_source_object_id": null,
+          "source_status_raw": "managed",
+          "source_disposition": "pending",
+          "source_concurrency_token": null,
+          "source_updated_at": "2024-06-15T09:00:00Z",
+          "schema_version": "1",
+          "ingested_at": null,
+          "raw_payload_hash": null
+        }
+      ],
+      "related_alert_refs": [
+        {
+          "source_kind": "alert",
+          "source_product": "mock_xdr",
+          "source_tenant_id": "tenant-demo",
+          "connector_id": "conn-disp-other_unclassified",
+          "source_object_type": null,
+          "source_object_id": "990099",
+          "parent_source_object_id": null,
+          "source_status_raw": "open",
+          "source_disposition": "pending",
+          "source_concurrency_token": null,
+          "source_updated_at": "2024-06-15T09:00:00Z",
+          "schema_version": "1",
+          "ingested_at": null,
+          "raw_payload_hash": null
+        }
+      ]
+    }
+  ],
+  "alerts": [
+    {
+      "reference": {
+        "source_kind": "alert",
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-demo",
+        "connector_id": "conn-disp-other_unclassified",
+        "source_object_type": null,
+        "source_object_id": "990099",
+        "parent_source_object_id": null,
+        "source_status_raw": "open",
+        "source_disposition": "pending",
+        "source_concurrency_token": null,
+        "source_updated_at": "2024-06-15T09:00:00Z",
+        "schema_version": "1",
+        "ingested_at": null,
+        "raw_payload_hash": null
+      },
+      "raw_payload": {},
+      "normalized": {
+        "event_type": "other",
+        "alert_type": "other",
+        "severity": "low",
+        "keyword": "unclassified"
+      },
+      "incident_ref": {
+        "source_kind": "incident",
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-demo",
+        "connector_id": "conn-disp-other_unclassified",
+        "source_object_type": null,
+        "source_object_id": "770099",
+        "parent_source_object_id": null,
+        "source_status_raw": "open",
+        "source_disposition": "pending",
+        "source_concurrency_token": null,
+        "source_updated_at": "2024-06-15T09:00:00Z",
+        "schema_version": "1",
+        "ingested_at": null,
+        "raw_payload_hash": null
+      },
+      "xff": null,
+      "source_ip": "10.60.1.10",
+      "related_log_refs": [
+        {
+          "source_kind": "log",
+          "source_product": "mock_xdr",
+          "source_tenant_id": "tenant-demo",
+          "connector_id": "conn-log-other_unclassified",
+          "source_object_type": null,
+          "source_object_id": "880099",
+          "parent_source_object_id": "990099",
+          "source_status_raw": "indexed",
+          "source_disposition": "pending",
+          "source_concurrency_token": null,
+          "source_updated_at": "2024-06-15T09:00:00Z",
+          "schema_version": "1",
+          "ingested_at": null,
+          "raw_payload_hash": null
+        }
+      ],
+      "sub_alert_refs": []
+    }
+  ],
+  "assets": [
+    {
+      "reference": {
+        "source_kind": "asset",
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-demo",
+        "connector_id": "conn-disp-other_unclassified",
+        "source_object_type": "endpoint",
+        "source_object_id": "990099",
+        "parent_source_object_id": null,
+        "source_status_raw": "managed",
+        "source_disposition": "pending",
+        "source_concurrency_token": null,
+        "source_updated_at": "2024-06-15T09:00:00Z",
+        "schema_version": "1",
+        "ingested_at": null,
+        "raw_payload_hash": null
+      },
+      "raw_payload": {},
+      "normalized": {},
+      "numeric_asset_id": "990099",
+      "ip": "10.60.1.10",
+      "hostname": "WKS-GEN-099",
+      "asset_name": null,
+      "asset_group": "system",
+      "owner": "general-user-099",
+      "business_system": null,
+      "importance": null,
+      "agent_status": "online",
+      "first_seen_at": null,
+      "last_seen_at": null
+    }
+  ],
+  "logs": [
+    {
+      "reference": {
+        "source_kind": "log",
+        "source_product": "mock_xdr",
+        "source_tenant_id": "tenant-demo",
+        "connector_id": "conn-log-other_unclassified",
+        "source_object_type": null,
+        "source_object_id": "880099",
+        "parent_source_object_id": "990099",
+        "source_status_raw": "indexed",
+        "source_disposition": "pending",
+        "source_concurrency_token": null,
+        "source_updated_at": "2024-06-15T09:00:00Z",
+        "schema_version": "1",
+        "ingested_at": null,
+        "raw_payload_hash": null
+      },
+      "raw_payload": {
+        "hostname": "WKS-GEN-099",
+        "account": "general-user-099"
+      },
+      "normalized": {},
+      "device_source": "edr",
+      "logged_at": "2024-06-15T09:00:00Z",
+      "src_ip": "10.60.1.10",
+      "src_port": null,
+      "dst_ip": null,
+      "dst_port": null,
+      "category": "process"
+    }
+  ],
+  "connectors": [
+    {
+      "connector_id": "conn-log-other_unclassified",
+      "source_product": "mock_xdr",
+      "display_name": "Mock Log Ingestion Only",
+      "device_type": "syslog",
+      "status": "online",
+      "read_endpoint": null,
+      "disposition_endpoint": null,
+      "capabilities": {
+        "log_ingestion": "supported",
+        "query": "unsupported",
+        "event_disposition": "unsupported",
+        "entity_response": "unsupported"
+      },
+      "disposition_policy_default": "not_required",
+      "last_sync_at": null,
+      "schema_version": "1",
+      "read_credential_ref": null,
+      "disposition_credential_ref": null,
+      "metadata": {
+        "role": "log_only"
+      }
+    },
+    {
+      "connector_id": "conn-disp-other_unclassified",
+      "source_product": "mock_xdr",
+      "display_name": "Mock Disposition / Response Connector",
+      "device_type": "xdr_console",
+      "status": "online",
+      "read_endpoint": null,
+      "disposition_endpoint": "mock://disposition",
+      "capabilities": {
+        "log_ingestion": "unsupported",
+        "query": "supported",
+        "event_disposition": "supported",
+        "entity_response": "supported"
+      },
+      "disposition_policy_default": "not_required",
+      "last_sync_at": null,
+      "schema_version": "1",
+      "read_credential_ref": null,
+      "disposition_credential_ref": "secret://mock/disposition",
+      "metadata": {
+        "role": "disposition"
+      }
+    }
+  ],
+  "telemetry_timeline": [
+    {
+      "record_id": "id-other_unclassified-42-0000",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:00:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "login",
+      "src_ip": "10.60.1.10",
+      "result": "success"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0001",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:00:30+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "auth",
+      "src_ip": "10.60.1.10",
+      "result": "success"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0002",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:01:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "login",
+      "src_ip": "10.60.1.10",
+      "result": "success"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0003",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:01:30+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "auth",
+      "src_ip": "10.60.1.10",
+      "result": "success"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0004",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:02:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "login",
+      "src_ip": "10.60.1.10",
+      "result": "success"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0005",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:02:30+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "auth",
+      "src_ip": "10.60.1.10",
+      "result": "success"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0006",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:03:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "login",
+      "src_ip": "10.60.1.10",
+      "result": "success"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0007",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:03:30+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "auth",
+      "src_ip": "10.60.1.10",
+      "result": "success"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0008",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:04:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "login",
+      "src_ip": "10.60.1.10",
+      "result": "failure"
+    },
+    {
+      "record_id": "id-other_unclassified-42-0009",
+      "channel": "identity",
+      "logged_at": "2024-06-15T09:04:30+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "account": "general-user-099",
+      "event_type": "auth",
+      "src_ip": "10.60.1.10",
+      "result": "failure"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0000",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:01:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "process_create",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0001",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:01:20+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "network_connect",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0002",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:01:40+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "process_create",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0003",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:02:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "network_connect",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0004",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:02:20+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "process_create",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0005",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:02:40+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "network_connect",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0006",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:03:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "process_create",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0007",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:03:20+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "network_connect",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0008",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:03:40+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "process_create",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0009",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:04:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "network_connect",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0010",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:04:20+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "process_create",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "ep-other_unclassified-42-0011",
+      "channel": "endpoint",
+      "logged_at": "2024-06-15T09:04:40+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "hostname": "WKS-GEN-099",
+      "process": "suspicious.bin",
+      "account": "general-user-099",
+      "action": "network_connect",
+      "dst_ip": "10.60.2.20"
+    },
+    {
+      "record_id": "net-other_unclassified-42-0001",
+      "channel": "network",
+      "logged_at": "2024-06-15T09:02:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "src_ip": "10.60.1.10",
+      "dst_ip": "198.51.100.55",
+      "dst_port": 443,
+      "bytes_out": 2000,
+      "hostname": "WKS-GEN-099",
+      "domain": "beacon-example.test"
+    },
+    {
+      "record_id": "dns-other_unclassified-42-0002",
+      "channel": "dns",
+      "logged_at": "2024-06-15T09:02:10+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "query": "beacon-example.test",
+      "qtype": "A",
+      "rcode": "NOERROR",
+      "hostname": "WKS-GEN-099"
+    },
+    {
+      "record_id": "dlp-other_unclassified-42-0003",
+      "channel": "dlp",
+      "logged_at": "2024-06-15T09:02:20+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "file_name": "sensitive.dat",
+      "action": "read",
+      "bytes": 4096,
+      "account": "general-user-099",
+      "hostname": "WKS-GEN-099"
+    },
+    {
+      "record_id": "asset-other_unclassified-42-0004",
+      "channel": "asset",
+      "logged_at": "2024-06-15T09:00:00+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "numeric_asset_id": "990099",
+      "hostname": "WKS-GEN-099",
+      "agent_status": "online"
+    },
+    {
+      "record_id": "ti-other_unclassified-42-0005",
+      "channel": "threat_intel",
+      "logged_at": "2024-06-15T09:02:30+00:00",
+      "is_key_event": true,
+      "is_conflict_seed": false,
+      "indicator": "198.51.100.55",
+      "indicator_type": "ip",
+      "confidence": 0.35,
+      "tags": [
+        "unclassified"
+      ],
+      "risk_score": 25
+    }
+  ],
+  "ticks": [],
+  "failure_profile": {
+    "seed": 42,
+    "fixed_delay_ms": 0,
+    "jitter_delay_ms": 0,
+    "rate_limit_every_n": null,
+    "server_error_every_n": null,
+    "timeout_every_n": null,
+    "malformed_payload_every_n": null,
+    "duplicate_page": false,
+    "late_data": false,
+    "out_of_order_updates": false,
+    "missing_fields": [],
+    "schema_version_override": null,
+    "async_disposition": false,
+    "force_token_conflict": false,
+    "force_partial_targets": false,
+    "reject_unauthorized_fields": true,
+    "control_plane_enabled": true
+  },
+  "expected_outcome": {
+    "expected_verdict": "none",
+    "expected_severity": "low",
+    "risk_score": 25,
+    "risk_min": 0,
+    "risk_max": 45,
+    "event_type": "other",
+    "disposition_policy": "not_required",
+    "allowed_actions": [
+      "create_ticket",
+      "notify_security_team"
+    ],
+    "rule_fallback": true,
+    "active_variant": "normal",
+    "variants": [
+      "normal",
+      "agent_not_installed",
+      "device_offline",
+      "capability_gap",
+      "partial_success",
+      "capacity_limit_exceeded",
+      "rate_limit",
+      "timeout",
+      "malformed_payload"
+    ],
+    "provider_error_codes": []
+  }
+}

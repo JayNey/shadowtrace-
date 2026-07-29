@@ -1,0 +1,16 @@
+[
+  {
+    "record_id": "ti-other_unclassified-42-0005",
+    "channel": "threat_intel",
+    "logged_at": "2024-06-15T09:02:30+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "indicator": "198.51.100.55",
+    "indicator_type": "ip",
+    "confidence": 0.35,
+    "tags": [
+      "unclassified"
+    ],
+    "risk_score": 25
+  }
+]

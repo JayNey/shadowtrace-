@@ -17,6 +17,13 @@ from app.data_generators.scenarios._common import (
     normalize_variant,
     split_telemetry_by_channel,
 )
+from app.data_generators.scenarios._system_scenario_pack import (
+    build_host_compromise,
+    build_insider_privilege_abuse,
+    build_lateral_movement,
+    build_malicious_process,
+    build_other_unclassified,
+)
 from app.data_generators.scenarios.account_anomaly_fp import (
     SCENARIO_ID as ACCOUNT_ANOMALY_FP_ID,
 )
@@ -39,6 +46,11 @@ SCENARIO_BUILDERS: dict[str, Callable[..., MockXDRScenario]] = {
     INSIDER_ID: build_insider_data_exfiltration,
     ACCOUNT_ANOMALY_FP_ID: build_account_anomaly_fp,
     DOMAIN_ACCESS_ID: build_suspicious_domain_access,
+    "host_compromise": build_host_compromise,
+    "malicious_process": build_malicious_process,
+    "insider_privilege_abuse": build_insider_privilege_abuse,
+    "lateral_movement": build_lateral_movement,
+    "other_unclassified": build_other_unclassified,
 }
 
 
@@ -47,13 +59,17 @@ def build_scenario(
     *,
     seed: int = 42,
     variant: ScenarioVariant | str = ScenarioVariant.NORMAL,
+    instance: int = 0,
 ) -> MockXDRScenario:
     try:
         builder = SCENARIO_BUILDERS[scenario_id]
     except KeyError as exc:
         known = ", ".join(sorted(SCENARIO_BUILDERS))
         raise KeyError(f"unknown scenario {scenario_id!r}; known: {known}") from exc
-    scenario = builder(seed=seed, variant=normalize_variant(variant))
+    try:
+        scenario = builder(seed=seed, variant=normalize_variant(variant), instance=instance)
+    except TypeError:
+        scenario = builder(seed=seed, variant=normalize_variant(variant))
     return scenario
 
 

@@ -36,6 +36,11 @@ SCENARIO_IDS = (
     "insider_data_exfiltration",
     "account_anomaly_fp",
     "suspicious_domain_access",
+    "host_compromise",
+    "malicious_process",
+    "insider_privilege_abuse",
+    "lateral_movement",
+    "other_unclassified",
 )
 
 # Opaque external id fixtures must cover digit-only / UUID / long unprefixed forms.
@@ -46,7 +51,7 @@ _UUID_RE = re.compile(
 
 
 @pytest.mark.parametrize("scenario_id", SCENARIO_IDS)
-def test_registry_contains_three_scenarios(scenario_id: str) -> None:
+def test_registry_contains_all_scenario_packs(scenario_id: str) -> None:
     assert scenario_id in SCENARIO_REGISTRY
     assert set(SCENARIO_REGISTRY) == set(SCENARIO_IDS)
     assert SCENARIO_REGISTRY[scenario_id].variant is ScenarioVariant.NORMAL

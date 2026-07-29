@@ -1,0 +1,12 @@
+[
+  {
+    "record_id": "asset-insider_privilege_abuse-42-0004",
+    "channel": "asset",
+    "logged_at": "2024-06-15T09:00:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "numeric_asset_id": "130013",
+    "hostname": "SRV-ADMIN-003",
+    "agent_status": "online"
+  }
+]

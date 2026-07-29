@@ -1,0 +1,12 @@
+[
+  {
+    "record_id": "asset-lateral_movement-42-0004",
+    "channel": "asset",
+    "logged_at": "2024-06-15T09:00:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "numeric_asset_id": "140014",
+    "hostname": "JUMP-HOST-001",
+    "agent_status": "online"
+  }
+]

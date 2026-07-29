@@ -55,6 +55,7 @@ markers = [
   "e2e_basic: analysis-only golden-path integration (ISSUE-039)",
   "orchestration: multi-agent orchestration integration (ISSUE-055)",
   "e2e_response: end-to-end response-loop integration (ISSUE-064)",
+  "system: full-system quality gate (ISSUE-086; requires PostgreSQL + Redis)",
   "opensearch: requires OpenSearch service (ISSUE-084)",
   "neo4j: requires Neo4j service (docker compose --profile optional up -d neo4j)",
 ]

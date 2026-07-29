@@ -1,0 +1,112 @@
+[
+  {
+    "record_id": "id-lateral_movement-42-0000",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:00:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "login",
+    "src_ip": "10.60.1.10",
+    "result": "success"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0001",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:00:30+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "auth",
+    "src_ip": "10.60.1.10",
+    "result": "success"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0002",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:01:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "login",
+    "src_ip": "10.60.1.10",
+    "result": "success"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0003",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:01:30+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "auth",
+    "src_ip": "10.60.1.10",
+    "result": "success"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0004",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:02:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "login",
+    "src_ip": "10.60.1.10",
+    "result": "success"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0005",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:02:30+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "auth",
+    "src_ip": "10.60.1.10",
+    "result": "success"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0006",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:03:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "login",
+    "src_ip": "10.60.1.10",
+    "result": "success"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0007",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:03:30+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "auth",
+    "src_ip": "10.60.1.10",
+    "result": "success"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0008",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:04:00+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "login",
+    "src_ip": "10.60.1.10",
+    "result": "failure"
+  },
+  {
+    "record_id": "id-lateral_movement-42-0009",
+    "channel": "identity",
+    "logged_at": "2024-06-15T09:04:30+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "account": "ops-jump-001",
+    "event_type": "auth",
+    "src_ip": "10.60.1.10",
+    "result": "failure"
+  }
+]

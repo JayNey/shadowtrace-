@@ -1,0 +1,13 @@
+[
+  {
+    "record_id": "dns-other_unclassified-42-0002",
+    "channel": "dns",
+    "logged_at": "2024-06-15T09:02:10+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "query": "beacon-example.test",
+    "qtype": "A",
+    "rcode": "NOERROR",
+    "hostname": "WKS-GEN-099"
+  }
+]
