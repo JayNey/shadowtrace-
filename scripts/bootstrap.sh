@@ -110,16 +110,36 @@ ${COMPOSE_CMD} exec -T backend python3 -m alembic upgrade head
 echo "[bootstrap] migrations complete"
 
 # --------------------------------------------------------------------------
+# 2b. Skip re-seed when demo events already exist (idempotent bootstrap)
+#     Set FORCE_BOOTSTRAP=true to re-seed on a non-empty volume.
+# --------------------------------------------------------------------------
+existing_count="$(
+  curl -sf -H "Authorization: Bearer ${AUTH_TOKEN}" \
+    "http://127.0.0.1:${BACKEND_PORT}/api/v1/events?page_size=50" \
+    | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('items', [])))" \
+    2>/dev/null || echo 0
+)"
+if [ "${FORCE_BOOTSTRAP:-false}" != "true" ] && [ "${existing_count}" -ge 3 ]; then
+  echo "[bootstrap] found ${existing_count} existing event(s); skipping seed/ingest"
+  echo "[bootstrap] (set FORCE_BOOTSTRAP=true to re-seed on this volume)"
+  skip_seed=1
+else
+  skip_seed=0
+fi
+
+# --------------------------------------------------------------------------
 # 3. Seed mock-xdr + poll-ingest demo scenarios (ISSUE-088 §验收标准 #1)
 # --------------------------------------------------------------------------
-for scenario_id in "${DEMO_SCENARIOS[@]}"; do
-  echo "[bootstrap] seeding mock-xdr + ingesting scenario: ${scenario_id} ..."
-  ${COMPOSE_CMD} exec -T backend python3 scripts/seed_mock_xdr_and_ingest.py \
-    --scenario "${scenario_id}" \
-    --mock-xdr-url "${MOCK_XDR_URL}" \
-    --seed 42
-done
-echo "[bootstrap] 3 demo scenarios seeded in mock-xdr and ingested"
+if [ "${skip_seed}" -eq 0 ]; then
+  for scenario_id in "${DEMO_SCENARIOS[@]}"; do
+    echo "[bootstrap] seeding mock-xdr + ingesting scenario: ${scenario_id} ..."
+    ${COMPOSE_CMD} exec -T backend python3 scripts/seed_mock_xdr_and_ingest.py \
+      --scenario "${scenario_id}" \
+      --mock-xdr-url "${MOCK_XDR_URL}" \
+      --seed 42
+  done
+  echo "[bootstrap] 3 demo scenarios seeded in mock-xdr and ingested"
+fi
 
 # --------------------------------------------------------------------------
 # 4. Trigger investigation on all "new" events via the backend API

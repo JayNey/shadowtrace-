@@ -225,5 +225,6 @@ make bootstrap
 
 ### 重复运行 bootstrap
 
-`make bootstrap` 可安全重复运行（alembic 幂等、KB 加载幂等），但每次会创建**新的**演示事件。
+`make bootstrap` 在数据卷上**幂等**：若已有 ≥3 个事件，会跳过 seed/ingest（alembic 仍运行）。
+强制重新播种：`FORCE_BOOTSTRAP=true make bootstrap`。  
 如需完全重置：`make down-v && make up && make bootstrap`。

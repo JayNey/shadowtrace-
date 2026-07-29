@@ -328,6 +328,12 @@ jobs:
       REDIS_PORT: "6379"
       BACKEND_PORT: "8000"
       FRONTEND_PORT: "5173"
+      MOCK_XDR_PORT: "8100"
+      VITE_API_BASE_URL: http://localhost:8000/api/v1
+      VITE_SOCKET_URL: http://localhost:8000
+      VITE_DEV_AUTH_TOKEN: e2e-token
+      VITE_AUTH_SUBJECT: e2e-operator
+      VITE_APPROVER_DISPLAY: E2E Operator
       E2E_FRONTEND_URL: http://127.0.0.1:5173
       E2E_BACKEND_URL: http://127.0.0.1:8000/api/v1
       E2E_AUTH_TOKEN: e2e-token

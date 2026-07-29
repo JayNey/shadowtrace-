@@ -58,9 +58,14 @@ services:
     build:
       context: ..
       dockerfile: backend/Dockerfile
+    environment:
+      SKIP_DB_MIGRATE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["python", "-m", "uvicorn"]
     command:
       [
-        "python", "-m", "uvicorn",
         "app.mock_xdr.api:app",
         "--host", "0.0.0.0",
         "--port", "8100",
@@ -110,8 +115,8 @@ services:
       ALLOW_LIVE_SIDE_EFFECTS: "false"
       ALLOW_XDR_WRITEBACK: "false"
 
-      # --- Dev auth (ISSUE-088 bootstrap) ---
-      DEV_AUTH_TOKENS: '{"bootstrap-token":{"subject":"bootstrap","roles":["analyst","admin","approver","disposition_operator"]}}'
+      # --- Dev auth (ISSUE-088 bootstrap + ISSUE-077 e2e compatibility) ---
+      DEV_AUTH_TOKENS: '{"bootstrap-token":{"subject":"bootstrap","roles":["analyst","admin","approver","disposition_operator"]},"e2e-token":{"subject":"e2e-operator","display_name":"E2E Operator","roles":["analyst","approver"]}}'
 
       # --- Optional graph mirror (override host default when neo4j profile is on) ---
       NEO4J_URI: bolt://neo4j:7687
@@ -140,12 +145,12 @@ services:
       context: ../frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE_URL: /api/v1
-        VITE_SOCKET_URL: ""
-        VITE_DEV_AUTH_TOKEN: bootstrap-token
-        VITE_AUTH_SUBJECT: bootstrap
-        VITE_APPROVER_DISPLAY: Bootstrap Operator
-        VITE_EVENT_CHAT_ENABLED: "true"
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+        VITE_SOCKET_URL: ${VITE_SOCKET_URL:-}
+        VITE_DEV_AUTH_TOKEN: ${VITE_DEV_AUTH_TOKEN:-bootstrap-token}
+        VITE_AUTH_SUBJECT: ${VITE_AUTH_SUBJECT:-bootstrap}
+        VITE_APPROVER_DISPLAY: ${VITE_APPROVER_DISPLAY:-Bootstrap Operator}
+        VITE_EVENT_CHAT_ENABLED: ${VITE_EVENT_CHAT_ENABLED:-true}
     ports:
       - "${FRONTEND_PORT:-3000}:80"
     depends_on:
