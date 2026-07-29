@@ -1305,8 +1305,12 @@ class EventService:
                         "expected_kind": expected_kind.value,
                     },
                 )
-            if expected_kind is SourceObjectKind.INCIDENT:
+            if expected_kind is SourceObjectKind.INCIDENT and primary.source_kind in (
+                SourceObjectKind.LOG,
+                SourceObjectKind.ASSET,
+            ):
                 # Logs/assets may arrive on a different connector than the parent incident.
+                # Alerts/incidents still require matching connector_id (full primary_scope).
                 if (
                     related.source_product != primary.source_product
                     or related.source_tenant_id != primary.source_tenant_id

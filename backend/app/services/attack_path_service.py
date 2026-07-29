@@ -29,6 +29,7 @@ WITH local
 MATCH (remote)
 WHERE remote.event_id <> $event_id
   AND remote.entity_value = local.entity_value
+  AND remote.entity_type = local.entity_type
   AND remote.entity_value IS NOT NULL
 RETURN local.entity_value AS shared_value,
        local.entity_type AS entity_type,
@@ -66,9 +67,9 @@ ORDER BY coalesce(r.occurred_at, datetime('1970-01-01T00:00:00Z'))
 
 
 def _path_id(event_id: str, related_event_id: str, shared_value: str) -> str:
-    digest = hashlib.sha256(
-        f"{event_id}|{related_event_id}|{shared_value}".encode()
-    ).hexdigest()[:12]
+    digest = hashlib.sha256(f"{event_id}|{related_event_id}|{shared_value}".encode()).hexdigest()[
+        :12
+    ]
     return f"cep-{digest}"
 
 
