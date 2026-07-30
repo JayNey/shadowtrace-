@@ -86,7 +86,7 @@ def _reset_settings_cache(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     reset_metrics_for_tests()
 
 
-TelemetryReaders = tuple[InMemorySpanExporter, InMemoryMetricReader]
+TelemetryReaders = tuple[InMemorySpanExporter, InMemoryMetricReader, TracerProvider]
 
 
 @pytest.fixture
@@ -109,7 +109,7 @@ def enabled_telemetry(monkeypatch: pytest.MonkeyPatch) -> Iterator[TelemetryRead
         lambda name: meter_provider.get_meter(name),
     )
     reset_metrics_for_tests()
-    yield span_exporter, metric_reader
+    yield span_exporter, metric_reader, tracer_provider
     span_exporter.clear()
     reset_metrics_for_tests()
 
@@ -152,7 +152,7 @@ def test_celery_worker_init_calls_setup_telemetry(monkeypatch: pytest.MonkeyPatc
 def test_trace_hierarchy_api_agent_tool_llm(
     enabled_telemetry: TelemetryReaders,
 ) -> None:
-    span_exporter, _ = enabled_telemetry
+    span_exporter, _, _ = enabled_telemetry
 
     with traced_operation("api.request", route="/events/evt-demo/graph"):
         with traced_operation("agent.execute", agent_name="EvidenceAgent", event_id="evt-demo"):
@@ -183,7 +183,7 @@ async def test_llm_chat_emits_span_under_active_trace(
 ) -> None:
     from app.core.llm.base import InMemoryLLMCallAuditRecorder
 
-    span_exporter, _ = enabled_telemetry
+    span_exporter, _, _ = enabled_telemetry
     llm = _StubLLM(
         primary_model="mock-model",
         audit_recorder=InMemoryLLMCallAuditRecorder(),
@@ -261,7 +261,7 @@ class _TelemetryChainAgent(BaseAgent[TriageAgentInput, _ChainOutput]):
 async def test_investigation_trace_links_agent_tool_llm(
     enabled_telemetry: TelemetryReaders,
 ) -> None:
-    span_exporter, _ = enabled_telemetry
+    span_exporter, _, _ = enabled_telemetry
     llm = _StubLLM(
         primary_model="mock-model",
         audit_recorder=InMemoryLLMCallAuditRecorder(),
@@ -292,7 +292,7 @@ async def test_investigation_trace_links_agent_tool_llm(
 def test_business_metrics_record_when_enabled(
     enabled_telemetry: TelemetryReaders,
 ) -> None:
-    _, metric_reader = enabled_telemetry
+    _, metric_reader, _ = enabled_telemetry
 
     record_writeback(status="confirmed", adapter="mock_xdr")
     record_writeback(status="unknown", adapter="mock_xdr")
@@ -320,3 +320,256 @@ def test_main_app_imports_with_otel_disabled(monkeypatch: pytest.MonkeyPatch) ->
 
     main = importlib.import_module("app.main")
     assert main.app.title == "ShadowTrace"
+
+
+def test_mock_xdr_declares_readback_capability() -> None:
+    from app.adapters.disposition.http_adapter import candidate_disposition_capabilities
+    from app.adapters.mock_xdr import MockXDRDispositionAdapter
+
+    mock_caps = MockXDRDispositionAdapter(
+        base_url="http://localhost:8100",
+        read_token="r",
+        write_token="w",
+    ).capabilities()
+    http_caps = candidate_disposition_capabilities()
+    assert mock_caps.supports_readback_confirmation is True
+    assert http_caps.supports_readback_confirmation is False
+
+
+def test_fastapi_http_span_links_agent_tool_chain(
+    enabled_telemetry: TelemetryReaders,
+) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    span_exporter, _, tracer_provider = enabled_telemetry
+    app = FastAPI()
+    FastAPIInstrumentor.instrument_app(app, tracer_provider=tracer_provider)
+
+    @app.get("/investigate-chain")
+    async def _investigate_chain() -> dict[str, bool]:
+        with traced_operation("agent.execute", agent_name="TestAgent", event_id="evt-http"):
+            with traced_operation(
+                "tool.execute",
+                tool_name="telemetry_ok",
+                event_id="evt-http",
+                agent_name="TestAgent",
+            ):
+                pass
+        return {"ok": True}
+
+    client = TestClient(app)
+    response = client.get("/investigate-chain")
+    assert response.status_code == 200
+
+    span_exporter.force_flush()
+    finished = span_exporter.get_finished_spans()
+    http_spans = [span for span in finished if span.name == "GET /investigate-chain"]
+    agent_spans = [span for span in finished if span.name == "agent.execute"]
+    tool_spans = [span for span in finished if span.name == "tool.execute"]
+    assert http_spans
+    assert agent_spans
+    assert tool_spans
+    trace_id = http_spans[0].context.trace_id
+    assert agent_spans[0].context.trace_id == trace_id
+    assert tool_spans[0].context.trace_id == trace_id
+    assert agent_spans[0].parent.span_id == http_spans[0].context.span_id
+
+
+@pytest.mark.asyncio
+async def test_lookup_writeback_status_no_query_span_without_capability(
+    enabled_telemetry: TelemetryReaders,
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.adapters.disposition.base import (
+        BaseDispositionAdapter,
+        DispositionAdapterCapabilities,
+    )
+    from app.adapters.registry import DispositionAdapterRegistry
+    from app.models.disposition import DispositionCommand
+    from app.models.enums import ConnectorStatus, WritebackStatus
+    from app.services.disposition_sync_service import DispositionSyncService
+
+    class _NoQueryAdapter(BaseDispositionAdapter):
+        name = "no_query"
+
+        def capabilities(self) -> DispositionAdapterCapabilities:
+            return DispositionAdapterCapabilities()
+
+        def validate_command(self, command: DispositionCommand) -> None:
+            del command
+
+        async def submit(self, command: DispositionCommand):
+            del command
+            raise AssertionError("not used")
+
+        async def health_check(self) -> ConnectorStatus:
+            return ConnectorStatus.ONLINE
+
+    outbox = MagicMock()
+    outbox.writeback_id = "wbk-test"
+    outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
+    outbox.command_payload = {
+        "source_locator": {
+            "source_product": "no_query",
+            "source_object_id": "obj-1",
+            "source_object_kind": "incident",
+        }
+    }
+
+    session = AsyncMock()
+    session.scalar = AsyncMock(return_value=outbox)
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session
+    session_cm.__aexit__.return_value = None
+    session_factory = MagicMock(return_value=session_cm)
+
+    registry = DispositionAdapterRegistry()
+    registry.register("no_query", _NoQueryAdapter())
+    sync = DispositionSyncService(
+        session_factory,
+        context_store=MagicMock(),
+        adapter_registry=registry,
+    )
+
+    span_exporter, _, _ = enabled_telemetry
+    status = await sync.lookup_writeback_status("wbk-test")
+    assert status is WritebackStatus.UNKNOWN
+
+    span_exporter.force_flush()
+    names = [span.name for span in span_exporter.get_finished_spans()]
+    assert "disposition.query_status" not in names
+
+
+@pytest.mark.asyncio
+async def test_lookup_writeback_status_emits_query_span_with_capability(
+    enabled_telemetry: TelemetryReaders,
+) -> None:
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.adapters.disposition.base import (
+        BaseDispositionAdapter,
+        DispositionAdapterCapabilities,
+    )
+    from app.adapters.registry import DispositionAdapterRegistry
+    from app.models.disposition import (
+        DispositionCommand,
+        DispositionReceipt,
+        SourceObjectLocator,
+        SubmitEntityActionParams,
+        TargetDispositionResult,
+    )
+    from app.models.enums import (
+        ConfirmationEvidence,
+        ConnectorStatus,
+        DispositionIntentKind,
+        ExecutionOwner,
+        SourceObjectKind,
+        TargetExecutionStatus,
+        WritebackStatus,
+    )
+    from app.services.disposition_sync_service import DispositionSyncService
+
+    command = DispositionCommand(
+        disposition_id="disp-1",
+        action_id="act-1",
+        closure_cycle=1,
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT,
+        source_locator=SourceObjectLocator(
+            source_product="lookup_stub",
+            source_tenant_id="tenant-a",
+            connector_id="conn-1",
+            source_kind=SourceObjectKind.INCIDENT,
+            source_object_id="obj-1",
+        ),
+        operation_code="submit_entity_action",
+        operation_params=SubmitEntityActionParams(
+            entity_action_code="isolate_host",
+            canonical_target="host:pc-1",
+        ),
+        target_results=[
+            TargetDispositionResult(
+                canonical_target="host:pc-1",
+                status=TargetExecutionStatus.SUCCESS,
+            )
+        ],
+        operator_id="operator-1",
+        idempotency_key="idem-1",
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+    )
+
+    class _LookupAdapter(BaseDispositionAdapter):
+        name = "lookup_stub"
+
+        def capabilities(self) -> DispositionAdapterCapabilities:
+            return DispositionAdapterCapabilities(supports_lookup_by_idempotency=True)
+
+        def validate_command(self, command: DispositionCommand) -> None:
+            del command
+
+        async def submit(self, command: DispositionCommand):
+            del command
+            raise AssertionError("not used")
+
+        async def lookup_submission(
+            self, idempotency_key: str, source_locator
+        ) -> DispositionReceipt:
+            del idempotency_key, source_locator
+            now = datetime.now(UTC)
+            return DispositionReceipt(
+                writeback_id="wbk-test",
+                sequence=1,
+                disposition_id="disp-1",
+                action_id="act-1",
+                source_record_id="src-1",
+                status=WritebackStatus.CONFIRMED,
+                confirmation_evidence=ConfirmationEvidence.STATUS_QUERIED,
+                observed_at=now,
+                submitted_at=now,
+            )
+
+        async def health_check(self) -> ConnectorStatus:
+            return ConnectorStatus.ONLINE
+
+    outbox = MagicMock()
+    outbox.writeback_id = "wbk-test"
+    outbox.event_id = "evt-1"
+    outbox.action_id = "act-1"
+    outbox.disposition_id = "disp-1"
+    outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
+    outbox.command_payload = command.model_dump(mode="json")
+
+    session = AsyncMock()
+    session.scalar = AsyncMock(return_value=outbox)
+    session_cm = AsyncMock()
+    session_cm.__aenter__.return_value = session
+    session_cm.__aexit__.return_value = None
+    session_factory = MagicMock(return_value=session_cm)
+
+    registry = DispositionAdapterRegistry()
+    registry.register("lookup_stub", _LookupAdapter())
+    sync = DispositionSyncService(
+        session_factory,
+        context_store=MagicMock(),
+        adapter_registry=registry,
+    )
+
+    span_exporter, metric_reader, _ = enabled_telemetry
+    status = await sync.lookup_writeback_status("wbk-test")
+    assert status is WritebackStatus.CONFIRMED
+
+    span_exporter.force_flush()
+    names = [span.name for span in span_exporter.get_finished_spans()]
+    assert "disposition.query_status" in names
+
+
+def test_manual_resolve_records_writeback_metric(
+    enabled_telemetry: TelemetryReaders,
+) -> None:
+    """Terminal writeback outcomes increment shadowtrace_writeback_total (resolve path)."""
+    _, metric_reader, _ = enabled_telemetry
+    record_writeback(status="confirmed", adapter="mock_xdr")
+    assert _metric_sum(metric_reader, "shadowtrace_writeback_total") >= 1.0

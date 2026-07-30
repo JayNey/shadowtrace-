@@ -30,6 +30,7 @@ class DispositionAdapterCapabilities(BaseModel):
     supports_status_query: bool = False
     supports_concurrency_token: bool = False
     supports_lookup_by_idempotency: bool = False
+    supports_readback_confirmation: bool = False
 
 
 class BaseDispositionAdapter(ABC):

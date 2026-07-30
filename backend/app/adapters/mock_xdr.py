@@ -344,6 +344,7 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
             supports_status_query=True,
             supports_concurrency_token=True,
             supports_lookup_by_idempotency=True,
+            supports_readback_confirmation=True,
         )
 
     async def _http(self) -> httpx.AsyncClient:

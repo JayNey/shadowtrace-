@@ -120,6 +120,11 @@ services:
 
       # --- Optional graph mirror (override host default when neo4j profile is on) ---
       NEO4J_URI: bolt://neo4j:7687
+
+      # Optional OTel (ISSUE-092): point at host collector when observability stack runs locally
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+      OTEL_SERVICE_NAME: shadowtrace-backend
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:

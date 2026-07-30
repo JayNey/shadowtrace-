@@ -225,11 +225,13 @@ class DispositionSyncService:
         return WritebackStatus.PENDING
 
     async def lookup_writeback_status(self, writeback_id: str) -> WritebackStatus | None:
-        """Look up the current writeback status from the outbox by writeback_id.
+        """Look up writeback status, preferring provider query when declared.
 
         Used by WritebackRecoveryHandler (ISSUE-062) when a writeback is in
-        UNKNOWN status and the handler needs to query the provider-side state
-        before deciding whether to retry or escalate.
+        UNKNOWN status. When the adapter declares ``supports_status_query`` or
+        ``supports_lookup_by_idempotency``, queries the provider inside a
+        ``disposition.query_status`` span (ISSUE-092); otherwise returns the
+        cached outbox status only (no span).
         """
         async with self._session_factory() as session:
             outbox = await session.scalar(
@@ -237,7 +239,45 @@ class DispositionSyncService:
                     orm.DispositionOutbox.writeback_id == writeback_id
                 )
             )
-            if outbox is None or not outbox.latest_writeback_status:
+            if outbox is None:
+                return None
+
+            adapter = self._resolve_adapter(outbox)
+            caps = adapter.capabilities()
+            if caps.supports_status_query or caps.supports_lookup_by_idempotency:
+                command = DispositionCommand.model_validate(outbox.command_payload)
+                latest_receipt = await session.scalar(
+                    select(orm.DispositionReceipt)
+                    .where(orm.DispositionReceipt.writeback_id == writeback_id)
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+                provider_job_id = (
+                    latest_receipt.provider_job_id if latest_receipt is not None else None
+                )
+                with disposition_span(
+                    "disposition.query_status",
+                    event_id=outbox.event_id,
+                    action_id=outbox.action_id,
+                    disposition_id=outbox.disposition_id,
+                    writeback_id=outbox.writeback_id,
+                ):
+                    receipt: DispositionReceipt | None = None
+                    if caps.supports_lookup_by_idempotency:
+                        receipt = await adapter.lookup_submission(
+                            command.idempotency_key,
+                            command.source_locator,
+                        )
+                    if (
+                        receipt is None
+                        and caps.supports_status_query
+                        and provider_job_id
+                    ):
+                        receipt = await adapter.get_status(provider_job_id)
+                if receipt is not None:
+                    return receipt.status
+
+            if not outbox.latest_writeback_status:
                 return None
             try:
                 return WritebackStatus(outbox.latest_writeback_status)
@@ -298,6 +338,8 @@ class DispositionSyncService:
                 if action is not None:
                     action.writeback_status = status.value
                 event_id = outbox.event_id
+                adapter_label = self._adapter_label(outbox)
+        record_writeback(status=status.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
         await self._maybe_resume(event_id)
         if self._bus is not None:
@@ -438,6 +480,8 @@ class DispositionSyncService:
                 if action is not None:
                     action.writeback_status = target.value
                 event_id = outbox.event_id
+                adapter_label = self._adapter_label(outbox)
+        record_writeback(status=target.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
         await self._maybe_resume(event_id)
         if self._bus is not None:
@@ -616,10 +660,9 @@ class DispositionSyncService:
                 # above produces ACCEPTED; the readback converts it to
                 # CONFIRMED by verifying the provider-side state
                 # transition actually occurred (provider truth).
-                confirm_readback = getattr(adapter, "confirm_readback", None)
                 if (
-                    confirm_readback is not None
-                    and command.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE
+                    command.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE
+                    and adapter.capabilities().supports_readback_confirmation
                 ):
                     try:
                         with disposition_span(
@@ -629,9 +672,10 @@ class DispositionSyncService:
                             disposition_id=outbox.disposition_id,
                             writeback_id=outbox.writeback_id,
                         ):
-                            confirmed = await confirm_readback(command)
-                        await self._append_receipt(session, outbox, receipt=confirmed)
-                        receipt = confirmed
+                            confirmed = await adapter.confirm_readback(command)
+                        if confirmed is not None:
+                            await self._append_receipt(session, outbox, receipt=confirmed)
+                            receipt = confirmed
                     except Exception as exc:
                         logger.warning(
                             "readback confirmation failed for %s; receipt stays at %s",
