@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCrossEventOverlayHints,
   entityOverlayKey,
+  localSharedNodesForPath,
 } from "../../src/components/graph/crossEventOverlayHints";
 import type { CrossEventPath, GraphNode } from "../../src/types/event";
 
@@ -18,7 +19,7 @@ const node = (
 });
 
 describe("buildCrossEventOverlayHints", () => {
-  it("uses path_nodes for dashed links instead of entity_value collisions", () => {
+  it("highlights all visible local nodes matching shared entity values", () => {
     const paths: CrossEventPath[] = [
       {
         path_id: "cep-demo",
@@ -35,13 +36,16 @@ describe("buildCrossEventOverlayHints", () => {
 
     const hints = buildCrossEventOverlayHints(paths, visibleNodes);
 
-    expect(hints.dashedLinks).toHaveLength(1);
-    expect(hints.dashedLinks[0]?.source).toBe("node-ip-host");
     expect(hints.sharedNodeIds.has("node-ip-host")).toBe(true);
-    expect(hints.sharedNodeIds.has("node-ip-domain")).toBe(false);
+    expect(hints.sharedNodeIds.has("node-ip-domain")).toBe(true);
+    expect(hints.dashedLinks).toHaveLength(2);
+    expect(hints.dashedLinks.map((link) => link.source).sort()).toEqual([
+      "node-ip-domain",
+      "node-ip-host",
+    ]);
   });
 
-  it("skips dashed links when the local node is filtered out", () => {
+  it("skips dashed links when no local shared nodes are visible", () => {
     const paths: CrossEventPath[] = [
       {
         path_id: "cep-hidden",
@@ -57,6 +61,25 @@ describe("buildCrossEventOverlayHints", () => {
     expect(hints.dashedLinks).toHaveLength(0);
     expect(hints.relatedEventAnchors).toEqual([
       { id: "rel-evt-evt-other", label: "evt-other" },
+    ]);
+  });
+});
+
+describe("localSharedNodesForPath", () => {
+  it("matches by shared entity value even when path_nodes omits a node id", () => {
+    const path: CrossEventPath = {
+      path_id: "cep-x",
+      related_event_ids: ["evt-b"],
+      shared_entities: ["alice"],
+      path_nodes: ["node-account"],
+      risk_hint: "shared_account",
+    };
+    const visible = [
+      node("node-account", "account", "alice"),
+      node("node-host", "host", "ws-01"),
+    ];
+    expect(localSharedNodesForPath(path, visible).map((n) => n.node_id)).toEqual([
+      "node-account",
     ]);
   });
 });

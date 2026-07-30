@@ -336,6 +336,43 @@ async def test_cross_event_paths_empty_when_cypher_raises(
 
 
 @pytest.mark.asyncio
+async def test_cross_event_paths_cypher_failure_skips_pg_fallback(
+    session_factory: async_sessionmaker[AsyncSession],
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neo4j query errors must not fall back to PostgreSQL (partial outage)."""
+    monkeypatch.setenv("NEO4J_ENABLED", "true")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    event_a = await _seed_event(session_factory, title="cypher-fail-a")
+    event_b = await _seed_event(session_factory, title="cypher-fail-b")
+    await _seed_event_graph_with_ip(
+        session_factory,
+        event_a,
+        host_value="host-cf-a.example.test",
+        ip_value=SHARED_EXTERNAL_IP,
+    )
+    await _seed_event_graph_with_ip(
+        session_factory,
+        event_b,
+        host_value="host-cf-b.example.test",
+        ip_value=SHARED_EXTERNAL_IP,
+    )
+
+    client = _FakeNeo4jClient(raise_on_cypher=RuntimeError("bolt down"))
+    svc = AttackPathService(
+        client=cast(Neo4jClient, client),
+        session_factory=session_factory,
+    )
+    assert await svc.find_cross_event_paths(event_a) == []
+    assert len(client.cypher_calls) == 1
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_cross_event_paths_requires_matching_entity_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

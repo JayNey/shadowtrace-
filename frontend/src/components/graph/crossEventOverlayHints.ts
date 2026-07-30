@@ -24,38 +24,46 @@ export function entityOverlayKey(entityType: string, entityValue: string): strin
   return `${entityType}\0${entityValue}`;
 }
 
+/** Visible local nodes that participate in a cross-event path for overlay styling. */
+export function localSharedNodesForPath(
+  path: CrossEventPath,
+  visibleNodes: GraphNode[],
+): GraphNode[] {
+  const sharedValues = new Set(path.shared_entities);
+  const pathNodeIds = new Set(path.path_nodes);
+  return visibleNodes.filter(
+    (node) =>
+      sharedValues.has(node.entity_value) || pathNodeIds.has(node.node_id),
+  );
+}
+
 export function buildCrossEventOverlayHints(
   paths: CrossEventPath[],
   visibleNodes: GraphNode[],
 ): CrossEventOverlayHints {
-  const visibleNodeIds = new Set(visibleNodes.map((node) => node.node_id));
   const sharedNodeIds = new Set<string>();
   const dashedLinks: CrossEventOverlayHints["dashedLinks"] = [];
   const anchorMap = new Map<string, string>();
 
   for (const path of paths) {
-    for (const nodeId of path.path_nodes) {
-      if (visibleNodeIds.has(nodeId)) {
-        sharedNodeIds.add(nodeId);
-      }
+    const localNodes = localSharedNodesForPath(path, visibleNodes);
+    for (const node of localNodes) {
+      sharedNodeIds.add(node.node_id);
     }
     for (const relatedEventId of path.related_event_ids) {
       const anchorId = `rel-evt-${relatedEventId}`;
       if (!anchorMap.has(anchorId)) {
         anchorMap.set(anchorId, relatedEventId);
       }
-      const localNodeId = path.path_nodes[0];
-      const primaryShared = path.shared_entities[0];
-      if (!localNodeId || !primaryShared || !visibleNodeIds.has(localNodeId)) {
-        continue;
+      for (const localNode of localNodes) {
+        dashedLinks.push({
+          edgeId: `cross-${path.path_id}-${relatedEventId}-${localNode.node_id}`,
+          source: localNode.node_id,
+          target: anchorId,
+          relatedEventId,
+          sharedEntity: localNode.entity_value,
+        });
       }
-      dashedLinks.push({
-        edgeId: `cross-${path.path_id}-${relatedEventId}`,
-        source: localNodeId,
-        target: anchorId,
-        relatedEventId,
-        sharedEntity: primaryShared,
-      });
     }
   }
 

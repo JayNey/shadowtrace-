@@ -4,7 +4,12 @@ When ``NEO4J_ENABLED=false`` every method returns an empty list — no Neo4j
 connection is attempted. Single-event PostgreSQL graphs are unaffected.
 
 When Neo4j is enabled but async sync has not finished, results fall back to a
-PostgreSQL shared-entity probe so ``GET /graph`` is not briefly empty.
+PostgreSQL shared-entity probe so ``GET /graph`` is not briefly empty. That
+fallback applies only when Neo4j returns **zero rows** — never when the Cypher
+query itself fails (partial Neo4j outage must not masquerade as cross-event data).
+
+Community detection (Issue goal) is intentionally deferred; this service covers
+cross-event shared-entity paths and lateral-movement hops only.
 """
 
 from __future__ import annotations
@@ -142,11 +147,6 @@ class AttackPathService:
             )
             return []
 
-        try:
-            await self._client.ensure_constraints()
-        except Exception:
-            logger.debug("Neo4j index ensure skipped", exc_info=True)
-
         records: list[dict[str, object]] = []
         try:
             records = await self._client.run_cypher(
@@ -155,9 +155,10 @@ class AttackPathService:
             )
         except Exception:
             logger.exception(
-                "Neo4j cross-event query failed for event %s",
+                "Neo4j cross-event query failed for event %s — skipping PG fallback",
                 event_id,
             )
+            return []
 
         paths = await self._build_paths_from_records(
             event_id,
