@@ -7,6 +7,7 @@ Mock interfaces MUST match the real BoundWorkingMemory signature:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import MagicMock
 
 import pydantic
@@ -19,7 +20,6 @@ from app.agents.triage_agent import (
     _apply_severity_rules,
     _extract_iocs,
     _map_event_type,
-    _merge_hint_entities,
     _resolve_alert_type_from_snapshot,
 )
 from app.core.errors import (
@@ -35,7 +35,9 @@ from app.models.entities import (
     IPEntity,
     ProcessEntity,
 )
-from app.models.enums import EventType, Severity
+from app.models.enums import EventType, Severity, SourceObjectKind
+from app.models.source import SourceReference
+from app.services.entity_merge import merge_entity_sets
 from app.services.working_memory import FIELD_OWNERSHIP
 
 # --------------------------------------------------------------------------- #
@@ -178,6 +180,17 @@ def _make_input(
     )
 
 
+def _source_ref(*, source_object_id: str = "INC-099") -> SourceReference:
+    return SourceReference(
+        source_kind=SourceObjectKind.INCIDENT,
+        source_product="mock_xdr",
+        source_tenant_id="tenant-1",
+        connector_id="conn-mock",
+        source_object_id=source_object_id,
+        ingested_at=datetime.now(UTC),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Tests: _apply_severity_rules
 # --------------------------------------------------------------------------- #
@@ -297,36 +310,45 @@ class TestMapEventType:
 # --------------------------------------------------------------------------- #
 
 
-class TestMergeHintEntities:
+class TestMergeEntitySets:
     def test_merge_preserves_existing(self):
         llm = EntitySet(accounts=[AccountEntity(entity_id="acct-1", username="alice")])
         hint = EntitySet(hosts=[HostEntity(entity_id="host-1", hostname="PC-01")])
-        merged = _merge_hint_entities(llm, hint)
+        merged = merge_entity_sets(llm=llm, source=hint).entities
         assert len(merged.accounts) == 1
         assert merged.accounts[0].username == "alice"
         assert len(merged.hosts) == 1
         assert merged.hosts[0].hostname == "PC-01"
 
-    def test_merge_skips_duplicate_entity_id(self):
-        llm = EntitySet(accounts=[AccountEntity(entity_id="acct-1", username="alice")])
-        hint = EntitySet(accounts=[AccountEntity(entity_id="acct-1", username="alice_dup")])
-        merged = _merge_hint_entities(llm, hint)
-        assert len(merged.accounts) == 1  # duplicate skipped
+    def test_merge_skips_duplicate_semantic_identity(self):
+        source = EntitySet(
+            accounts=[
+                AccountEntity(
+                    entity_id="acct-1",
+                    username="alice",
+                    attributes={"provenance": "source"},
+                )
+            ]
+        )
+        llm = EntitySet(
+            accounts=[
+                AccountEntity(
+                    entity_id="acct-2",
+                    username="alice",
+                    attributes={"provenance": "llm"},
+                )
+            ]
+        )
+        merged = merge_entity_sets(source=source, llm=llm).entities
+        assert len(merged.accounts) == 1
+        assert merged.accounts[0].entity_id == "acct-1"
 
     def test_merge_does_not_mutate_inputs(self):
         llm = EntitySet(accounts=[AccountEntity(entity_id="acct-1", username="alice")])
         hint = EntitySet()
         original_len = len(llm.accounts)
-        _merge_hint_entities(llm, hint)
-        assert len(llm.accounts) == original_len  # not mutated
-
-    def test_merge_is_idempotent(self):
-        llm = EntitySet(accounts=[AccountEntity(entity_id="acct-1", username="alice")])
-        hint = EntitySet(hosts=[HostEntity(entity_id="host-1", hostname="PC-01")])
-        first = _merge_hint_entities(llm, hint)
-        second = _merge_hint_entities(first, hint)
-        assert len(second.accounts) == len(first.accounts)
-        assert len(second.hosts) == len(first.hosts)
+        merge_entity_sets(llm=llm, source=hint)
+        assert len(llm.accounts) == original_len
 
 
 # --------------------------------------------------------------------------- #
@@ -1504,10 +1526,29 @@ class TestTriageSourceEntityMerge:
         wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
         agent = TriageAgent(llm_client=llm_client, working_memory=wm)
 
+        ref = _source_ref()
         hint = EntitySet(
-            hosts=[HostEntity(entity_id="src-host-1", hostname="DEV-WKS-012")],
-            accounts=[AccountEntity(entity_id="src-acct-1", username="dev-user-012")],
-            processes=[ProcessEntity(entity_id="src-proc-1", name="ransomware_stage.exe")],
+            hosts=[
+                HostEntity(
+                    entity_id="src-host-1",
+                    hostname="DEV-WKS-012",
+                    source_refs=[ref],
+                )
+            ],
+            accounts=[
+                AccountEntity(
+                    entity_id="src-acct-1",
+                    username="dev-user-012",
+                    source_refs=[ref],
+                )
+            ],
+            processes=[
+                ProcessEntity(
+                    entity_id="src-proc-1",
+                    name="ransomware_stage.exe",
+                    source_refs=[ref],
+                )
+            ],
         )
         title = "Malicious process spawned — ransomware-like behavior"
         input_ = _make_input(raw_event_summary=title, hint_entities=hint)
@@ -1516,8 +1557,10 @@ class TestTriageSourceEntityMerge:
         hostnames = {h.hostname for h in result.entities.hosts}
         assert "DEV-WKS-012" in hostnames
         assert "ransomware-like" not in hostnames
+        assert result.entity_provenance_summary
         assert result.degraded is False
         assert "text_extraction_empty" in result.degradation_reasons
+        assert isinstance(result.entity_conflicts, list)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -1547,3 +1590,87 @@ class TestTriageSourceEntityMerge:
         assert any(a.username == account for a in result.entities.accounts)
         assert any(p.name == process for p in result.entities.processes)
 
+    @pytest.mark.asyncio
+    async def test_source_priority_keeps_source_entity_id_when_llm_duplicates(self):
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+
+        llm_entities = EntitySet(
+            hosts=[HostEntity(entity_id="llm-host", hostname="DEV-WKS-012")]
+        )
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.MALICIOUS_PROCESS,
+                entities=llm_entities,
+                reasoning="",
+            ),
+            model_name="mock",
+        )
+        llm_client = _MockLLMClient(response=llm_response)
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(llm_client=llm_client, working_memory=wm)
+        ref = _source_ref()
+        hint = EntitySet(
+            hosts=[
+                HostEntity(
+                    entity_id="src-host-1",
+                    hostname="DEV-WKS-012",
+                    source_refs=[ref],
+                )
+            ],
+        )
+        input_ = _make_input(
+            raw_event_summary="Malicious process spawned — ransomware-like behavior",
+            hint_entities=hint,
+        )
+        result = await agent._run(input_)
+        assert len(result.entities.hosts) == 1
+        assert result.entities.hosts[0].entity_id == "src-host-1"
+        assert result.entity_provenance_summary
+        assert result.entity_provenance_summary[0].source_object_id == "INC-099"
+
+    @pytest.mark.asyncio
+    async def test_account_anomaly_fp_without_source_hints_unchanged(self):
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        await wm.write(
+            "evt-fp",
+            "source_snapshot",
+            {
+                "title": "Bulk login by ops account during change window",
+                "alert_type": "account_anomaly",
+            },
+        )
+        agent = TriageAgent(working_memory=wm)
+        input_ = _make_input(
+            event_id="evt-fp",
+            raw_event_summary="Bulk login by ops account during change window",
+        )
+        result = await agent._run(input_)
+        assert result.event_type == EventType.ACCOUNT_ANOMALY
+        assert result.degraded is True
+        assert not result.entity_provenance_summary
+
+
+class TestTriageDecisionBasisProjection:
+    def test_decision_basis_includes_entity_audit_fields(self):
+        from app.services.agent_trace_service import TraceProjection
+
+        ref = _source_ref(source_object_id="INC-trace")
+        result = TriageResult(
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            need_investigation=True,
+            entity_provenance_summary=[
+                {
+                    "source_kind": ref.source_kind.value,
+                    "source_object_id": ref.source_object_id,
+                    "connector_id": ref.connector_id,
+                    "entity_category": "hosts",
+                }
+            ],
+            degradation_reasons=["text_extraction_empty"],
+        )
+        basis = TraceProjection.decision_basis(result.model_dump(mode="json"))
+        assert basis["entity_provenance_summary"]
+        assert basis["degradation_reasons"] == ["text_extraction_empty"]

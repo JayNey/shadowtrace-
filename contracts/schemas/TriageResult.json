@@ -652,6 +652,93 @@
       },
       "title": "Degradation Reasons",
       "type": "array"
+    },
+    "entity_provenance_summary": {
+      "default": [],
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "connector_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Connector Id"
+          },
+          "entity_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Entity Category"
+          },
+          "source_kind": {
+            "title": "Source Kind",
+            "type": "string"
+          },
+          "source_object_id": {
+            "title": "Source Object Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_kind",
+          "source_object_id"
+        ],
+        "title": "EntityProvenanceRecord",
+        "type": "object"
+      },
+      "title": "Entity Provenance Summary",
+      "type": "array"
+    },
+    "entity_conflicts": {
+      "default": [],
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "discarded_source": {
+            "title": "Discarded Source",
+            "type": "string"
+          },
+          "entity_type": {
+            "title": "Entity Type",
+            "type": "string"
+          },
+          "kept_source": {
+            "title": "Kept Source",
+            "type": "string"
+          },
+          "reason": {
+            "default": "source_priority",
+            "title": "Reason",
+            "type": "string"
+          },
+          "semantic_key": {
+            "title": "Semantic Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "entity_type",
+          "semantic_key",
+          "kept_source",
+          "discarded_source"
+        ],
+        "title": "EntityConflictRecord",
+        "type": "object"
+      },
+      "title": "Entity Conflicts",
+      "type": "array"
     }
   },
   "required": [

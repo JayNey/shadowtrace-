@@ -330,6 +330,24 @@ class FlakyToolExecutor:
         return await self._inner.call(tool_name, params, event_id, **kwargs)
 
 
+class RecordingToolExecutor:
+    """Delegate tool calls and record (tool_name, params) for integration tests."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def call(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        event_id: str,
+        **kwargs: Any,
+    ) -> ToolResult:
+        self.calls.append((tool_name, dict(params)))
+        return await self._inner.call(tool_name, params, event_id, **kwargs)
+
+
 class FailingLLMClient:
     """Always-fail LLM stub for degradation scenarios."""
 

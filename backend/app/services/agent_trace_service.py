@@ -93,6 +93,12 @@ _DECISION_WARNING_FIELDS = frozenset(
         "possible_false_positive",
     }
 )
+_DECISION_ENTITY_FIELDS = frozenset(
+    {
+        "entity_provenance_summary",
+        "entity_conflicts",
+    }
+)
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -289,7 +295,18 @@ class TraceProjection:
         elif raw_warnings is not None:
             warnings = [str(raw_warnings)[:500]]
 
-        return {
+        entity_audit: dict[str, Any] = {}
+        for key in _DECISION_ENTITY_FIELDS:
+            value = data.get(key)
+            if isinstance(value, list) and value:
+                entity_audit[key] = value[:20]
+        degradation_reasons = data.get("degradation_reasons")
+        if isinstance(degradation_reasons, list) and degradation_reasons:
+            entity_audit["degradation_reasons"] = [
+                str(item)[:200] for item in degradation_reasons[:20]
+            ]
+
+        basis = {
             "input_summary": input_summary,
             "evidence_refs": evidence_refs,
             "rules_applied": rules_applied,
@@ -299,6 +316,8 @@ class TraceProjection:
             "confidence": confidence,
             "warnings": warnings,
         }
+        basis.update(entity_audit)
+        return basis
 
 
 class AgentTraceService:

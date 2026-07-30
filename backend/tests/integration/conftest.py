@@ -9,10 +9,12 @@ from tests.integration.integration_fixtures import (
     DEFAULT_PARTIAL_FAIL_TOOLS,
     FailingLLMClient,
     FlakyToolExecutor,
+    RecordingToolExecutor,
 )
 
 __all__ = [
     "DEFAULT_PARTIAL_FAIL_TOOLS",
     "FailingLLMClient",
     "FlakyToolExecutor",
+    "RecordingToolExecutor",
 ]

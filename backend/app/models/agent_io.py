@@ -114,6 +114,29 @@ AgentName = Literal[
 # --------------------------------------------------------------------------- #
 
 
+class EntityProvenanceRecord(BaseModel):
+    """Structured source enrichment provenance (ISSUE-099, no raw payload)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_kind: str
+    source_object_id: str
+    connector_id: str | None = None
+    entity_category: str | None = None
+
+
+class EntityConflictRecord(BaseModel):
+    """Source-priority entity merge conflict (ISSUE-099)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entity_type: str
+    semantic_key: str
+    kept_source: str
+    discarded_source: str
+    reason: str = "source_priority"
+
+
 class TriageResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -125,6 +148,8 @@ class TriageResult(BaseModel):
     reasoning: str = ""
     degraded: bool = False
     degradation_reasons: list[str] = Field(default_factory=list)
+    entity_provenance_summary: list[EntityProvenanceRecord] = Field(default_factory=list)
+    entity_conflicts: list[EntityConflictRecord] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

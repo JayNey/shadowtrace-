@@ -33,7 +33,12 @@ from app.core.errors import (
 )
 from app.core.llm.base import LLMResponse
 from app.core.network_utils import is_internal_ip
-from app.models.agent_io import TriageAgentInput, TriageResult
+from app.models.agent_io import (
+    EntityConflictRecord,
+    EntityProvenanceRecord,
+    TriageAgentInput,
+    TriageResult,
+)
 from app.models.entities import (
     AccountEntity,
     DomainEntity,
@@ -44,7 +49,7 @@ from app.models.entities import (
     ProcessEntity,
 )
 from app.models.enums import EventType, Severity
-from app.services.entity_merge import merge_entity_sets
+from app.services.entity_merge import EntityMergeResult, merge_entity_sets
 from app.services.entity_validator import validate_entity_set
 from app.services.working_memory import BoundWorkingMemory
 
@@ -402,28 +407,39 @@ def _map_event_type(
     return EventType.OTHER
 
 
-def _merge_hint_entities(
-    llm_entities: EntitySet,
-    hint_entities: EntitySet,
-) -> EntitySet:
-    """Merge hint entities into LLM entities, returning a NEW ``EntitySet``.
+def _provenance_from_hint_entities(hint_entities: EntitySet) -> list[EntityProvenanceRecord]:
+    """Summarize structured source refs on hint entities (no raw payload)."""
+    records: list[EntityProvenanceRecord] = []
+    seen: set[tuple[str, str, str]] = set()
+    for category in EntitySet.model_fields:
+        for entity in getattr(hint_entities, category):
+            for ref in entity.source_refs or []:
+                key = (ref.source_kind.value, ref.source_object_id, category)
+                if key in seen:
+                    continue
+                seen.add(key)
+                records.append(
+                    EntityProvenanceRecord(
+                        source_kind=ref.source_kind.value,
+                        source_object_id=ref.source_object_id,
+                        connector_id=ref.connector_id,
+                        entity_category=category,
+                    )
+                )
+    return records
 
-    Entities from ``hint_entities`` that do not already exist (by ``entity_id``)
-    in ``llm_entities`` are appended.  The input objects are never mutated
-    (fixing the immutability contract issue noted in the PR review).
-    """
-    merged = EntitySet()
 
-    # Traverse all entity categories defined on EntitySet so new categories
-    # are picked up automatically (instead of a hardcoded six-item tuple).
-    for category in EntitySet.model_fields.keys():
-        llm_list: list[Any] = getattr(llm_entities, category)
-        hint_list: list[Any] = getattr(hint_entities, category)
-        existing_ids = {e.entity_id for e in llm_list}
-        combined = list(llm_list) + [e for e in hint_list if e.entity_id not in existing_ids]
-        setattr(merged, category, combined)
-
-    return merged
+def _conflicts_to_records(merge_result: EntityMergeResult) -> list[EntityConflictRecord]:
+    return [
+        EntityConflictRecord(
+            entity_type=item.entity_type,
+            semantic_key=item.semantic_key,
+            kept_source=item.kept_source,
+            discarded_source=item.discarded_source,
+            reason=item.reason,
+        )
+        for item in merge_result.conflicts
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -590,6 +606,8 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             reasoning=" ".join(reasoning_parts) if reasoning_parts else "",
             degraded=degraded,
             degradation_reasons=degradation_reasons,
+            entity_provenance_summary=_provenance_from_hint_entities(input.hint_entities),
+            entity_conflicts=_conflicts_to_records(merge_result),
         )
 
         # 7. Persist to EventContext.
@@ -877,6 +895,5 @@ __all__ = [
     "_extract_iocs",
     "_external_ip_in_text",
     "_map_event_type",
-    "_merge_hint_entities",
     "_resolve_alert_type_from_snapshot",
 ]
