@@ -1,0 +1,48 @@
+# Optional observability stack (ISSUE-092).
+#
+# Usage (standalone — does not start the ShadowTrace app):
+#   docker compose -f infra/observability/docker-compose.observability.yml up -d
+#
+# Point the backend at the collector:
+#   OTEL_ENABLED=true
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+#
+# Grafana: http://localhost:3001  (admin / shadowtrace)
+# Prometheus: http://localhost:9090
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.109.0
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    ports:
+      - "${OTEL_HTTP_PORT:-4318}:4318"
+      - "${OTEL_GRPC_PORT:-4317}:4317"
+      - "${OTEL_PROMETHEUS_PORT:-8889}:8889"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - otel-collector
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: shadowtrace
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana-dashboard.json:/var/lib/grafana/dashboards/shadowtrace-writeback.json:ro
+      - ./grafana-provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped

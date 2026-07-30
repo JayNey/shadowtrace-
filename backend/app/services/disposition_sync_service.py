@@ -23,6 +23,13 @@ from app.core.errors import (
 )
 from app.core.event_bus import EventBus
 from app.core.guardrails import OutboundDispositionGuard
+from app.core.metrics import (
+    observe_writeback_queue_age,
+    record_action_unknown,
+    record_writeback,
+    record_writeback_retry,
+)
+from app.core.telemetry import disposition_span
 from app.db import models as orm
 from app.models.disposition import DispositionCommand, DispositionOutboxRecord, DispositionReceipt
 from app.models.enums import (
@@ -87,6 +94,12 @@ class DispositionSyncService:
         self._bus = event_bus
         self._resume = resume_investigation or _NullResumeHook()
         self._worker_id = worker_id
+
+    def _adapter_label(self, outbox: orm.DispositionOutbox) -> str:
+        try:
+            return self._resolve_adapter(outbox).name
+        except Exception:
+            return "unknown"
 
     async def enqueue_command(
         self,
@@ -208,6 +221,7 @@ class DispositionSyncService:
                         reason="retry_writeback:re-enqueued",
                     )
                 )
+                record_writeback_retry(adapter=self._adapter_label(outbox))
         return WritebackStatus.PENDING
 
     async def lookup_writeback_status(self, writeback_id: str) -> WritebackStatus | None:
@@ -585,7 +599,15 @@ class DispositionSyncService:
                 )
                 adapter = self._resolve_adapter(outbox)
                 adapter.validate_command(command)
-                receipt = await adapter.submit(command)
+                adapter_label = adapter.name
+                with disposition_span(
+                    "disposition.submit",
+                    event_id=outbox.event_id,
+                    action_id=outbox.action_id,
+                    disposition_id=outbox.disposition_id,
+                    writeback_id=outbox.writeback_id,
+                ):
+                    receipt = await adapter.submit(command)
                 await self._append_receipt(session, outbox, receipt=receipt)
 
                 # B1 fix (ISSUE-064): For EVENT_STATUS_UPDATE intents,
@@ -600,7 +622,14 @@ class DispositionSyncService:
                     and command.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE
                 ):
                     try:
-                        confirmed = await confirm_readback(command)
+                        with disposition_span(
+                            "disposition.readback",
+                            event_id=outbox.event_id,
+                            action_id=outbox.action_id,
+                            disposition_id=outbox.disposition_id,
+                            writeback_id=outbox.writeback_id,
+                        ):
+                            confirmed = await confirm_readback(command)
                         await self._append_receipt(session, outbox, receipt=confirmed)
                         receipt = confirmed
                     except Exception as exc:
@@ -625,10 +654,16 @@ class DispositionSyncService:
                 outbox.latest_writeback_status = receipt.status.value
                 outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
                 outbox.delivered_at = datetime.now(UTC)
+                record_writeback(status=receipt.status.value, adapter=adapter_label)
                 action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
                 if action is not None:
                     action.writeback_status = receipt.status.value
-                    await self._apply_action_terminal_from_receipt(session, action, receipt)
+                    await self._apply_action_terminal_from_receipt(
+                        session,
+                        action,
+                        receipt,
+                        adapter_label=adapter_label,
+                    )
                 event_id = outbox.event_id
                 writeback_id = outbox.writeback_id
         await self._sync_writeback_summary(event_id)
@@ -730,6 +765,8 @@ class DispositionSyncService:
         session: AsyncSession,
         action: orm.Action,
         receipt: DispositionReceipt,
+        *,
+        adapter_label: str = "unknown",
     ) -> None:
         from app.models.enums import ActionCategory, ActionStatus
         from app.models.workflow import validate_action_status_transition
@@ -743,6 +780,7 @@ class DispositionSyncService:
             target = ActionStatus.PARTIAL_SUCCESS
         elif receipt.status is WritebackStatus.UNKNOWN:
             target = ActionStatus.UNKNOWN
+            record_action_unknown(adapter=adapter_label)
         else:
             target = ActionStatus.FAILED
         validate_action_status_transition(
@@ -801,6 +839,7 @@ class DispositionSyncService:
                 outbox.locked_at = None
                 outbox.lease_expires_at = None
                 outbox.updated_at = datetime.now(UTC)
+                record_writeback_retry(adapter=self._adapter_label(outbox))
 
     async def _maybe_resume(self, event_id: str) -> None:
         async with self._session_factory() as session:
@@ -892,6 +931,8 @@ class OutboxWorker:
                     row.locked_by = self._service._worker_id
                     row.locked_at = now
                     row.lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
+                    if row.created_at is not None:
+                        observe_writeback_queue_age((now - row.created_at).total_seconds())
                     claimed.append(row.outbox_id)
         return claimed
 

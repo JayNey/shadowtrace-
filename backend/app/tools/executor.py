@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from app.core.errors import BudgetExceededError, is_retryable
 from app.core.event_bus import EventBus
+from app.core.telemetry import traced_operation
 from app.models.enums import ExecutionJobStatus, ExecutionOwner, ToolCategory
 from app.models.execution import ActionExecutionJob
 from app.models.ids import new_call_id
@@ -271,198 +272,204 @@ class ToolExecutor:
         dispatch_started = False
         started_monotonic = time.monotonic()
 
-        while True:
-            guard = self.convergence_guard
-            if guard is not None and await guard.should_stop(event_id):
-                result = self._failure_result(
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    provider_name=binding_provider,
-                    status=ToolResultStatus.FAILED,
-                    error_detail="convergence guard stopped execution",
-                    execution_time_ms=self._elapsed_ms(started_monotonic),
-                )
-                await self._finalize(
-                    call_id=call_id,
-                    event_id=event_id,
-                    result=result,
-                    retry_count=retry_count,
-                    audit_started=audit_started,
-                )
-                return result
-
-            if attempt > 0:
-                await self.sleep(policy.delay_for_attempt(attempt))
-
-            if guard is not None:
-                await guard.record_step(event_id, tool_name=tool_name, params=params)
-
-            if not breaker.allow_request():
-                result = self._circuit_open_result(
-                    tool_name,
-                    provider_name=binding_provider,
-                    call_id=call_id,
-                )
-                await self._finalize(
-                    call_id=call_id,
-                    event_id=event_id,
-                    result=result,
-                    retry_count=retry_count,
-                    audit_started=audit_started,
-                )
-                return result
-
-            try:
-                dispatch_started = True
-                raw = await asyncio.wait_for(
-                    self._dispatch(
-                        registered=registered,
+        with traced_operation(
+            "tool.execute",
+            tool_name=tool_name,
+            event_id=event_id,
+            agent_name=agent_name,
+        ):
+            while True:
+                guard = self.convergence_guard
+                if guard is not None and await guard.should_stop(event_id):
+                    result = self._failure_result(
+                        call_id=call_id,
                         tool_name=tool_name,
-                        params=params,
-                        call_nature=call_nature,
-                        event_id=event_id,
-                        action_id=action_id,
-                        execution_job_id=execution_job_id,
-                        idempotency_key=idempotency_key,
-                        execution_owner=execution_owner,
-                    ),
-                    timeout=effective_timeout,
-                )
-                try:
-                    raw_result = ToolResult.model_validate(raw)
-                except ValidationError:
-                    raw_result = None
-                if raw_result is None or raw_result.status in {
-                    ToolResultStatus.ACCEPTED,
-                    ToolResultStatus.SUCCESS,
-                    ToolResultStatus.PARTIAL_SUCCESS,
-                }:
-                    self.registry.validate_output(tool_name, raw)
-                result = self._coerce_tool_result(
-                    raw,
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    provider_name=binding_provider,
-                    execution_time_ms=self._elapsed_ms(started_monotonic),
-                    force_provider_name=call_nature is CallNature.SIDE_EFFECT,
-                )
-
-                if result.status in {
-                    ToolResultStatus.SUCCESS,
-                    ToolResultStatus.PARTIAL_SUCCESS,
-                    ToolResultStatus.ACCEPTED,
-                }:
-                    breaker.record_success()
-                elif result.status in {
-                    ToolResultStatus.FAILED,
-                    ToolResultStatus.REMOTE_ERROR,
-                    ToolResultStatus.RATE_LIMITED,
-                    ToolResultStatus.AUTH_ERROR,
-                    ToolResultStatus.VALIDATION_ERROR,
-                }:
-                    breaker.record_failure()
-
-                if (
-                    call_nature is CallNature.SIDE_EFFECT
-                    and execution_job_id is not None
-                    and self.job_store is not None
-                    and result.job_id is not None
-                ):
-                    await self._cas_writeback_job(
-                        execution_job_id,
-                        result,
                         provider_name=binding_provider,
+                        status=ToolResultStatus.FAILED,
+                        error_detail="convergence guard stopped execution",
+                        execution_time_ms=self._elapsed_ms(started_monotonic),
+                    )
+                    await self._finalize(
+                        call_id=call_id,
+                        event_id=event_id,
+                        result=result,
+                        retry_count=retry_count,
+                        audit_started=audit_started,
+                    )
+                    return result
+
+                if attempt > 0:
+                    await self.sleep(policy.delay_for_attempt(attempt))
+
+                if guard is not None:
+                    await guard.record_step(event_id, tool_name=tool_name, params=params)
+
+                if not breaker.allow_request():
+                    result = self._circuit_open_result(
+                        tool_name,
+                        provider_name=binding_provider,
+                        call_id=call_id,
+                    )
+                    await self._finalize(
+                        call_id=call_id,
+                        event_id=event_id,
+                        result=result,
+                        retry_count=retry_count,
+                        audit_started=audit_started,
+                    )
+                    return result
+
+                try:
+                    dispatch_started = True
+                    raw = await asyncio.wait_for(
+                        self._dispatch(
+                            registered=registered,
+                            tool_name=tool_name,
+                            params=params,
+                            call_nature=call_nature,
+                            event_id=event_id,
+                            action_id=action_id,
+                            execution_job_id=execution_job_id,
+                            idempotency_key=idempotency_key,
+                            execution_owner=execution_owner,
+                        ),
+                        timeout=effective_timeout,
+                    )
+                    try:
+                        raw_result = ToolResult.model_validate(raw)
+                    except ValidationError:
+                        raw_result = None
+                    if raw_result is None or raw_result.status in {
+                        ToolResultStatus.ACCEPTED,
+                        ToolResultStatus.SUCCESS,
+                        ToolResultStatus.PARTIAL_SUCCESS,
+                    }:
+                        self.registry.validate_output(tool_name, raw)
+                    result = self._coerce_tool_result(
+                        raw,
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        provider_name=binding_provider,
+                        execution_time_ms=self._elapsed_ms(started_monotonic),
+                        force_provider_name=call_nature is CallNature.SIDE_EFFECT,
                     )
 
-                if self.budget_service is not None and result.status in {
-                    ToolResultStatus.SUCCESS,
-                    ToolResultStatus.PARTIAL_SUCCESS,
-                    ToolResultStatus.ACCEPTED,
-                }:
-                    await self.budget_service.charge_tool(event_id, agent_name, tool_name)
+                    if result.status in {
+                        ToolResultStatus.SUCCESS,
+                        ToolResultStatus.PARTIAL_SUCCESS,
+                        ToolResultStatus.ACCEPTED,
+                    }:
+                        breaker.record_success()
+                    elif result.status in {
+                        ToolResultStatus.FAILED,
+                        ToolResultStatus.REMOTE_ERROR,
+                        ToolResultStatus.RATE_LIMITED,
+                        ToolResultStatus.AUTH_ERROR,
+                        ToolResultStatus.VALIDATION_ERROR,
+                    }:
+                        breaker.record_failure()
 
-                await self._finalize(
-                    call_id=call_id,
-                    event_id=event_id,
-                    result=result,
-                    retry_count=retry_count,
-                    audit_started=audit_started,
-                )
-                return result
+                    if (
+                        call_nature is CallNature.SIDE_EFFECT
+                        and execution_job_id is not None
+                        and self.job_store is not None
+                        and result.job_id is not None
+                    ):
+                        await self._cas_writeback_job(
+                            execution_job_id,
+                            result,
+                            provider_name=binding_provider,
+                        )
 
-            except TimeoutError:
-                status = (
-                    ToolResultStatus.UNKNOWN
-                    if call_nature is CallNature.SIDE_EFFECT and dispatch_started
-                    else ToolResultStatus.TIMEOUT
-                )
-                breaker.record_failure()
-                if self._should_retry(
-                    call_nature=call_nature,
-                    meta=meta,
-                    exc=TimeoutError(),
-                    attempt=attempt,
-                    policy=policy,
-                    side_effect_dispatched=dispatch_started,
-                ):
-                    attempt += 1
-                    retry_count += 1
-                    continue
-                result = self._failure_result(
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    provider_name=binding_provider,
-                    status=status,
-                    error_detail="tool execution timed out",
-                    execution_time_ms=self._elapsed_ms(started_monotonic),
-                )
-                await self._finalize(
-                    call_id=call_id,
-                    event_id=event_id,
-                    result=result,
-                    retry_count=retry_count,
-                    audit_started=audit_started,
-                )
-                return result
+                    if self.budget_service is not None and result.status in {
+                        ToolResultStatus.SUCCESS,
+                        ToolResultStatus.PARTIAL_SUCCESS,
+                        ToolResultStatus.ACCEPTED,
+                    }:
+                        await self.budget_service.charge_tool(event_id, agent_name, tool_name)
 
-            except WrongExecutionChannelError:
-                raise
+                    await self._finalize(
+                        call_id=call_id,
+                        event_id=event_id,
+                        result=result,
+                        retry_count=retry_count,
+                        audit_started=audit_started,
+                    )
+                    return result
 
-            except BudgetExceededError:
-                raise
+                except TimeoutError:
+                    status = (
+                        ToolResultStatus.UNKNOWN
+                        if call_nature is CallNature.SIDE_EFFECT and dispatch_started
+                        else ToolResultStatus.TIMEOUT
+                    )
+                    breaker.record_failure()
+                    if self._should_retry(
+                        call_nature=call_nature,
+                        meta=meta,
+                        exc=TimeoutError(),
+                        attempt=attempt,
+                        policy=policy,
+                        side_effect_dispatched=dispatch_started,
+                    ):
+                        attempt += 1
+                        retry_count += 1
+                        continue
+                    result = self._failure_result(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        provider_name=binding_provider,
+                        status=status,
+                        error_detail="tool execution timed out",
+                        execution_time_ms=self._elapsed_ms(started_monotonic),
+                    )
+                    await self._finalize(
+                        call_id=call_id,
+                        event_id=event_id,
+                        result=result,
+                        retry_count=retry_count,
+                        audit_started=audit_started,
+                    )
+                    return result
 
-            except Exception as exc:
-                breaker.record_failure()
-                if self._should_retry(
-                    call_nature=call_nature,
-                    meta=meta,
-                    exc=exc,
-                    attempt=attempt,
-                    policy=policy,
-                    side_effect_dispatched=dispatch_started,
-                ):
-                    attempt += 1
-                    retry_count += 1
-                    continue
-                status = ToolResultStatus.FAILED
-                if call_nature is CallNature.SIDE_EFFECT and dispatch_started:
-                    status = ToolResultStatus.UNKNOWN
-                result = self._failure_result(
-                    call_id=call_id,
-                    tool_name=tool_name,
-                    provider_name=binding_provider,
-                    status=status,
-                    error_detail=str(exc),
-                    execution_time_ms=self._elapsed_ms(started_monotonic),
-                )
-                await self._finalize(
-                    call_id=call_id,
-                    event_id=event_id,
-                    result=result,
-                    retry_count=retry_count,
-                    audit_started=audit_started,
-                )
-                return result
+                except WrongExecutionChannelError:
+                    raise
+
+                except BudgetExceededError:
+                    raise
+
+                except Exception as exc:
+                    breaker.record_failure()
+                    if self._should_retry(
+                        call_nature=call_nature,
+                        meta=meta,
+                        exc=exc,
+                        attempt=attempt,
+                        policy=policy,
+                        side_effect_dispatched=dispatch_started,
+                    ):
+                        attempt += 1
+                        retry_count += 1
+                        continue
+                    status = ToolResultStatus.FAILED
+                    if call_nature is CallNature.SIDE_EFFECT and dispatch_started:
+                        status = ToolResultStatus.UNKNOWN
+                    result = self._failure_result(
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        provider_name=binding_provider,
+                        status=status,
+                        error_detail=str(exc),
+                        execution_time_ms=self._elapsed_ms(started_monotonic),
+                    )
+                    await self._finalize(
+                        call_id=call_id,
+                        event_id=event_id,
+                        result=result,
+                        retry_count=retry_count,
+                        audit_started=audit_started,
+                    )
+                    return result
 
     async def _dispatch(
         self,

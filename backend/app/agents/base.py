@@ -21,6 +21,7 @@ from typing import Any, Generic, TypeVar, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.sanitization import redact_sensitive_text
+from app.core.telemetry import traced_operation
 from app.models.agent_io import AGENT_INPUT_BY_NAME, AgentInput, AgentName
 from app.services.working_memory import BoundWorkingMemory
 
@@ -103,11 +104,18 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
         error_detail: str | None = None
         output: TOut | None = None
         self._current_input: TIn | None = input
+        event_id = getattr(input, "event_id", None)
+        agent_label = self.agent_name or type(self).__name__
         try:
-            output = await self._run(input)
-            output = await self._apply_guardrails(output)
-            for hook in self.post_hooks:
-                await hook(self, input)
+            with traced_operation(
+                "agent.execute",
+                agent_name=agent_label,
+                event_id=str(event_id) if event_id is not None else None,
+            ):
+                output = await self._run(input)
+                output = await self._apply_guardrails(output)
+                for hook in self.post_hooks:
+                    await hook(self, input)
             duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
             await self._publish_agent_completed(input, duration_ms=duration_ms)
             return output

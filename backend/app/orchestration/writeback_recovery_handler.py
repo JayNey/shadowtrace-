@@ -40,6 +40,7 @@ from app.core.errors import (
     WritebackManualResolutionRequiredError,
     WritebackRecoveryExhaustedError,
 )
+from app.core.telemetry import disposition_span
 from app.models.enums import (
     EventStatus,
     ExecutionSubstate,
@@ -432,9 +433,14 @@ class WritebackRecoveryHandler:
                 )
                 return await self._handle_escalate(event_id, writeback, result, op)
             try:
-                looked_up = await self._disposition_sync.lookup_writeback_status(
-                    writeback.writeback_id,
-                )
+                with disposition_span(
+                    "disposition.query_status",
+                    event_id=event_id,
+                    writeback_id=writeback.writeback_id,
+                ):
+                    looked_up = await self._disposition_sync.lookup_writeback_status(
+                        writeback.writeback_id,
+                    )
                 if looked_up is not None and looked_up is not WritebackStatus.UNKNOWN:
                     logger.info(
                         "writeback %s: lookup resolved → %s",

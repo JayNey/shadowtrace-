@@ -91,6 +91,13 @@ class Settings(BaseSettings):
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
     neo4j_password: str = Field(default="shadowtrace", alias="NEO4J_PASSWORD")
 
+    otel_enabled: bool = Field(default=False, alias="OTEL_ENABLED")
+    otel_exporter_otlp_endpoint: str = Field(
+        default="http://127.0.0.1:4318",
+        alias="OTEL_EXPORTER_OTLP_ENDPOINT",
+    )
+    otel_service_name: str = Field(default="shadowtrace-backend", alias="OTEL_SERVICE_NAME")
+
     def model_post_init(self, __context: object) -> None:
         if not (self.celery_broker_url or "").strip():
             object.__setattr__(self, "celery_broker_url", self.redis_url)

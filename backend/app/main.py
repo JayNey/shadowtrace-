@@ -14,6 +14,8 @@ from app.api.v1.health import shutdown_health_clients
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 from app.core.socketio_manager import SocketIOManager
+from app.core.telemetry import setup_telemetry
+from app.db.session import get_engine
 from app.orchestration.orchestration_config import assert_orchestration_mode
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,8 @@ if get_settings().app_env != "production":
     )
 
 app.include_router(api_router, prefix="/api/v1")
+
+setup_telemetry(app=app, engine=get_engine())
 
 # ---------------------------------------------------------------------------
 # Socket.IO wrapper — uvicorn / Docker must target ``socket_app``, not ``app``.

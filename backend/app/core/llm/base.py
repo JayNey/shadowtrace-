@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import LLMError, ShadowTraceError
+from app.core.telemetry import traced_operation
 from app.db import models as orm
 
 logger = logging.getLogger(__name__)
@@ -288,29 +289,17 @@ class BaseLLMClient(ABC):
         require_json = json_mode or response_model is not None
         last_error: LLMError | None = None
 
-        for model_index, model_name in enumerate((self.primary_model, *self.fallback_models)):
-            level = _fallback_level(model_index)
-            try:
-                raw, parsed = await self._attempt(
-                    prepared,
-                    model_name=model_name,
-                    event_id=event_id,
-                    agent_name=agent_name,
-                    prompt_key=prompt_key,
-                    fallback_level=level,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    json_mode=require_json,
-                    response_model=response_model,
-                    timeout=timeout,
-                )
-            except LLMInvalidJSONError as exc:
-                last_error = exc
+        with traced_operation(
+            "llm.chat",
+            event_id=event_id,
+            agent_name=agent_name,
+            prompt_key=prompt_key,
+        ):
+            for model_index, model_name in enumerate((self.primary_model, *self.fallback_models)):
+                level = _fallback_level(model_index)
                 try:
-                    repaired, parsed = await self._repair_json(
+                    raw, parsed = await self._attempt(
                         prepared,
-                        invalid_content=exc.invalid_content,
-                        validation_error=exc.validation_error,
                         model_name=model_name,
                         event_id=event_id,
                         agent_name=agent_name,
@@ -318,39 +307,57 @@ class BaseLLMClient(ABC):
                         fallback_level=level,
                         temperature=temperature,
                         max_tokens=max_tokens,
+                        json_mode=require_json,
                         response_model=response_model,
+                        timeout=timeout,
                     )
-                    raw = repaired
-                except LLMError:
+                except LLMInvalidJSONError as exc:
+                    last_error = exc
+                    try:
+                        repaired, parsed = await self._repair_json(
+                            prepared,
+                            invalid_content=exc.invalid_content,
+                            validation_error=exc.validation_error,
+                            model_name=model_name,
+                            event_id=event_id,
+                            agent_name=agent_name,
+                            prompt_key=prompt_key,
+                            fallback_level=level,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            response_model=response_model,
+                        )
+                        raw = repaired
+                    except LLMError:
+                        raise
+                except LLMAuditError:
                     raise
-            except LLMAuditError:
-                raise
-            except LLMError as exc:
-                if not exc.retryable:
+                except LLMError as exc:
+                    if not exc.retryable:
+                        raise
+                    last_error = exc
+                    continue
+                except ShadowTraceError:
                     raise
-                last_error = exc
-                continue
-            except ShadowTraceError:
-                raise
 
-            response = LLMResponse(
-                content=raw.content,
-                parsed=parsed,
-                model_name=raw.model_name,
-                prompt_tokens=raw.prompt_tokens,
-                completion_tokens=raw.completion_tokens,
-                total_tokens=raw.total_tokens or raw.prompt_tokens + raw.completion_tokens,
-                latency_ms=max(0, round((time.perf_counter() - chat_started) * 1000)),
-                fallback_level=level,
-                degraded_reason=(
-                    f"primary model unavailable: {type(last_error).__name__}" if level else None
-                ),
-            )
-            return response
+                response = LLMResponse(
+                    content=raw.content,
+                    parsed=parsed,
+                    model_name=raw.model_name,
+                    prompt_tokens=raw.prompt_tokens,
+                    completion_tokens=raw.completion_tokens,
+                    total_tokens=raw.total_tokens or raw.prompt_tokens + raw.completion_tokens,
+                    latency_ms=max(0, round((time.perf_counter() - chat_started) * 1000)),
+                    fallback_level=level,
+                    degraded_reason=(
+                        f"primary model unavailable: {type(last_error).__name__}" if level else None
+                    ),
+                )
+                return response
 
-        if last_error is not None:
-            raise last_error
-        raise LLMProviderError("no LLM models are configured")
+            if last_error is not None:
+                raise last_error
+            raise LLMProviderError("no LLM models are configured")
 
     @abstractmethod
     async def _request(
