@@ -112,9 +112,7 @@ def setup_telemetry(
                 ),
                 export_interval_millis=15_000,
             )
-            metrics.set_meter_provider(
-                MeterProvider(resource=resource, metric_readers=[reader])
-            )
+            metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[reader]))
         except Exception:
             logger.warning(
                 "OTLP metric exporter unavailable; business metrics will not export",
@@ -148,7 +146,7 @@ def setup_telemetry(
         try:
             from opentelemetry.instrumentation.celery import CeleryInstrumentor
 
-            CeleryInstrumentor().instrument()
+            CeleryInstrumentor().instrument()  # type: ignore[no-untyped-call]
         except Exception:
             logger.warning("Celery auto-instrumentation failed", exc_info=True)
 
@@ -181,9 +179,7 @@ def setup_test_telemetry() -> tuple[Any, Any]:
     tracer_provider = TracerProvider(resource=resource)
     tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
     trace.set_tracer_provider(tracer_provider)
-    metrics.set_meter_provider(
-        MeterProvider(resource=resource, metric_readers=[metric_reader])
-    )
+    metrics.set_meter_provider(MeterProvider(resource=resource, metric_readers=[metric_reader]))
 
     _ENABLED = True
     _CONFIGURED = True

@@ -268,11 +268,7 @@ class DispositionSyncService:
                             command.idempotency_key,
                             command.source_locator,
                         )
-                    if (
-                        receipt is None
-                        and caps.supports_status_query
-                        and provider_job_id
-                    ):
+                    if receipt is None and caps.supports_status_query and provider_job_id:
                         receipt = await adapter.get_status(provider_job_id)
                 if receipt is not None:
                     return receipt.status
