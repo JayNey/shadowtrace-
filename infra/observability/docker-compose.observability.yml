@@ -7,6 +7,8 @@
 #   OTEL_ENABLED=true
 #   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 #
+# Celery worker (compose --profile worker) needs the same OTEL_* vars;
+# see docs/deployment.md §可选：OpenTelemetry 可观测性.
 # Grafana: http://localhost:3001  (admin / shadowtrace)
 # Prometheus: http://localhost:9090
 

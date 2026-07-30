@@ -195,6 +195,10 @@ services:
       DISPOSITION_BASE_URL: http://mock-xdr:8100
       TASK_MODE: celery
       CELERY_BROKER_URL: redis://redis:6379/0
+      # Optional OTel (ISSUE-092): point at host collector when observability stack runs locally
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+      OTEL_SERVICE_NAME: shadowtrace-worker
     command:
       [
         "python", "-m", "celery",

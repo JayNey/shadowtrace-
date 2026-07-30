@@ -57,6 +57,7 @@ def setup_telemetry(
     settings = get_settings()
     if not settings.otel_enabled:
         trace.set_tracer_provider(NoOpTracerProvider())
+        metrics.set_meter_provider(NoOpMeterProvider())
         _ENABLED = False
         _CONFIGURED = True
         return
@@ -155,6 +156,7 @@ def setup_telemetry(
         logger.info("OpenTelemetry enabled (service=%s)", settings.otel_service_name)
     except Exception:
         trace.set_tracer_provider(NoOpTracerProvider())
+        metrics.set_meter_provider(NoOpMeterProvider())
         _ENABLED = False
         logger.warning("OpenTelemetry setup failed; continuing with no-op telemetry", exc_info=True)
     finally:

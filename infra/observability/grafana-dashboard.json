@@ -47,9 +47,14 @@
           "expr": "sum(rate(shadowtrace_writeback_retry_total[5m])) by (adapter)",
           "legendFormat": "{{adapter}} retries",
           "refId": "A"
+        },
+        {
+          "expr": "sum(rate(shadowtrace_writeback_total{status=\"conflict\"}[5m])) by (adapter)",
+          "legendFormat": "{{adapter}} conflicts",
+          "refId": "B"
         }
       ],
-      "title": "写回重试 / 冲突重入队",
+      "title": "写回重试与冲突",
       "type": "timeseries"
     },
     {

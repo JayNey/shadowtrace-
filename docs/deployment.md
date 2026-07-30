@@ -228,3 +228,47 @@ make bootstrap
 `make bootstrap` 在数据卷上**幂等**：若已有 ≥3 个事件，会跳过 seed/ingest（alembic 仍运行）。
 强制重新播种：`FORCE_BOOTSTRAP=true make bootstrap`。  
 如需完全重置：`make down-v && make up && make bootstrap`。
+
+## 可选：OpenTelemetry 可观测性（ISSUE-092）
+
+默认关闭（`OTEL_ENABLED=false`），对业务零影响。启用时需同时配置 **API 进程**与 **Celery worker**（若使用 `--profile worker`）。
+
+### 1. 启动 observability 栈
+
+```bash
+docker compose -f infra/observability/docker-compose.observability.yml up -d
+```
+
+- Grafana: http://localhost:3001 （admin / shadowtrace）
+- Prometheus: http://localhost:9090
+- OTLP HTTP: http://127.0.0.1:4318
+
+### 2. 启用 backend / worker 导出
+
+在 `.env` 或 shell 中设置（backend 与 worker 均需一致，worker 建议使用独立 service name）：
+
+```bash
+OTEL_ENABLED=true
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318   # 本机 backend
+# Docker worker 默认 compose 已映射 host.docker.internal:4318
+OTEL_SERVICE_NAME=shadowtrace-backend               # worker compose 内为 shadowtrace-worker
+```
+
+然后重启 stack：
+
+```bash
+make up
+# 若使用 Celery worker：
+docker compose -f infra/docker-compose.yml --profile worker up -d
+```
+
+### 3. 验证
+
+```bash
+cd backend && pytest tests/test_core/test_telemetry.py -v
+make bootstrap   # 产生写回与研判流量
+```
+
+在 Grafana「ShadowTrace Writeback Observability」看板查看四面板（积压、确认率、重试/冲突、UNKNOWN）。
+
+> Traces 当前由 collector 输出到 debug 日志；指标经 Prometheus 供 Grafana 使用。导出失败仅记日志，不阻塞业务。

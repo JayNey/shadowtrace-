@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from opentelemetry import trace
@@ -11,9 +12,17 @@ from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from pydantic import BaseModel, ConfigDict
 
+from app.agents.base import BaseAgent
+from app.core import metrics as metrics_module
 from app.core.config import get_settings
-from app.core.llm.base import BaseLLMClient, LLMMessage, ProviderResponse
+from app.core.llm.base import (
+    BaseLLMClient,
+    InMemoryLLMCallAuditRecorder,
+    LLMMessage,
+    ProviderResponse,
+)
 from app.core.metrics import (
     observe_writeback_queue_age,
     record_action_unknown,
@@ -28,7 +37,11 @@ from app.core.telemetry import (
     setup_telemetry,
     traced_operation,
 )
+from app.models.agent_io import TriageAgentInput
+from app.models.enums import ToolCategory
+from app.models.tool_meta import RoutingKind, ToolMeta, ToolResult, ToolResultStatus
 from app.tools.executor import ToolExecutor
+from app.tools.registry import ToolRegistry
 
 
 class _StubLLM(BaseLLMClient):
@@ -119,6 +132,22 @@ def test_otel_disabled_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
             record_action_unknown(adapter="mock_xdr")
             observe_writeback_queue_age(1.5)
 
+    assert metrics_module._writeback_total is None
+
+
+def test_celery_worker_init_calls_setup_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _capture(**kwargs: object) -> None:
+        calls.append(dict(kwargs))
+
+    monkeypatch.setattr("app.core.telemetry.setup_telemetry", _capture)
+    from app.core.celery_app import init_worker_telemetry
+
+    init_worker_telemetry(sender=None)
+    assert len(calls) == 1
+    assert "engine" in calls[0]
+
 
 def test_trace_hierarchy_api_agent_tool_llm(
     enabled_telemetry: TelemetryReaders,
@@ -174,8 +203,94 @@ async def test_llm_chat_emits_span_under_active_trace(
     assert "llm.chat" in names
 
 
+class _ChainOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool = True
+
+
+def _telemetry_tool_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+
+    async def ok_execute(params: dict[str, Any]) -> dict[str, Any]:
+        del params
+        return ToolResult(
+            call_id="call-telemetry-test",
+            tool_name="telemetry_ok",
+            provider_name="test",
+            status=ToolResultStatus.SUCCESS,
+            data={"ok": True},
+        ).model_dump(mode="json")
+
+    registry.register(
+        ToolMeta(
+            tool_name="telemetry_ok",
+            tool_category=ToolCategory.QUERY,
+            routing_kind=RoutingKind.TOOL_PROVIDER_ONLY,
+            default_timeout_s=5.0,
+            input_schema={"type": "object", "additionalProperties": False},
+            output_schema={"type": "object"},
+        ),
+        ok_execute,
+    )
+    return registry
+
+
+class _TelemetryChainAgent(BaseAgent[TriageAgentInput, _ChainOutput]):
+    agent_name = "triage_agent"
+
+    async def _run(self, input: TriageAgentInput) -> _ChainOutput:
+        assert self.tool_executor is not None
+        assert self.llm_client is not None
+        await self.tool_executor.call(
+            "telemetry_ok",
+            {},
+            input.event_id,
+            agent_name="triage_agent",
+        )
+        await self.llm_client.chat(
+            [LLMMessage(role="user", content="ping")],
+            event_id=input.event_id,
+            agent_name="triage_agent",
+            prompt_key="triage_extract",
+        )
+        return _ChainOutput()
+
+
+@pytest.mark.asyncio
+async def test_investigation_trace_links_agent_tool_llm(
+    enabled_telemetry: TelemetryReaders,
+) -> None:
+    span_exporter, _ = enabled_telemetry
+    llm = _StubLLM(
+        primary_model="mock-model",
+        audit_recorder=InMemoryLLMCallAuditRecorder(),
+    )
+    executor = ToolExecutor(registry=_telemetry_tool_registry())
+    agent = _TelemetryChainAgent(llm_client=llm, tool_executor=executor)
+
+    with traced_operation("api.request", route="/investigate"):
+        await agent.execute(TriageAgentInput(event_id="evt-chain"))
+
+    span_exporter.force_flush()
+    names = [span.name for span in span_exporter.get_finished_spans()]
+    assert "api.request" in names
+    assert "agent.execute" in names
+    assert "tool.execute" in names
+    assert "llm.chat" in names
+
+    by_name = {span.name: span for span in span_exporter.get_finished_spans()}
+    trace_id = by_name["api.request"].context.trace_id
+    assert by_name["agent.execute"].context.trace_id == trace_id
+    assert by_name["tool.execute"].context.trace_id == trace_id
+    assert by_name["llm.chat"].context.trace_id == trace_id
+    assert by_name["agent.execute"].parent.span_id == by_name["api.request"].context.span_id
+    assert by_name["tool.execute"].parent.span_id == by_name["agent.execute"].context.span_id
+    assert by_name["llm.chat"].parent.span_id == by_name["agent.execute"].context.span_id
+
+
 def test_business_metrics_record_when_enabled(
-    enabled_telemetry: tuple[InMemorySpanExporter, InMemoryMetricReader],
+    enabled_telemetry: TelemetryReaders,
 ) -> None:
     _, metric_reader = enabled_telemetry
 

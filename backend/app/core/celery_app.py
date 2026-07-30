@@ -6,9 +6,14 @@ Broker and result backend default to ``CELERY_BROKER_URL`` (falling back to
 
 from __future__ import annotations
 
+import logging
+
 from celery import Celery
+from celery.signals import worker_process_init
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_broker_url() -> str:
@@ -16,6 +21,18 @@ def _resolve_broker_url() -> str:
     broker = (settings.celery_broker_url or "").strip()
     return broker or settings.redis_url
 
+
+def init_worker_telemetry(**kwargs: object) -> None:
+    """Bootstrap OpenTelemetry inside each Celery worker process (ISSUE-092)."""
+    del kwargs
+    from app.core.telemetry import setup_telemetry
+    from app.db.session import get_engine
+
+    setup_telemetry(engine=get_engine())
+    logger.debug("Celery worker telemetry initialized")
+
+
+worker_process_init.connect(init_worker_telemetry, weak=False)
 
 celery_app = Celery("shadowtrace")
 
@@ -31,4 +48,4 @@ celery_app.conf.update(
     imports=("app.tasks.investigation_tasks",),
 )
 
-__all__ = ["celery_app"]
+__all__ = ["celery_app", "init_worker_telemetry"]
