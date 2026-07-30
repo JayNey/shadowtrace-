@@ -48,7 +48,9 @@ from app.services.context_service import (
     event_summary_from_security_event,
 )
 from app.services.degraded_flag_service import DegradedFlagService
+from app.services.entity_validator import validate_entity_set
 from app.services.evidence_projection import EvidenceQueryScope
+from app.services.source_entity_enricher import enrich_entities_from_source
 from app.services.source_policy_resolver import (
     SourcePolicyResolver,
     connector_policy_from_row,
@@ -1749,6 +1751,8 @@ class EventService:
                 event.raw_alert_ids = alert_ids
         event.row_version = int(event.row_version or 1) + 1
 
+        await self._refresh_event_entities_from_sources(session, event)
+
         session.add(
             orm.SourceEventLink(
                 source_record_id=related_record_id,
@@ -1841,6 +1845,7 @@ class EventService:
         target.raw_alert_ids = list(
             dict.fromkeys([*(target.raw_alert_ids or []), *(secondary.raw_alert_ids or [])])
         )
+        await self._refresh_event_entities_from_sources(session, target)
 
         links = (
             await session.scalars(
@@ -1981,6 +1986,8 @@ class EventService:
             target.title = source.title
         target.row_version = int(target.row_version or 1) + 1
 
+        await self._refresh_event_entities_from_sources(session, target)
+
         session.add(
             orm.SourceEventLink(
                 source_record_id=incident_record_id,
@@ -2038,6 +2045,36 @@ class EventService:
             promoted=True,
             merged_event_ids=tuple(merged_event_ids),
         )
+
+    async def _refresh_event_entities_from_sources(
+        self,
+        session: AsyncSession,
+        event: orm.SecurityEvent,
+    ) -> None:
+        """Project linked SourceObject normalized fields into ``SecurityEvent.entities``."""
+        refs: list[SourceReference] = []
+        creation = event.creation_source_ref
+        if isinstance(creation, dict):
+            refs.append(SourceReference.model_validate(creation))
+        for item in event.source_reference_snapshots or []:
+            if isinstance(item, dict):
+                refs.append(SourceReference.model_validate(item))
+
+        sources: list[tuple[SourceReference, dict[str, Any]]] = []
+        for ref in refs:
+            obj = await self._find_source_by_ref(session, ref)
+            if obj is not None and obj.normalized:
+                sources.append((ref, dict(obj.normalized)))
+
+        if not sources:
+            return
+
+        enrichment = enrich_entities_from_source(sources)
+        validated = validate_entity_set(enrichment.entity_set, provenance="source")
+        if validated.entity_set == EntitySet():
+            return
+
+        event.entities = validated.entity_set.model_dump(mode="json")
 
     async def _add_related_link_if_missing(
         self, session: AsyncSession, source_record_id: str, event_id: str

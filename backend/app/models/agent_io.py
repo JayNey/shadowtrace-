@@ -124,6 +124,7 @@ class TriageResult(BaseModel):
     ioc_list: list[str] = Field(default_factory=list)
     reasoning: str = ""
     degraded: bool = False
+    degradation_reasons: list[str] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

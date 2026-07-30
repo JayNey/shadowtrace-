@@ -33,6 +33,7 @@ from app.models.entities import (
     EntitySet,
     HostEntity,
     IPEntity,
+    ProcessEntity,
 )
 from app.models.enums import EventType, Severity
 from app.services.working_memory import FIELD_OWNERSHIP
@@ -1484,3 +1485,65 @@ class TestReDoSResistance:
         # Should complete in well under 2 s (catastrophic backtracking → >10 s).
         assert elapsed < 2.0, f"Regex extraction took {elapsed:.1f}s — possible ReDoS"
         assert "final.exe" in result.processes
+
+
+# --------------------------------------------------------------------------- #
+# Tests: ISSUE-099 source-aware entity merge
+# --------------------------------------------------------------------------- #
+
+
+class TestTriageSourceEntityMerge:
+    @pytest.mark.asyncio
+    async def test_malicious_process_title_uses_source_hints_not_regex_phrase(self):
+        """Title lacks hostname; structured source hints must win over regex noise."""
+        from app.core.llm.base import LLMResponse
+
+        llm_response = LLMResponse(content="", parsed=None, model_name="mock")
+        llm_client = _MockLLMClient(response=llm_response)
+
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(llm_client=llm_client, working_memory=wm)
+
+        hint = EntitySet(
+            hosts=[HostEntity(entity_id="src-host-1", hostname="DEV-WKS-012")],
+            accounts=[AccountEntity(entity_id="src-acct-1", username="dev-user-012")],
+            processes=[ProcessEntity(entity_id="src-proc-1", name="ransomware_stage.exe")],
+        )
+        title = "Malicious process spawned — ransomware-like behavior"
+        input_ = _make_input(raw_event_summary=title, hint_entities=hint)
+        result = await agent._run(input_)
+
+        hostnames = {h.hostname for h in result.entities.hosts}
+        assert "DEV-WKS-012" in hostnames
+        assert "ransomware-like" not in hostnames
+        assert result.degraded is False
+        assert "text_extraction_empty" in result.degradation_reasons
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "hostname,account,process",
+        [
+            ("DEV-WKS-012", "dev-user-012", "ransomware_stage.exe"),
+            ("WKS-HOST-007", "svc-beacon-007", "beacon.exe"),
+            ("JUMP-HOST-001", "ops-jump-001", "mstsc.exe"),
+        ],
+    )
+    async def test_source_hints_merge_for_system_scenarios(
+        self, hostname: str, account: str, process: str
+    ):
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(working_memory=wm)
+        hint = EntitySet(
+            hosts=[HostEntity(entity_id="h1", hostname=hostname)],
+            accounts=[AccountEntity(entity_id="a1", username=account)],
+            processes=[ProcessEntity(entity_id="p1", name=process)],
+        )
+        input_ = _make_input(
+            raw_event_summary="Security alert without embedded entity tokens",
+            hint_entities=hint,
+        )
+        result = await agent._run(input_)
+        assert any(h.hostname == hostname for h in result.entities.hosts)
+        assert any(a.username == account for a in result.entities.accounts)
+        assert any(p.name == process for p in result.entities.processes)
+

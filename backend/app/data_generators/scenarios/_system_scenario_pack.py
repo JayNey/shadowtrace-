@@ -285,6 +285,8 @@ def build_system_scenario(
             )
         )
 
+    proc = _scenario_process_name(spec.scenario_id)
+
     log_ref = make_ref(
         SourceObjectKind.LOG,
         spec.log_id,
@@ -300,6 +302,12 @@ def build_system_scenario(
             category="process",
             logged_at=base,
             src_ip="10.60.1.10",
+            normalized={
+                "hostname": spec.hostname,
+                "account": spec.account,
+                "process": proc,
+                "channel": "endpoint",
+            },
             raw_payload={"hostname": spec.hostname, "account": spec.account},
         )
     ]
@@ -387,13 +395,19 @@ def build_system_scenario(
     )
 
 
+def _scenario_process_name(scenario_id: str) -> str:
+    if scenario_id == "host_compromise":
+        return "beacon.exe"
+    if scenario_id == "malicious_process":
+        return "ransomware_stage.exe"
+    if scenario_id == "lateral_movement":
+        return "mstsc.exe"
+    return "suspicious.bin"
+
+
 def _build_timeline(*, spec: SystemScenarioSpec, base: datetime, seed: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    proc = "beacon.exe" if spec.scenario_id == "host_compromise" else "suspicious.bin"
-    if spec.scenario_id == "malicious_process":
-        proc = "ransomware_stage.exe"
-    if spec.scenario_id == "lateral_movement":
-        proc = "mstsc.exe"
+    proc = _scenario_process_name(spec.scenario_id)
 
     for i in range(10):
         rows.append(

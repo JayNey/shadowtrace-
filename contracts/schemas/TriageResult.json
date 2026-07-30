@@ -644,6 +644,14 @@
       "default": false,
       "title": "Degraded",
       "type": "boolean"
+    },
+    "degradation_reasons": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Degradation Reasons",
+      "type": "array"
     }
   },
   "required": [

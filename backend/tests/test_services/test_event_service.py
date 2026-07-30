@@ -748,6 +748,51 @@ async def test_log_with_verified_incident_ref_links_without_new_event(
 
 
 @pytest.mark.asyncio
+async def test_related_asset_enriches_event_entities(
+    event_service: EventService,
+) -> None:
+    sfx = _sfx()
+    incident_ref = _ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-asset-{sfx}")
+    asset_ref = _ref(
+        kind=SourceObjectKind.ASSET,
+        object_id=f"ASSET-{sfx}",
+        connector_id=f"conn-asset-{sfx}",
+    )
+
+    inc = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=incident_ref,
+            title="Malicious process spawned — ransomware-like behavior",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            source_type="mock_xdr",
+        )
+    )
+    assert inc.event_id
+    linked = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=asset_ref,
+            normalized={
+                "hostname": "DEV-WKS-012",
+                "owner": "dev-user-012",
+                "ip": "10.60.1.10",
+                "channel": "asset",
+            },
+            incident_ref=incident_ref,
+            source_type="mock_xdr",
+        )
+    )
+    assert linked.event_id == inc.event_id
+
+    event = await event_service.get_event(inc.event_id)
+    assert event is not None
+    hostnames = {h.hostname for h in event.entities.hosts if h.hostname}
+    accounts = {a.username for a in event.entities.accounts if a.username}
+    assert "DEV-WKS-012" in hostnames
+    assert "dev-user-012" in accounts
+
+
+@pytest.mark.asyncio
 async def test_file_create_event_not_required_and_idempotent(
     event_service: EventService,
 ) -> None:
