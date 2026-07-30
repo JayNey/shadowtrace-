@@ -404,6 +404,15 @@ export interface GraphOutput {
   edges: GraphEdge[];
   central_entities: string[];
   attack_path_candidates: string[][];
+  cross_event_paths?: CrossEventPath[];
+}
+
+export interface CrossEventPath {
+  path_id: string;
+  related_event_ids: string[];
+  shared_entities: string[];
+  path_nodes: string[];
+  risk_hint: string;
 }
 
 /* ------------------------------------------------------------------ */

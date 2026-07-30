@@ -1896,7 +1896,7 @@
           "graph"
         ],
         "summary": "Get Graph",
-        "description": "Return the persisted entity graph for an event.\n\nA known event without graph rows is a valid, not-yet-generated graph and\ntherefore returns four empty arrays rather than a 404.",
+        "description": "Return the persisted entity graph for an event.\n\nA known event without graph rows is a valid, not-yet-generated graph and\ntherefore returns empty arrays rather than a 404.\n\n``cross_event_paths`` is filled when NEO4J_ENABLED and overlaps exist;\notherwise it is always ``[]`` (ISSUE-083).",
         "operationId": "get_graph_api_v1_events__event_id__graph_get",
         "parameters": [
           {
@@ -2959,6 +2959,47 @@
         "type": "object",
         "title": "ConnectorsResponse"
       },
+      "CrossEventPath": {
+        "properties": {
+          "path_id": {
+            "type": "string",
+            "title": "Path Id"
+          },
+          "related_event_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Event Ids"
+          },
+          "shared_entities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Shared Entities"
+          },
+          "path_nodes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Path Nodes"
+          },
+          "risk_hint": {
+            "type": "string",
+            "title": "Risk Hint",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path_id"
+        ],
+        "title": "CrossEventPath",
+        "description": "Cross-event association path discovered via Neo4j (ISSUE-083)."
+      },
       "DecisionTraceResponse": {
         "properties": {
           "event_id": {
@@ -3956,6 +3997,13 @@
             },
             "type": "array",
             "title": "Attack Path Candidates"
+          },
+          "cross_event_paths": {
+            "items": {
+              "$ref": "#/components/schemas/CrossEventPath"
+            },
+            "type": "array",
+            "title": "Cross Event Paths"
           }
         },
         "additionalProperties": false,

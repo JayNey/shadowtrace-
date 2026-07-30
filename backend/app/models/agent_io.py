@@ -205,6 +205,18 @@ class GraphEdge(BaseModel):
     occurred_at: datetime | None = None
 
 
+class CrossEventPath(BaseModel):
+    """Cross-event association path discovered via Neo4j (ISSUE-083)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path_id: str
+    related_event_ids: list[str] = Field(default_factory=list)
+    shared_entities: list[str] = Field(default_factory=list)
+    path_nodes: list[str] = Field(default_factory=list)
+    risk_hint: str = ""
+
+
 class GraphOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -213,6 +225,8 @@ class GraphOutput(BaseModel):
     central_entities: list[str] = Field(default_factory=list)
     # Each candidate is a time-ordered chain of node_id values.
     attack_path_candidates: list[list[str]] = Field(default_factory=list)
+    # Filled by AttackPathService when NEO4J_ENABLED; otherwise always [].
+    cross_event_paths: list[CrossEventPath] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #

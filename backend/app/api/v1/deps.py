@@ -415,15 +415,43 @@ async def get_graph_sync_service() -> Any:
     if not settings.neo4j_enabled:
         return None
     if _graph_sync_service is None:
-        from app.core.neo4j_client import Neo4jClient
         from app.services.graph_sync_service import GraphSyncService
 
-        _neo4j_client = Neo4jClient()
+        client = _ensure_neo4j_client()
         _graph_sync_service = GraphSyncService(
             _get_session_factory(),
-            client=_neo4j_client,
+            client=client,
         )
     return _graph_sync_service
+
+
+def _ensure_neo4j_client() -> Any:
+    """Lazily construct the shared Neo4jClient when NEO4J_ENABLED."""
+    global _neo4j_client
+    settings = get_settings()
+    if not settings.neo4j_enabled:
+        return None
+    if _neo4j_client is None:
+        from app.core.neo4j_client import Neo4jClient
+
+        _neo4j_client = Neo4jClient()
+    return _neo4j_client
+
+
+async def get_attack_path_service() -> Any:
+    """Return AttackPathService (ISSUE-083).
+
+    When NEO4J_ENABLED=false the service is constructed without a client and
+    always returns empty cross_event_paths.
+    """
+    from app.services.attack_path_service import AttackPathService
+
+    settings = get_settings()
+    session_factory = _get_session_factory() if settings.neo4j_enabled else None
+    return AttackPathService(
+        client=_ensure_neo4j_client(),
+        session_factory=session_factory,
+    )
 
 
 async def shutdown_neo4j_client() -> None:
