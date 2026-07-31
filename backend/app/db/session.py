@@ -9,6 +9,7 @@ from app.db.session_provider import (
     get_session,
     get_session_provider,
     peek_session_provider,
+    reset_session_provider_async,
 )
 
 __all__ = [
@@ -18,6 +19,7 @@ __all__ = [
     "get_session_factory",
     "get_session_provider",
     "peek_session_provider",
+    "reset_session_provider_async",
 ]
 
 

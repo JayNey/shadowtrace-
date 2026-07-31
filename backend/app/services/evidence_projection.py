@@ -809,6 +809,12 @@ def get_evidence_projection() -> EvidenceProjection:
     return _default_projection
 
 
+def reset_evidence_projection_default() -> None:
+    """Clear the process-default projection (call after SessionProvider reset in tests)."""
+    global _default_projection
+    _default_projection = None
+
+
 @contextmanager
 def bind_evidence_projection(projection: EvidenceProjection) -> Iterator[None]:
     """Temporarily bind an isolated projection for one test/request context."""
@@ -1245,4 +1251,5 @@ __all__ = [
     "get_evidence_query_scope",
     "get_evidence_projection",
     "query_output_schema",
+    "reset_evidence_projection_default",
 ]

@@ -729,6 +729,9 @@ def reset_deps() -> None:
     global _graph_sync_service, _neo4j_client
     global _memory_governance
     reset_session_provider()
+    from app.services.evidence_projection import reset_evidence_projection_default
+
+    reset_evidence_projection_default()
     _redis_client = None
     _context_store = None
     _degraded_flags = None

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Response
 from redis.asyncio import Redis
 
 from app.core.config import Settings, get_settings
-from app.db.session_provider import get_session_provider
+from app.db.session_provider import get_session_provider, peek_session_provider, ping_postgres_url
 
 router = APIRouter(tags=["health"])
 
@@ -33,9 +33,13 @@ async def shutdown_health_clients() -> None:
 
 async def check_postgres(database_url: str) -> str:
     """Return 'ok' if SELECT 1 succeeds, else 'error'."""
-    del database_url  # process-local provider owns the canonical URL
     try:
-        ok = await get_session_provider().ping_postgres()
+        provider = peek_session_provider()
+        if provider is not None and provider.database_url == database_url:
+            ok = await provider.ping_postgres()
+        else:
+            # Ephemeral NullPool probe when settings URL differs from the process provider.
+            ok = await ping_postgres_url(database_url, pool="nullpool")
         return "ok" if ok else "error"
     except Exception:  # noqa: BLE001 — health must never raise
         return "error"

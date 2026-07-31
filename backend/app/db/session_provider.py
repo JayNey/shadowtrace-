@@ -58,7 +58,7 @@ class SessionProvider:
 
     def engine(self) -> AsyncEngine:
         if self._engine is None:
-            kwargs: dict[str, object] = {"pool_pre_ping": True, "future": True}
+            kwargs: dict[str, object] = {"pool_pre_ping": True}
             if self._pool == "nullpool":
                 kwargs["poolclass"] = NullPool
             self._engine = create_async_engine(self._database_url, **kwargs)
@@ -79,7 +79,7 @@ class SessionProvider:
         return self._factory
 
     async def ping_postgres(self) -> bool:
-        """Return True when ``SELECT 1`` succeeds (health probes)."""
+        """Return True when ``SELECT 1`` succeeds via the process-local engine."""
         try:
             async with self.engine().connect() as conn:
                 await conn.execute(text("SELECT 1"))
@@ -93,6 +93,28 @@ class SessionProvider:
             logger.debug("SessionProvider engine disposed (pool=%s)", self._pool)
         self._engine = None
         self._factory = None
+
+
+async def ping_postgres_url(
+    database_url: str,
+    *,
+    pool: PoolPolicy = "nullpool",
+) -> bool:
+    """Run ``SELECT 1`` against *database_url* without touching the process provider."""
+    engine: AsyncEngine | None = None
+    try:
+        kwargs: dict[str, object] = {"pool_pre_ping": True}
+        if pool == "nullpool":
+            kwargs["poolclass"] = NullPool
+        engine = create_async_engine(database_url, **kwargs)
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        return True
+    except Exception:  # noqa: BLE001 — health must never raise
+        return False
+    finally:
+        if engine is not None:
+            await engine.dispose()
 
 
 def peek_session_provider() -> SessionProvider | None:
@@ -111,7 +133,7 @@ def _dispose_provider_sync(provider: SessionProvider) -> None:
     else:
         logger.warning(
             "SessionProvider engine not disposed synchronously because an event loop "
-            "is running; await dispose_session_provider() instead"
+            "is running; await reset_session_provider_async() instead"
         )
 
 
@@ -142,19 +164,31 @@ def init_worker_session_provider() -> SessionProvider:
 
 
 def set_session_provider(provider: SessionProvider | None) -> None:
-    """Replace the process-local provider (tests)."""
+    """Replace the process-local provider, disposing the previous engine when set."""
     global _provider
+    if _provider is not None and _provider is not provider:
+        _dispose_provider_sync(_provider)
     _provider = provider
 
 
 def reset_session_provider() -> None:
-    """Dispose (when possible) and clear the process-local provider (tests)."""
+    """Dispose (when possible) and clear the process-local provider (sync tests)."""
     global _provider
     if _provider is None:
         return
     provider = _provider
     _provider = None
     _dispose_provider_sync(provider)
+
+
+async def reset_session_provider_async() -> None:
+    """Dispose and clear the process-local provider (async tests / teardown)."""
+    global _provider
+    if _provider is None:
+        return
+    provider = _provider
+    _provider = None
+    await provider.dispose()
 
 
 async def dispose_session_provider() -> None:
