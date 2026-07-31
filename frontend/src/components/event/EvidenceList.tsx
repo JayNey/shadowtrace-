@@ -1,8 +1,31 @@
-import { Select, Space, Table, Tag, Tooltip, Typography } from "antd";
+import { Alert, Descriptions, Select, Space, Table, Tag, Tooltip, Typography } from "antd";
 import { WarningOutlined } from "@ant-design/icons";
 import { useMemo, useState } from "react";
 import type { ColumnsType } from "antd/es/table";
-import type { Evidence, EvidenceConflict } from "../../types/event";
+import type {
+  CollectionStatus,
+  Evidence,
+  EvidenceConflict,
+  EvidenceGap,
+  EvidenceQuerySummaryItem,
+} from "../../types/event";
+
+const COLLECTION_STATUS_LABEL: Record<CollectionStatus, string> = {
+  completed: "已完成（≥5 路有效源）",
+  partial_done: "部分完成（3-4 路有效源）",
+  degraded: "降级（1-2 路有效源）",
+  failed: "失败（0 路有效源）",
+};
+
+const GAP_REASON_LABEL: Record<string, string> = {
+  invalid_entity: "实体校验失败",
+  source_skipped: "缺少所需实体，已跳过",
+  no_records: "查询成功但无可用记录",
+  triage_degraded: "分诊降级且无 Source 实体",
+  tool_failed: "工具调用失败",
+  missing_scope: "缺少证据查询范围",
+  global_timeout: "全局采集超时",
+};
 
 function conflictReason(evidenceId: string, conflicts: EvidenceConflict[]): string | null {
   const reasons = conflicts
@@ -11,12 +34,39 @@ function conflictReason(evidenceId: string, conflicts: EvidenceConflict[]): stri
   return reasons.length > 0 ? reasons.join("；") : null;
 }
 
+function gapReasonLabel(reason: string): string {
+  return GAP_REASON_LABEL[reason] ?? reason;
+}
+
+function buildEmptyExplanation(
+  gaps: EvidenceGap[],
+  collectionStatus: CollectionStatus | undefined,
+): string {
+  if (gaps.length === 0) {
+    return collectionStatus === "failed"
+      ? "证据采集未产出可展示记录，但未记录具体缺口原因。"
+      : "暂无证据记录。";
+  }
+  const reasons = [...new Set(gaps.map((gap) => gapReasonLabel(gap.reason)))];
+  return `证据为空：${reasons.join("；")}。请查看下方缺口明细与采集摘要。`;
+}
+
 export default function EvidenceList({
   evidence,
   conflicts,
+  gaps = [],
+  collectionStatus,
+  successSources = [],
+  failedSources = [],
+  querySummary = [],
 }: {
   evidence: Evidence[];
   conflicts: EvidenceConflict[];
+  gaps?: EvidenceGap[];
+  collectionStatus?: CollectionStatus;
+  successSources?: string[];
+  failedSources?: string[];
+  querySummary?: EvidenceQuerySummaryItem[];
 }) {
   const [source, setSource] = useState<string>();
   const sources = useMemo(
@@ -24,6 +74,52 @@ export default function EvidenceList({
     [evidence],
   );
   const rows = source ? evidence.filter((item) => item.source === source) : evidence;
+  const emptyExplanation = buildEmptyExplanation(gaps, collectionStatus);
+
+  const gapColumns: ColumnsType<EvidenceGap> = [
+    { title: "缺失源", dataIndex: "missing_source", width: 140 },
+    {
+      title: "原因",
+      dataIndex: "reason",
+      width: 180,
+      render: (value: string) => (
+        <Tag color={value === "no_records" ? "orange" : "default"}>{gapReasonLabel(value)}</Tag>
+      ),
+    },
+    {
+      title: "说明",
+      dataIndex: "detail",
+      render: (detail: EvidenceGap["detail"]) => {
+        const description =
+          typeof detail?.description === "string" ? detail.description : null;
+        const toolName = typeof detail?.tool_name === "string" ? detail.tool_name : null;
+        return (
+          <Typography.Text type="secondary">
+            {[toolName, description].filter(Boolean).join(" — ") || "暂无数据"}
+          </Typography.Text>
+        );
+      },
+    },
+  ];
+
+  const summaryColumns: ColumnsType<EvidenceQuerySummaryItem> = [
+    { title: "tool", dataIndex: "tool_name", width: 170 },
+    { title: "source", dataIndex: "source", width: 130 },
+    { title: "status", dataIndex: "status", width: 160 },
+    { title: "records", dataIndex: "records_count", width: 90 },
+    {
+      title: "gap",
+      dataIndex: "gap_reason",
+      width: 160,
+      render: (value: string | null | undefined) =>
+        value ? <Tag>{gapReasonLabel(value)}</Tag> : <Tag>—</Tag>,
+    },
+    {
+      title: "耗时(ms)",
+      dataIndex: "execution_time_ms",
+      width: 100,
+    },
+  ];
 
   const columns: ColumnsType<Evidence> = [
     { title: "evidence_id", dataIndex: "evidence_id", width: 170 },
@@ -76,6 +172,50 @@ export default function EvidenceList({
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {collectionStatus && (
+        <Alert
+          type={collectionStatus === "failed" ? "warning" : "info"}
+          showIcon
+          message={`采集状态：${COLLECTION_STATUS_LABEL[collectionStatus] ?? collectionStatus}`}
+          description={
+            <Descriptions size="small" column={3}>
+              <Descriptions.Item label="有效源">
+                {successSources.length > 0 ? successSources.join(", ") : "无"}
+              </Descriptions.Item>
+              <Descriptions.Item label="失败/跳过源">
+                {failedSources.length > 0 ? failedSources.join(", ") : "无"}
+              </Descriptions.Item>
+              <Descriptions.Item label="缺口数">{gaps.length}</Descriptions.Item>
+            </Descriptions>
+          }
+          data-testid="evidence-collection-status"
+        />
+      )}
+
+      {gaps.length > 0 && (
+        <Table
+          rowKey={(row) => `${row.missing_source}-${row.reason}-${row.event_id}`}
+          columns={gapColumns}
+          dataSource={gaps}
+          pagination={false}
+          size="small"
+          title={() => "证据缺口"}
+          data-testid="evidence-gaps-table"
+        />
+      )}
+
+      {querySummary.length > 0 && (
+        <Table
+          rowKey="tool_name"
+          columns={summaryColumns}
+          dataSource={querySummary}
+          pagination={false}
+          size="small"
+          title={() => "采集摘要（按工具）"}
+          data-testid="evidence-query-summary"
+        />
+      )}
+
       <Select
         allowClear
         placeholder="按证据来源筛选"
@@ -90,7 +230,7 @@ export default function EvidenceList({
         columns={columns}
         dataSource={rows}
         pagination={{ pageSize: 10, hideOnSinglePage: true }}
-        locale={{ emptyText: "暂无数据" }}
+        locale={{ emptyText: emptyExplanation }}
         scroll={{ x: 1050 }}
         onRow={(record) => ({
           "data-testid": `evidence-row-${record.evidence_id}`,

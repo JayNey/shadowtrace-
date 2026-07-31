@@ -19,6 +19,7 @@ from app.agents.evidence_agent import (
 from app.agents.evidence_parser import TOOL_SOURCE_MAP, EvidenceParser
 from app.models.agent_io import (
     CollectionStatus,
+    EntityProvenanceRecord,
     EvidenceAgentInput,
     EvidenceOutput,
     TriageResult,
@@ -30,9 +31,10 @@ from app.models.entities import (
     HostEntity,
     IPEntity,
 )
-from app.models.enums import EventType, EvidenceSource, Severity
+from app.models.enums import EventType, EvidenceSource, Severity, SourceObjectKind
 from app.models.evidence import Evidence
 from app.models.ids import new_evidence_id
+from app.models.source import SourceReference
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.services.evidence_projection import (
     EvidenceProjection,
@@ -464,7 +466,7 @@ async def test_evidence_collect_skips_edr_when_no_valid_host(
         output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
 
     assert recorder.edr_calls == []
-    assert any(gap.reason == "missing_entity" for gap in output.gaps)
+    assert any(gap.reason == "source_skipped" for gap in output.gaps)
 
 
 async def test_evidence_table_count_matches_list_after_upsert(
@@ -689,6 +691,185 @@ async def test_empty_records_counts_as_gap_not_success_source(
     dns_gaps = [gap for gap in output.gaps if gap.missing_source is EvidenceSource.DNS]
     assert len(dns_gaps) == 1
     assert dns_gaps[0].reason == "no_records"
+
+
+def _source_ref() -> SourceReference:
+    return SourceReference(
+        source_kind=SourceObjectKind.INCIDENT,
+        source_product="mock_xdr",
+        source_tenant_id="tenant-1",
+        connector_id="conn-mock",
+        source_object_id="INC-101",
+        ingested_at=datetime.now(UTC),
+    )
+
+
+async def test_invalid_hostname_produces_invalid_entity_gap_without_tool_call(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """ISSUE-101: alert-jargon hostname must not invoke EDR; gap=invalid_entity."""
+
+    class _EdrCallRecorder:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.edr_calls: list[dict[str, object]] = []
+
+        async def call(self, tool_name: str, params: dict[str, object], **kwargs: object) -> object:
+            if tool_name == "query_edr_process":
+                self.edr_calls.append(params)
+            return await self.inner.call(tool_name, params, **kwargs)
+
+    event_id = f"evt-101-invalid-host-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    recorder = _EdrCallRecorder(tool_executor)
+    agent = _build_agent(tool_executor=recorder, wm=wm, evidence_repo=evidence_repo)
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(
+            hosts=[HostEntity(entity_id="ent-bad-host", hostname="stage3")],
+        ),
+    )
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.edr_calls == []
+    endpoint_gaps = [
+        gap for gap in output.gaps if gap.missing_source is EvidenceSource.ENDPOINT
+    ]
+    assert len(endpoint_gaps) == 1
+    assert endpoint_gaps[0].reason == "invalid_entity"
+
+
+async def test_triage_degraded_without_source_entities_skips_all_queries(
+    tool_executor: Any,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """ISSUE-101: degraded triage without source entities fail-closes all seven queries."""
+
+    class _CallRecorder:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.calls: list[str] = []
+
+        async def call(self, tool_name: str, params: dict[str, object], **kwargs: object) -> object:
+            self.calls.append(tool_name)
+            return await self.inner.call(tool_name, params, **kwargs)
+
+    event_id = f"evt-101-degraded-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    recorder = _CallRecorder(tool_executor)
+    agent = _build_agent(tool_executor=recorder, wm=wm, evidence_repo=evidence_repo)
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        degraded=True,
+        degradation_reasons=["llm_timeout"],
+        entities=EntitySet(),
+    )
+    with bind_evidence_query_scope(DEFAULT_SCOPE):
+        output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.calls == []
+    assert len(output.gaps) == len(EVIDENCE_QUERY_ORDER)
+    assert all(gap.reason == "triage_degraded" for gap in output.gaps)
+    assert output.collection_status is CollectionStatus.FAILED
+
+
+async def test_triage_degraded_with_source_entities_still_collects(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """Degraded triage with source-enriched entities must not global-skip."""
+    event_id = f"evt-101-degraded-src-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    agent = _build_agent(tool_executor=tool_executor, wm=wm, evidence_repo=evidence_repo)
+    ref = _source_ref()
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        degraded=True,
+        entities=EntitySet(
+            hosts=[
+                HostEntity(
+                    entity_id="ent-host-src",
+                    hostname="PC-FIN-023",
+                    ip="10.20.30.23",
+                    source_refs=[ref],
+                ),
+            ],
+            accounts=[AccountEntity(entity_id="ent-acc", username="svc-backup", source_refs=[ref])],
+            ips=[
+                IPEntity(
+                    entity_id="ent-ip-int",
+                    address="10.20.30.23",
+                    scope="internal",
+                    source_refs=[ref],
+                ),
+            ],
+            domains=[
+                DomainEntity(
+                    entity_id="ent-dom",
+                    fqdn="unknown-upload-example.com",
+                    source_refs=[ref],
+                ),
+            ],
+        ),
+        ioc_list=["203.0.113.88"],
+        entity_provenance_summary=[
+            EntityProvenanceRecord(
+                source_kind="incident",
+                source_object_id="INC-101",
+                connector_id="conn-mock",
+            )
+        ],
+    )
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert not any(gap.reason == "triage_degraded" for gap in output.gaps)
+    assert len(output.success_sources) >= 1
+
+
+async def test_query_timings_include_records_count_and_gap_reason(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """ISSUE-101: agent trace timings expose records_count and gap_reason."""
+    event_id = f"evt-101-timings-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    executor = _EmptyDnsExecutor(tool_executor)
+    agent = _build_agent(tool_executor=executor, wm=wm, evidence_repo=evidence_repo)
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            await agent.execute(
+                EvidenceAgentInput(event_id=event_id, triage_result=_main_scenario_triage())
+            )
+
+    dns_timing = next(
+        row for row in agent.last_query_timings if row["tool_name"] == "query_dns"
+    )
+    assert dns_timing["records_count"] == 0
+    assert dns_timing["gap_reason"] == "no_records"
+    success_timing = next(
+        row
+        for row in agent.last_query_timings
+        if row["tool_name"] != "query_dns" and row.get("records_count", 0) > 0
+    )
+    assert success_timing["gap_reason"] is None
 
 
 @pytest.mark.integration

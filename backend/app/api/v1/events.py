@@ -24,11 +24,13 @@ from app.api.v1.deps import (
     get_pipeline,
     get_state_machine,
     get_super_agent,
+    _get_context_store,
 )
 from app.api.v1.errors import (
     DispositionPermissionDenied,
     EventNotFoundError,
     InvalidStateTransitionError,
+    ResourceNotFoundError,
     WritebackConflictError,
     WritebackFailedError,
     WritebackPendingError,
@@ -969,7 +971,7 @@ async def _db_read(
             event_id,
         )
         return [], 0
-    except (ConnectionRefusedError, TimeoutError, sa_exc.OperationalError):
+    except (ConnectionRefusedError, TimeoutError, OSError, sa_exc.OperationalError):
         logger.warning(
             "DB read degraded (transient error) for table=%s event=%s",
             getattr(table, "__tablename__", table),
@@ -1318,6 +1320,109 @@ async def list_tool_calls(
         status_filter=status,
     )
     return s.ToolCallsResponse(total=total, page=page, page_size=page_size, items=items)
+
+
+def _gap_to_response(gap: Any) -> s.EvidenceGapResponse:
+    missing = gap.missing_source
+    missing_value = missing.value if hasattr(missing, "value") else str(missing)
+    return s.EvidenceGapResponse(
+        event_id=gap.event_id,
+        missing_source=missing_value,
+        reason=gap.reason,
+        detail=dict(gap.detail or {}),
+    )
+
+
+def _query_summary_from_agent_traces(rows: list[Any]) -> list[s.EvidenceQuerySummaryItem]:
+    from app.services.decision_trace_service import _evidence_query_timing_by_tool
+
+    timing_by_tool = _evidence_query_timing_by_tool(rows)
+    summary: list[s.EvidenceQuerySummaryItem] = []
+    for tool_name in sorted(timing_by_tool):
+        item = timing_by_tool[tool_name]
+        if not isinstance(item, dict):
+            continue
+        summary.append(
+            s.EvidenceQuerySummaryItem(
+                tool_name=str(item.get("tool_name") or tool_name),
+                source=str(item.get("source") or ""),
+                status=str(item.get("status") or ""),
+                execution_time_ms=int(item.get("execution_time_ms") or 0),
+                records_count=int(item.get("records_count") or 0),
+                gap_reason=(
+                    str(item["gap_reason"]) if item.get("gap_reason") is not None else None
+                ),
+            )
+        )
+    return summary
+
+
+# --------------------------------------------------------------------------- #
+# GET /events/{event_id}/evidence (ISSUE-101)
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/events/{event_id}/evidence", response_model=s.EventEvidenceResponse)
+async def get_event_evidence(
+    event_id: str,
+    principal: CurrentPrincipal,
+    context_store: Annotated[Any, Depends(_get_context_store)],
+    event_service: EventService = Depends(get_event_service),
+) -> s.EventEvidenceResponse:
+    """Return evidence collection output with gaps and per-tool query summary."""
+    event = await event_service.get_event(event_id)
+    if event is None:
+        raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
+
+    from app.models.agent_io import EvidenceOutput
+
+    try:
+        context = await context_store.get_full_context(event_id)
+    except KeyError as exc:
+        raise ResourceNotFoundError(
+            f"evidence for event {event_id} is not ready",
+            error_code="evidence_not_ready",
+            details={"event_id": event_id},
+        ) from exc
+
+    raw_output = context.evidence_output
+    if raw_output is None:
+        raise ResourceNotFoundError(
+            f"evidence for event {event_id} is not ready",
+            error_code="evidence_not_ready",
+            details={"event_id": event_id},
+        )
+
+    evidence_output = EvidenceOutput.model_validate(raw_output)
+    query_summary: list[s.EvidenceQuerySummaryItem] = []
+    if _try_get_session_factory() is not None:
+        try:
+            rows, _ = await _db_read(
+                event_id,
+                orm.AgentTrace,
+                orm.AgentTrace.started_at.desc(),
+                page=1,
+                page_size=50,
+                extra_conditions=[orm.AgentTrace.agent_name == "evidence_agent"],
+            )
+            if rows:
+                query_summary = _query_summary_from_agent_traces(rows)
+        except DependencyUnavailableError:
+            logger.warning(
+                "evidence query_summary unavailable for event=%s; returning context output only",
+                event_id,
+            )
+
+    return s.EventEvidenceResponse(
+        event_id=event_id,
+        evidence_list=evidence_output.evidence_list,
+        gaps=[_gap_to_response(gap) for gap in evidence_output.gaps],
+        collection_status=evidence_output.collection_status,
+        success_sources=list(evidence_output.success_sources),
+        failed_sources=list(evidence_output.failed_sources),
+        overall_confidence=evidence_output.overall_confidence,
+        query_summary=query_summary,
+    )
 
 
 # --------------------------------------------------------------------------- #

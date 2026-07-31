@@ -20,14 +20,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
 from app.agents.conflict_detector import ConflictDetector
+from app.agents.rules.entity_validation import EntityValidationResult, validate_entity_set
 from app.agents.evidence_parser import (
     TOOL_SOURCE_MAP,
     EvidenceParser,
     truncate_timestamp_to_second,
 )
 from app.db import models as orm
-from app.models.agent_io import CollectionStatus, EvidenceAgentInput, EvidenceOutput
-from app.models.entities import EntitySet
+from app.models.agent_io import CollectionStatus, EvidenceAgentInput, EvidenceOutput, TriageResult
+from app.models.entities import (
+    AccountEntity,
+    DomainEntity,
+    EntitySet,
+    FileEntity,
+    HostEntity,
+    IPEntity,
+    ProcessEntity,
+)
 from app.models.enums import EvidenceSource
 from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
 from app.models.tool_meta import ToolResult, ToolResultStatus
@@ -72,6 +81,161 @@ _STATUS_PENALTY: dict[CollectionStatus, float] = {
 }
 
 _MISSING_SCOPE_ERROR = "missing_evidence_query_scope"
+
+# collection_status thresholds (ISSUE-101): count parser-success sources only.
+_COLLECTION_STATUS_COMPLETED = 5
+_COLLECTION_STATUS_PARTIAL_DONE = 3
+_COLLECTION_STATUS_DEGRADED = 1
+
+
+def _entity_provenance(entity: Any) -> str:
+    return "source" if getattr(entity, "source_refs", None) else "llm"
+
+
+def _has_source_enriched_entities(triage: TriageResult) -> bool:
+    """True when triage carries SourceAdapter-backed entity provenance."""
+    if triage.entity_provenance_summary:
+        return True
+    entities = triage.entities
+    for collection in (
+        entities.accounts,
+        entities.hosts,
+        entities.ips,
+        entities.domains,
+        entities.processes,
+        entities.files,
+    ):
+        for entity in collection:
+            if entity.source_refs:
+                return True
+    return False
+
+
+def _should_skip_all_queries(triage: TriageResult) -> bool:
+    """Fail-closed when triage is degraded and no source-enriched entities exist."""
+    return triage.degraded and not _has_source_enriched_entities(triage)
+
+
+def _validate_entities_for_evidence(entities: EntitySet) -> EntityValidationResult:
+    """Validate triage entities per-entity provenance before tool calls (ISSUE-100)."""
+    rejections = []
+    accounts: list[AccountEntity] = []
+    hosts: list[HostEntity] = []
+    ips: list[IPEntity] = []
+    domains: list[DomainEntity] = []
+    processes: list[ProcessEntity] = []
+    files: list[FileEntity] = []
+
+    for account in entities.accounts:
+        result = validate_entity_set(
+            EntitySet(accounts=[account]),
+            provenance=_entity_provenance(account),  # type: ignore[arg-type]
+        )
+        accounts.extend(result.entity_set.accounts)
+        rejections.extend(result.rejections)
+
+    for host in entities.hosts:
+        result = validate_entity_set(
+            EntitySet(hosts=[host]),
+            provenance=_entity_provenance(host),  # type: ignore[arg-type]
+        )
+        hosts.extend(result.entity_set.hosts)
+        rejections.extend(result.rejections)
+
+    for ip_entity in entities.ips:
+        result = validate_entity_set(
+            EntitySet(ips=[ip_entity]),
+            provenance=_entity_provenance(ip_entity),  # type: ignore[arg-type]
+        )
+        ips.extend(result.entity_set.ips)
+        rejections.extend(result.rejections)
+
+    for domain in entities.domains:
+        result = validate_entity_set(
+            EntitySet(domains=[domain]),
+            provenance=_entity_provenance(domain),  # type: ignore[arg-type]
+        )
+        domains.extend(result.entity_set.domains)
+        rejections.extend(result.rejections)
+
+    for process in entities.processes:
+        result = validate_entity_set(
+            EntitySet(processes=[process]),
+            provenance=_entity_provenance(process),  # type: ignore[arg-type]
+        )
+        processes.extend(result.entity_set.processes)
+        rejections.extend(result.rejections)
+
+    for file_entity in entities.files:
+        result = validate_entity_set(
+            EntitySet(files=[file_entity]),
+            provenance=_entity_provenance(file_entity),  # type: ignore[arg-type]
+        )
+        files.extend(result.entity_set.files)
+        rejections.extend(result.rejections)
+
+    return EntityValidationResult(
+        entity_set=EntitySet(
+            accounts=accounts,
+            hosts=hosts,
+            ips=ips,
+            domains=domains,
+            processes=processes,
+            files=files,
+        ),
+        rejections=tuple(rejections),
+    )
+
+
+def _skip_reason_for_tool(
+    tool_name: str,
+    *,
+    raw: EntitySet,
+    validated: EntitySet,
+) -> str:
+    """Distinguish invalid_entity (rejected by validator) from source_skipped."""
+    if tool_name in {"query_account_login", "query_file_access"}:
+        raw_values = {a.username for a in raw.accounts if a.username}
+        valid_values = {a.username for a in validated.accounts if a.username}
+    elif tool_name == "query_edr_process":
+        raw_values = {h.hostname for h in raw.hosts if h.hostname}
+        valid_values = {h.hostname for h in validated.hosts if h.hostname}
+    elif tool_name == "query_network_flow":
+        raw_values = {ip.address for ip in raw.ips if ip.address}
+        valid_values = {ip.address for ip in validated.ips if ip.address}
+    elif tool_name == "query_dns":
+        raw_values = {d.fqdn for d in raw.domains if d.fqdn}
+        valid_values = {d.fqdn for d in validated.domains if d.fqdn}
+    elif tool_name == "query_asset_info":
+        raw_values = {
+            value
+            for host in raw.hosts
+            for value in (host.hostname, host.ip)
+            if value
+        }
+        valid_values = {
+            value
+            for host in validated.hosts
+            for value in (host.hostname, host.ip)
+            if value
+        }
+    elif tool_name == "query_threat_intel":
+        raw_values = {
+            ip.address
+            for ip in raw.ips
+            if ip.address and ip.scope == "external"
+        } | {d.fqdn for d in raw.domains if d.fqdn}
+        valid_values = {
+            ip.address
+            for ip in validated.ips
+            if ip.address and ip.scope == "external"
+        } | {d.fqdn for d in validated.domains if d.fqdn}
+    else:
+        return "source_skipped"
+
+    if raw_values - valid_values:
+        return "invalid_entity"
+    return "source_skipped"
 
 
 def resolve_evidence_mode() -> str:
@@ -367,7 +531,11 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             )
 
         mode = self.evidence_mode
-        if mode == "concurrent":
+        if _should_skip_all_queries(input.triage_result):
+            collected, success_sources, failed_sources, gaps = await self._collect_all_triage_degraded(
+                input
+            )
+        elif mode == "concurrent":
             collected, success_sources, failed_sources, gaps = await self._collect_concurrent(
                 input,
                 time_range=time_range,
@@ -422,17 +590,29 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         failed_sources: list[str] = []
         gaps: list[EvidenceGap] = []
         started = time.perf_counter()
+        raw_entities = input.triage_result.entities
+        validated_entities = _validate_entities_for_evidence(raw_entities).entity_set
 
         for tool_name in EVIDENCE_QUERY_ORDER:
             source = TOOL_SOURCE_MAP[tool_name]
             params = self._build_params(
                 tool_name,
-                input.triage_result.entities,
+                validated_entities,
                 time_range,
                 ioc_list=list(input.triage_result.ioc_list),
             )
             if params is None:
-                outcome = self._skipped_missing_entity_outcome(tool_name, source, input.event_id)
+                skip_reason = _skip_reason_for_tool(
+                    tool_name,
+                    raw=raw_entities,
+                    validated=validated_entities,
+                )
+                outcome = self._skipped_entity_outcome(
+                    tool_name,
+                    source,
+                    input.event_id,
+                    reason=skip_reason,
+                )
             else:
                 outcome = await self._run_one_query(
                     tool_name,
@@ -440,6 +620,40 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                     input.event_id,
                     scope=scope,
                 )
+            await self._merge_outcome(
+                outcome,
+                collected=collected,
+                success_sources=success_sources,
+                failed_sources=failed_sources,
+                gaps=gaps,
+            )
+
+        self.last_collection_elapsed_s = time.perf_counter() - started
+        return collected, success_sources, failed_sources, gaps
+
+    async def _collect_all_triage_degraded(
+        self,
+        input: EvidenceAgentInput,
+    ) -> tuple[list[Evidence], list[str], list[str], list[EvidenceGap]]:
+        """Skip all seven queries when triage is degraded without source entities."""
+        collected: list[Evidence] = []
+        success_sources: list[str] = []
+        failed_sources: list[str] = []
+        gaps: list[EvidenceGap] = []
+        started = time.perf_counter()
+
+        for tool_name in EVIDENCE_QUERY_ORDER:
+            source = TOOL_SOURCE_MAP[tool_name]
+            outcome = self._skipped_entity_outcome(
+                tool_name,
+                source,
+                input.event_id,
+                reason="triage_degraded",
+                description=(
+                    "triage degraded without source-enriched entities; "
+                    f"skipped {tool_name}"
+                ),
+            )
             await self._merge_outcome(
                 outcome,
                 collected=collected,
@@ -466,16 +680,28 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         started = time.perf_counter()
 
         pending_tasks: dict[asyncio.Task[dict[str, Any]], str] = {}
+        raw_entities = input.triage_result.entities
+        validated_entities = _validate_entities_for_evidence(raw_entities).entity_set
         for tool_name in EVIDENCE_QUERY_ORDER:
             source = TOOL_SOURCE_MAP[tool_name]
             params = self._build_params(
                 tool_name,
-                input.triage_result.entities,
+                validated_entities,
                 time_range,
                 ioc_list=list(input.triage_result.ioc_list),
             )
             if params is None:
-                outcome = self._skipped_missing_entity_outcome(tool_name, source, input.event_id)
+                skip_reason = _skip_reason_for_tool(
+                    tool_name,
+                    raw=raw_entities,
+                    validated=validated_entities,
+                )
+                outcome = self._skipped_entity_outcome(
+                    tool_name,
+                    source,
+                    input.event_id,
+                    reason=skip_reason,
+                )
                 await self._merge_outcome(
                     outcome,
                     collected=collected,
@@ -580,12 +806,17 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         self.last_collection_elapsed_s = time.perf_counter() - started
         return collected, success_sources, failed_sources, gaps
 
-    def _skipped_missing_entity_outcome(
+    def _skipped_entity_outcome(
         self,
         tool_name: str,
         source: EvidenceSource,
         event_id: str,
+        *,
+        reason: str,
+        description: str | None = None,
     ) -> dict[str, Any]:
+        if description is None:
+            description = f"required entity missing or invalid for {tool_name}"
         return {
             "tool_name": tool_name,
             "source": source,
@@ -593,15 +824,15 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             "gap": self._gap(
                 event_id=event_id,
                 source=source,
-                reason="missing_entity",
+                reason=reason,
                 impact="source_skipped",
-                description=f"required entity missing for {tool_name}",
+                description=description,
                 tool_name=tool_name,
             ),
             "failed": True,
             "success": False,
             "timing_ms": 0,
-            "status_text": "skipped_missing_entity",
+            "status_text": f"skipped_{reason}",
         }
 
     async def _run_one_query(
@@ -694,6 +925,10 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         source_value = source.value
         timing_ms = int(outcome.get("timing_ms") or 0)
         status_text = str(outcome.get("status_text") or "")
+        parsed: list[Evidence] = list(outcome.get("parsed") or [])
+        gap = outcome.get("gap")
+        gap_reason = gap.reason if gap is not None else None
+        records_count = len(parsed)
 
         self.last_query_timings.append(
             {
@@ -701,6 +936,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "source": source_value,
                 "status": status_text,
                 "execution_time_ms": timing_ms,
+                "records_count": records_count,
+                "gap_reason": gap_reason,
             }
         )
         event_id = ""
@@ -721,7 +958,6 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         if outcome.get("failed"):
             if source_value not in failed_sources:
                 failed_sources.append(source_value)
-        parsed: list[Evidence] = list(outcome.get("parsed") or [])
         if parsed:
             collected.extend(parsed)
         if outcome.get("success") and source_value not in success_sources:
@@ -1055,11 +1291,15 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
 
     @staticmethod
     def _collection_status(success_count: int) -> CollectionStatus:
-        if success_count >= 5:
+        """Map parser-success source count to collection_status (ISSUE-101).
+
+        Thresholds: COMPLETED >=5, PARTIAL_DONE 3-4, DEGRADED 1-2, FAILED 0.
+        """
+        if success_count >= _COLLECTION_STATUS_COMPLETED:
             return CollectionStatus.COMPLETED
-        if success_count >= 3:
+        if success_count >= _COLLECTION_STATUS_PARTIAL_DONE:
             return CollectionStatus.PARTIAL_DONE
-        if success_count >= 1:
+        if success_count >= _COLLECTION_STATUS_DEGRADED:
             return CollectionStatus.DEGRADED
         return CollectionStatus.FAILED
 

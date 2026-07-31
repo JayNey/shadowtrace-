@@ -143,6 +143,11 @@ def _agent_detail(row: orm.AgentTrace, inferred: bool) -> dict[str, Any]:
         "collection_status",
         "evidence_list",
         "warnings",
+        # ISSUE-101: evidence gap observability in agent execution detail.
+        "gaps",
+        "query_timings",
+        "success_sources",
+        "failed_sources",
     ):
         if key in output_data and output_data[key] is not None:
             detail[key] = output_data[key]
@@ -172,10 +177,52 @@ def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEnt
     return entries
 
 
-def _normalize_tool_calls(rows: list[orm.ToolCallLog]) -> list[DecisionTraceEntry]:
+def _evidence_query_timing_by_tool(
+    agent_rows: list[orm.AgentTrace],
+) -> dict[str, dict[str, Any]]:
+    """Build tool_name -> query timing map from the latest evidence_agent trace."""
+    timing_by_tool: dict[str, dict[str, Any]] = {}
+    for row in reversed(agent_rows):
+        if row.agent_name != "evidence_agent":
+            continue
+        output_data = row.output_data if isinstance(row.output_data, dict) else {}
+        timings = output_data.get("query_timings")
+        if not isinstance(timings, list):
+            continue
+        for item in timings:
+            if not isinstance(item, dict):
+                continue
+            tool_name = item.get("tool_name")
+            if isinstance(tool_name, str) and tool_name:
+                timing_by_tool.setdefault(tool_name, item)
+        if timing_by_tool:
+            break
+    return timing_by_tool
+
+
+def _normalize_tool_calls(
+    rows: list[orm.ToolCallLog],
+    *,
+    timing_by_tool: dict[str, dict[str, Any]] | None = None,
+) -> list[DecisionTraceEntry]:
+    enrich = timing_by_tool or {}
     entries: list[DecisionTraceEntry] = []
     for row in rows:
         ts, inferred = _require_ts(row, "started_at", "completed_at")
+        detail: dict[str, Any] = {
+            "tool_name": row.tool_name,
+            "tool_category": row.tool_category,
+            "status": row.status,
+            "duration_ms": row.duration_ms,
+            "retry_count": row.retry_count,
+        }
+        timing = enrich.get(row.tool_name)
+        if isinstance(timing, dict):
+            if "records_count" in timing:
+                detail["records_count"] = timing["records_count"]
+            gap_reason = timing.get("gap_reason")
+            if gap_reason is not None:
+                detail["gap_reason"] = gap_reason
         entries.append(
             DecisionTraceEntry(
                 entry_id=_new_entry_id(),
@@ -183,16 +230,7 @@ def _normalize_tool_calls(rows: list[orm.ToolCallLog]) -> list[DecisionTraceEntr
                 timestamp=ts,
                 actor=row.tool_name,
                 title=f"{row.tool_name} 工具调用完成：status={row.status}",
-                detail=_maybe_inferred_detail(
-                    {
-                        "tool_name": row.tool_name,
-                        "tool_category": row.tool_category,
-                        "status": row.status,
-                        "duration_ms": row.duration_ms,
-                        "retry_count": row.retry_count,
-                    },
-                    inferred,
-                ),
+                detail=_maybe_inferred_detail(detail, inferred),
                 ref_id=row.call_id,
             )
         )
@@ -402,6 +440,7 @@ class DecisionTraceService:
 
         async with self._session_factory() as session:
             # 1. Agent traces
+            agent_rows: list[orm.AgentTrace] = []
             try:
                 agent_rows = await self._fetch_agent_traces(session, event_id)
                 all_entries.extend(_normalize_agent_traces(agent_rows))
@@ -412,7 +451,10 @@ class DecisionTraceService:
             # 2. Tool calls
             try:
                 tool_rows = await self._fetch_tool_calls(session, event_id)
-                all_entries.extend(_normalize_tool_calls(tool_rows))
+                timing_by_tool = _evidence_query_timing_by_tool(agent_rows)
+                all_entries.extend(
+                    _normalize_tool_calls(tool_rows, timing_by_tool=timing_by_tool)
+                )
             except Exception as exc:
                 logger.warning("Failed to fetch tool calls for %s: %s", event_id, exc)
                 missing.append("tool_call_log")

@@ -403,6 +403,7 @@ export default function EventDetailPage() {
     writebacks,
     sourceRecord,
     connectors,
+    evidenceDetail,
     loading,
     refresh,
   } = useEventDetail(eventId);
@@ -433,7 +434,7 @@ export default function EventDetailPage() {
   }
 
   const context = event.event.event_context_snapshot;
-  const evidenceOutput = context?.evidence_output;
+  const evidenceOutput = evidenceDetail ?? context?.evidence_output;
   const writebackSummary = context?.writeback_summary;
 
   const sourceContent = (
@@ -522,6 +523,11 @@ export default function EventDetailPage() {
         <EvidenceList
           evidence={evidenceOutput?.evidence_list ?? []}
           conflicts={evidenceOutput?.conflicts ?? []}
+          gaps={evidenceOutput?.gaps ?? []}
+          collectionStatus={evidenceOutput?.collection_status}
+          successSources={evidenceOutput?.success_sources ?? []}
+          failedSources={evidenceOutput?.failed_sources ?? []}
+          querySummary={evidenceDetail?.query_summary ?? []}
         />
       ),
     },

@@ -4,6 +4,7 @@ import apiClient from "./apiClient";
 import type {
   AttackStoryline,
   EventDetailResponse,
+  EventEvidenceResponse,
   EventListParams,
   EventListResponse,
   GraphOutput,
@@ -41,6 +42,10 @@ export function getTimeline(eventId: string) {
 
 export function getGraph(eventId: string) {
   return apiClient.get<GraphOutput>(`/events/${eventId}/graph`);
+}
+
+export function getEventEvidence(eventId: string) {
+  return apiClient.get<EventEvidenceResponse>(`/events/${eventId}/evidence`);
 }
 
 export function triggerInvestigation(eventId: string) {

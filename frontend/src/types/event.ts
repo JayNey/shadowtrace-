@@ -322,6 +322,20 @@ export interface EvidenceOutput {
   collection_status: CollectionStatus;
 }
 
+export interface EvidenceQuerySummaryItem {
+  tool_name: string;
+  source: string;
+  status: string;
+  execution_time_ms: number;
+  records_count: number;
+  gap_reason?: string | null;
+}
+
+export interface EventEvidenceResponse extends EvidenceOutput {
+  event_id: string;
+  query_summary: EvidenceQuerySummaryItem[];
+}
+
 /* ------------------------------------------------------------------ */
 /*  Attack storyline models                                           */
 /* ------------------------------------------------------------------ */

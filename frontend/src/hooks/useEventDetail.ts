@@ -4,6 +4,7 @@ import type {
   ConnectorPublic,
   DispositionResponse,
   EventDetailResponse,
+  EventEvidenceResponse,
   ExecutionJobResponse,
   SourceRecordResponse,
   WritebackResponse,
@@ -11,6 +12,7 @@ import type {
 import type { AgentTrace } from "../types/trace";
 import {
   getEvent,
+  getEventEvidence,
   getExecutionJob,
   getSourceRecord,
   getTraces,
@@ -92,6 +94,7 @@ export function useEventDetail(eventId: string | undefined) {
   const [writebacks, setWritebacks] = useState<EventWriteback[]>([]);
   const [sourceRecord, setSourceRecord] = useState<SourceRecordResponse | null>(null);
   const [connectors, setConnectors] = useState<ConnectorPublic[]>([]);
+  const [evidenceDetail, setEvidenceDetail] = useState<EventEvidenceResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const mountedRef = useRef(true);
   const eventRef = useRef<EventDetailResponse | null>(null);
@@ -123,14 +126,16 @@ export function useEventDetail(eventId: string | undefined) {
           ? listDispositions(eventId)
           : null;
       const connectorsPromise = isAll ? listConnectors() : null;
+      const evidencePromise = isAll || resource === "event" ? getEventEvidence(eventId) : null;
 
-      const [eventResult, tracesResult, actionsResult, dispositionsResult, connectorsResult] =
+      const [eventResult, tracesResult, actionsResult, dispositionsResult, connectorsResult, evidenceResult] =
         await Promise.allSettled([
           eventPromise,
           tracesPromise,
           actionsPromise,
           dispositionsPromise,
           connectorsPromise,
+          evidencePromise,
         ]);
       if (!mountedRef.current) return;
 
@@ -155,6 +160,11 @@ export function useEventDetail(eventId: string | undefined) {
       }
       if (connectorsResult.status === "fulfilled" && connectorsResult.value) {
         setConnectors(connectorsResult.value.data.items);
+      }
+      if (evidenceResult.status === "fulfilled" && evidenceResult.value) {
+        setEvidenceDetail(evidenceResult.value.data);
+      } else if (isAll || resource === "event") {
+        setEvidenceDetail(null);
       }
 
       if (isAll && nextEvent?.event.current_primary_source_record_id) {
@@ -251,6 +261,7 @@ export function useEventDetail(eventId: string | undefined) {
     writebacks,
     sourceRecord,
     connectors,
+    evidenceDetail,
     loading,
     refresh,
   };

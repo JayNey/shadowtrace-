@@ -924,3 +924,50 @@ class TestDecisionTraceDegradationAndEdgeCases:
             e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
         )
         assert "执行中分诊" in agent.title
+
+    @pytest.mark.asyncio
+    async def test_tool_call_detail_includes_records_count_from_evidence_trace(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """ISSUE-101: merge evidence_agent query_timings into tool_call detail."""
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="evidence_agent",
+                    output_data={
+                        "query_timings": [
+                            {
+                                "tool_name": "query_dns",
+                                "source": "dns",
+                                "status": "success",
+                                "execution_time_ms": 12,
+                                "records_count": 0,
+                                "gap_reason": "no_records",
+                            }
+                        ],
+                        "gaps": [],
+                        "collection_status": "degraded",
+                    },
+                )
+                await _seed_tool_call(session, event_id, tool_name="query_dns")
+
+        trace = await service.get_decision_trace(event_id)
+        tool_e = next(e for e in trace.entries if e.entry_type == DecisionTraceEntryType.TOOL_CALL)
+        assert tool_e.detail["records_count"] == 0
+        assert tool_e.detail["gap_reason"] == "no_records"
+
+        agent_e = next(
+            e
+            for e in trace.entries
+            if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+            and e.detail.get("agent_name") == "evidence_agent"
+        )
+        assert "query_timings" in agent_e.detail
+        assert agent_e.detail["collection_status"] == "degraded"

@@ -16,6 +16,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.models.action import Action
+from app.models.agent_io import CollectionStatus
 from app.models.disposition import (
     DispositionCommand,
     SetEventDispositionParams,
@@ -44,6 +45,7 @@ from app.models.report import InvestigationReport, ReportSection
 from app.models.security_event import EventListItem as EventListItem
 from app.models.security_event import EventSummary as EventSummary
 from app.models.security_event import SecurityEvent
+from app.models.evidence import Evidence, EvidenceGap
 from app.models.source import SourceReference
 
 
@@ -236,6 +238,45 @@ class TimelineItem(BaseModel):
 class TimelineResponse(BaseModel):
     event_id: str
     items: list[TimelineItem] = Field(default_factory=list)
+
+
+class EvidenceGapResponse(BaseModel):
+    """API view of ``EvidenceGap`` (ISSUE-101)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    missing_source: str
+    reason: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+
+
+class EvidenceQuerySummaryItem(BaseModel):
+    """Per-tool evidence collection summary for observability."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str
+    source: str
+    status: str
+    execution_time_ms: int = 0
+    records_count: int = 0
+    gap_reason: str | None = None
+
+
+class EventEvidenceResponse(BaseModel):
+    """GET /events/{event_id}/evidence payload (ISSUE-101)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    evidence_list: list[Evidence] = Field(default_factory=list)
+    gaps: list[EvidenceGapResponse] = Field(default_factory=list)
+    collection_status: CollectionStatus
+    success_sources: list[str] = Field(default_factory=list)
+    failed_sources: list[str] = Field(default_factory=list)
+    overall_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    query_summary: list[EvidenceQuerySummaryItem] = Field(default_factory=list)
 
 
 class DecisionTraceResponse(BaseModel):
