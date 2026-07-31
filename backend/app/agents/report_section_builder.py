@@ -70,6 +70,7 @@ class ReportSectionBuilder:
         rag_output: dict[str, Any] | None = None,
         final_verdict: FinalVerdict = FinalVerdict.NONE,
         false_positive_match: dict[str, Any] | None = None,
+        fp_adjudication: dict[str, Any] | None = None,
         content_sha256: str | None = None,
         escalated: bool = False,
         replan_count: int = 0,
@@ -88,6 +89,7 @@ class ReportSectionBuilder:
             final_verdict=final_verdict,
             evidence_output=evidence_output,
             false_positive_match=false_positive_match,
+            fp_adjudication=fp_adjudication,
             escalated=escalated,
             replan_count=replan_count,
         )
@@ -110,6 +112,7 @@ class ReportSectionBuilder:
             response_actions=response_actions,
             final_verdict=final_verdict,
             false_positive_match=false_positive_match,
+            fp_adjudication=fp_adjudication,
             escalated=escalated,
             replan_count=replan_count,
             impact_assessments=impact_assessments,
@@ -278,6 +281,7 @@ class ReportSectionBuilder:
         final_verdict: FinalVerdict,
         evidence_output: EvidenceOutput,
         false_positive_match: dict[str, Any] | None = None,
+        fp_adjudication: dict[str, Any] | None = None,
         escalated: bool = False,
         replan_count: int = 0,
     ) -> str:
@@ -292,7 +296,12 @@ class ReportSectionBuilder:
             f"evidence_count: {len(evidence_output.evidence_list)}",
             f"collection_status: {evidence_output.collection_status.value}",
         ]
-        lines.extend(self._fp_basis_lines(false_positive_match))
+        lines.extend(
+            self._fp_basis_lines(
+                false_positive_match=false_positive_match,
+                fp_adjudication=fp_adjudication,
+            )
+        )
         if escalated:
             lines.append(
                 "human_escalation: 本事件已完成 "
@@ -305,10 +314,34 @@ class ReportSectionBuilder:
             lines.append(PLACEHOLDER_LOW_RISK_NO_EVIDENCE)
         return "\n".join(lines)
 
-    def _fp_basis_lines(self, false_positive_match: dict[str, Any] | None) -> list[str]:
+    def _fp_basis_lines(
+        self,
+        *,
+        false_positive_match: dict[str, Any] | None = None,
+        fp_adjudication: dict[str, Any] | None = None,
+    ) -> list[str]:
+        if (
+            isinstance(fp_adjudication, dict)
+            and fp_adjudication.get("recommendation") == "close_as_fp"
+        ):
+            lines: list[str] = ["fp_decision: post_evidence_close_as_fp"]
+            window_id = fp_adjudication.get("matched_window_id")
+            if window_id:
+                lines.append(f"fp_matched_window_id: {window_id}")
+            evidence_ids = fp_adjudication.get("supporting_evidence_ids") or []
+            if evidence_ids:
+                lines.append(f"fp_supporting_evidence_ids: {','.join(evidence_ids)}")
+            matched = fp_adjudication.get("matched_conditions") or []
+            if matched:
+                lines.append(f"fp_matched_conditions: {','.join(matched)}")
+            score = fp_adjudication.get("max_score")
+            if score is not None:
+                lines.append(f"fp_adjudication_score: {score}")
+            return lines
+
         if not isinstance(false_positive_match, dict):
             return []
-        lines: list[str] = []
+        lines = []
         case_id = false_positive_match.get("matched_case_id")
         if case_id:
             lines.append(f"fp_matched_case_id: {case_id}")
@@ -492,6 +525,7 @@ class ReportSectionBuilder:
         response_actions: list[Action],
         final_verdict: FinalVerdict,
         false_positive_match: dict[str, Any] | None = None,
+        fp_adjudication: dict[str, Any] | None = None,
         escalated: bool = False,
         replan_count: int = 0,
         impact_assessments: list[ImpactAssessment] | list[dict[str, Any]] | None = None,
@@ -512,15 +546,30 @@ class ReportSectionBuilder:
             FinalVerdict.FALSE_POSITIVE,
             FinalVerdict.POSSIBLE_FALSE_POSITIVE,
         }:
-            fp_pattern = None
-            if isinstance(false_positive_match, dict):
-                fp_pattern = false_positive_match.get("matched_pattern")
-                if fp_pattern is None:
-                    fp_pattern = false_positive_match.get("matched_rule")
-            if fp_pattern:
-                tips.append(f"误报依据：匹配已知模式「{fp_pattern}」，建议沉淀为检测白名单。")
+            if (
+                isinstance(fp_adjudication, dict)
+                and fp_adjudication.get("recommendation") == "close_as_fp"
+            ):
+                window_id = fp_adjudication.get("matched_window_id")
+                if window_id:
+                    tips.append(
+                        f"误报依据：post-evidence 裁决匹配变更窗口「{window_id}」，"
+                        "建议沉淀为检测白名单。"
+                    )
+                else:
+                    tips.append(
+                        "误报依据：post-evidence 裁决确认授权变更窗口，建议沉淀为检测白名单。"
+                    )
             else:
-                tips.append("按误报案例沉淀规则，降低同类告警噪音。")
+                fp_pattern = None
+                if isinstance(false_positive_match, dict):
+                    fp_pattern = false_positive_match.get("matched_pattern")
+                    if fp_pattern is None:
+                        fp_pattern = false_positive_match.get("matched_rule")
+                if fp_pattern:
+                    tips.append(f"误报依据：匹配已知模式「{fp_pattern}」，建议沉淀为检测白名单。")
+                else:
+                    tips.append("按误报案例沉淀规则，降低同类告警噪音。")
             tips.append("复核检测阈值与基线，避免重复误报。")
             tips.append("保留审计记录后关闭事件，并同步来源处置状态。")
         else:

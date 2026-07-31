@@ -597,10 +597,10 @@ def test_plan_id_format() -> None:
     assert len(plan_id) == len("rsp-") + 8
 
 
-def test_approval_confidence_uses_fp_max_score() -> None:
+def test_approval_confidence_uses_fp_adjudication_max_score() -> None:
     confidence = approval_confidence_for_disposition_only(
         event_confidence=0.5,
-        false_positive_match={
+        fp_adjudication={
             "recommendation": "close_as_fp",
             "max_score": FP_HIGH_THRESHOLD,
         },

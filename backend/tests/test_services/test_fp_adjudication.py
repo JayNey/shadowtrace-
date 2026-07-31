@@ -68,6 +68,19 @@ def _malicious_edr_evidence() -> Evidence:
     )
 
 
+def _asset_evidence(*, asset_group: str = "ops") -> Evidence:
+    return Evidence(
+        evidence_id="evd-asset-001",
+        event_id="evt-001",
+        source=EvidenceSource.ASSET,
+        evidence_type="host",
+        description="ops maintenance host",
+        confidence=0.88,
+        timestamp=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+        raw_data={"asset_group": asset_group, "hostname": "ops-host-01"},
+    )
+
+
 def _triage() -> TriageResult:
     return TriageResult(
         event_type=EventType.ACCOUNT_ANOMALY,
@@ -112,10 +125,10 @@ def test_post_evidence_close_with_authorization(tmp_path: Path) -> None:
     result = adjudicator.adjudicate(
         event_id="evt-001",
         evidence_output=EvidenceOutput(
-            evidence_list=[_auth_evidence()],
+            evidence_list=[_auth_evidence(), _asset_evidence()],
             conflicts=[],
             gaps=[],
-            success_sources=["identity"],
+            success_sources=["identity", "asset"],
             failed_sources=[],
             overall_confidence=0.8,
             collection_status=CollectionStatus.COMPLETED,
@@ -128,6 +141,28 @@ def test_post_evidence_close_with_authorization(tmp_path: Path) -> None:
     assert result.supporting_evidence_ids == ["evd-auth-001"]
     assert "baseline_window_match" in result.matched_conditions
     assert result.matched_window_id == "cw-test"
+    assert result.max_score == 0.9
+
+
+def test_missing_asset_group_blocks_fp_close(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[_auth_evidence()],
+            conflicts=[],
+            gaps=[],
+            success_sources=["identity"],
+            failed_sources=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+    )
+    assert result.recommendation != "close_as_fp"
+    assert "baseline_window_match" in result.missing_conditions
 
 
 def test_same_telemetry_without_authorization_does_not_close(tmp_path: Path) -> None:
@@ -216,6 +251,27 @@ def test_verdict_resolver_ignores_pre_evidence_close_as_fp() -> None:
     assert verdict.value == "confirmed_threat"
 
 
+def test_verdict_resolver_pre_evidence_high_score_is_advisory_only() -> None:
+    resolver = VerdictResolver()
+    assessment = RiskAssessment(
+        risk_score=20,
+        severity=Severity.LOW,
+        confidence=0.9,
+        risk_factors=[],
+        possible_false_positive=False,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    verdict = resolver.resolve(
+        assessment,
+        false_positive_match={
+            "recommendation": "investigate_with_flag",
+            "max_score": 0.96,
+            "phase": "pre_evidence",
+        },
+    )
+    assert verdict.value == "possible_false_positive"
+
+
 def test_verdict_resolver_honors_post_evidence_adjudication() -> None:
     resolver = VerdictResolver()
     assessment = RiskAssessment(
@@ -245,10 +301,10 @@ def test_window_match_is_independent_of_scenario_field(tmp_path: Path) -> None:
     snapshot_with = {"source_tenant_id": "tenant-demo", "scenario": "account_anomaly_fp"}
     snapshot_without = {"source_tenant_id": "tenant-demo"}
     evidence = EvidenceOutput(
-        evidence_list=[_auth_evidence()],
+        evidence_list=[_auth_evidence(), _asset_evidence()],
         conflicts=[],
         gaps=[],
-        success_sources=["identity"],
+        success_sources=["identity", "asset"],
         failed_sources=[],
         overall_confidence=0.8,
         collection_status=CollectionStatus.COMPLETED,

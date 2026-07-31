@@ -1127,18 +1127,26 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
 def approval_confidence_for_disposition_only(
     *,
     event_confidence: float | None,
-    false_positive_match: dict[str, Any] | None,
+    false_positive_match: dict[str, Any] | None = None,
+    fp_adjudication: dict[str, Any] | None = None,
 ) -> float:
-    """Compute approval confidence when RiskAgent was skipped (ISSUE-057)."""
+    """Compute approval confidence when RiskAgent was skipped (ISSUE-057 / ISSUE-114)."""
     fp_score = 0.0
-    if isinstance(false_positive_match, dict):
+    recommendation: str | None = None
+    if isinstance(fp_adjudication, dict):
+        try:
+            fp_score = float(fp_adjudication.get("max_score") or 0.0)
+        except (TypeError, ValueError):
+            fp_score = 0.0
+        recommendation = fp_adjudication.get("recommendation")
+    elif isinstance(false_positive_match, dict):
         try:
             fp_score = float(false_positive_match.get("max_score") or 0.0)
         except (TypeError, ValueError):
             fp_score = 0.0
+        recommendation = false_positive_match.get("recommendation")
     base = float(event_confidence or 0.0)
     combined = max(base, fp_score)
-    recommendation = (false_positive_match or {}).get("recommendation")
     if recommendation == "close_as_fp" and fp_score >= FP_HIGH_THRESHOLD:
         return max(combined, FP_HIGH_THRESHOLD)
     return combined

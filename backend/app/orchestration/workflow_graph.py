@@ -134,7 +134,6 @@ P0_NODE_SEQUENCE = (
 )
 
 ROUTE_CLOSE = "close"
-ROUTE_DISPOSITION_ONLY = "disposition_only"
 ROUTE_MANUAL_HOLD = "manual_hold"
 ROUTE_INVESTIGATE = "investigate"
 ROUTE_RESPONSE = "response"
@@ -231,11 +230,6 @@ class _EventServiceLike(Protocol):
         *,
         operator: str | None = None,
     ) -> Any: ...
-
-
-def _is_close_as_fp(state: InvestigationState) -> bool:
-    adjudication = state.get("fp_adjudication") or {}
-    return adjudication.get("recommendation") == "close_as_fp"
 
 
 def route_after_triage(state: InvestigationState) -> str:
@@ -843,9 +837,6 @@ def build_investigation_graph(
         )
 
     async def fp_adjudication_node(state: InvestigationState) -> InvestigationState:
-        if state.get("fp_adjudication") is not None:
-            return _trace(NODE_FP_ADJUDICATION)
-
         triage = TriageResult.model_validate(state["triage_result"])
         evidence = EvidenceOutput.model_validate(state["evidence_output"])
         store = cast(EventContextStore, services["context_store"])

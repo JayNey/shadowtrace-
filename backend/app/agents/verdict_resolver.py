@@ -19,12 +19,12 @@ class VerdictResolver:
     Priority (ISSUE-035 / ISSUE-047 / ISSUE-114):
     1. ``fp_adjudication.recommendation == close_as_fp`` → false_positive
        (post-evidence typed decision; never overridden by risk_score >= 70)
-    2. High-confidence FP evidence + risk_score < 40 → false_positive
-    3. Medium FP signal → possible_false_positive
+    2. Legacy post-evidence ``false_positive_match.close_as_fp`` → false_positive
+    3. Pre-evidence vector / RAG FP signal → possible_false_positive (advisory only)
     4. risk_score >= 70 → confirmed_threat
     5. else → none
 
-    Pre-evidence ``false_positive_match`` is advisory only and must not close.
+    Pre-evidence ``false_positive_match`` must never independently yield false_positive.
     """
 
     def resolve(
@@ -46,8 +46,6 @@ class VerdictResolver:
         fp_score = self._fp_score(fp, rag_output)
         risk_score = int(risk_assessment.risk_score)
 
-        if fp_score >= FP_HIGH_THRESHOLD and risk_score < 40:
-            return FinalVerdict.FALSE_POSITIVE
         if fp_score >= FP_LOW_THRESHOLD:
             return FinalVerdict.POSSIBLE_FALSE_POSITIVE
         if risk_score >= 70:

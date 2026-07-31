@@ -107,6 +107,7 @@ class PostEvidenceFpAdjudicator:
                     "baseline_window_match",
                     "identity_scope_match",
                     "action_scope_match",
+                    "asset_scope_match",
                     "time_match",
                 ]
             )
@@ -123,6 +124,7 @@ class PostEvidenceFpAdjudicator:
                 "baseline_window_match",
                 "identity_scope_match",
                 "action_scope_match",
+                "asset_scope_match",
                 "time_match",
                 "no_malicious_conflicts",
             ]
@@ -140,7 +142,7 @@ class PostEvidenceFpAdjudicator:
             missing_conditions=[],
             conflicts=[],
             matched_window_id=matched_window.window_id,
-            max_score=0.88,
+            max_score=_derive_adjudication_score(auth_evidence),
             adjudicated_at=now,
         )
 
@@ -271,11 +273,24 @@ def _match_change_window(
             continue
 
         authorized_groups = {value.lower() for value in window.authorized_asset_groups}
-        if authorized_groups and asset_groups and asset_groups.isdisjoint(authorized_groups):
+        if authorized_groups and (
+            not asset_groups or asset_groups.isdisjoint(authorized_groups)
+        ):
             continue
 
         return window
     return None
+
+
+def _derive_adjudication_score(auth_evidence: list[Evidence]) -> float:
+    """Confidence floor for disposition-only approval from authorization evidence."""
+    scores: list[float] = []
+    for item in auth_evidence:
+        try:
+            scores.append(max(0.0, min(1.0, float(item.confidence))))
+        except (TypeError, ValueError):
+            continue
+    return max(scores) if scores else 0.0
 
 
 def _matched_authorization_labels(auth_evidence: list[Evidence]) -> list[str]:

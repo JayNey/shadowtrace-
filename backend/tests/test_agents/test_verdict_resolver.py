@@ -26,13 +26,13 @@ def test_post_evidence_close_as_fp_not_overridden_by_high_risk() -> None:
     assert verdict is FinalVerdict.FALSE_POSITIVE
 
 
-def test_high_fp_with_low_risk_is_false_positive() -> None:
+def test_high_fp_with_low_risk_is_possible_false_positive() -> None:
     resolver = VerdictResolver()
     verdict = resolver.resolve(
         _assessment(20),
         false_positive_match={"max_score": 0.95},
     )
-    assert verdict is FinalVerdict.FALSE_POSITIVE
+    assert verdict is FinalVerdict.POSSIBLE_FALSE_POSITIVE
 
 
 def test_medium_fp_signal_is_possible_false_positive() -> None:

@@ -569,6 +569,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             EventStatus.CLOSED,
             reason=build_fp_close_reason(
                 ec.false_positive_match,
+                fp_adjudication=ec.fp_adjudication,
                 default="super_agent:short_circuit_closed",
             ),
             ec=ec,
@@ -731,6 +732,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 EventStatus.CLOSED,
                 reason=build_fp_close_reason(
                     ec.false_positive_match,
+                    fp_adjudication=ec.fp_adjudication,
                     default="super_agent:complete_not_required",
                 ),
                 ec=ec,

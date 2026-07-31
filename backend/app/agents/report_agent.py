@@ -98,6 +98,9 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         fp_match = await self._read_optional(input.event_id, "false_positive_match")
         if not isinstance(fp_match, dict):
             fp_match = None
+        fp_adjudication = await self._read_optional(input.event_id, "fp_adjudication")
+        if not isinstance(fp_adjudication, dict):
+            fp_adjudication = None
         final_verdict = await self._resolve_final_verdict(input.event_id)
 
         impact_assessments = await self._read_optional(input.event_id, "impact_assessments")
@@ -114,6 +117,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             rag_output=rag,
             final_verdict=final_verdict,
             false_positive_match=fp_match,
+            fp_adjudication=fp_adjudication,
             escalated=input.escalated,
             replan_count=input.replan_count,
             impact_assessments=impact_assessments,

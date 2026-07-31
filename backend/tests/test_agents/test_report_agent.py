@@ -709,6 +709,35 @@ def test_builder_includes_human_escalation_note() -> None:
     assert "replan_count=3" in recommendations.content
 
 
+def test_llm_overview_preserves_post_evidence_fp_basis() -> None:
+    builder = ReportSectionBuilder()
+    event_id = "evt-report-fp-adj-post"
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=_main_evidence(event_id),
+        risk_assessment=_high_risk(),
+        triage_result=_main_triage(),
+        fp_adjudication={
+            "recommendation": "close_as_fp",
+            "matched_window_id": "cw-scheduled-ops-maintenance",
+            "supporting_evidence_ids": ["evd-auth-001"],
+            "matched_conditions": ["baseline_window_match", "asset_scope_match"],
+            "max_score": 0.9,
+        },
+    )
+
+    merged = ReportAgent(llm_client=None)._merge_sections(
+        sections,
+        {"overview": "LLM-generated analyst summary."},
+    )
+    overview = next(section for section in merged if section.key == "overview")
+
+    assert overview.content.startswith("LLM-generated analyst summary.")
+    assert "fp_decision: post_evidence_close_as_fp" in overview.content
+    assert "fp_matched_window_id: cw-scheduled-ops-maintenance" in overview.content
+    assert "evd-auth-001" in overview.content
+
+
 def test_llm_overview_preserves_false_positive_basis() -> None:
     builder = ReportSectionBuilder()
     event_id = "evt-report-fp-basis"
