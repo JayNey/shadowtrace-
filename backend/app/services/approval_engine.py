@@ -49,9 +49,6 @@ logger = logging.getLogger(__name__)
 SYSTEM_TIMEOUT_OPERATOR = "system_timeout"
 APPROVAL_ENGINE_OPERATOR = "ApprovalEngine"
 
-L2_CONFIDENCE_THRESHOLD = 0.8
-L3_CONFIDENCE_THRESHOLD = 0.85
-
 ResumeHook = Callable[[str], Awaitable[None]]
 
 _APPROVAL_TERMINAL = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
@@ -124,7 +121,16 @@ def evaluate_level_rules(
     confidence: float,
     severity: Severity,
 ) -> ApprovalDecision:
-    """Apply ActionLevel + confidence tier rules after hard gates pass."""
+    """Apply ActionLevel rules after hard gates pass.
+
+    Only L0/L1 may be policy-auto-approved. L2-L5 always require a human
+    Principal approval regardless of confidence or severity (ISSUE-147 /
+    #613 Phase 0): the previous L2 confidence and L3 severity+confidence
+    auto-approve branches were a security fail-open, letting high-confidence
+    side-effecting actions execute in the Mock full loop with no human
+    evidence. ``confidence``/``severity`` are retained for signature
+    compatibility and audit context only; they never unlock auto-approval.
+    """
     level = action.action_level
 
     if level in AUTO_APPROVABLE_ACTION_LEVELS:
@@ -135,32 +141,17 @@ def evaluate_level_rules(
         )
 
     if level is ActionLevel.L2:
-        if confidence >= L2_CONFIDENCE_THRESHOLD:
-            return ApprovalDecision(
-                decision=ApprovalDecisionKind.AUTO_APPROVE,
-                rule_applied="level_l2_confidence",
-                reason=f"L2 confidence {confidence:.2f} >= {L2_CONFIDENCE_THRESHOLD}",
-            )
         return ApprovalDecision(
             decision=ApprovalDecisionKind.REQUIRE_APPROVAL,
-            rule_applied="level_l2_confidence",
-            reason=f"L2 confidence {confidence:.2f} below {L2_CONFIDENCE_THRESHOLD}",
+            rule_applied="level_l2_requires_human",
+            reason="L2 requires human approval (confidence does not auto-approve)",
         )
 
     if level is ActionLevel.L3:
-        if severity in {Severity.HIGH, Severity.CRITICAL} and confidence >= L3_CONFIDENCE_THRESHOLD:
-            return ApprovalDecision(
-                decision=ApprovalDecisionKind.AUTO_APPROVE,
-                rule_applied="level_l3_high_confidence",
-                reason=(
-                    f"L3 severity={severity.value} confidence {confidence:.2f} "
-                    f">= {L3_CONFIDENCE_THRESHOLD}"
-                ),
-            )
         return ApprovalDecision(
             decision=ApprovalDecisionKind.REQUIRE_APPROVAL,
-            rule_applied="level_l3_high_confidence",
-            reason="L3 requires high/critical severity and confidence >= 0.85",
+            rule_applied="level_l3_requires_human",
+            reason="L3 requires human approval (severity/confidence do not auto-approve)",
         )
 
     # L4/L5 always manual.

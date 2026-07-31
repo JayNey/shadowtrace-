@@ -313,10 +313,20 @@ def test_evaluate_level_rules_l2_below_threshold() -> None:
     assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
 
 
-def test_evaluate_level_rules_l3_high_confidence_auto() -> None:
+def test_evaluate_level_rules_l3_high_confidence_requires_approval() -> None:
+    # ISSUE-147: L3 no longer auto-approves on high severity + confidence.
     action = _action_model(action_level=ActionLevel.L3)
     decision = evaluate_level_rules(action, confidence=0.9, severity=Severity.HIGH)
-    assert decision.decision is ApprovalDecisionKind.AUTO_APPROVE
+    assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
+    assert decision.rule_applied == "level_l3_requires_human"
+
+
+def test_evaluate_level_rules_l2_high_confidence_still_requires_approval() -> None:
+    # ISSUE-147: L2 no longer auto-approves on high confidence.
+    action = _action_model(action_level=ActionLevel.L2)
+    decision = evaluate_level_rules(action, confidence=0.99, severity=Severity.CRITICAL)
+    assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
+    assert decision.rule_applied == "level_l2_requires_human"
 
 
 def test_evaluate_level_rules_l4_requires_manual() -> None:
