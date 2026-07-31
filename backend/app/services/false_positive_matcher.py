@@ -395,9 +395,6 @@ def build_fp_close_reason(
 ) -> str:
     """Build an audit-friendly close reason from post-evidence FP adjudication."""
     adjudication = fp_adjudication if isinstance(fp_adjudication, dict) else None
-    if adjudication is None and isinstance(false_positive_match, dict):
-        if false_positive_match.get("phase") == "post_evidence":
-            adjudication = false_positive_match
 
     if isinstance(adjudication, dict) and adjudication.get("recommendation") == "close_as_fp":
         parts = ["close_as_fp", "post_evidence"]

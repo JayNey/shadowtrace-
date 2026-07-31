@@ -24,6 +24,13 @@ from app.services.evidence_projection import bind_evidence_projection
 
 pytestmark = pytest.mark.e2e_basic
 
+
+def _journal_scalar(value: object) -> object:
+    if isinstance(value, dict) and set(value) == {"_scalar"}:
+        return value["_scalar"]
+    return value
+
+
 ALL_SOURCE_KINDS = [
     SourceObjectKind.INCIDENT,
     SourceObjectKind.ALERT,
@@ -276,4 +283,4 @@ async def test_required_post_evidence_fp_adjudication_from_pipeline_without_jour
             )
         )
         assert intent is not None
-        assert intent.value is True
+        assert _journal_scalar(intent.value) is True

@@ -801,7 +801,22 @@ def test_verdict_resolver_no_fp_match_uses_risk() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_build_fp_close_reason_post_evidence_match_mirror_uses_window() -> None:
+def test_build_fp_close_reason_requires_fp_adjudication_for_post_evidence() -> None:
+    from app.services.false_positive_matcher import build_fp_close_reason
+
+    reason = build_fp_close_reason(
+        None,
+        fp_adjudication={
+            "recommendation": "close_as_fp",
+            "matched_window_id": "cw-test",
+            "supporting_evidence_ids": ["evd-1"],
+        },
+    )
+    assert reason.startswith("close_as_fp post_evidence")
+    assert "window=cw-test" in reason
+
+
+def test_build_fp_close_reason_ignores_false_positive_match_mirror() -> None:
     from app.services.false_positive_matcher import build_fp_close_reason
 
     reason = build_fp_close_reason(
@@ -809,11 +824,10 @@ def test_build_fp_close_reason_post_evidence_match_mirror_uses_window() -> None:
             "recommendation": "close_as_fp",
             "phase": "post_evidence",
             "matched_window_id": "cw-test",
-            "supporting_evidence_ids": ["evd-1"],
-        }
+        },
+        default="investigation:close",
     )
-    assert reason.startswith("close_as_fp post_evidence")
-    assert "window=cw-test" in reason
+    assert reason == "investigation:close"
 
 
 def test_build_fp_close_reason_pre_evidence_close_as_fp_uses_default() -> None:
