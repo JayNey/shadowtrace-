@@ -237,8 +237,9 @@ class AnalysisOnlyPipeline:
         )
 
         if event is not None and self._state_machine is not None and hasattr(event, "title"):
-            triage_result = await self._run_triage(event_id, event)
+            triage_result, alert_text = await self._run_triage(event_id, event)
         else:
+            alert_text = raw_event_summary
             triage_input = TriageAgentInput(
                 event_id=event_id,
                 raw_event_summary=raw_event_summary,
@@ -274,7 +275,7 @@ class AnalysisOnlyPipeline:
             context=TransitionContext(need_investigation=True),
             reason="analysis_pipeline:evidence_collect",
         )
-        evidence_output = await self._run_evidence(event_id, triage_result)
+        evidence_output = await self._run_evidence(event_id, triage_result, alert_text=alert_text)
 
         await self._transition(
             event_id,
@@ -405,19 +406,29 @@ class AnalysisOnlyPipeline:
             reason=reason or f"analysis_only:{target.value}",
         )
 
-    async def _run_triage(self, event_id: str, event: Any) -> TriageResult:
+    async def _run_triage(self, event_id: str, event: Any) -> tuple[TriageResult, str]:
         raw_summary = f"{event.title}. {event.description}"
         triage_input = TriageAgentInput(
             event_id=event_id,
             raw_event_summary=raw_summary,
             hint_entities=event.entities,
         )
-        return await self._triage.execute(triage_input)
+        result = await self._triage.execute(triage_input)
+        if not isinstance(result, TriageResult):
+            raise TypeError("TriageAgent must return TriageResult")
+        return result, raw_summary
 
-    async def _run_evidence(self, event_id: str, triage_result: TriageResult) -> EvidenceOutput:
+    async def _run_evidence(
+        self,
+        event_id: str,
+        triage_result: TriageResult,
+        *,
+        alert_text: str = "",
+    ) -> EvidenceOutput:
         evidence_input = EvidenceAgentInput(
             event_id=event_id,
             triage_result=triage_result,
+            alert_text=alert_text,
         )
         output = await self._evidence.execute(evidence_input)
         if not isinstance(output, EvidenceOutput):

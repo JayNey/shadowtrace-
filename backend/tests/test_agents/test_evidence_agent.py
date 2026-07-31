@@ -872,6 +872,120 @@ async def test_query_timings_include_records_count_and_gap_reason(
     assert success_timing["gap_reason"] is None
 
 
+async def test_malicious_process_with_source_entities_produces_evidence(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """ISSUE-101 acceptance: malicious_process + source entities yields evidence."""
+    event_id = f"evt-101-malproc-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    agent = _build_agent(tool_executor=tool_executor, wm=wm, evidence_repo=evidence_repo)
+    ref = _source_ref()
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(
+            hosts=[
+                HostEntity(
+                    entity_id="ent-host-mp",
+                    hostname="PC-FIN-023",
+                    ip="10.20.30.23",
+                    source_refs=[ref],
+                ),
+            ],
+            accounts=[AccountEntity(entity_id="ent-acc-mp", username="svc-backup", source_refs=[ref])],
+            ips=[
+                IPEntity(
+                    entity_id="ent-ip-mp",
+                    address="10.20.30.23",
+                    scope="internal",
+                    source_refs=[ref],
+                ),
+            ],
+            domains=[
+                DomainEntity(
+                    entity_id="ent-dom-mp",
+                    fqdn="unknown-upload-example.com",
+                    source_refs=[ref],
+                ),
+            ],
+        ),
+        ioc_list=["203.0.113.88"],
+    )
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert len(output.evidence_list) >= 1
+    assert output.collection_status in {
+        CollectionStatus.DEGRADED,
+        CollectionStatus.PARTIAL_DONE,
+        CollectionStatus.COMPLETED,
+    }
+
+
+async def test_degraded_summary_only_still_global_skips(
+    tool_executor: Any,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """Provenance summary alone must not bypass triage_degraded global skip."""
+
+    class _CallRecorder:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.calls: list[str] = []
+
+        async def call(self, tool_name: str, params: dict[str, object], **kwargs: object) -> object:
+            self.calls.append(tool_name)
+            return await self.inner.call(tool_name, params, **kwargs)
+
+    event_id = f"evt-101-summary-only-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    recorder = _CallRecorder(tool_executor)
+    agent = _build_agent(tool_executor=recorder, wm=wm, evidence_repo=evidence_repo)
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        degraded=True,
+        degradation_reasons=["llm_timeout"],
+        entities=EntitySet(),
+        entity_provenance_summary=[
+            EntityProvenanceRecord(
+                source_kind="incident",
+                source_object_id="INC-orphan",
+                connector_id="conn-mock",
+            )
+        ],
+    )
+    with bind_evidence_query_scope(DEFAULT_SCOPE):
+        output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.calls == []
+    assert all(gap.reason == "triage_degraded" for gap in output.gaps)
+
+
+async def test_evidence_respects_alert_context_for_validator() -> None:
+    """Evidence-stage validator must align with triage alert context (ISSUE-101)."""
+    from app.agents.evidence_agent import _validate_entities_for_evidence
+
+    alert_text = "Suspicious activity detected on host myserver during lateral scan"
+    entities = EntitySet(
+        hosts=[HostEntity(entity_id="ent-myserver", hostname="myserver")],
+    )
+
+    without_alert = _validate_entities_for_evidence(entities, alert_text="")
+    assert without_alert.entity_set.hosts == []
+
+    with_alert = _validate_entities_for_evidence(entities, alert_text=alert_text)
+    assert len(with_alert.entity_set.hosts) == 1
+    assert with_alert.entity_set.hosts[0].hostname == "myserver"
+
+
 @pytest.mark.integration
 async def test_sqlalchemy_evidence_upsert_keeps_higher_confidence() -> None:
     """Postgres upsert retains the higher-confidence row on evidence_id conflict."""

@@ -264,6 +264,16 @@ class EvidenceQuerySummaryItem(BaseModel):
     gap_reason: str | None = None
 
 
+class EvidenceTriageContextResponse(BaseModel):
+    """Upstream triage context for evidence gap reason chain (ISSUE-101)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    degraded: bool = False
+    degradation_reasons: list[str] = Field(default_factory=list)
+    entity_rejection_summary: dict[str, Any] = Field(default_factory=dict)
+
+
 class EventEvidenceResponse(BaseModel):
     """GET /events/{event_id}/evidence payload (ISSUE-101)."""
 
@@ -277,6 +287,7 @@ class EventEvidenceResponse(BaseModel):
     failed_sources: list[str] = Field(default_factory=list)
     overall_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     query_summary: list[EvidenceQuerySummaryItem] = Field(default_factory=list)
+    triage_context: EvidenceTriageContextResponse | None = None
 
 
 class DecisionTraceResponse(BaseModel):

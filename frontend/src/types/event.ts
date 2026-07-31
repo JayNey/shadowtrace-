@@ -331,9 +331,16 @@ export interface EvidenceQuerySummaryItem {
   gap_reason?: string | null;
 }
 
+export interface EvidenceTriageContext {
+  degraded: boolean;
+  degradation_reasons: string[];
+  entity_rejection_summary: Record<string, unknown>;
+}
+
 export interface EventEvidenceResponse extends EvidenceOutput {
   event_id: string;
   query_summary: EvidenceQuerySummaryItem[];
+  triage_context?: EvidenceTriageContext | null;
 }
 
 /* ------------------------------------------------------------------ */

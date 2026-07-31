@@ -93,9 +93,7 @@ def _entity_provenance(entity: Any) -> str:
 
 
 def _has_source_enriched_entities(triage: TriageResult) -> bool:
-    """True when triage carries SourceAdapter-backed entity provenance."""
-    if triage.entity_provenance_summary:
-        return True
+    """True when triage entities carry SourceAdapter-backed source_refs."""
     entities = triage.entities
     for collection in (
         entities.accounts,
@@ -116,7 +114,11 @@ def _should_skip_all_queries(triage: TriageResult) -> bool:
     return triage.degraded and not _has_source_enriched_entities(triage)
 
 
-def _validate_entities_for_evidence(entities: EntitySet) -> EntityValidationResult:
+def _validate_entities_for_evidence(
+    entities: EntitySet,
+    *,
+    alert_text: str = "",
+) -> EntityValidationResult:
     """Validate triage entities per-entity provenance before tool calls (ISSUE-100)."""
     rejections = []
     accounts: list[AccountEntity] = []
@@ -130,6 +132,7 @@ def _validate_entities_for_evidence(entities: EntitySet) -> EntityValidationResu
         result = validate_entity_set(
             EntitySet(accounts=[account]),
             provenance=_entity_provenance(account),  # type: ignore[arg-type]
+            alert_text=alert_text,
         )
         accounts.extend(result.entity_set.accounts)
         rejections.extend(result.rejections)
@@ -138,6 +141,7 @@ def _validate_entities_for_evidence(entities: EntitySet) -> EntityValidationResu
         result = validate_entity_set(
             EntitySet(hosts=[host]),
             provenance=_entity_provenance(host),  # type: ignore[arg-type]
+            alert_text=alert_text,
         )
         hosts.extend(result.entity_set.hosts)
         rejections.extend(result.rejections)
@@ -146,6 +150,7 @@ def _validate_entities_for_evidence(entities: EntitySet) -> EntityValidationResu
         result = validate_entity_set(
             EntitySet(ips=[ip_entity]),
             provenance=_entity_provenance(ip_entity),  # type: ignore[arg-type]
+            alert_text=alert_text,
         )
         ips.extend(result.entity_set.ips)
         rejections.extend(result.rejections)
@@ -154,6 +159,7 @@ def _validate_entities_for_evidence(entities: EntitySet) -> EntityValidationResu
         result = validate_entity_set(
             EntitySet(domains=[domain]),
             provenance=_entity_provenance(domain),  # type: ignore[arg-type]
+            alert_text=alert_text,
         )
         domains.extend(result.entity_set.domains)
         rejections.extend(result.rejections)
@@ -162,6 +168,7 @@ def _validate_entities_for_evidence(entities: EntitySet) -> EntityValidationResu
         result = validate_entity_set(
             EntitySet(processes=[process]),
             provenance=_entity_provenance(process),  # type: ignore[arg-type]
+            alert_text=alert_text,
         )
         processes.extend(result.entity_set.processes)
         rejections.extend(result.rejections)
@@ -170,6 +177,7 @@ def _validate_entities_for_evidence(entities: EntitySet) -> EntityValidationResu
         result = validate_entity_set(
             EntitySet(files=[file_entity]),
             provenance=_entity_provenance(file_entity),  # type: ignore[arg-type]
+            alert_text=alert_text,
         )
         files.extend(result.entity_set.files)
         rejections.extend(result.rejections)
@@ -235,6 +243,12 @@ def _skip_reason_for_tool(
 
     if raw_values - valid_values:
         return "invalid_entity"
+    return "source_skipped"
+
+
+def _impact_for_skip_reason(reason: str) -> str:
+    if reason in {"invalid_entity", "triage_degraded", "source_skipped"}:
+        return reason
     return "source_skipped"
 
 
@@ -531,6 +545,9 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             )
 
         mode = self.evidence_mode
+        alert_text = input.alert_text.strip()
+        if not alert_text:
+            alert_text = await self._resolve_alert_text(input.event_id)
         if _should_skip_all_queries(input.triage_result):
             collected, success_sources, failed_sources, gaps = await self._collect_all_triage_degraded(
                 input
@@ -540,12 +557,14 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 input,
                 time_range=time_range,
                 scope=scope,
+                alert_text=alert_text,
             )
         else:
             collected, success_sources, failed_sources, gaps = await self._collect_sequential(
                 input,
                 time_range=time_range,
                 scope=scope,
+                alert_text=alert_text,
             )
 
         evidence_list = self._dedup_and_sort(collected)
@@ -584,6 +603,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         *,
         time_range: dict[str, str],
         scope: EvidenceQueryScope | None,
+        alert_text: str = "",
     ) -> tuple[list[Evidence], list[str], list[str], list[EvidenceGap]]:
         collected: list[Evidence] = []
         success_sources: list[str] = []
@@ -591,7 +611,10 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         gaps: list[EvidenceGap] = []
         started = time.perf_counter()
         raw_entities = input.triage_result.entities
-        validated_entities = _validate_entities_for_evidence(raw_entities).entity_set
+        validated_entities = _validate_entities_for_evidence(
+            raw_entities,
+            alert_text=alert_text,
+        ).entity_set
 
         for tool_name in EVIDENCE_QUERY_ORDER:
             source = TOOL_SOURCE_MAP[tool_name]
@@ -671,6 +694,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         *,
         time_range: dict[str, str],
         scope: EvidenceQueryScope | None,
+        alert_text: str = "",
     ) -> tuple[list[Evidence], list[str], list[str], list[EvidenceGap]]:
         """Run queries concurrently; ``asyncio.wait`` keeps completed work on global timeout."""
         collected: list[Evidence] = []
@@ -681,7 +705,10 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
 
         pending_tasks: dict[asyncio.Task[dict[str, Any]], str] = {}
         raw_entities = input.triage_result.entities
-        validated_entities = _validate_entities_for_evidence(raw_entities).entity_set
+        validated_entities = _validate_entities_for_evidence(
+            raw_entities,
+            alert_text=alert_text,
+        ).entity_set
         for tool_name in EVIDENCE_QUERY_ORDER:
             source = TOOL_SOURCE_MAP[tool_name]
             params = self._build_params(
@@ -825,7 +852,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 event_id=event_id,
                 source=source,
                 reason=reason,
-                impact="source_skipped",
+                impact=_impact_for_skip_reason(reason),
                 description=description,
                 tool_name=tool_name,
             ),
@@ -1200,6 +1227,33 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                     exc_info=True,
                 )
         return dict(self.default_time_range)
+
+    async def _resolve_alert_text(self, event_id: str) -> str:
+        """Prefer EventContext.event description/title for ISSUE-100 alert context."""
+        if self.working_memory is None:
+            return ""
+        try:
+            event_blob = await self.working_memory.read(event_id, "event")
+        except Exception:
+            logger.debug(
+                "failed to read EventContext.event for alert_text event=%s",
+                event_id,
+                exc_info=True,
+            )
+            return ""
+        if not isinstance(event_blob, dict):
+            return ""
+        title = event_blob.get("title")
+        description = event_blob.get("description")
+        parts = [
+            part.strip()
+            for part in (
+                str(title) if title is not None else "",
+                str(description) if description is not None else "",
+            )
+            if part and part.strip()
+        ]
+        return ". ".join(parts)
 
     def _build_params(
         self,

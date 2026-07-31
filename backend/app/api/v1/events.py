@@ -1333,6 +1333,26 @@ def _gap_to_response(gap: Any) -> s.EvidenceGapResponse:
     )
 
 
+def _triage_context_from_context(context: Any) -> s.EvidenceTriageContextResponse | None:
+    from app.models.agent_io import TriageResult
+
+    raw = getattr(context, "triage_result", None)
+    if not isinstance(raw, dict):
+        return None
+    triage = TriageResult.model_validate(raw)
+    if (
+        not triage.degraded
+        and not triage.degradation_reasons
+        and not triage.entity_rejection_summary
+    ):
+        return None
+    return s.EvidenceTriageContextResponse(
+        degraded=triage.degraded,
+        degradation_reasons=list(triage.degradation_reasons),
+        entity_rejection_summary=dict(triage.entity_rejection_summary or {}),
+    )
+
+
 def _query_summary_from_agent_traces(rows: list[Any]) -> list[s.EvidenceQuerySummaryItem]:
     from app.services.decision_trace_service import _evidence_query_timing_by_tool
 
@@ -1422,6 +1442,7 @@ async def get_event_evidence(
         failed_sources=list(evidence_output.failed_sources),
         overall_confidence=evidence_output.overall_confidence,
         query_summary=query_summary,
+        triage_context=_triage_context_from_context(context),
     )
 
 

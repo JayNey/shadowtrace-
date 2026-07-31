@@ -8,6 +8,7 @@ import type {
   EvidenceConflict,
   EvidenceGap,
   EvidenceQuerySummaryItem,
+  EvidenceTriageContext,
 } from "../../types/event";
 
 const COLLECTION_STATUS_LABEL: Record<CollectionStatus, string> = {
@@ -41,14 +42,37 @@ function gapReasonLabel(reason: string): string {
 function buildEmptyExplanation(
   gaps: EvidenceGap[],
   collectionStatus: CollectionStatus | undefined,
+  triageContext?: EvidenceTriageContext | null,
 ): string {
+  const triageHints: string[] = [];
+  if (triageContext?.degraded) {
+    triageHints.push("分诊已降级");
+  }
+  if (triageContext?.degradation_reasons?.length) {
+    triageHints.push(`分诊原因：${triageContext.degradation_reasons.join("；")}`);
+  }
   if (gaps.length === 0) {
+    if (triageHints.length > 0) {
+      return `证据为空：${triageHints.join("；")}。`;
+    }
     return collectionStatus === "failed"
       ? "证据采集未产出可展示记录，但未记录具体缺口原因。"
       : "暂无证据记录。";
   }
   const reasons = [...new Set(gaps.map((gap) => gapReasonLabel(gap.reason)))];
-  return `证据为空：${reasons.join("；")}。请查看下方缺口明细与采集摘要。`;
+  const chain = [...triageHints, ...reasons].filter(Boolean);
+  return `证据为空：${chain.join("；")}。请查看下方分诊上下文、缺口明细与采集摘要。`;
+}
+
+function formatRejectionSummary(summary: Record<string, unknown>): string | null {
+  const counts = summary.rejection_counts;
+  if (typeof counts !== "object" || counts === null) {
+    return null;
+  }
+  const parts = Object.entries(counts as Record<string, number>)
+    .filter(([, count]) => count > 0)
+    .map(([reason, count]) => `${reason}×${count}`);
+  return parts.length > 0 ? parts.join("，") : null;
 }
 
 export default function EvidenceList({
@@ -59,6 +83,7 @@ export default function EvidenceList({
   successSources = [],
   failedSources = [],
   querySummary = [],
+  triageContext = null,
 }: {
   evidence: Evidence[];
   conflicts: EvidenceConflict[];
@@ -67,6 +92,7 @@ export default function EvidenceList({
   successSources?: string[];
   failedSources?: string[];
   querySummary?: EvidenceQuerySummaryItem[];
+  triageContext?: EvidenceTriageContext | null;
 }) {
   const [source, setSource] = useState<string>();
   const sources = useMemo(
@@ -74,7 +100,14 @@ export default function EvidenceList({
     [evidence],
   );
   const rows = source ? evidence.filter((item) => item.source === source) : evidence;
-  const emptyExplanation = buildEmptyExplanation(gaps, collectionStatus);
+  const emptyResultSources = useMemo(
+    () => [...new Set(gaps.filter((gap) => gap.reason === "no_records").map((gap) => gap.missing_source))],
+    [gaps],
+  );
+  const rejectionSummary = triageContext?.entity_rejection_summary
+    ? formatRejectionSummary(triageContext.entity_rejection_summary)
+    : null;
+  const emptyExplanation = buildEmptyExplanation(gaps, collectionStatus, triageContext);
 
   const gapColumns: ColumnsType<EvidenceGap> = [
     { title: "缺失源", dataIndex: "missing_source", width: 140 },
@@ -172,6 +205,30 @@ export default function EvidenceList({
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {triageContext && (
+        <Alert
+          type={triageContext.degraded ? "warning" : "info"}
+          showIcon
+          message="分诊上下文（上游）"
+          description={
+            <Descriptions size="small" column={1}>
+              <Descriptions.Item label="分诊降级">
+                {triageContext.degraded ? "是" : "否"}
+              </Descriptions.Item>
+              <Descriptions.Item label="降级原因">
+                {triageContext.degradation_reasons.length > 0
+                  ? triageContext.degradation_reasons.join("；")
+                  : "无"}
+              </Descriptions.Item>
+              <Descriptions.Item label="实体拒收摘要">
+                {rejectionSummary ?? "无"}
+              </Descriptions.Item>
+            </Descriptions>
+          }
+          data-testid="evidence-triage-context"
+        />
+      )}
+
       {collectionStatus && (
         <Alert
           type={collectionStatus === "failed" ? "warning" : "info"}
@@ -184,6 +241,9 @@ export default function EvidenceList({
               </Descriptions.Item>
               <Descriptions.Item label="失败/跳过源">
                 {failedSources.length > 0 ? failedSources.join(", ") : "无"}
+              </Descriptions.Item>
+              <Descriptions.Item label="空结果源">
+                {emptyResultSources.length > 0 ? emptyResultSources.join(", ") : "无"}
               </Descriptions.Item>
               <Descriptions.Item label="缺口数">{gaps.length}</Descriptions.Item>
             </Descriptions>

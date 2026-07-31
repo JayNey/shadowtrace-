@@ -30,14 +30,19 @@ class _ContextStore:
         evidence_output: dict[str, Any] | None,
         *,
         context_exists: bool = True,
+        triage_result: dict[str, Any] | None = None,
     ) -> None:
         self._evidence_output = evidence_output
         self._context_exists = context_exists
+        self._triage_result = triage_result
 
     async def get_full_context(self, event_id: str) -> EventContext:
         if not self._context_exists:
             raise KeyError(f"security_event not found: {event_id}")
-        return EventContext(evidence_output=self._evidence_output)
+        return EventContext(
+            evidence_output=self._evidence_output,
+            triage_result=self._triage_result,
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +57,7 @@ def _client(
     *,
     event_exists: bool = True,
     context_exists: bool = True,
+    triage_result: dict[str, Any] | None = None,
 ) -> TestClient:
     async def _principal() -> Principal:
         return Principal(subject="analyst-1", roles=["analyst"])
@@ -60,7 +66,11 @@ def _client(
         return _EventService(exists=event_exists)
 
     def _context_store() -> _ContextStore:
-        return _ContextStore(evidence_output, context_exists=context_exists)
+        return _ContextStore(
+            evidence_output,
+            context_exists=context_exists,
+            triage_result=triage_result,
+        )
 
     app.dependency_overrides[get_principal] = _principal
     app.dependency_overrides[get_event_service] = _event_service
@@ -116,3 +126,30 @@ def test_get_event_evidence_event_not_found_first() -> None:
 
     assert response.status_code == 404
     assert response.json()["error_code"] == "event_not_found"
+
+
+def test_get_event_evidence_includes_triage_context_chain() -> None:
+    triage_result = {
+        "event_type": "malicious_process",
+        "severity": "high",
+        "need_investigation": True,
+        "degraded": True,
+        "degradation_reasons": ["llm_timeout"],
+        "entity_rejection_summary": {
+            "rejection_counts": {"phrase_without_host_context": 2},
+            "total_rejected": 2,
+        },
+        "entities": {},
+        "ioc_list": [],
+        "reasoning": "",
+    }
+    response = _client(
+        _evidence_output(),
+        triage_result=triage_result,
+    ).get("/api/v1/events/evt-api-101/evidence")
+
+    assert response.status_code == 200
+    triage_context = response.json()["triage_context"]
+    assert triage_context["degraded"] is True
+    assert triage_context["degradation_reasons"] == ["llm_timeout"]
+    assert triage_context["entity_rejection_summary"]["total_rejected"] == 2

@@ -528,6 +528,7 @@ export default function EventDetailPage() {
           successSources={evidenceOutput?.success_sources ?? []}
           failedSources={evidenceOutput?.failed_sources ?? []}
           querySummary={evidenceDetail?.query_summary ?? []}
+          triageContext={evidenceDetail?.triage_context ?? null}
         />
       ),
     },

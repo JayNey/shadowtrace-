@@ -366,6 +366,18 @@ async def invoke_investigation_graph(
     return cast(InvestigationState, result)
 
 
+def _alert_text_from_state(state: InvestigationState) -> str:
+    snapshot = state.get("source_snapshot")
+    if not isinstance(snapshot, dict):
+        return ""
+    parts = [
+        str(snapshot[key]).strip()
+        for key in ("title", "description", "summary", "raw_alert")
+        if isinstance(snapshot.get(key), str) and str(snapshot[key]).strip()
+    ]
+    return ". ".join(parts)
+
+
 def _event_context_from_state(state: InvestigationState) -> EventContext:
     policy = DispositionPolicy(
         state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
@@ -793,7 +805,11 @@ def build_investigation_graph(
             reason="investigation:evidence",
         )
         result = await evidence_agent.execute(
-            EvidenceAgentInput(event_id=state["event_id"], triage_result=triage)
+            EvidenceAgentInput(
+                event_id=state["event_id"],
+                triage_result=triage,
+                alert_text=_alert_text_from_state(state),
+            )
         )
         if not isinstance(result, EvidenceOutput):
             raise TypeError("evidence_agent must return EvidenceOutput")

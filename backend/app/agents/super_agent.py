@@ -833,6 +833,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         evidence_input = EvidenceAgentInput(
             event_id=event_id,
             triage_result=triage,
+            alert_text=_alert_text_from_event_context(ec),
             plan_step_goal=step.step_goal,
             required_tools=step.required_tools,
         )
@@ -1439,6 +1440,14 @@ def _event_summary_from_record(event_id: str, event: Any) -> EventSummary:
     from app.services.context_service import event_summary_from_security_event
 
     return event_summary_from_security_event(event)
+
+
+def _alert_text_from_event_context(ec: EventContext) -> str:
+    """Build alert text for downstream entity validation (ISSUE-100/101)."""
+    if ec.event is None:
+        return ""
+    parts = [part.strip() for part in (ec.event.title, ec.event.description) if part.strip()]
+    return ". ".join(parts)
 
 
 def _event_id_from_context(ec: EventContext) -> str:
