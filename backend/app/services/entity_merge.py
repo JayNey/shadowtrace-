@@ -1,7 +1,8 @@
 """Source-priority entity merge contract (ISSUE-099).
 
 Merge order: validated structured source > validated LLM > validated regex.
-Dedup by semantic identity value; conflicts retain source and are surfaced.
+Dedup by semantic identity; slot competition keeps one primary hostname/account
+per category when layers disagree.
 """
 
 from __future__ import annotations
@@ -71,21 +72,35 @@ def merge_entity_sets(
         merged, layer_conflicts = _merge_layer(merged, layer, layer_name=layer_name)
         conflicts.extend(layer_conflicts)
 
-    if regex is not None and regex != EntitySet() and (llm is None or llm == EntitySet()):
-        if source is not None and source != EntitySet():
-            degradation.append("text_extraction_empty")
-        else:
-            degradation.append("regex_fallback")
+    llm_empty = llm is None or llm == EntitySet()
+    regex_empty = regex is None or regex == EntitySet()
+    source_present = source is not None and source != EntitySet()
 
-    if source is not None and source != EntitySet() and (llm is None or llm == EntitySet()):
-        if regex is None or regex == EntitySet():
-            degradation.append("text_extraction_empty")
+    if source_present and llm_empty and regex_empty:
+        degradation.append("text_extraction_empty")
+    elif not llm_empty or not regex_empty:
+        if llm_empty and not regex_empty:
+            degradation.append(
+                "text_extraction_empty" if source_present else "regex_fallback"
+            )
 
     return EntityMergeResult(
         entities=merged,
         conflicts=tuple(conflicts),
         degradation_reasons=tuple(dict.fromkeys(degradation)),
     )
+
+
+def merge_source_layers(base: EntitySet, incoming: EntitySet) -> EntityMergeResult:
+    """Merge two structured source layers without mislabeling provenance as llm."""
+    if incoming == EntitySet():
+        return EntityMergeResult(entities=base.model_copy(deep=True))
+    merged, conflicts = _merge_layer(
+        base.model_copy(deep=True),
+        incoming,
+        layer_name="source",
+    )
+    return EntityMergeResult(entities=merged, conflicts=tuple(conflicts))
 
 
 def _merge_layer(
@@ -106,11 +121,38 @@ def _merge_layer(
         ("files", _merge_files),
     ):
         existing: list[Any] = list(getattr(result, category))
-        additions, cat_conflicts = merger(existing, list(getattr(incoming, category)), layer_name)
+        if category == "ips":
+            host_ips = {(h.ip or "").strip() for h in result.hosts if (h.ip or "").strip()}
+            additions, cat_conflicts = _merge_ips(
+                existing,
+                list(getattr(incoming, category)),
+                layer_name,
+                host_ips=host_ips,
+            )
+        else:
+            additions, cat_conflicts = merger(
+                existing, list(getattr(incoming, category)), layer_name
+            )
         conflicts.extend(cat_conflicts)
         setattr(result, category, existing + additions)
 
     return result, conflicts
+
+
+def _primary_account_username(accounts: list[AccountEntity]) -> str | None:
+    for item in accounts:
+        username = (item.username or "").strip()
+        if username:
+            return username.lower()
+    return None
+
+
+def _primary_host_hostname(hosts: list[HostEntity]) -> str | None:
+    for item in hosts:
+        hostname = (item.hostname or "").strip()
+        if hostname:
+            return hostname.lower()
+    return None
 
 
 def _merge_accounts(
@@ -119,28 +161,49 @@ def _merge_accounts(
     layer_name: str,
 ) -> tuple[list[AccountEntity], list[EntityConflict]]:
     index = {_account_key(item): (item, _layer_of(item)) for item in existing}
+    primary = _primary_account_username(existing)
     additions: list[AccountEntity] = []
     conflicts: list[EntityConflict] = []
     for item in incoming:
+        username = (item.username or "").strip()
+        if not username:
+            continue
+        username_lower = username.lower()
         key = _account_key(item)
-        if not key:
+        if primary is not None and username_lower != primary:
+            kept = next(
+                (acct for acct in existing if (acct.username or "").strip().lower() == primary),
+                existing[0] if existing else item,
+            )
+            conflicts.append(
+                EntityConflict(
+                    entity_type="account",
+                    semantic_key="account:primary",
+                    kept_value=kept.username or primary,
+                    kept_source=_layer_of(kept),
+                    discarded_value=username,
+                    discarded_source=layer_name,
+                )
+            )
             continue
         if key in index:
             kept, kept_layer = index[key]
-            if (kept.username or "").lower() != (item.username or "").lower():
+            if (kept.username or "").strip() != username:
                 conflicts.append(
                     EntityConflict(
                         entity_type="account",
                         semantic_key=key,
                         kept_value=kept.username or "",
                         kept_source=kept_layer,
-                        discarded_value=item.username or "",
+                        discarded_value=username,
                         discarded_source=layer_name,
                     )
                 )
             continue
         additions.append(item)
         index[key] = (item, layer_name)
+        if primary is None:
+            primary = username_lower
     return additions, conflicts
 
 
@@ -150,9 +213,33 @@ def _merge_hosts(
     layer_name: str,
 ) -> tuple[list[HostEntity], list[EntityConflict]]:
     index = {_host_key(item): (item, _layer_of(item)) for item in existing}
+    primary_hostname = _primary_host_hostname(existing)
     additions: list[HostEntity] = []
     conflicts: list[EntityConflict] = []
     for item in incoming:
+        hostname = (item.hostname or "").strip()
+        if hostname:
+            hostname_lower = hostname.lower()
+            if primary_hostname is not None and hostname_lower != primary_hostname:
+                kept = next(
+                    (
+                        host
+                        for host in existing
+                        if (host.hostname or "").strip().lower() == primary_hostname
+                    ),
+                    existing[0] if existing else item,
+                )
+                conflicts.append(
+                    EntityConflict(
+                        entity_type="host",
+                        semantic_key="host:primary",
+                        kept_value=_host_value(kept),
+                        kept_source=_layer_of(kept),
+                        discarded_value=_host_value(item),
+                        discarded_source=layer_name,
+                    )
+                )
+                continue
         key = _host_key(item)
         if not key:
             continue
@@ -172,6 +259,8 @@ def _merge_hosts(
             continue
         additions.append(item)
         index[key] = (item, layer_name)
+        if hostname and primary_hostname is None:
+            primary_hostname = hostname.lower()
     return additions, conflicts
 
 
@@ -179,26 +268,33 @@ def _merge_ips(
     existing: list[IPEntity],
     incoming: list[IPEntity],
     layer_name: str,
+    *,
+    host_ips: set[str] | None = None,
 ) -> tuple[list[IPEntity], list[EntityConflict]]:
+    attached_host_ips = host_ips or set()
     index = {_ip_key(item): (item, _layer_of(item)) for item in existing}
     additions: list[IPEntity] = []
     conflicts: list[EntityConflict] = []
     for item in incoming:
+        address = (item.address or "").strip()
         key = _ip_key(item)
-        if not key or key in index:
-            if key and key in index:
-                kept, kept_layer = index[key]
-                if (kept.address or "") != (item.address or ""):
-                    conflicts.append(
-                        EntityConflict(
-                            entity_type="ip",
-                            semantic_key=key,
-                            kept_value=kept.address or "",
-                            kept_source=kept_layer,
-                            discarded_value=item.address or "",
-                            discarded_source=layer_name,
-                        )
+        if not key:
+            continue
+        if address in attached_host_ips:
+            continue
+        if key in index:
+            kept, kept_layer = index[key]
+            if (kept.address or "") != address:
+                conflicts.append(
+                    EntityConflict(
+                        entity_type="ip",
+                        semantic_key=key,
+                        kept_value=kept.address or "",
+                        kept_source=kept_layer,
+                        discarded_value=address,
+                        discarded_source=layer_name,
                     )
+                )
             continue
         additions.append(item)
         index[key] = (item, layer_name)
@@ -228,15 +324,46 @@ def _merge_processes(
     layer_name: str,
 ) -> tuple[list[ProcessEntity], list[EntityConflict]]:
     index = {_process_key(item): (item, _layer_of(item)) for item in existing}
+    primary = _primary_process_name(existing)
     additions: list[ProcessEntity] = []
     conflicts: list[EntityConflict] = []
     for item in incoming:
+        name = (item.name or "").strip()
+        if not name:
+            continue
+        name_lower = name.lower()
+        if primary is not None and name_lower != primary:
+            kept = next(
+                (proc for proc in existing if (proc.name or "").strip().lower() == primary),
+                existing[0] if existing else item,
+            )
+            conflicts.append(
+                EntityConflict(
+                    entity_type="process",
+                    semantic_key="process:primary",
+                    kept_value=kept.name or primary,
+                    kept_source=_layer_of(kept),
+                    discarded_value=name,
+                    discarded_source=layer_name,
+                )
+            )
+            continue
         key = _process_key(item)
         if not key or key in index:
             continue
         additions.append(item)
         index[key] = (item, layer_name)
+        if primary is None:
+            primary = name_lower
     return additions, conflicts
+
+
+def _primary_process_name(processes: list[ProcessEntity]) -> str | None:
+    for item in processes:
+        name = (item.name or "").strip()
+        if name:
+            return name.lower()
+    return None
 
 
 def _merge_files(
@@ -298,4 +425,9 @@ def _file_key(entity: FileEntity) -> str:
     return f"file:{value}" if value else ""
 
 
-__all__ = ["EntityConflict", "EntityMergeResult", "merge_entity_sets"]
+__all__ = [
+    "EntityConflict",
+    "EntityMergeResult",
+    "merge_entity_sets",
+    "merge_source_layers",
+]

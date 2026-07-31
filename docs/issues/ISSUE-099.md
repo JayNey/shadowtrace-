@@ -30,7 +30,7 @@ ISSUE-032（TriageAgent）、ISSUE-013（SourceIngester / EventService）、ISSU
 统一命名：
 1. 新增内部函数/模块名建议：`enrich_entities_from_source()` / `SourceEntityEnricher`（实现时二选一，Issue 内保持一致）
 2. 产出仍写入 `TriageResult.entities`（`EntitySet`），owner 仍为 TriageAgent
-3. 降级标记继续使用 `TriageResult.degraded` + `degraded_flags`，新增原因码 `source_enrichment_partial` / `text_extraction_empty`
+3. 降级标记继续使用 `TriageResult.degraded` + `degradation_reasons`，新增原因码 `source_enrichment_partial` / `text_extraction_empty`
 
 实现步骤：
 1. **定义 enrichment 优先级**：`source_snapshot.normalized` > impacted asset refs > related alert/log raw_payload > LLM/regex 文本抽取；后者不得覆盖前者已确认字段。

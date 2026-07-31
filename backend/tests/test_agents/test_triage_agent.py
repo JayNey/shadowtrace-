@@ -1631,6 +1631,46 @@ class TestTriageSourceEntityMerge:
         assert result.entity_provenance_summary[0].source_object_id == "INC-099"
 
     @pytest.mark.asyncio
+    async def test_source_wins_over_llm_competing_hostname_with_conflict(self):
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+
+        llm_entities = EntitySet(
+            hosts=[HostEntity(entity_id="llm-host", hostname="EVIL-HOST")]
+        )
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.MALICIOUS_PROCESS,
+                entities=llm_entities,
+                reasoning="",
+            ),
+            model_name="mock",
+        )
+        llm_client = _MockLLMClient(response=llm_response)
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(llm_client=llm_client, working_memory=wm)
+        ref = _source_ref()
+        hint = EntitySet(
+            hosts=[
+                HostEntity(
+                    entity_id="src-host-1",
+                    hostname="DEV-WKS-012",
+                    source_refs=[ref],
+                )
+            ],
+        )
+        input_ = _make_input(
+            raw_event_summary="Malicious process spawned — ransomware-like behavior",
+            hint_entities=hint,
+        )
+        result = await agent._run(input_)
+        assert len(result.entities.hosts) == 1
+        assert result.entities.hosts[0].hostname == "DEV-WKS-012"
+        assert len(result.entity_conflicts) == 1
+        assert "entity conflict" in result.reasoning.lower()
+
+    @pytest.mark.asyncio
     async def test_account_anomaly_fp_without_source_hints_unchanged(self):
         wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
         await wm.write(

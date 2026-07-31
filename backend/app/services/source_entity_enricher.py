@@ -122,6 +122,7 @@ def _project_single(
 
     hostname = normalized.get("hostname") or normalized.get("host")
     host_ip = normalized.get("ip")
+    host_ip_str = str(host_ip) if host_ip else None
     if hostname or host_ip:
         counters["hosts"] += 1
         hosts.append(
@@ -142,6 +143,8 @@ def _project_single(
     seen_ip: set[str] = set()
     for address, key in ip_candidates:
         if address in seen_ip:
+            continue
+        if host_ip_str and address == host_ip_str:
             continue
         seen_ip.add(address)
         counters["ips"] += 1
@@ -203,9 +206,9 @@ def _project_single(
 
 
 def _merge_seed(base: EntitySet, seed: EntitySet) -> EntitySet:
-    from app.services.entity_merge import merge_entity_sets
+    from app.services.entity_merge import merge_source_layers
 
-    return merge_entity_sets(source=base, llm=seed).entities
+    return merge_source_layers(base, seed).entities
 
 
 def _entity_counts(entity_set: EntitySet) -> dict[str, int]:

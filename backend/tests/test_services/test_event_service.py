@@ -793,6 +793,34 @@ async def test_related_asset_enriches_event_entities(
 
 
 @pytest.mark.asyncio
+async def test_incident_create_with_normalized_hostname_has_source_refs(
+    event_service: EventService,
+) -> None:
+    sfx = _sfx()
+    incident_ref = _ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-seed-{sfx}")
+    inc = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=incident_ref,
+            title="Host compromise detected",
+            event_type=EventType.HOST_COMPROMISE,
+            severity=Severity.HIGH,
+            normalized={
+                "hostname": "DEV-WKS-012",
+                "account": "dev-user-012",
+                "event_type": "host_compromise",
+            },
+            source_type="mock_xdr",
+        )
+    )
+    event = await event_service.get_event(inc.event_id)
+    assert event is not None
+    assert event.entities.hosts
+    assert event.entities.hosts[0].hostname == "DEV-WKS-012"
+    assert event.entities.hosts[0].source_refs
+    assert event.entities.hosts[0].source_refs[0].source_object_id == incident_ref.source_object_id
+
+
+@pytest.mark.asyncio
 async def test_file_create_event_not_required_and_idempotent(
     event_service: EventService,
 ) -> None:

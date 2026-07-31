@@ -52,3 +52,23 @@ def test_enrich_asset_and_log_normalized_fields() -> None:
     assert "dev-user-012" in accounts
     assert "ransomware_stage.exe" in processes
     assert enrichment.provenance_summary
+
+
+def test_enrich_does_not_duplicate_ip_on_host_and_ips() -> None:
+    asset_ref = _ref(SourceObjectKind.ASSET, "asset-dedupe")
+    enrichment = SourceEntityEnricher.enrich_from_sources(
+        [
+            (
+                asset_ref,
+                {
+                    "hostname": "DEV-WKS-012",
+                    "ip": "10.60.1.10",
+                    "owner": "dev-user-012",
+                },
+            ),
+        ]
+    )
+    host_ips = {h.ip for h in enrichment.entity_set.hosts if h.ip}
+    ip_addresses = {ip.address for ip in enrichment.entity_set.ips}
+    assert "10.60.1.10" in host_ips
+    assert "10.60.1.10" not in ip_addresses
