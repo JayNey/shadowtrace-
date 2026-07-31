@@ -63,7 +63,11 @@ from app.models.report import InvestigationReport
 from app.models.security_event import EventSummary
 from app.models.workflow import MAX_AGENT_RETRIES, TransitionContext
 from app.orchestration.lease import EventLease, generate_owner_id
-from app.orchestration.workflow_graph import planner_node, rag_node
+from app.orchestration.workflow_graph import (
+    alert_text_from_snapshot,
+    planner_node,
+    rag_node,
+)
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.working_memory import BoundWorkingMemory
 
@@ -1443,11 +1447,20 @@ def _event_summary_from_record(event_id: str, event: Any) -> EventSummary:
 
 
 def _alert_text_from_event_context(ec: EventContext) -> str:
-    """Build alert text for downstream entity validation (ISSUE-100/101)."""
+    """Build alert text for downstream entity validation (ISSUE-100/101).
+
+    Aligns with the production ``workflow_graph`` path (ISSUE-143): prefer the
+    frozen ``source_snapshot`` dict, then fall back to the event title. Never
+    access ``ec.event.description`` — ``EventSummary`` (ISSUE-094) has no such
+    field (``extra=forbid``), so touching it raises ``AttributeError``.
+    """
     if ec.event is None:
         return ""
-    parts = [part.strip() for part in (ec.event.title, ec.event.description) if part.strip()]
-    return ". ".join(parts)
+    text = alert_text_from_snapshot(ec.source_snapshot)
+    if text:
+        return text
+    title = ec.event.title.strip() if ec.event.title else ""
+    return title
 
 
 def _event_id_from_context(ec: EventContext) -> str:

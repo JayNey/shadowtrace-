@@ -366,8 +366,13 @@ async def invoke_investigation_graph(
     return cast(InvestigationState, result)
 
 
-def _alert_text_from_state(state: InvestigationState) -> str:
-    snapshot = state.get("source_snapshot")
+def alert_text_from_snapshot(snapshot: object) -> str:
+    """Build alert text from a frozen ``source_snapshot`` dict.
+
+    Shared by the production ``workflow_graph`` and the SuperAgent internal
+    graph so both derive alert text from the same immutable source fields
+    (ISSUE-143). Returns an empty string when no usable snapshot is present.
+    """
     if not isinstance(snapshot, dict):
         return ""
     parts = [
@@ -376,6 +381,10 @@ def _alert_text_from_state(state: InvestigationState) -> str:
         if isinstance(snapshot.get(key), str) and str(snapshot[key]).strip()
     ]
     return ". ".join(parts)
+
+
+def _alert_text_from_state(state: InvestigationState) -> str:
+    return alert_text_from_snapshot(state.get("source_snapshot"))
 
 
 def _event_context_from_state(state: InvestigationState) -> EventContext:
