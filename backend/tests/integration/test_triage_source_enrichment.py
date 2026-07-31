@@ -55,6 +55,7 @@ async def test_malicious_process_ingest_populates_triage_entities(
     session_factory: async_sessionmaker[AsyncSession],
     working_memory: object,
     agent_trace_service: object,
+    mock_llm_client: MockLLMClient,
 ) -> None:
     event_id = await _ingest_malicious_process(
         mock_xdr_state=mock_xdr_state,
@@ -69,7 +70,7 @@ async def test_malicious_process_ingest_populates_triage_entities(
 
     triage_input = await build_triage_agent_input(event_id, event_service=event_service)
     triage = TriageAgent(
-        llm_client=MockLLMClient(),
+        llm_client=mock_llm_client,
         working_memory=working_memory.for_writer("TriageAgent"),
         trace_service=agent_trace_service,
     )
@@ -96,6 +97,7 @@ async def test_malicious_process_evidence_uses_source_hostname(
     e2e_tool_executor: object,
     agent_trace_service: object,
     state_machine_service: StateMachineService,
+    mock_llm_client: MockLLMClient,
 ) -> None:
     event_id = await _ingest_malicious_process(
         mock_xdr_state=mock_xdr_state,
@@ -105,12 +107,18 @@ async def test_malicious_process_evidence_uses_source_hostname(
     )
     triage_input = await build_triage_agent_input(event_id, event_service=event_service)
     triage = TriageAgent(
-        llm_client=MockLLMClient(),
+        llm_client=mock_llm_client,
         working_memory=working_memory.for_writer("TriageAgent"),
         trace_service=agent_trace_service,
     )
     triage_result = await triage.execute(triage_input)
 
+    await state_machine_service.transition(
+        event_id,
+        EventStatus.TRIAGING,
+        operator="test",
+        reason="issue-099 evidence enrichment test",
+    )
     await state_machine_service.transition(
         event_id,
         EventStatus.COLLECTING_EVIDENCE,
@@ -120,7 +128,7 @@ async def test_malicious_process_evidence_uses_source_hostname(
 
     recorder = RecordingToolExecutor(e2e_tool_executor)
     evidence = EvidenceAgent(
-        llm_client=MockLLMClient(),
+        llm_client=mock_llm_client,
         tool_executor=recorder,
         working_memory=working_memory.for_writer("EvidenceAgent"),
         trace_service=agent_trace_service,
@@ -145,6 +153,7 @@ async def test_triage_trace_includes_entity_provenance_summary(
     session_factory: async_sessionmaker[AsyncSession],
     working_memory: object,
     agent_trace_service: object,
+    mock_llm_client: MockLLMClient,
 ) -> None:
     from sqlalchemy import select
 
@@ -158,7 +167,7 @@ async def test_triage_trace_includes_entity_provenance_summary(
     )
     triage_input = await build_triage_agent_input(event_id, event_service=event_service)
     triage = TriageAgent(
-        llm_client=MockLLMClient(),
+        llm_client=mock_llm_client,
         working_memory=working_memory.for_writer("TriageAgent"),
         trace_service=agent_trace_service,
     )
@@ -213,3 +222,56 @@ async def test_entities_empty_if_investigate_before_asset_link(
     event = await event_service.get_event(inc.event_id)
     assert event is not None
     assert not event.entities.hosts
+
+
+@pytest.mark.asyncio
+async def test_supporting_log_enriches_event_without_link_or_snapshot(
+    mock_xdr_state: MockXDRState,
+    source_adapter: object,
+    source_ingester: SourceIngester,
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """#655: supporting objects fold into entities via the parent back-reference only.
+
+    The log's structured host/account/process fields must enrich the parent event's
+    entities, yet supporting objects must never enter the incident/alert snapshot set
+    nor gain a synthetic ``SourceEventLink`` (both are hard pipeline invariants).
+    """
+    from sqlalchemy import select
+
+    from app.db import models as orm
+
+    event_id = await _ingest_malicious_process(
+        mock_xdr_state=mock_xdr_state,
+        source_adapter=source_adapter,
+        source_ingester=source_ingester,
+        session_factory=session_factory,
+    )
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert MALICIOUS_PROCESS_HOST in {h.hostname for h in event.entities.hosts if h.hostname}
+
+    async with session_factory() as session:
+        snapshots = await session.scalar(
+            select(orm.SecurityEvent.source_reference_snapshots).where(
+                orm.SecurityEvent.event_id == event_id
+            )
+        )
+        linked_kinds = (
+            await session.scalars(
+                select(orm.SourceObject.source_kind)
+                .join(
+                    orm.SourceEventLink,
+                    orm.SourceEventLink.source_record_id == orm.SourceObject.source_record_id,
+                )
+                .where(orm.SourceEventLink.event_id == event_id)
+            )
+        ).all()
+
+    assert {ref["source_kind"] for ref in snapshots or []} == {
+        SourceObjectKind.INCIDENT.value,
+        SourceObjectKind.ALERT.value,
+    }
+    assert SourceObjectKind.LOG.value not in linked_kinds
+    assert SourceObjectKind.ASSET.value not in linked_kinds

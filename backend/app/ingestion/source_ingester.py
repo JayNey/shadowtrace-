@@ -700,37 +700,42 @@ class SourceIngester:
                     if projected:
                         existing.normalized = projected
                     await session.flush()
-                    return True
-
-                session.add(
-                    orm.SourceObject(
-                        source_record_id=record_id,
-                        source_product=ref.source_product,
-                        source_tenant_id=ref.source_tenant_id,
-                        connector_id=ref.connector_id,
-                        source_kind=ref.source_kind.value,
-                        source_object_id=ref.source_object_id,
-                        source_object_type=ref.source_object_type,
-                        parent_source_object_id=ref.parent_source_object_id,
-                        source_status_raw=ref.source_status_raw,
-                        source_disposition=ref.source_disposition.value,
-                        source_concurrency_token=ref.source_concurrency_token,
-                        source_updated_at=ref.source_updated_at,
-                        schema_version=ref.schema_version,
-                        ingested_at=ref.ingested_at or datetime.now(UTC),
-                        raw_payload_hash=ref.raw_payload_hash,
-                        normalized=projected,
-                        raw_payload=item.raw_payload,
-                        current_source_status_raw=ref.source_status_raw,
-                        current_source_disposition=ref.source_disposition.value,
-                        current_concurrency_token=ref.source_concurrency_token,
-                        current_source_updated_at=ref.source_updated_at,
-                        current_state_version=1,
-                        source_sync_state="synced",
+                    idempotent = True
+                else:
+                    session.add(
+                        orm.SourceObject(
+                            source_record_id=record_id,
+                            source_product=ref.source_product,
+                            source_tenant_id=ref.source_tenant_id,
+                            connector_id=ref.connector_id,
+                            source_kind=ref.source_kind.value,
+                            source_object_id=ref.source_object_id,
+                            source_object_type=ref.source_object_type,
+                            parent_source_object_id=ref.parent_source_object_id,
+                            source_status_raw=ref.source_status_raw,
+                            source_disposition=ref.source_disposition.value,
+                            source_concurrency_token=ref.source_concurrency_token,
+                            source_updated_at=ref.source_updated_at,
+                            schema_version=ref.schema_version,
+                            ingested_at=ref.ingested_at or datetime.now(UTC),
+                            raw_payload_hash=ref.raw_payload_hash,
+                            normalized=projected,
+                            raw_payload=item.raw_payload,
+                            current_source_status_raw=ref.source_status_raw,
+                            current_source_disposition=ref.source_disposition.value,
+                            current_concurrency_token=ref.source_concurrency_token,
+                            current_source_updated_at=ref.source_updated_at,
+                            current_state_version=1,
+                            source_sync_state="synced",
+                        )
                     )
-                )
-                await session.flush()
-                return False
+                    await session.flush()
+                    idempotent = False
+
+        # Supporting object is now committed: re-enrich the parent event's entities
+        # via the adapter-recorded parent_source_object_id back-reference.
+        await self._events.refresh_events_for_supporting_ref(ref)
+        return idempotent
 
     async def _persist_connector(
         self,

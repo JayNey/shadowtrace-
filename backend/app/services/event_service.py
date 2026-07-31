@@ -185,6 +185,19 @@ def _ref_dump(ref: SourceReference) -> dict[str, Any]:
     return ref.model_dump(mode="json")
 
 
+def _ref_from_source_object(obj: orm.SourceObject) -> SourceReference:
+    """Reconstruct the identity ``SourceReference`` for a persisted SourceObject row."""
+    return SourceReference(
+        source_kind=SourceObjectKind(obj.source_kind),
+        source_product=obj.source_product,
+        source_tenant_id=obj.source_tenant_id,
+        connector_id=obj.connector_id,
+        source_object_id=obj.source_object_id,
+        source_object_type=obj.source_object_type,
+        parent_source_object_id=obj.parent_source_object_id,
+    )
+
+
 def _entities_from_source_ref(
     ref: SourceReference,
     normalized: dict[str, Any],
@@ -1994,7 +2007,14 @@ class EventService:
         session: AsyncSession,
         event: orm.SecurityEvent,
     ) -> None:
-        """Project linked SourceObject normalized fields into ``SecurityEvent.entities``."""
+        """Project linked SourceObject normalized fields into ``SecurityEvent.entities``.
+
+        Incident/alert refs come from ``creation_source_ref`` + ``source_reference_snapshots``.
+        Supporting objects (asset/log) are folded in via the adapter-recorded
+        ``parent_source_object_id`` back-reference so their structured host/account/process
+        fields enrich entities without polluting the incident/alert snapshot set or creating
+        a synthetic link. Associations are read, never inferred.
+        """
         refs: list[SourceReference] = []
         creation = event.creation_source_ref
         if isinstance(creation, dict):
@@ -2003,11 +2023,21 @@ class EventService:
             if isinstance(item, dict):
                 refs.append(SourceReference.model_validate(item))
 
+        seen: set[tuple[str, str, str, str, str]] = set()
         sources: list[tuple[SourceReference, dict[str, Any]]] = []
         for ref in refs:
+            if ref.identity in seen:
+                continue
+            seen.add(ref.identity)
             obj = await self._find_source_by_ref(session, ref)
             if obj is not None and obj.normalized:
                 sources.append((ref, dict(obj.normalized)))
+
+        for child_ref, child_normalized in await self._supporting_sources_for_refs(session, refs):
+            if child_ref.identity in seen:
+                continue
+            seen.add(child_ref.identity)
+            sources.append((child_ref, child_normalized))
 
         if not sources:
             return
@@ -2018,6 +2048,111 @@ class EventService:
             return
 
         event.entities = validated.entity_set.model_dump(mode="json")
+
+    @staticmethod
+    async def _supporting_sources_for_refs(
+        session: AsyncSession,
+        refs: list[SourceReference],
+    ) -> list[tuple[SourceReference, dict[str, Any]]]:
+        """Resolve asset/log SourceObjects that declare one of ``refs`` as their parent.
+
+        Supporting objects (assets, logs) carry the structured host/account/process fields
+        that enrich entities but are ingested standalone. The adapter records their
+        ``parent_source_object_id`` back to the owning incident/alert; we read that
+        relationship rather than inferring one.
+        """
+        parent_ids = {
+            ref.source_object_id
+            for ref in refs
+            if ref.source_kind in (SourceObjectKind.INCIDENT, SourceObjectKind.ALERT)
+        }
+        if not parent_ids:
+            return []
+        products = {ref.source_product for ref in refs}
+        tenants = {ref.source_tenant_id for ref in refs}
+        children = (
+            await session.scalars(
+                select(orm.SourceObject).where(
+                    orm.SourceObject.parent_source_object_id.in_(parent_ids),
+                    orm.SourceObject.source_product.in_(products),
+                    orm.SourceObject.source_tenant_id.in_(tenants),
+                    orm.SourceObject.source_kind.in_(
+                        [SourceObjectKind.LOG.value, SourceObjectKind.ASSET.value]
+                    ),
+                )
+            )
+        ).all()
+        resolved: list[tuple[SourceReference, dict[str, Any]]] = []
+        for obj in children:
+            if obj.normalized:
+                resolved.append((_ref_from_source_object(obj), dict(obj.normalized)))
+        return resolved
+
+    async def refresh_events_for_supporting_ref(self, ref: SourceReference) -> None:
+        """Re-enrich the parent event once a supporting object (asset/log) is ingested.
+
+        Supporting objects are persisted on their own poll pass with no direct event
+        link. When the object declares a verified ``parent_source_object_id`` we resolve
+        the parent incident/alert's event and recompute its source-derived entities so the
+        supporting fields fold in. No link or snapshot is created — enrichment reads the
+        parent relationship the adapter already recorded (never inferred).
+        """
+        parent_id = ref.parent_source_object_id
+        if parent_id is None:
+            return
+        refreshed: orm.SecurityEvent | None = None
+        async with self._session_factory() as session:
+            async with session.begin():
+                parent_obj = await session.scalar(
+                    select(orm.SourceObject).where(
+                        orm.SourceObject.source_product == ref.source_product,
+                        orm.SourceObject.source_tenant_id == ref.source_tenant_id,
+                        orm.SourceObject.source_object_id == parent_id,
+                        orm.SourceObject.source_kind.in_(
+                            [SourceObjectKind.ALERT.value, SourceObjectKind.INCIDENT.value]
+                        ),
+                    )
+                )
+                if parent_obj is None:
+                    return
+                parent_link = await session.scalar(
+                    select(orm.SourceEventLink)
+                    .where(orm.SourceEventLink.source_record_id == parent_obj.source_record_id)
+                    .order_by(
+                        case(
+                            (orm.SourceEventLink.role == LINK_ROLE_PRIMARY, 0),
+                            (orm.SourceEventLink.role == LINK_ROLE_PROVISIONAL, 1),
+                            else_=2,
+                        ),
+                        orm.SourceEventLink.id,
+                    )
+                )
+                if parent_link is None:
+                    return
+                event = await session.get(orm.SecurityEvent, parent_link.event_id)
+                if event is None:
+                    return
+                before = event.entities
+                await self._refresh_event_entities_from_sources(session, event)
+                if event.entities != before:
+                    event.row_version = int(event.row_version or 1) + 1
+                    session.add(
+                        orm.EventAuditLog(
+                            event_id=event.event_id,
+                            from_status=event.status,
+                            to_status=event.status,
+                            operator="EventService",
+                            reason="supporting_source_entities_refreshed",
+                        )
+                    )
+                    refreshed = event
+            # Session stays open (expire_on_commit=False) so the committed row remains
+            # attached while we refresh derived context/redis state.
+            if refreshed is not None:
+                await session.refresh(refreshed)
+                await self._post_create_side_effects(
+                    refreshed, force_context_refresh=True, publish_event=False
+                )
 
     async def _add_related_link_if_missing(
         self, session: AsyncSession, source_record_id: str, event_id: str
