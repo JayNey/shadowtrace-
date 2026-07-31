@@ -1,0 +1,47 @@
+{
+  "additionalProperties": false,
+  "description": "Rollup for optional severity/ATT&CK/incident grouping scorers.",
+  "properties": {
+    "scorer_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Scorer Id",
+      "type": "string"
+    },
+    "evaluated_count": {
+      "minimum": 0,
+      "title": "Evaluated Count",
+      "type": "integer"
+    },
+    "pass_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Pass Count",
+      "type": "integer"
+    },
+    "fail_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Fail Count",
+      "type": "integer"
+    },
+    "not_applicable_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Not Applicable Count",
+      "type": "integer"
+    },
+    "error_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Error Count",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "scorer_id",
+    "evaluated_count"
+  ],
+  "title": "GroupingScorerSummary",
+  "type": "object"
+}

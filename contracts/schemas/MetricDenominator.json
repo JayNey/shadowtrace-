@@ -1,0 +1,34 @@
+{
+  "additionalProperties": false,
+  "description": "Explicit numerator/denominator with missing-truth and error accounting.",
+  "properties": {
+    "numerator": {
+      "minimum": 0,
+      "title": "Numerator",
+      "type": "integer"
+    },
+    "denominator": {
+      "minimum": 0,
+      "title": "Denominator",
+      "type": "integer"
+    },
+    "missing_truth_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Missing Truth Count",
+      "type": "integer"
+    },
+    "error_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Error Count",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "numerator",
+    "denominator"
+  ],
+  "title": "MetricDenominator",
+  "type": "object"
+}

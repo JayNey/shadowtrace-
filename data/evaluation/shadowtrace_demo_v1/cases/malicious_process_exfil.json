@@ -22,7 +22,10 @@
     "slice_type": "threat",
     "schema_version": "1.0",
     "expected_case_label": "true_positive",
-    "expected_final_verdict": "confirmed_threat"
+    "expected_final_verdict": "confirmed_threat",
+    "expected_risk_score": 85,
+    "expected_attack_techniques": ["T1059", "T1048"],
+    "expected_incident_group_id": "incident-malicious-process-001"
   },
   "label_provenance": {
     "adjudicator": "evaluation-curator",

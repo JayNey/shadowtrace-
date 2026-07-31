@@ -76,6 +76,13 @@ from app.models.evaluation_run import (
     EvaluationRunConfig,
     EvaluationThresholdManifest,
 )
+from app.models.evaluation_quality import (
+    ConfidenceInterval,
+    EvaluationQualityReport,
+    GroupingScorerSummary,
+    MetricDenominator,
+    QualityMetricValue,
+)
 from app.models.embedding import (
     EmbeddingProviderHealth,
     EmbeddingRelease,
@@ -245,6 +252,12 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "BenignSliceExpectation": BenignSliceExpectation,
     "UnevaluableSliceExpectation": UnevaluableSliceExpectation,
     "TruthObservationRef": TruthObservationRef,
+    # evaluation quality report (ISSUE-113 Phase B)
+    "EvaluationQualityReport": EvaluationQualityReport,
+    "QualityMetricValue": QualityMetricValue,
+    "MetricDenominator": MetricDenominator,
+    "ConfidenceInterval": ConfidenceInterval,
+    "GroupingScorerSummary": GroupingScorerSummary,
     # evaluation run artifact (ISSUE-105)
     "EvaluationRunArtifact": EvaluationRunArtifact,
     "EvaluationRunConfig": EvaluationRunConfig,

@@ -1,0 +1,141 @@
+{
+  "$defs": {
+    "ConfidenceInterval": {
+      "additionalProperties": false,
+      "description": "Wilson score interval for a proportion metric.",
+      "properties": {
+        "lower": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Lower",
+          "type": "number"
+        },
+        "upper": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Upper",
+          "type": "number"
+        },
+        "level": {
+          "default": 0.95,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Level",
+          "type": "number"
+        },
+        "method": {
+          "default": "wilson",
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "title": "ConfidenceInterval",
+      "type": "object"
+    },
+    "MetricDenominator": {
+      "additionalProperties": false,
+      "description": "Explicit numerator/denominator with missing-truth and error accounting.",
+      "properties": {
+        "numerator": {
+          "minimum": 0,
+          "title": "Numerator",
+          "type": "integer"
+        },
+        "denominator": {
+          "minimum": 0,
+          "title": "Denominator",
+          "type": "integer"
+        },
+        "missing_truth_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Missing Truth Count",
+          "type": "integer"
+        },
+        "error_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Error Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "title": "MetricDenominator",
+      "type": "object"
+    },
+    "QualityMetricStatus": {
+      "description": "Whether a metric value is safe to interpret.",
+      "enum": [
+        "computed",
+        "fail_closed",
+        "insufficient_sample"
+      ],
+      "title": "QualityMetricStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One typed offline quality metric.",
+  "properties": {
+    "metric_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Metric Id",
+      "type": "string"
+    },
+    "value": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Null when status is fail_closed or insufficient_sample.",
+      "title": "Value"
+    },
+    "status": {
+      "$ref": "#/$defs/QualityMetricStatus"
+    },
+    "denominator": {
+      "$ref": "#/$defs/MetricDenominator"
+    },
+    "confidence_interval": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ConfidenceInterval"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "reason": {
+      "default": "",
+      "maxLength": 256,
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "required": [
+    "metric_id",
+    "status",
+    "denominator"
+  ],
+  "title": "QualityMetricValue",
+  "type": "object"
+}

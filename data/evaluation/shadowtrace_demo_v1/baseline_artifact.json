@@ -8,7 +8,7 @@
     "required_scorer_error_count": 0,
     "unevaluable_count": 1
   },
-  "artifact_hash": "4698f4be4548136d773ec82ec796f34dbc35e573b809805f3f6e40439162ca43",
+  "artifact_hash": "0a6b8eae0d898d614b39e3d335b099c8bd85a6cdc61f99fe11846bd4aa4ca6eb",
   "case_results": [
     {
       "case_id": "malicious_process_exfil",
@@ -16,8 +16,14 @@
       "observation": {
         "case_id": "malicious_process_exfil",
         "observation_available": true,
+        "observed_attack_techniques": [
+          "T1059",
+          "T1048"
+        ],
         "observed_case_label": "true_positive",
         "observed_final_verdict": "confirmed_threat",
+        "observed_incident_group_id": "incident-malicious-process-001",
+        "observed_risk_score": 85,
         "replay_notes": "mock_deterministic:threat;seed=42;n=f837bb5c",
         "slice_type": "threat"
       },
@@ -28,11 +34,32 @@
           "outcome": "pass",
           "reason_code": "",
           "scorer_id": "threat_label"
+        },
+        {
+          "details": {},
+          "message": "severity aligned with truth",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "severity_alignment"
+        },
+        {
+          "details": {},
+          "message": "expected ATT&CK techniques covered",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "attack_technique_coverage"
+        },
+        {
+          "details": {},
+          "message": "incident grouping consistent with truth",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "incident_grouping_consistency"
         }
       ],
       "slice_type": "threat",
-      "truth_content_hash": "22810ae1cb206ffee4ca6941237696d6d696b8445fef294463ef2a9fe8631f5c",
-      "truth_id": "truth-0e427ffd0ac7",
+      "truth_content_hash": "2daecaa23cfc1f2b8e7617f4e41729fded19ebd28fd6808d401441181e62ee08",
+      "truth_id": "truth-bdca7a1fa165",
       "truth_revision": 1,
       "unevaluable_reason": null
     },
@@ -42,8 +69,11 @@
       "observation": {
         "case_id": "partial_telemetry_unknown",
         "observation_available": false,
+        "observed_attack_techniques": [],
         "observed_case_label": null,
         "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
         "replay_notes": "unevaluable:insufficient_observations;seed=42;n=47aea8c3",
         "slice_type": "unevaluable"
       },
@@ -58,7 +88,7 @@
       ],
       "slice_type": "unevaluable",
       "truth_content_hash": "9ac160e25610544e2f8d9aec6821a6293bb4097d6df3fc10e73886cab752708f",
-      "truth_id": "truth-5a4690313a2a",
+      "truth_id": "truth-96ac5d7cec13",
       "truth_revision": 1,
       "unevaluable_reason": "insufficient_observations"
     },
@@ -68,8 +98,11 @@
       "observation": {
         "case_id": "scheduled_task_benign",
         "observation_available": true,
+        "observed_attack_techniques": [],
         "observed_case_label": "false_positive",
         "observed_final_verdict": "false_positive",
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
         "replay_notes": "mock_deterministic:benign;seed=42;n=3bbc7f70",
         "slice_type": "benign"
       },
@@ -80,17 +113,38 @@
           "outcome": "pass",
           "reason_code": "",
           "scorer_id": "benign_label"
+        },
+        {
+          "details": {},
+          "message": "no expected_risk_score configured in truth",
+          "outcome": "pass",
+          "reason_code": "not_applicable",
+          "scorer_id": "severity_alignment"
+        },
+        {
+          "details": {},
+          "message": "no expected_attack_techniques configured in truth",
+          "outcome": "pass",
+          "reason_code": "not_applicable",
+          "scorer_id": "attack_technique_coverage"
+        },
+        {
+          "details": {},
+          "message": "no expected_incident_group_id configured in truth",
+          "outcome": "pass",
+          "reason_code": "not_applicable",
+          "scorer_id": "incident_grouping_consistency"
         }
       ],
       "slice_type": "benign",
-      "truth_content_hash": "9051c8fcfeaaebc620e8eadeb1aee4644f2e6969bab90580a7a9337d5ecdd92d",
-      "truth_id": "truth-04dd078c79fa",
+      "truth_content_hash": "6cd3c19ca303ad06a0102a46e25491b80041bec6cd81fa68bc01920758dc4f67",
+      "truth_id": "truth-6fc5ad295e32",
       "truth_revision": 1,
       "unevaluable_reason": null
     }
   ],
   "code_sha": "evaluation-baseline-v1",
-  "completed_at": "2026-07-31T09:26:23.445008Z",
+  "completed_at": "2026-07-31T09:33:43.760710Z",
   "config": {
     "extra": {},
     "release_refs": {
@@ -103,13 +157,16 @@
     "replay_fidelity": "echo_truth_stub",
     "replay_mode": "mock_deterministic",
     "scorer_ids": [
+      "attack_technique_coverage",
       "benign_label",
+      "incident_grouping_consistency",
+      "severity_alignment",
       "threat_label",
       "unevaluable_coverage"
     ],
     "seed": 42
   },
-  "dataset_content_hash": "8e15545dfa63e63233a434e96a06211c60fa58706ff137effa56f23fe70406f4",
+  "dataset_content_hash": "3df98ef9bfe51441c4172e6687cf7e03693812b0b867745056677d7ae6029d47",
   "dataset_id": "shadowtrace_demo_v1",
   "dataset_version": "2026.07.31",
   "errors": [],
@@ -120,9 +177,147 @@
     "quarantine_active": false,
     "verdict": "pass"
   },
-  "run_id": "eval-f4c4a7dd-95e1-4234-a6e6-b1ed432f5d1b",
+  "quality_report": {
+    "code_sha": "evaluation-baseline-v1",
+    "dataset_content_hash": "3df98ef9bfe51441c4172e6687cf7e03693812b0b867745056677d7ae6029d47",
+    "dataset_id": "shadowtrace_demo_v1",
+    "dataset_version": "2026.07.31",
+    "grouping_scorer_summaries": [
+      {
+        "error_count": 0,
+        "evaluated_count": 2,
+        "fail_count": 0,
+        "not_applicable_count": 1,
+        "pass_count": 1,
+        "scorer_id": "attack_technique_coverage"
+      },
+      {
+        "error_count": 0,
+        "evaluated_count": 2,
+        "fail_count": 0,
+        "not_applicable_count": 1,
+        "pass_count": 1,
+        "scorer_id": "incident_grouping_consistency"
+      },
+      {
+        "error_count": 0,
+        "evaluated_count": 2,
+        "fail_count": 0,
+        "not_applicable_count": 1,
+        "pass_count": 1,
+        "scorer_id": "severity_alignment"
+      }
+    ],
+    "metrics": [
+      {
+        "confidence_interval": {
+          "level": 0.95,
+          "lower": 0.0,
+          "method": "wilson",
+          "upper": 1.0
+        },
+        "denominator": {
+          "denominator": 1,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 1
+        },
+        "metric_id": "threat_recall",
+        "reason": "",
+        "status": "computed",
+        "value": 1.0
+      },
+      {
+        "confidence_interval": {
+          "level": 0.95,
+          "lower": 0.0,
+          "method": "wilson",
+          "upper": 1.0
+        },
+        "denominator": {
+          "denominator": 1,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 1
+        },
+        "metric_id": "threat_precision",
+        "reason": "",
+        "status": "computed",
+        "value": 1.0
+      },
+      {
+        "confidence_interval": {
+          "level": 0.95,
+          "lower": 0.0,
+          "method": "wilson",
+          "upper": 1.0
+        },
+        "denominator": {
+          "denominator": 1,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 1
+        },
+        "metric_id": "benign_specificity",
+        "reason": "",
+        "status": "computed",
+        "value": 1.0
+      },
+      {
+        "confidence_interval": {
+          "level": 0.95,
+          "lower": 0.0,
+          "method": "wilson",
+          "upper": 1.0
+        },
+        "denominator": {
+          "denominator": 1,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "benign_fpr",
+        "reason": "",
+        "status": "computed",
+        "value": 0.0
+      },
+      {
+        "confidence_interval": {
+          "level": 0.95,
+          "lower": 0.0,
+          "method": "wilson",
+          "upper": 1.0
+        },
+        "denominator": {
+          "denominator": 1,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 1
+        },
+        "metric_id": "unevaluable_coverage",
+        "reason": "",
+        "status": "computed",
+        "value": 1.0
+      }
+    ],
+    "release_refs": {
+      "config_profile": "mock_p0",
+      "kb_release_id": null,
+      "model_release_id": null,
+      "prompt_release_id": null,
+      "rule_release_id": null
+    },
+    "sample_counts": {
+      "benign": 1,
+      "threat": 1,
+      "total": 3,
+      "unevaluable": 1
+    },
+    "schema_version": "1.0"
+  },
+  "run_id": "eval-4344b85a-b80e-480c-b225-65983d9ce74c",
   "schema_version": "1.0",
-  "started_at": "2026-07-31T09:26:23.438963Z",
+  "started_at": "2026-07-31T09:33:43.753716Z",
   "status": "completed",
   "tenant_id": "tenant-evaluation-demo"
 }

@@ -628,8 +628,9 @@ async def test_required_scorer_error_count_only_counts_manifest_scorers(
         code_sha="deadbeef",
         registry=registry,
     )
-    assert artifact.aggregates.error_count >= 1
+    assert artifact.aggregates.error_count == 0
     assert artifact.aggregates.required_scorer_error_count == 0
+    assert artifact.status == EvaluationRunStatus.COMPLETED
 
 
 @pytest.mark.evaluation

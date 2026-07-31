@@ -140,6 +140,14 @@ def diff_against_baseline(
     provenance while still detecting evaluation-output drift.
     """
     aligned = candidate.model_copy(update={"code_sha": baseline.code_sha})
+    if aligned.quality_report is not None and baseline.quality_report is not None:
+        aligned = aligned.model_copy(
+            update={
+                "quality_report": aligned.quality_report.model_copy(
+                    update={"code_sha": baseline.code_sha}
+                )
+            }
+        )
     aligned = finalize_artifact(aligned)
     return diff_artifacts(baseline, aligned)
 

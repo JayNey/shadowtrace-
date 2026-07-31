@@ -88,6 +88,9 @@ class ThreatSliceExpectation(BaseModel):
     schema_version: str = Field(default=SLICE_EXPECTATION_SCHEMA_VERSION, min_length=1)
     expected_case_label: CaseLabel = CaseLabel.TRUE_POSITIVE
     expected_final_verdict: FinalVerdict = FinalVerdict.CONFIRMED_THREAT
+    expected_risk_score: int | None = Field(default=None, ge=0, le=100)
+    expected_attack_techniques: list[str] = Field(default_factory=list)
+    expected_incident_group_id: str | None = Field(default=None, max_length=128)
 
 
 class BenignSliceExpectation(BaseModel):
@@ -99,6 +102,9 @@ class BenignSliceExpectation(BaseModel):
     schema_version: str = Field(default=SLICE_EXPECTATION_SCHEMA_VERSION, min_length=1)
     expected_case_label: CaseLabel = CaseLabel.FALSE_POSITIVE
     expected_final_verdict: FinalVerdict = FinalVerdict.FALSE_POSITIVE
+    expected_risk_score: int | None = Field(default=None, ge=0, le=100)
+    expected_attack_techniques: list[str] = Field(default_factory=list)
+    expected_incident_group_id: str | None = Field(default=None, max_length=128)
 
 
 class UnevaluableSliceExpectation(BaseModel):

@@ -36,6 +36,40 @@
           "default": null,
           "title": "Observed Final Verdict"
         },
+        "observed_risk_score": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Risk Score"
+        },
+        "observed_attack_techniques": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Observed Attack Techniques",
+          "type": "array"
+        },
+        "observed_incident_group_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Incident Group Id"
+        },
         "observation_available": {
           "default": true,
           "title": "Observation Available",

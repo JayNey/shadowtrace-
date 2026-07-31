@@ -14,6 +14,7 @@ from pathlib import Path
 from app.core.errors import ValidationError
 from app.evaluation.artifact import finalize_artifact
 from app.evaluation.paths import repo_relative_manifest_path
+from app.evaluation.quality_metrics import build_quality_report
 from app.evaluation.replayer import MockDeterministicReplayer
 from app.evaluation.scorers.base import ScorerContext
 from app.evaluation.scorers.registry import ScorerRegistry, default_scorer_registry
@@ -50,14 +51,19 @@ def _slice_type(truth: EvaluationCaseTruth) -> SliceType:
 
 def _scorer_failure_status(
     scorer_results: list[EvaluationScorerResult],
+    *,
+    required_scorer_ids: frozenset[str] | None = None,
 ) -> EvaluationRunStatus | None:
-    if not scorer_results:
+    active = scorer_results
+    if required_scorer_ids is not None:
+        active = [r for r in scorer_results if r.scorer_id in required_scorer_ids]
+    if not active:
         return None
-    if any(r.outcome == ScorerOutcome.ERROR for r in scorer_results):
+    if any(r.outcome == ScorerOutcome.ERROR for r in active):
         return EvaluationRunStatus.FAILED
-    if any(r.outcome == ScorerOutcome.FAIL for r in scorer_results):
+    if any(r.outcome == ScorerOutcome.FAIL for r in active):
         return EvaluationRunStatus.FAILED
-    if any(r.outcome == ScorerOutcome.SKIPPED for r in scorer_results):
+    if any(r.outcome == ScorerOutcome.SKIPPED for r in active):
         return EvaluationRunStatus.FAILED
     return None
 
@@ -65,19 +71,32 @@ def _scorer_failure_status(
 def _case_status(
     slice_type: SliceType,
     scorer_results: list[EvaluationScorerResult],
+    *,
+    required_scorer_ids: frozenset[str] | None = None,
 ) -> EvaluationRunStatus:
-    failure = _scorer_failure_status(scorer_results)
+    failure = _scorer_failure_status(
+        scorer_results,
+        required_scorer_ids=required_scorer_ids,
+    )
     if failure is not None:
         return failure
     if slice_type == SliceType.UNEVALUABLE:
-        if not scorer_results:
+        if required_scorer_ids is None:
+            active = scorer_results
+        else:
+            active = [r for r in scorer_results if r.scorer_id in required_scorer_ids]
+        if not active:
             return EvaluationRunStatus.UNEVALUABLE
-        if all(r.outcome == ScorerOutcome.UNEVALUABLE for r in scorer_results):
+        if all(r.outcome == ScorerOutcome.UNEVALUABLE for r in active):
             return EvaluationRunStatus.UNEVALUABLE
         return EvaluationRunStatus.FAILED
-    if not scorer_results:
+    if required_scorer_ids is None:
+        active = scorer_results
+    else:
+        active = [r for r in scorer_results if r.scorer_id in required_scorer_ids]
+    if not active:
         return EvaluationRunStatus.FAILED
-    if all(r.outcome == ScorerOutcome.PASS for r in scorer_results):
+    if all(r.outcome == ScorerOutcome.PASS for r in active):
         return EvaluationRunStatus.COMPLETED
     return EvaluationRunStatus.FAILED
 
@@ -91,12 +110,15 @@ def _aggregate(
     required_scorer_error_count = 0
 
     for case in case_results:
-        outcomes = {r.outcome for r in case.scorer_results}
+        required_results = [
+            r for r in case.scorer_results if r.scorer_id in required_scorer_ids
+        ]
+        outcomes = {r.outcome for r in required_results}
         if ScorerOutcome.ERROR in outcomes:
             error_count += 1
             required_scorer_error_count += sum(
                 1
-                for r in case.scorer_results
+                for r in required_results
                 if r.outcome == ScorerOutcome.ERROR and r.scorer_id in required_scorer_ids
             )
         elif case.case_status == EvaluationRunStatus.UNEVALUABLE:
@@ -104,8 +126,8 @@ def _aggregate(
         elif ScorerOutcome.FAIL in outcomes or case.case_status == EvaluationRunStatus.FAILED:
             fail_count += 1
         elif (
-            case.scorer_results
-            and all(r.outcome == ScorerOutcome.PASS for r in case.scorer_results)
+            required_results
+            and all(r.outcome == ScorerOutcome.PASS for r in required_results)
         ):
             pass_count += 1
         else:
@@ -282,6 +304,9 @@ class EvaluationRunner:
                             message=str(exc)[:512],
                         )
                     )
+            required_for_case = frozenset(
+                reg.scorer_id for reg in active_registrations if reg.required
+            )
             case_results.append(
                 EvaluationCaseResult(
                     case_id=truth.case_id,
@@ -291,7 +316,11 @@ class EvaluationRunner:
                     slice_type=slice_type,
                     observation=observation,
                     scorer_results=scorer_results,
-                    case_status=_case_status(slice_type, scorer_results),
+                    case_status=_case_status(
+                        slice_type,
+                        scorer_results,
+                        required_scorer_ids=required_for_case,
+                    ),
                     unevaluable_reason=(
                         truth.slice_expectation.reason_code
                         if isinstance(truth.slice_expectation, UnevaluableSliceExpectation)
@@ -320,6 +349,14 @@ class EvaluationRunner:
         )
         status = _run_status(aggregates, gate.verdict if gate else None, errors)
         completed_at = datetime.now(tz=UTC)
+        quality_report = build_quality_report(
+            dataset_id=request.dataset_id,
+            dataset_version=request.dataset_version,
+            dataset_content_hash=request.dataset_content_hash,
+            code_sha=request.code_sha,
+            release_refs=request.release_refs,
+            case_results=case_results,
+        )
 
         artifact = EvaluationRunArtifact(
             run_id=f"eval-{uuid.uuid4()}",
@@ -335,6 +372,7 @@ class EvaluationRunner:
             case_results=case_results,
             aggregates=aggregates,
             gate=gate,
+            quality_report=quality_report,
             errors=errors,
         )
         return finalize_artifact(artifact)

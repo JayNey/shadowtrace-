@@ -287,7 +287,7 @@ async def test_fixture_loader_persists_demo_dataset(
     truths, manifest = await load_fixture_dataset(service, DATASET_DIR)
     assert len(truths) == 3
     assert manifest.case_count == 3
-    expected_hash = "8e15545dfa63e63233a434e96a06211c60fa58706ff137effa56f23fe70406f4"
+    expected_hash = "3df98ef9bfe51441c4172e6687cf7e03693812b0b867745056677d7ae6029d47"
     assert manifest.content_hash == expected_hash
 
     slice_types = {truth.slice_expectation.slice_type for truth in truths}

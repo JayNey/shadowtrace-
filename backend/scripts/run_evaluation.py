@@ -132,6 +132,10 @@ async def _run(args: argparse.Namespace) -> int:
                 "gate_verdict": artifact.gate.verdict.value if artifact.gate else None,
                 "quarantine_active": artifact.gate.quarantine_active if artifact.gate else False,
                 "replay_fidelity": artifact.config.replay_fidelity,
+                "quality_metrics": {
+                    metric.metric_id: metric.value
+                    for metric in (artifact.quality_report.metrics if artifact.quality_report else [])
+                },
                 "output": str(output_path),
                 "loaded_cases": loaded_cases,
             },

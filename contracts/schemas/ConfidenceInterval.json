@@ -1,0 +1,38 @@
+{
+  "additionalProperties": false,
+  "description": "Wilson score interval for a proportion metric.",
+  "properties": {
+    "lower": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Lower",
+      "type": "number"
+    },
+    "upper": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Upper",
+      "type": "number"
+    },
+    "level": {
+      "default": 0.95,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Level",
+      "type": "number"
+    },
+    "method": {
+      "default": "wilson",
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Method",
+      "type": "string"
+    }
+  },
+  "required": [
+    "lower",
+    "upper"
+  ],
+  "title": "ConfidenceInterval",
+  "type": "object"
+}

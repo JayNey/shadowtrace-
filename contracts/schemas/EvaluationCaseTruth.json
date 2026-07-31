@@ -23,6 +23,40 @@
         "expected_final_verdict": {
           "$ref": "#/$defs/FinalVerdict",
           "default": "false_positive"
+        },
+        "expected_risk_score": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Risk Score"
+        },
+        "expected_attack_techniques": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Attack Techniques",
+          "type": "array"
+        },
+        "expected_incident_group_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Incident Group Id"
         }
       },
       "title": "BenignSliceExpectation",
@@ -167,6 +201,40 @@
         "expected_final_verdict": {
           "$ref": "#/$defs/FinalVerdict",
           "default": "confirmed_threat"
+        },
+        "expected_risk_score": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Risk Score"
+        },
+        "expected_attack_techniques": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Attack Techniques",
+          "type": "array"
+        },
+        "expected_incident_group_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Incident Group Id"
         }
       },
       "title": "ThreatSliceExpectation",

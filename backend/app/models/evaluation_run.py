@@ -81,6 +81,9 @@ class CaseObservation(BaseModel):
     slice_type: SliceType
     observed_case_label: str | None = None
     observed_final_verdict: str | None = None
+    observed_risk_score: int | None = Field(default=None, ge=0, le=100)
+    observed_attack_techniques: list[str] = Field(default_factory=list)
+    observed_incident_group_id: str | None = Field(default=None, max_length=128)
     observation_available: bool = True
     replay_notes: str = Field(default="", max_length=512)
 
@@ -211,6 +214,7 @@ class EvaluationRunArtifact(BaseModel):
     case_results: list[EvaluationCaseResult] = Field(default_factory=list)
     aggregates: EvaluationAggregateMetrics
     gate: EvaluationGateResult | None = None
+    quality_report: EvaluationQualityReport | None = None
     errors: list[str] = Field(default_factory=list)
     artifact_hash: str = Field(default="", min_length=0, max_length=64)
 
