@@ -102,7 +102,7 @@ async def test_health_degraded_returns_503_when_redis_down(client: AsyncClient) 
 @pytest.mark.asyncio
 async def test_check_postgres_returns_error_on_exception() -> None:
     with patch(
-        "app.api.v1.health._get_engine",
+        "app.api.v1.health.get_session_provider",
         side_effect=RuntimeError("boom"),
     ):
         assert await health_module.check_postgres("postgresql+asyncpg://x") == "error"

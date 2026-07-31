@@ -13,19 +13,18 @@ import logging
 from typing import Annotated, Any
 
 from fastapi import Depends
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
+from app.db.session_provider import get_session_provider, reset_session_provider
 
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# Lazy singletons
+# Lazy singletons (session factory owned by SessionProvider — ISSUE-118)
 # --------------------------------------------------------------------------- #
 
-_session_factory: async_sessionmaker[AsyncSession] | None = None
 _redis_client: RedisClient | None = None
 _context_store: Any = None  # EventContextStore
 _degraded_flags: Any = None  # DegradedFlagService
@@ -54,12 +53,7 @@ _memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
-    global _session_factory
-    if _session_factory is None:
-        settings = get_settings()
-        engine = create_async_engine(settings.database_url, poolclass=NullPool)
-        _session_factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
-    return _session_factory
+    return get_session_provider().session_factory()
 
 
 def _get_redis() -> RedisClient:
@@ -725,7 +719,7 @@ async def get_super_agent() -> Any:
 
 def reset_deps() -> None:
     """Reset all lazy singletons (for tests)."""
-    global _session_factory, _redis_client, _context_store, _degraded_flags
+    global _redis_client, _context_store, _degraded_flags
     global _audit_log, _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
     global _super_agent, _event_lease, _investigation_stack
     global _disposition_sync, _action_execution, _rollback_service
@@ -734,7 +728,7 @@ def reset_deps() -> None:
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
     global _memory_governance
-    _session_factory = None
+    reset_session_provider()
     _redis_client = None
     _context_store = None
     _degraded_flags = None

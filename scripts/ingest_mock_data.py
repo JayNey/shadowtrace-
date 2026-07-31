@@ -15,7 +15,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from app.core.redis_client import RedisClient  # noqa: E402
-from app.db.session import get_engine, get_session_factory  # noqa: E402
+from app.db.session import dispose_session_provider, get_session_factory  # noqa: E402
 from app.ingestion.file_ingester import FileIngester  # noqa: E402
 from app.ingestion.source_ingester import SourceIngester  # noqa: E402
 from app.services.context_service import EventContextStore  # noqa: E402
@@ -56,7 +56,7 @@ async def _run(path: Path, scenario: str | None, batch_size: int) -> int:
         return 1 if summary.degraded or summary.rejected else 0
     finally:
         await redis.aclose()
-        await get_engine().dispose()
+        await dispose_session_provider()
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -143,10 +143,15 @@ def test_celery_worker_init_calls_setup_telemetry(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr("app.core.telemetry.setup_telemetry", _capture)
     from app.core.celery_app import init_worker_telemetry
+    from app.db.session_provider import reset_session_provider
 
+    reset_session_provider()
     init_worker_telemetry(sender=None)
     assert len(calls) == 1
     assert "engine" in calls[0]
+    from sqlalchemy.pool import NullPool
+
+    assert isinstance(calls[0]["engine"].pool, NullPool)
 
 
 def test_trace_hierarchy_api_agent_tool_llm(

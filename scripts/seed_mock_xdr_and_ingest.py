@@ -33,7 +33,7 @@ from app.data_generators.scenarios import (
     SCENARIO_BUILDERS,
     build_scenario,
 )
-from app.db.session import get_engine, get_session_factory
+from app.db.session import dispose_session_provider, get_session_factory
 from app.ingestion.source_ingester import SourceIngester
 from app.models.enums import SourceObjectKind
 from app.services.context_service import EventContextStore
@@ -82,7 +82,7 @@ async def _poll_ingest(*, mock_xdr_url: str) -> dict:
         return summary.model_dump(mode="json")
     finally:
         await redis.aclose()
-        await get_engine().dispose()
+        await dispose_session_provider()
 
 
 async def _run(*, scenario_id: str, mock_xdr_url: str, seed: int) -> int:

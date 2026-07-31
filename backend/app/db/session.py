@@ -1,45 +1,29 @@
-"""Async engine, session factory and the FastAPI ``get_session`` dependency."""
+"""Async engine and session factory — delegates to ``SessionProvider`` (ISSUE-118)."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from functools import lru_cache
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from sqlalchemy.ext.asyncio import (
-    AsyncEngine,
-    AsyncSession,
-    async_sessionmaker,
-    create_async_engine,
+from app.db.session_provider import (
+    dispose_session_provider,
+    get_session,
+    get_session_provider,
 )
 
-from app.core.config import get_settings
+__all__ = [
+    "dispose_session_provider",
+    "get_engine",
+    "get_session",
+    "get_session_factory",
+    "get_session_provider",
+]
 
 
-@lru_cache
 def get_engine() -> AsyncEngine:
-    """Return the cached async engine built from ``DATABASE_URL``."""
-    settings = get_settings()
-    return create_async_engine(settings.database_url, pool_pre_ping=True, future=True)
+    """Return the process-local async engine."""
+    return get_session_provider().engine()
 
 
-@lru_cache
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
-    """Return the cached session factory."""
-    return async_session_factory
-
-
-async_session_factory: async_sessionmaker[AsyncSession] = async_sessionmaker(
-    bind=get_engine(),
-    expire_on_commit=False,
-    autoflush=False,
-)
-
-
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency yielding an async session with commit/rollback handling."""
-    async with async_session_factory() as session:
-        try:
-            yield session
-        except Exception:
-            await session.rollback()
-            raise
+    """Return the process-local session factory."""
+    return get_session_provider().session_factory()

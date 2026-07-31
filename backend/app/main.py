@@ -15,7 +15,7 @@ from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 from app.core.socketio_manager import SocketIOManager
 from app.core.telemetry import setup_telemetry
-from app.db.session import get_engine
+from app.db.session import dispose_session_provider, get_session_provider
 from app.orchestration.orchestration_config import assert_orchestration_mode
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,7 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
             await scan_task
         await _socketio_manager.stop()
         await shutdown_health_clients()
+        await dispose_session_provider()
         try:
             from app.api.v1.deps import shutdown_neo4j_client
 
@@ -101,7 +102,7 @@ if get_settings().app_env != "production":
 
 app.include_router(api_router, prefix="/api/v1")
 
-setup_telemetry(app=app, engine=get_engine())
+setup_telemetry(app=app, engine=get_session_provider().engine())
 
 # ---------------------------------------------------------------------------
 # Socket.IO wrapper — uvicorn / Docker must target ``socket_app``, not ``app``.

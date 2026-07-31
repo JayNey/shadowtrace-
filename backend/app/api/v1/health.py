@@ -6,25 +6,14 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Response
 from redis.asyncio import Redis
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.core.config import Settings, get_settings
+from app.db.session_provider import get_session_provider
 
 router = APIRouter(tags=["health"])
 
-# Process-wide caches so health probes reuse one pool/connection per URL
-# instead of building and tearing one down on every request.
-_ENGINES: dict[str, AsyncEngine] = {}
+# Process-wide Redis cache so health probes reuse one client per URL.
 _REDIS_CLIENTS: dict[str, Redis] = {}
-
-
-def _get_engine(database_url: str) -> AsyncEngine:
-    engine = _ENGINES.get(database_url)
-    if engine is None:
-        engine = create_async_engine(database_url, pool_pre_ping=True)
-        _ENGINES[database_url] = engine
-    return engine
 
 
 def _get_redis(redis_url: str) -> Redis:
@@ -36,10 +25,7 @@ def _get_redis(redis_url: str) -> Redis:
 
 
 async def shutdown_health_clients() -> None:
-    """Dispose cached engines / Redis clients on application shutdown."""
-    for engine in _ENGINES.values():
-        await engine.dispose()
-    _ENGINES.clear()
+    """Close cached Redis clients on application shutdown (DB via SessionProvider)."""
     for client in _REDIS_CLIENTS.values():
         await client.aclose()
     _REDIS_CLIENTS.clear()
@@ -47,11 +33,10 @@ async def shutdown_health_clients() -> None:
 
 async def check_postgres(database_url: str) -> str:
     """Return 'ok' if SELECT 1 succeeds, else 'error'."""
+    del database_url  # process-local provider owns the canonical URL
     try:
-        engine = _get_engine(database_url)
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
-        return "ok"
+        ok = await get_session_provider().ping_postgres()
+        return "ok" if ok else "error"
     except Exception:  # noqa: BLE001 — health must never raise
         return "error"
 
