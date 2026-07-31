@@ -575,7 +575,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             ec=ec,
             context=TransitionContext(
                 need_investigation=False,
-                recommendation="close_as_fp",
+                recommendation="low_risk_no_investigation",
             ),
         )
         state["super_agent_status"] = SuperAgentStatus.FINISHED

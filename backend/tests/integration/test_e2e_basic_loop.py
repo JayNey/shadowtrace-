@@ -519,7 +519,7 @@ async def test_low_risk_not_required_short_circuit_closed(
     assert result.triage_result.severity is Severity.LOW
     assert result.triage_result.need_investigation is False
     assert result.triage_result.event_type is EventType.ACCOUNT_ANOMALY
-    assert result.final_verdict is FinalVerdict.FALSE_POSITIVE
+    assert result.final_verdict is FinalVerdict.NONE
     assert result.evidence_output is not None
     assert result.evidence_output.collection_status is CollectionStatus.COMPLETED
     assert result.evidence_output.evidence_list == []

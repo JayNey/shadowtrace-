@@ -695,10 +695,10 @@ def build_investigation_graph(
         if short_circuit and not final_verdict:
             await event_service.set_final_verdict(
                 state["event_id"],
-                FinalVerdict.FALSE_POSITIVE,
+                FinalVerdict.NONE,
                 operator=_GRAPH_OPERATOR,
             )
-            final_verdict = FinalVerdict.FALSE_POSITIVE.value
+            final_verdict = FinalVerdict.NONE.value
 
         report_generated = bool(state.get("report_generated"))
         if not report_generated:

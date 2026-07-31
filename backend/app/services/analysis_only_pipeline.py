@@ -602,7 +602,7 @@ class AnalysisOnlyPipeline:
             rag_degraded=False,
             risk_assessment=placeholder_risk,
             report=report,
-            final_verdict=FinalVerdict.FALSE_POSITIVE,
+            final_verdict=FinalVerdict.NONE,
             analysis_only_complete=True,
             status=EventStatus.CLOSED,
             disposition_policy="not_required",

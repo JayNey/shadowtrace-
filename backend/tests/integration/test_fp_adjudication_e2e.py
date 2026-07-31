@@ -12,7 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.mock_xdr import MockXDRSourceAdapter
 from app.db import models as orm
-from app.models.enums import EventStatus, FinalVerdict
+from app.models.enums import (
+    ActionExecutionPhase,
+    ActionStatus,
+    EventStatus,
+    FinalVerdict,
+    SourceDisposition,
+)
 from app.models.enums import SourceObjectKind
 from app.services.evidence_projection import bind_evidence_projection
 
@@ -253,3 +259,21 @@ async def test_required_post_evidence_fp_adjudication_from_pipeline_without_jour
         assert db_row is not None
         assert float(db_row.confidence or 0.0) >= 0.88
         assert db_row.final_verdict == FinalVerdict.FALSE_POSITIVE.value
+        deferred_row = await session.scalar(
+            select(orm.Action).where(
+                orm.Action.event_id == event_id,
+                orm.Action.execution_phase == ActionExecutionPhase.POST_VERIFY.value,
+                orm.Action.tool_name == "update_source_event_disposition",
+            )
+        )
+        assert deferred_row is not None
+        assert deferred_row.status == ActionStatus.APPROVED.value
+        assert deferred_row.approved_terminal_dispositions == [SourceDisposition.IGNORED.value]
+        intent = await session.scalar(
+            select(orm.EventContextJournal).where(
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == "disposition_only_intent",
+            )
+        )
+        assert intent is not None
+        assert intent.value is True

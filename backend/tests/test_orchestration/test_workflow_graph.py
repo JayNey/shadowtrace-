@@ -592,7 +592,7 @@ async def test_not_required_short_circuit_generates_report_and_closes() -> None:
     )
     assert final["node_trace"] == ["triage_node", NODE_CLOSE]
     assert final["report_generated"] is True
-    assert services["event_service"].verdicts == [FinalVerdict.FALSE_POSITIVE]
+    assert services["event_service"].verdicts == [FinalVerdict.NONE]
 
 
 @pytest.mark.asyncio

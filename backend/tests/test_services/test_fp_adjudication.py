@@ -13,7 +13,7 @@ from app.models.entities import AccountEntity, EntitySet
 from app.models.enums import EventType, EvidenceSource, Severity
 from app.models.evidence import Evidence, EvidenceConflict
 from app.models.workflow import FP_HIGH_THRESHOLD, FP_LOW_THRESHOLD
-from app.services.change_window_baseline_loader import load_change_window_baseline
+from app.services.change_window_baseline_loader import load_change_window_baseline, resolve_tenant_id
 from app.services.false_positive_matcher import _build_alert_text, _recommendation_for
 from app.services.fp_adjudication_service import PostEvidenceFpAdjudicator
 
@@ -459,6 +459,28 @@ def test_baseline_loader_indexes_tenants(tmp_path: Path) -> None:
     indexed = load_change_window_baseline(str(_baseline_file(tmp_path)))
     assert "tenant-demo" in indexed
     assert indexed["tenant-demo"].change_windows[0].window_id == "cw-test"
+
+
+def test_resolve_tenant_id_from_creation_source_ref() -> None:
+    from app.services.event_service import _source_snapshot_from_row
+    from app.db import models as orm
+
+    row = orm.SecurityEvent(
+        event_id="evt-tenant-ref",
+        event_type="account_anomaly",
+        title="Bulk login",
+        creation_source_ref={
+            "source_product": "mock_xdr",
+            "source_tenant_id": "tenant-demo",
+            "connector_id": "conn-1",
+            "source_kind": "incident",
+            "source_object_id": "inc-1",
+        },
+        source_reference_snapshots=[],
+    )
+    snapshot = _source_snapshot_from_row(row)
+    assert resolve_tenant_id(snapshot) == "tenant-demo"
+    assert resolve_tenant_id({"title": "no tenant"}) is None
 
 
 def test_window_match_is_independent_of_scenario_field(tmp_path: Path) -> None:
