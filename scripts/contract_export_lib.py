@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import filecmp
 import json
+import subprocess
 import sys
+import textwrap
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _BACKEND = _REPO_ROOT / "backend"
+_SCRIPTS = _REPO_ROOT / "scripts"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
@@ -96,7 +99,8 @@ def _prune_stale_json_files(out_dir: Path, keep_stems: Iterable[str]) -> None:
             path.unlink()
 
 
-def export_openapi(out_path: Path) -> Path:
+def _export_openapi_inprocess(out_path: Path) -> Path:
+    """Export OpenAPI in the current interpreter (internal; use ``export_openapi``)."""
     apply_contract_export_env()
     from app.main import app
 
@@ -104,6 +108,35 @@ def export_openapi(out_path: Path) -> Path:
     schema = app.openapi()
     out_path.write_text(json.dumps(schema, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return out_path
+
+
+def export_openapi(out_path: Path) -> Path:
+    """Export OpenAPI in a fresh subprocess so ``CONTRACT_EXPORT_ENV`` always applies.
+
+    ``app.api.v1.api_router`` is built at first import time; exporting inside a pytest
+    process that already imported ``app.api.v1`` would otherwise freeze feature flags
+    such as ``EVENT_CHAT_ENABLED`` and produce nondeterministic drift results.
+    """
+    resolved = out_path.resolve()
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+    snippet = textwrap.dedent(
+        f"""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, {str(_BACKEND)!r})
+        sys.path.insert(0, {str(_SCRIPTS)!r})
+        from contract_export_lib import _export_openapi_inprocess
+
+        _export_openapi_inprocess(Path({str(resolved)!r}))
+        """
+    ).strip()
+    subprocess.run(
+        [sys.executable, "-c", snippet],
+        cwd=_BACKEND,
+        check=True,
+    )
+    return resolved
 
 
 def export_core_schemas(out_dir: Path) -> list[Path]:

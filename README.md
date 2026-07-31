@@ -13,6 +13,9 @@ curl http://localhost:8000/api/v1/health
 make test
 make lint
 
+# 后端依赖（ISSUE-112：Python 3.11 + frozen uv.lock，与 CI/Docker 一致）
+cd backend && uv sync --frozen --extra dev
+
 # 契约 baseline 与 frozen 依赖（ISSUE-112）
 # backend/uv.lock 锁定依赖；改模型/API/Tool/Socket.IO 后执行：
 # make update-contracts && make check-contract-drift

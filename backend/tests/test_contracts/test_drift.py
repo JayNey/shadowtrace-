@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,17 @@ def test_check_contract_drift_passes_on_current_repo() -> None:
     assert mod.main() == 0
 
 
+def test_drift_passes_when_api_router_preimported_with_chat_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OpenAPI export must stay deterministic even after pytest loads app.api.v1."""
+    monkeypatch.setenv("EVENT_CHAT_ENABLED", "false")
+    import tests.test_orchestration.orchestration_fixtures  # noqa: F401
+
+    mod = _load_check_module()
+    assert mod.main() == 0
+
+
 def test_check_contract_drift_fails_when_openapi_differs() -> None:
     mod = _load_check_module()
     with tempfile.TemporaryDirectory() as tmp:
@@ -96,6 +108,34 @@ def test_check_contract_drift_fails_when_committed_has_stale_schema() -> None:
             assert mod.main() == 1
         finally:
             mod.COMMITTED_CONTRACTS_ROOT = original
+
+
+def test_replace_tree_removes_stale_empty_directories(tmp_path: Path) -> None:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "export_contracts",
+        _SCRIPTS / "export_contracts.py",
+    )
+    assert spec and spec.loader
+    export_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(export_mod)
+
+    target = tmp_path / "contracts"
+    stale_dir = target / "schemas" / "orphan"
+    stale_dir.mkdir(parents=True)
+    (target / "openapi").mkdir(parents=True)
+    (target / "openapi" / "openapi.json").write_text("{}\n", encoding="utf-8")
+
+    source = tmp_path / "fresh"
+    (source / "openapi").mkdir(parents=True)
+    (source / "openapi" / "openapi.json").write_text('{"openapi":"3.1.0"}\n', encoding="utf-8")
+
+    export_mod._replace_tree(source, target)
+    assert not stale_dir.exists()
+    assert json.loads((target / "openapi" / "openapi.json").read_text()) == {
+        "openapi": "3.1.0",
+    }
 
 
 def test_export_env_pins_event_chat_route(tmp_path: Path) -> None:

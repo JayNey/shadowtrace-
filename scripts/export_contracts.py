@@ -47,6 +47,15 @@ def _replace_tree(source: Path, target: Path) -> None:
     for path in sorted(target.rglob("*"), reverse=True):
         if path.is_file() and path.name != ".gitkeep":
             path.unlink()
+    for path in sorted(
+        (item for item in target.rglob("*") if item.is_dir()),
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
     for path in source.rglob("*"):
         if path.is_file():
             rel = path.relative_to(source)
