@@ -1,0 +1,59 @@
+{
+  "additionalProperties": false,
+  "description": "Maps semantic truth to operational anchors for shadow replay.\n\n``event_id`` / ``detection_id`` / ``disposition_id`` reference runtime\nEvent/Detection/Disposition state. They are evaluation anchors, **not**\nground truth. Never copy agent severity, verdict, or response outcome here.",
+  "properties": {
+    "mapping_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Mapping Version",
+      "type": "string"
+    },
+    "event_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Id"
+    },
+    "detection_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detection Id"
+    },
+    "disposition_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Disposition Id"
+    },
+    "notes": {
+      "default": "",
+      "maxLength": 256,
+      "title": "Notes",
+      "type": "string"
+    }
+  },
+  "title": "OperationalTruthMapping",
+  "type": "object"
+}

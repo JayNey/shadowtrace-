@@ -55,6 +55,18 @@ from app.models.agent_io import (
 from app.models.context import EventContext
 from app.models.decision_record import DecisionRecord, DecisionRecordCandidate, DecisionStage
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
+from app.models.evaluation_truth import (
+    BenignSliceExpectation,
+    EvaluationCaseTruth,
+    EvaluationDatasetManifest,
+    EvaluationTruthListResult,
+    EvaluationTruthQuery,
+    LabelProvenance,
+    OperationalTruthMapping,
+    ThreatSliceExpectation,
+    TruthObservationRef,
+    UnevaluableSliceExpectation,
+)
 from app.models.embedding import (
     EmbeddingProviderHealth,
     EmbeddingRelease,
@@ -213,6 +225,17 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     # decision record (ISSUE-131)
     "DecisionRecord": DecisionRecord,
     "DecisionRecordCandidate": DecisionRecordCandidate,
+    # evaluation truth (ISSUE-113)
+    "EvaluationCaseTruth": EvaluationCaseTruth,
+    "EvaluationDatasetManifest": EvaluationDatasetManifest,
+    "EvaluationTruthListResult": EvaluationTruthListResult,
+    "EvaluationTruthQuery": EvaluationTruthQuery,
+    "LabelProvenance": LabelProvenance,
+    "OperationalTruthMapping": OperationalTruthMapping,
+    "ThreatSliceExpectation": ThreatSliceExpectation,
+    "BenignSliceExpectation": BenignSliceExpectation,
+    "UnevaluableSliceExpectation": UnevaluableSliceExpectation,
+    "TruthObservationRef": TruthObservationRef,
     # embedding / vector contract (ISSUE-140)
     "EmbeddingRelease": EmbeddingRelease,
     "VectorRecordIdentity": VectorRecordIdentity,

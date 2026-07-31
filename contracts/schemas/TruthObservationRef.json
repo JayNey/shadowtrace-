@@ -1,0 +1,50 @@
+{
+  "additionalProperties": false,
+  "description": "Immutable observation anchor (source object, scenario pack, etc.).",
+  "properties": {
+    "ref_type": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Ref Type",
+      "type": "string"
+    },
+    "ref_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Ref Id",
+      "type": "string"
+    },
+    "source_product": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Product"
+    },
+    "connector_id": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Connector Id"
+    }
+  },
+  "required": [
+    "ref_type",
+    "ref_id"
+  ],
+  "title": "TruthObservationRef",
+  "type": "object"
+}

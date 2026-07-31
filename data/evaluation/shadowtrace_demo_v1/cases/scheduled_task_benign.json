@@ -1,0 +1,32 @@
+{
+  "case_id": "scheduled_task_benign",
+  "case_version": 1,
+  "source_tenant_id": "tenant-demo",
+  "source_product": "mock_xdr",
+  "connector_id": "mock-xdr-primary",
+  "observation_refs": [
+    {
+      "ref_type": "scenario_pack",
+      "ref_id": "scheduled_task",
+      "source_product": "mock_xdr",
+      "connector_id": "mock-xdr-primary"
+    }
+  ],
+  "slice_expectation": {
+    "slice_type": "benign",
+    "schema_version": "1.0",
+    "expected_case_label": "false_positive",
+    "expected_final_verdict": "false_positive"
+  },
+  "label_provenance": {
+    "adjudicator": "evaluation-curator",
+    "adjudicated_at": "2026-07-31T08:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "Known benign scheduled maintenance pattern."
+  },
+  "operational_mapping": {
+    "mapping_version": "1.0",
+    "notes": "Shadow replay anchor only."
+  },
+  "retention_policy": "evaluation_standard"
+}

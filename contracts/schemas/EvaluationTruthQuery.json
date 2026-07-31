@@ -1,0 +1,91 @@
+{
+  "$defs": {
+    "SliceType": {
+      "description": "First-round evaluation slices; extend via reviewed schema revision only.",
+      "enum": [
+        "threat",
+        "benign",
+        "unevaluable"
+      ],
+      "title": "SliceType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Read-only query contract for canonical truth (tenant-scoped).",
+  "properties": {
+    "tenant_id": {
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "dataset_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dataset Id"
+    },
+    "dataset_version": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dataset Version"
+    },
+    "case_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Case Id"
+    },
+    "slice_type": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SliceType"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "page": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Page",
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 50,
+      "maximum": 200,
+      "minimum": 1,
+      "title": "Page Size",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "tenant_id"
+  ],
+  "title": "EvaluationTruthQuery",
+  "type": "object"
+}

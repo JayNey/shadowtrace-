@@ -1,0 +1,51 @@
+{
+  "$defs": {
+    "CaseLabel": {
+      "description": "Case-KB compatible label derived from FinalVerdict.",
+      "enum": [
+        "true_positive",
+        "false_positive",
+        "uncertain"
+      ],
+      "title": "CaseLabel",
+      "type": "string"
+    },
+    "FinalVerdict": {
+      "description": "Verdict label, independent from EventStatus.",
+      "enum": [
+        "none",
+        "possible_false_positive",
+        "false_positive",
+        "confirmed_threat"
+      ],
+      "title": "FinalVerdict",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Expectation for confirmed-threat cases.",
+  "properties": {
+    "slice_type": {
+      "const": "threat",
+      "default": "threat",
+      "title": "Slice Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "expected_case_label": {
+      "$ref": "#/$defs/CaseLabel",
+      "default": "true_positive"
+    },
+    "expected_final_verdict": {
+      "$ref": "#/$defs/FinalVerdict",
+      "default": "confirmed_threat"
+    }
+  },
+  "title": "ThreatSliceExpectation",
+  "type": "object"
+}

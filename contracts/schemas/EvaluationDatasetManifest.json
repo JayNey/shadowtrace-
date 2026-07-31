@@ -1,0 +1,47 @@
+{
+  "additionalProperties": false,
+  "description": "Dataset-level hash and revision metadata for reproducible evaluation runs.",
+  "properties": {
+    "tenant_id": {
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "dataset_id": {
+      "minLength": 1,
+      "title": "Dataset Id",
+      "type": "string"
+    },
+    "dataset_version": {
+      "minLength": 1,
+      "title": "Dataset Version",
+      "type": "string"
+    },
+    "content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "case_count": {
+      "minimum": 0,
+      "title": "Case Count",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tenant_id",
+    "dataset_id",
+    "dataset_version",
+    "content_hash",
+    "case_count"
+  ],
+  "title": "EvaluationDatasetManifest",
+  "type": "object"
+}

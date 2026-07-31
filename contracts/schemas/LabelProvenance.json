@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "description": "Who adjudicated the label and when — append-only across revisions.",
+  "properties": {
+    "adjudicator": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Adjudicator",
+      "type": "string"
+    },
+    "adjudicated_at": {
+      "format": "date-time",
+      "title": "Adjudicated At",
+      "type": "string"
+    },
+    "source_kind": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Source Kind",
+      "type": "string"
+    },
+    "revision_notes": {
+      "default": "",
+      "maxLength": 512,
+      "title": "Revision Notes",
+      "type": "string"
+    }
+  },
+  "required": [
+    "adjudicator",
+    "adjudicated_at",
+    "source_kind"
+  ],
+  "title": "LabelProvenance",
+  "type": "object"
+}

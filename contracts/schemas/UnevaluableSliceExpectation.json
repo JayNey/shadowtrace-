@@ -1,0 +1,35 @@
+{
+  "additionalProperties": false,
+  "description": "Explicit unevaluable slice — unknown truth must not default to benign.",
+  "properties": {
+    "slice_type": {
+      "const": "unevaluable",
+      "default": "unevaluable",
+      "title": "Slice Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "reason_code": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Reason Code",
+      "type": "string"
+    },
+    "detail": {
+      "default": "",
+      "maxLength": 512,
+      "title": "Detail",
+      "type": "string"
+    }
+  },
+  "required": [
+    "reason_code"
+  ],
+  "title": "UnevaluableSliceExpectation",
+  "type": "object"
+}

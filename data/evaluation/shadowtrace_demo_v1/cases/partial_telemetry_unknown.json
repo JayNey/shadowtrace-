@@ -1,0 +1,32 @@
+{
+  "case_id": "partial_telemetry_unknown",
+  "case_version": 1,
+  "source_tenant_id": "tenant-demo",
+  "source_product": "mock_xdr",
+  "connector_id": "mock-xdr-primary",
+  "observation_refs": [
+    {
+      "ref_type": "scenario_pack",
+      "ref_id": "incomplete_observation",
+      "source_product": "mock_xdr",
+      "connector_id": "mock-xdr-primary"
+    }
+  ],
+  "slice_expectation": {
+    "slice_type": "unevaluable",
+    "schema_version": "1.0",
+    "reason_code": "insufficient_observations",
+    "detail": "Required endpoint and identity channels missing; truth cannot be adjudicated."
+  },
+  "label_provenance": {
+    "adjudicator": "evaluation-curator",
+    "adjudicated_at": "2026-07-31T08:00:00+00:00",
+    "source_kind": "manual_review",
+    "revision_notes": "Explicit unevaluable — must not default to benign."
+  },
+  "operational_mapping": {
+    "mapping_version": "1.0",
+    "notes": "Missing channels documented; no operational verdict implied."
+  },
+  "retention_policy": "evaluation_standard"
+}

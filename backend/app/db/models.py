@@ -524,6 +524,50 @@ class DecisionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
 
 
+class EvaluationCaseTruth(Base):
+    """Canonical adjudicated evaluation truth (ISSUE-113 Phase A)."""
+
+    __tablename__ = "evaluation_case_truth"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_evaluation_case_truth_idempotency_key"),
+        Index("ix_evaluation_case_truth_tenant_dataset", "tenant_id", "dataset_id"),
+        Index(
+            "ix_evaluation_case_truth_tenant_dataset_case_rev",
+            "tenant_id",
+            "dataset_id",
+            "case_id",
+            "revision",
+        ),
+    )
+
+    truth_id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_tenant_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_product: Mapped[str | None] = mapped_column(String, nullable=True)
+    connector_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    dataset_id: Mapped[str] = mapped_column(String, nullable=False)
+    dataset_version: Mapped[str] = mapped_column(String, nullable=False)
+    case_id: Mapped[str] = mapped_column(String, nullable=False)
+    case_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    observation_refs: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, default=list, nullable=False
+    )
+    slice_expectation: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    label_provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    operational_mapping: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    supersedes_truth_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("evaluation_case_truth.truth_id"), nullable=True
+    )
+    correction_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    retention_policy: Mapped[str] = mapped_column(String, default="evaluation_standard", nullable=False)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    truth_hash: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
 class EventAuditLog(Base):
     __tablename__ = "event_audit_log"
 

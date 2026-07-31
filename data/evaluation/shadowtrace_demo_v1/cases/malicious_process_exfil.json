@@ -1,0 +1,38 @@
+{
+  "case_id": "malicious_process_exfil",
+  "case_version": 1,
+  "source_tenant_id": "tenant-demo",
+  "source_product": "mock_xdr",
+  "connector_id": "mock-xdr-primary",
+  "observation_refs": [
+    {
+      "ref_type": "scenario_pack",
+      "ref_id": "malicious_process",
+      "source_product": "mock_xdr",
+      "connector_id": "mock-xdr-primary"
+    },
+    {
+      "ref_type": "source_object",
+      "ref_id": "incident-malicious-process-001",
+      "source_product": "mock_xdr",
+      "connector_id": "mock-xdr-primary"
+    }
+  ],
+  "slice_expectation": {
+    "slice_type": "threat",
+    "schema_version": "1.0",
+    "expected_case_label": "true_positive",
+    "expected_final_verdict": "confirmed_threat"
+  },
+  "label_provenance": {
+    "adjudicator": "evaluation-curator",
+    "adjudicated_at": "2026-07-31T08:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "Curated from system scenario pack malicious_process."
+  },
+  "operational_mapping": {
+    "mapping_version": "1.0",
+    "notes": "Operational event anchors for shadow replay; not ground truth."
+  },
+  "retention_policy": "evaluation_standard"
+}
