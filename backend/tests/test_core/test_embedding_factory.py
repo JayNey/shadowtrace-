@@ -47,6 +47,20 @@ def test_reset_embedding_client_closes_remote_http() -> None:
     reset_embedding_client()
     close_mock.assert_awaited_once()
 
+
+def test_get_embedding_client_warns_when_settings_ignored(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    caplog.set_level(logging.WARNING)
+    reset_embedding_client()
+    get_embedding_client(settings=Settings(embedding_mode="mock", embedding_release_id="mock-v1"))
+    get_embedding_client(settings=Settings(embedding_mode="mock", embedding_release_id="other-release"))
+    assert any("ignored" in record.message for record in caplog.records)
+    reset_embedding_client()
+
+
 @pytest.mark.asyncio
 async def test_close_embedding_client_disposes_singleton() -> None:
     reset_embedding_client()

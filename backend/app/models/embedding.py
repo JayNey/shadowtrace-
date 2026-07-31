@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 
 class EmbeddingProviderMode(StrEnum):
@@ -18,6 +18,8 @@ class EmbeddingProviderMode(StrEnum):
 
 
 class VectorDistanceMetric(StrEnum):
+    """P0 pgvector store uses cosine (<=>); other metrics are reserved for future backends."""
+
     COSINE = "cosine"
     L2 = "l2"
     INNER_PRODUCT = "inner_product"
@@ -55,6 +57,34 @@ class EmbeddingRelease(BaseModel):
         return stripped
 
 
+class VectorIndexSchema(BaseModel):
+    """Declared unique/index contract for ``knowledge_vector`` (#634 migration)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    unique_key_fields: tuple[str, ...] = (
+        "tenant_id",
+        "corpus_id",
+        "object_id",
+        "release_id",
+        "embedding_release_id",
+        "content_hash",
+        "vector_revision",
+    )
+    vector_column_dimension: int = Field(
+        default=1024,
+        description="Pgvector column width; must match active EmbeddingRelease.dimension",
+    )
+    distance_metric: VectorDistanceMetric = Field(
+        default=VectorDistanceMetric.COSINE,
+        description="P0 store index uses cosine ops only",
+    )
+    pgvector_index_ops: str = Field(
+        default="vector_cosine_ops",
+        description="Pgvector index operator class for cosine similarity",
+    )
+
+
 class VectorRecordIdentity(BaseModel):
     """Vector row binding: tenant/corpus/object/release/content revision."""
 
@@ -68,9 +98,9 @@ class VectorRecordIdentity(BaseModel):
     content_hash: str = Field(..., min_length=1, description="SHA-256 hex of normalized content")
     vector_revision: int = Field(default=1, ge=1, description="Monotonic revision on content/release change")
 
-    @property
+    @computed_field  # type: ignore[prop-decorator]
     def idempotency_key(self) -> str:
-        """Unique upsert key including revision for content/release changes (#634)."""
+        """Unique upsert key exported to contract consumers (#634)."""
         return (
             f"{self.tenant_id}:{self.corpus_id}:{self.object_id}:"
             f"{self.release_id}:{self.embedding_release_id}:"
@@ -120,6 +150,14 @@ class EmbeddingProviderHealth(BaseModel):
     release_id: str
     model_id: str
     dimension: int
+    store_vector_dimension: int = Field(
+        ...,
+        description="Deployed pgvector column dimension (P0 knowledge_chunk / future knowledge_vector)",
+    )
+    index_schema_ok: bool = Field(
+        default=True,
+        description="False when active release dimension != store column dimension",
+    )
     distance_metric: VectorDistanceMetric
     normalization: VectorNormalization
     config_hash: str = ""

@@ -10,6 +10,7 @@
       "type": "string"
     },
     "VectorDistanceMetric": {
+      "description": "P0 pgvector store uses cosine (<=>); other metrics are reserved for future backends.",
       "enum": [
         "cosine",
         "l2",

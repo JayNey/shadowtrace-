@@ -14,6 +14,9 @@ from app.db.base import Base
 
 _TS = DateTime(timezone=True)
 
+# P0 knowledge_chunk.embedding column width; #634 knowledge_vector must match active release.
+KNOWLEDGE_CHUNK_VECTOR_DIM = 1024
+
 
 class KnowledgeChunkORM(Base):
     __tablename__ = "knowledge_chunk"
@@ -24,5 +27,7 @@ class KnowledgeChunkORM(Base):
     chunk_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, default=dict, nullable=False
     )
-    embedding: Mapped[list[float] | None] = mapped_column(Vector(1024), nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(KNOWLEDGE_CHUNK_VECTOR_DIM), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)

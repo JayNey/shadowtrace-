@@ -146,6 +146,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "embedding_release_mismatch": ErrorCategory.PERMANENT,
     "embedding_metric_mismatch": ErrorCategory.PERMANENT,
     "embedding_mode_conflict": ErrorCategory.SYSTEM,
+    "embedding_schema_drift": ErrorCategory.PERMANENT,
     # Replan / writeback recovery (ISSUE-062)
     "replan_count_exceeded": ErrorCategory.PERMANENT,
     "writeback_recovery_exhausted": ErrorCategory.PERMANENT,

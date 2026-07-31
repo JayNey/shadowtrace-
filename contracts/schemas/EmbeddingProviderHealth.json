@@ -10,6 +10,7 @@
       "type": "string"
     },
     "VectorDistanceMetric": {
+      "description": "P0 pgvector store uses cosine (<=>); other metrics are reserved for future backends.",
       "enum": [
         "cosine",
         "l2",
@@ -49,6 +50,17 @@
     "dimension": {
       "title": "Dimension",
       "type": "integer"
+    },
+    "store_vector_dimension": {
+      "description": "Deployed pgvector column dimension (P0 knowledge_chunk / future knowledge_vector)",
+      "title": "Store Vector Dimension",
+      "type": "integer"
+    },
+    "index_schema_ok": {
+      "default": true,
+      "description": "False when active release dimension != store column dimension",
+      "title": "Index Schema Ok",
+      "type": "boolean"
     },
     "distance_metric": {
       "$ref": "#/$defs/VectorDistanceMetric"
@@ -92,6 +104,7 @@
     "release_id",
     "model_id",
     "dimension",
+    "store_vector_dimension",
     "distance_metric",
     "normalization"
   ],

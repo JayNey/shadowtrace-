@@ -10,6 +10,7 @@ from app.core.embedding.compat import validate_vector_dimension
 from app.core.embedding.mock_embedder import MockEmbedder
 from app.core.embedding.release import build_embedding_release
 from app.core.embedding.remote_embedder import RemoteEmbedder
+from app.db.orm.knowledge import KNOWLEDGE_CHUNK_VECTOR_DIM
 from app.models.embedding import EmbeddingProviderHealth, EmbeddingProviderMode, EmbeddingRelease
 
 
@@ -89,12 +90,22 @@ class EmbeddingService:
         else:
             status = "error"
             error_code = "embedding_provider_unavailable"
+
+        store_dim = KNOWLEDGE_CHUNK_VECTOR_DIM
+        index_schema_ok = self._release.dimension == store_dim
+        if not index_schema_ok:
+            if status == "ok":
+                status = "degraded"
+            error_code = error_code or "embedding_schema_drift"
+
         return EmbeddingProviderHealth(
             status=status,
             mode=self._mode,
             release_id=self._release.release_id,
             model_id=self._release.model_id,
             dimension=self._release.dimension,
+            store_vector_dimension=store_dim,
+            index_schema_ok=index_schema_ok,
             distance_metric=self._release.distance_metric,
             normalization=self._release.normalization,
             config_hash=self._release.config_hash,

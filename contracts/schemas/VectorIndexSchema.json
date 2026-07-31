@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "VectorDistanceMetric": {
+      "description": "P0 pgvector store uses cosine (<=>); other metrics are reserved for future backends.",
+      "enum": [
+        "cosine",
+        "l2",
+        "inner_product"
+      ],
+      "title": "VectorDistanceMetric",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Declared unique/index contract for ``knowledge_vector`` (#634 migration).",
+  "properties": {
+    "unique_key_fields": {
+      "default": [
+        "tenant_id",
+        "corpus_id",
+        "object_id",
+        "release_id",
+        "embedding_release_id",
+        "content_hash",
+        "vector_revision"
+      ],
+      "items": {
+        "type": "string"
+      },
+      "title": "Unique Key Fields",
+      "type": "array"
+    },
+    "vector_column_dimension": {
+      "default": 1024,
+      "description": "Pgvector column width; must match active EmbeddingRelease.dimension",
+      "title": "Vector Column Dimension",
+      "type": "integer"
+    },
+    "distance_metric": {
+      "$ref": "#/$defs/VectorDistanceMetric",
+      "default": "cosine",
+      "description": "P0 store index uses cosine ops only"
+    },
+    "pgvector_index_ops": {
+      "default": "vector_cosine_ops",
+      "description": "Pgvector index operator class for cosine similarity",
+      "title": "Pgvector Index Ops",
+      "type": "string"
+    }
+  },
+  "title": "VectorIndexSchema",
+  "type": "object"
+}

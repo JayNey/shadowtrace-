@@ -58,6 +58,7 @@ from app.models.embedding import (
     EmbeddingProviderHealth,
     EmbeddingRelease,
     VectorImportUpsert,
+    VectorIndexSchema,
     VectorQueryContext,
     VectorQueryFilter,
     VectorRecordIdentity,
@@ -211,6 +212,7 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     # embedding / vector contract (ISSUE-140)
     "EmbeddingRelease": EmbeddingRelease,
     "VectorRecordIdentity": VectorRecordIdentity,
+    "VectorIndexSchema": VectorIndexSchema,
     "VectorQueryFilter": VectorQueryFilter,
     "VectorQueryContext": VectorQueryContext,
     "EmbeddingProviderHealth": EmbeddingProviderHealth,

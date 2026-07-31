@@ -45,6 +45,8 @@ async def check_embedding_provider() -> dict[str, object]:
             "release_id": "",
             "model_id": "",
             "dimension": 0,
+            "store_vector_dimension": 0,
+            "index_schema_ok": False,
             "distance_metric": "cosine",
             "normalization": "unit_l2",
             "config_hash": "",

@@ -48,8 +48,11 @@ def test_vector_import_upsert_golden_json_roundtrip() -> None:
         content=content,
         metadata={"source": "golden"},
     )
-    golden = json.dumps(row.model_dump(mode="json"), sort_keys=True)
-    restored = VectorImportUpsert.model_validate_json(golden)
+    payload = row.model_dump(mode="json")
+    assert payload["identity"]["idempotency_key"] == identity.idempotency_key
+    input_payload = row.model_dump(mode="python")
+    input_payload["identity"].pop("idempotency_key", None)
+    restored = VectorImportUpsert.model_validate(input_payload)
     assert restored == row
     assert restored.identity.idempotency_key == identity.idempotency_key
 

@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from app.core.config import Settings, get_settings
+from app.core.embedding.release import build_embedding_release
 from app.core.embedding.service import EmbeddingService
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,20 @@ def get_embedding_client(*, settings: Settings | None = None) -> EmbeddingServic
     global _client
     if _client is None:
         _client = EmbeddingService(settings or get_settings())
+    elif settings is not None:
+        requested = build_embedding_release(settings)
+        active = _client.release
+        if (
+            requested.release_id != active.release_id
+            or requested.config_hash != active.config_hash
+            or requested.provider_mode != active.provider_mode
+        ):
+            logger.warning(
+                "get_embedding_client(settings=...) ignored: client already initialized "
+                "with release_id=%r (requested %r); reset_embedding_client() first",
+                active.release_id,
+                requested.release_id,
+            )
     return _client
 
 
