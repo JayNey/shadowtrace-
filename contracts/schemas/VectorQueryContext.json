@@ -1,0 +1,149 @@
+{
+  "$defs": {
+    "EmbeddingProviderMode": {
+      "enum": [
+        "mock",
+        "local",
+        "remote"
+      ],
+      "title": "EmbeddingProviderMode",
+      "type": "string"
+    },
+    "EmbeddingRelease": {
+      "additionalProperties": false,
+      "description": "Immutable embedding release descriptor (config-injected, not hardcoded SDK versions).",
+      "properties": {
+        "provider_mode": {
+          "$ref": "#/$defs/EmbeddingProviderMode"
+        },
+        "model_id": {
+          "description": "Provider model identifier from config",
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "release_id": {
+          "description": "Logical release id from config",
+          "minLength": 1,
+          "title": "Release Id",
+          "type": "string"
+        },
+        "dimension": {
+          "maximum": 8192,
+          "minimum": 1,
+          "title": "Dimension",
+          "type": "integer"
+        },
+        "normalization": {
+          "$ref": "#/$defs/VectorNormalization"
+        },
+        "distance_metric": {
+          "$ref": "#/$defs/VectorDistanceMetric"
+        },
+        "content_schema_version": {
+          "minLength": 1,
+          "title": "Content Schema Version",
+          "type": "string"
+        },
+        "preprocess_schema_version": {
+          "minLength": 1,
+          "title": "Preprocess Schema Version",
+          "type": "string"
+        },
+        "config_hash": {
+          "default": "",
+          "description": "Sanitized artifact/config fingerprint (never secrets)",
+          "title": "Config Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider_mode",
+        "model_id",
+        "release_id",
+        "dimension",
+        "normalization",
+        "distance_metric",
+        "content_schema_version",
+        "preprocess_schema_version"
+      ],
+      "title": "EmbeddingRelease",
+      "type": "object"
+    },
+    "VectorDistanceMetric": {
+      "enum": [
+        "cosine",
+        "l2",
+        "inner_product"
+      ],
+      "title": "VectorDistanceMetric",
+      "type": "string"
+    },
+    "VectorNormalization": {
+      "enum": [
+        "unit_l2",
+        "none"
+      ],
+      "title": "VectorNormalization",
+      "type": "string"
+    },
+    "VectorQueryFilter": {
+      "additionalProperties": false,
+      "description": "Mandatory tenant/release scope applied before vector candidate fetch.",
+      "properties": {
+        "tenant_id": {
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "corpus_id": {
+          "minLength": 1,
+          "title": "Corpus Id",
+          "type": "string"
+        },
+        "release_id": {
+          "minLength": 1,
+          "title": "Release Id",
+          "type": "string"
+        },
+        "embedding_release_id": {
+          "minLength": 1,
+          "title": "Embedding Release Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "corpus_id",
+        "release_id",
+        "embedding_release_id"
+      ],
+      "title": "VectorQueryFilter",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Query-side vector context bound to an active embedding release.",
+  "properties": {
+    "filter": {
+      "$ref": "#/$defs/VectorQueryFilter"
+    },
+    "active_release": {
+      "$ref": "#/$defs/EmbeddingRelease"
+    },
+    "query_vector": {
+      "description": "Populated after embed step",
+      "items": {
+        "type": "number"
+      },
+      "title": "Query Vector",
+      "type": "array"
+    }
+  },
+  "required": [
+    "filter",
+    "active_release"
+  ],
+  "title": "VectorQueryContext",
+  "type": "object"
+}

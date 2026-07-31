@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "EmbeddingProviderMode": {
+      "enum": [
+        "mock",
+        "local",
+        "remote"
+      ],
+      "title": "EmbeddingProviderMode",
+      "type": "string"
+    },
+    "VectorDistanceMetric": {
+      "enum": [
+        "cosine",
+        "l2",
+        "inner_product"
+      ],
+      "title": "VectorDistanceMetric",
+      "type": "string"
+    },
+    "VectorNormalization": {
+      "enum": [
+        "unit_l2",
+        "none"
+      ],
+      "title": "VectorNormalization",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Immutable embedding release descriptor (config-injected, not hardcoded SDK versions).",
+  "properties": {
+    "provider_mode": {
+      "$ref": "#/$defs/EmbeddingProviderMode"
+    },
+    "model_id": {
+      "description": "Provider model identifier from config",
+      "minLength": 1,
+      "title": "Model Id",
+      "type": "string"
+    },
+    "release_id": {
+      "description": "Logical release id from config",
+      "minLength": 1,
+      "title": "Release Id",
+      "type": "string"
+    },
+    "dimension": {
+      "maximum": 8192,
+      "minimum": 1,
+      "title": "Dimension",
+      "type": "integer"
+    },
+    "normalization": {
+      "$ref": "#/$defs/VectorNormalization"
+    },
+    "distance_metric": {
+      "$ref": "#/$defs/VectorDistanceMetric"
+    },
+    "content_schema_version": {
+      "minLength": 1,
+      "title": "Content Schema Version",
+      "type": "string"
+    },
+    "preprocess_schema_version": {
+      "minLength": 1,
+      "title": "Preprocess Schema Version",
+      "type": "string"
+    },
+    "config_hash": {
+      "default": "",
+      "description": "Sanitized artifact/config fingerprint (never secrets)",
+      "title": "Config Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "provider_mode",
+    "model_id",
+    "release_id",
+    "dimension",
+    "normalization",
+    "distance_metric",
+    "content_schema_version",
+    "preprocess_schema_version"
+  ],
+  "title": "EmbeddingRelease",
+  "type": "object"
+}

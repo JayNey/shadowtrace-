@@ -137,6 +137,15 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "adapter_validation_error": ErrorCategory.USER_INPUT,
     # Startup / runtime configuration (ISSUE-093 §5)
     "configuration_error": ErrorCategory.SYSTEM,
+    # Embedding / vector contract (ISSUE-140)
+    "embedding_provider_error": ErrorCategory.SYSTEM,
+    "embedding_compatibility_error": ErrorCategory.PERMANENT,
+    "embedding_provider_unavailable": ErrorCategory.TRANSIENT,
+    "embedding_prefilter_required": ErrorCategory.PERMANENT,
+    "embedding_dimension_mismatch": ErrorCategory.PERMANENT,
+    "embedding_release_mismatch": ErrorCategory.PERMANENT,
+    "embedding_metric_mismatch": ErrorCategory.PERMANENT,
+    "embedding_mode_conflict": ErrorCategory.SYSTEM,
     # Replan / writeback recovery (ISSUE-062)
     "replan_count_exceeded": ErrorCategory.PERMANENT,
     "writeback_recovery_exhausted": ErrorCategory.PERMANENT,

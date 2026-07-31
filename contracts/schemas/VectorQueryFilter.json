@@ -1,0 +1,34 @@
+{
+  "additionalProperties": false,
+  "description": "Mandatory tenant/release scope applied before vector candidate fetch.",
+  "properties": {
+    "tenant_id": {
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "corpus_id": {
+      "minLength": 1,
+      "title": "Corpus Id",
+      "type": "string"
+    },
+    "release_id": {
+      "minLength": 1,
+      "title": "Release Id",
+      "type": "string"
+    },
+    "embedding_release_id": {
+      "minLength": 1,
+      "title": "Embedding Release Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tenant_id",
+    "corpus_id",
+    "release_id",
+    "embedding_release_id"
+  ],
+  "title": "VectorQueryFilter",
+  "type": "object"
+}

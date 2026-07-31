@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "EmbeddingProviderMode": {
+      "enum": [
+        "mock",
+        "local",
+        "remote"
+      ],
+      "title": "EmbeddingProviderMode",
+      "type": "string"
+    },
+    "VectorDistanceMetric": {
+      "enum": [
+        "cosine",
+        "l2",
+        "inner_product"
+      ],
+      "title": "VectorDistanceMetric",
+      "type": "string"
+    },
+    "VectorNormalization": {
+      "enum": [
+        "unit_l2",
+        "none"
+      ],
+      "title": "VectorNormalization",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Sanitized embedding provider readiness for /health and diagnostics.",
+  "properties": {
+    "status": {
+      "description": "ok | degraded | error",
+      "title": "Status",
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/EmbeddingProviderMode"
+    },
+    "release_id": {
+      "title": "Release Id",
+      "type": "string"
+    },
+    "model_id": {
+      "title": "Model Id",
+      "type": "string"
+    },
+    "dimension": {
+      "title": "Dimension",
+      "type": "integer"
+    },
+    "distance_metric": {
+      "$ref": "#/$defs/VectorDistanceMetric"
+    },
+    "normalization": {
+      "$ref": "#/$defs/VectorNormalization"
+    },
+    "config_hash": {
+      "default": "",
+      "title": "Config Hash",
+      "type": "string"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "latency_ms": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Latency Ms"
+    }
+  },
+  "required": [
+    "status",
+    "mode",
+    "release_id",
+    "model_id",
+    "dimension",
+    "distance_metric",
+    "normalization"
+  ],
+  "title": "EmbeddingProviderHealth",
+  "type": "object"
+}

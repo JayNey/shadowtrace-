@@ -44,6 +44,22 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     with (
         patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
         patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "ok",
+                "mode": "mock",
+                "release_id": "mock-v1",
+                "model_id": "mock-embedder",
+                "dimension": 1024,
+                "distance_metric": "cosine",
+                "normalization": "unit_l2",
+                "config_hash": "abc",
+                "error_code": None,
+                "latency_ms": 1.0,
+            },
+        ),
     ):
         response = await client.get("/api/v1/health")
 
@@ -54,6 +70,9 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     assert body["status"] == "ok"
     assert body["postgres"] == "ok"
     assert body["redis"] == "ok"
+    assert body["embedding_provider"]["status"] == "ok"
+    assert body["embedding_provider"]["mode"] == "mock"
+    assert "api_key" not in str(body["embedding_provider"]).lower()
     assert body["simulation_enabled"] is True
     assert body["version"] == "0.1.0"
 

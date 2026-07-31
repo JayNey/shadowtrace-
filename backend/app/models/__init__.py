@@ -54,6 +54,14 @@ from app.models.agent_io import (
 )
 from app.models.context import EventContext
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
+from app.models.embedding import (
+    EmbeddingProviderHealth,
+    EmbeddingRelease,
+    VectorImportUpsert,
+    VectorQueryContext,
+    VectorQueryFilter,
+    VectorRecordIdentity,
+)
 from app.models.disposition import (
     DispositionCommand,
     DispositionOutboxRecord,
@@ -200,6 +208,13 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "DecisionTraceEntry": DecisionTraceEntry,
     "DecisionTraceSummary": DecisionTraceSummary,
     "DecisionTrace": DecisionTrace,
+    # embedding / vector contract (ISSUE-140)
+    "EmbeddingRelease": EmbeddingRelease,
+    "VectorRecordIdentity": VectorRecordIdentity,
+    "VectorQueryFilter": VectorQueryFilter,
+    "VectorQueryContext": VectorQueryContext,
+    "EmbeddingProviderHealth": EmbeddingProviderHealth,
+    "VectorImportUpsert": VectorImportUpsert,
 }
 
 __all__ = ["MODEL_REGISTRY", *sorted(MODEL_REGISTRY.keys())]

@@ -68,6 +68,19 @@ class Settings(BaseSettings):
     embedding_mode: str = Field(default="mock", alias="EMBEDDING_MODE")
     embedding_api_base_url: str = Field(default="", alias="EMBEDDING_API_BASE_URL")
     embedding_api_key: str = Field(default="", alias="EMBEDDING_API_KEY")
+    embedding_model_id: str = Field(default="mock-embedder", alias="EMBEDDING_MODEL_ID")
+    embedding_release_id: str = Field(default="mock-v1", alias="EMBEDDING_RELEASE_ID")
+    embedding_dimension: int = Field(default=1024, alias="EMBEDDING_DIMENSION")
+    embedding_distance_metric: str = Field(default="cosine", alias="EMBEDDING_DISTANCE_METRIC")
+    embedding_normalization: str = Field(default="unit_l2", alias="EMBEDDING_NORMALIZATION")
+    embedding_content_schema_version: str = Field(default="1", alias="EMBEDDING_CONTENT_SCHEMA_VERSION")
+    embedding_preprocess_schema_version: str = Field(
+        default="1",
+        alias="EMBEDDING_PREPROCESS_SCHEMA_VERSION",
+    )
+    embedding_config_hash: str = Field(default="", alias="EMBEDDING_CONFIG_HASH")
+    embedding_max_batch_size: int = Field(default=64, alias="EMBEDDING_MAX_BATCH_SIZE")
+    embedding_timeout_seconds: float = Field(default=30.0, alias="EMBEDDING_TIMEOUT_SECONDS")
 
     rerank_mode: str = Field(default="mock", alias="RERANK_MODE")
 
@@ -132,6 +145,8 @@ class Settings(BaseSettings):
             violations.append(f"disposition_adapter_kind={self.disposition_adapter_kind}")
         if _looks_mock(self.llm_mode):
             violations.append(f"llm_mode={self.llm_mode}")
+        if _looks_mock(self.embedding_mode):
+            violations.append(f"embedding_mode={self.embedding_mode}")
         return violations
 
 

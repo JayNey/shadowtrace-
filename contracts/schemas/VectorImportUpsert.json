@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "VectorRecordIdentity": {
+      "additionalProperties": false,
+      "description": "Vector row binding: tenant/corpus/object/release/content revision.",
+      "properties": {
+        "tenant_id": {
+          "minLength": 1,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "corpus_id": {
+          "minLength": 1,
+          "title": "Corpus Id",
+          "type": "string"
+        },
+        "object_id": {
+          "minLength": 1,
+          "title": "Object Id",
+          "type": "string"
+        },
+        "release_id": {
+          "minLength": 1,
+          "title": "Release Id",
+          "type": "string"
+        },
+        "embedding_release_id": {
+          "minLength": 1,
+          "title": "Embedding Release Id",
+          "type": "string"
+        },
+        "content_hash": {
+          "description": "SHA-256 hex of normalized content",
+          "minLength": 1,
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "vector_revision": {
+          "default": 1,
+          "description": "Monotonic revision on content/release change",
+          "minimum": 1,
+          "title": "Vector Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tenant_id",
+        "corpus_id",
+        "object_id",
+        "release_id",
+        "embedding_release_id",
+        "content_hash"
+      ],
+      "title": "VectorRecordIdentity",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Idempotent bulk import row contract (#634 consumes).",
+  "properties": {
+    "identity": {
+      "$ref": "#/$defs/VectorRecordIdentity"
+    },
+    "content": {
+      "minLength": 1,
+      "title": "Content",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "identity",
+    "content"
+  ],
+  "title": "VectorImportUpsert",
+  "type": "object"
+}

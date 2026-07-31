@@ -31,6 +31,28 @@ async def shutdown_health_clients() -> None:
     _REDIS_CLIENTS.clear()
 
 
+async def check_embedding_provider() -> dict[str, object]:
+    """Return sanitized embedding provider readiness (ISSUE-140)."""
+    try:
+        from app.core.embedding.factory import get_embedding_client
+
+        health = await get_embedding_client().health_probe()
+        return health.model_dump(mode="json")
+    except Exception:  # noqa: BLE001 — health must never raise
+        return {
+            "status": "error",
+            "mode": "unknown",
+            "release_id": "",
+            "model_id": "",
+            "dimension": 0,
+            "distance_metric": "cosine",
+            "normalization": "unit_l2",
+            "config_hash": "",
+            "error_code": "embedding_provider_error",
+            "latency_ms": None,
+        }
+
+
 async def check_postgres(database_url: str) -> str:
     """Return 'ok' if SELECT 1 succeeds, else 'error'."""
     try:
@@ -76,6 +98,7 @@ async def health(
     """
     postgres = await check_postgres(settings.database_url)
     redis_status = await check_redis(settings.redis_url)
+    embedding_provider = await check_embedding_provider()
 
     # NOTE: capability values below are UNVERIFIED placeholders for the Mock
     # phase. Once real adapters land they must be replaced with actual
@@ -115,7 +138,11 @@ async def health(
         },
     )
 
-    overall = "ok" if postgres == "ok" and redis_status == "ok" else "degraded"
+    overall = (
+        "ok"
+        if postgres == "ok" and redis_status == "ok" and embedding_provider.get("status") == "ok"
+        else "degraded"
+    )
     if overall != "ok":
         response.status_code = 503
 
@@ -123,6 +150,7 @@ async def health(
         "status": overall,
         "postgres": postgres,
         "redis": redis_status,
+        "embedding_provider": embedding_provider,
         "source_adapter": source_adapter,
         "disposition_adapter": disposition_adapter,
         "tool_provider": tool_provider,

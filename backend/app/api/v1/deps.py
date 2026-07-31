@@ -173,14 +173,14 @@ def get_memory_governance() -> Any:
     """Return the shared memory review and promotion service."""
     global _memory_governance
     if _memory_governance is None:
-        from app.core.embedding.service import EmbeddingService
+        from app.core.embedding.factory import get_embedding_client
         from app.services.case_kb_service import CaseKBService
         from app.services.knowledge_store import KnowledgeStore
         from app.services.memory_governance import MemoryGovernance
         from app.services.profile_service import ProfileService
 
         session_factory = _get_session_factory()
-        knowledge_store = KnowledgeStore(session_factory, EmbeddingService(get_settings()))
+        knowledge_store = KnowledgeStore(session_factory, get_embedding_client())
         _memory_governance = MemoryGovernance(
             session_factory,
             case_kb_service=CaseKBService(knowledge_store, session_factory),
@@ -482,7 +482,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.agents.report_agent import ReportAgent
     from app.agents.risk_agent import RiskAgent
     from app.agents.triage_agent import TriageAgent
-    from app.core.embedding.service import EmbeddingService
+    from app.core.embedding.factory import get_embedding_client
     from app.core.guardrails import OutputGuard
     from app.core.llm.factory import get_llm_client
     from app.services.agent_trace_service import AgentTraceService
@@ -510,7 +510,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         tool_executor.audit_service = _get_tool_call_log_service()
 
     # ISSUE-078: wire FalsePositiveMatcher for vector-based FP pre-filter.
-    embed_service = EmbeddingService(settings)
+    embed_service = get_embedding_client(settings=settings)
     knowledge_store = KnowledgeStore(session_factory, embed_service)
     case_kb_service = CaseKBService(knowledge_store, session_factory)
     fp_matcher = FalsePositiveMatcher(case_kb_service)
@@ -729,8 +729,10 @@ def reset_deps() -> None:
     global _graph_sync_service, _neo4j_client
     global _memory_governance
     reset_session_provider()
+    from app.core.embedding.factory import reset_embedding_client
     from app.services.evidence_projection import reset_evidence_projection_default
 
+    reset_embedding_client()
     reset_evidence_projection_default()
     _redis_client = None
     _context_store = None

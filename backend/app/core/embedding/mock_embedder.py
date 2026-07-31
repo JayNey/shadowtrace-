@@ -1,11 +1,15 @@
-"""MockEmbedder: deterministic pseudo-random 1024-dim unit vectors from SHA-256."""
+"""MockEmbedder: deterministic pseudo-random unit vectors from SHA-256 (ISSUE-140)."""
 
 from __future__ import annotations
 
 import hashlib
 import math
 
-EMBEDDING_DIM = 1024
+from app.core.embedding.compat import validate_vector_dimension
+from app.models.embedding import EmbeddingRelease, VectorNormalization
+
+DEFAULT_EMBEDDING_DIM = 1024
+EMBEDDING_DIM = DEFAULT_EMBEDDING_DIM
 
 # Large primes for the pseudo-random projection
 _PRIME_A = 2654435761
@@ -28,26 +32,33 @@ def _pseudo_random_float(seed: int, index: int) -> float:
 
 
 class MockEmbedder:
-    """Deterministic embedder: SHA-256(text) → seeded pseudo-random unit vector.
+    """Deterministic embedder: SHA-256(text) → seeded pseudo-random unit vector."""
 
-    Same text always produces the same 1024-dim unit vector.  Zero network I/O,
-    zero external dependencies beyond stdlib.
-    """
+    def __init__(self, *, release: EmbeddingRelease | None = None, dim: int | None = None) -> None:
+        self._release = release
+        self.dim = release.dimension if release is not None else (dim or DEFAULT_EMBEDDING_DIM)
 
-    def __init__(self) -> None:
-        self.dim = EMBEDDING_DIM
+    @property
+    def release(self) -> EmbeddingRelease | None:
+        return self._release
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Produce deterministic unit vectors for *texts*."""
         vectors: list[list[float]] = []
         for text in texts:
             digest = _sha256_hex(text)
-            # Use the first 8 hex chars (32 bits) as the seed
             seed = int(digest[:8], 16)
             raw = [_pseudo_random_float(seed, i) for i in range(self.dim)]
             norm = math.sqrt(sum(v * v for v in raw))
             if norm == 0.0:
-                vectors.append([0.0] * self.dim)
+                vector = [0.0] * self.dim
             else:
-                vectors.append([v / norm for v in raw])
+                vector = [v / norm for v in raw]
+            if self._release is not None and self._release.normalization == VectorNormalization.UNIT_L2:
+                validate_vector_dimension(
+                    vector,
+                    expected_dimension=self._release.dimension,
+                    context="mock_embed",
+                )
+            vectors.append(vector)
         return vectors

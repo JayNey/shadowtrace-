@@ -7,6 +7,7 @@ import math
 import pytest
 
 from app.core.config import Settings
+from app.core.embedding.base import EmbeddingCompatibilityError
 from app.core.embedding.mock_embedder import MockEmbedder
 from app.core.embedding.service import EmbeddingService
 
@@ -129,7 +130,8 @@ class TestEmbeddingService:
             called = True
             return [[0.0] * 1024 for _ in texts]
 
-        monkeypatch.setattr(svc, "_embed_remote", fake_remote)
+        assert svc._remote is not None
+        monkeypatch.setattr(svc._remote, "embed", fake_remote)
         vectors = await svc.embed_texts(["local probe"])
         assert called is True
         assert len(vectors[0]) == 1024
@@ -137,12 +139,5 @@ class TestEmbeddingService:
 
     def test_unknown_mode_raises(self) -> None:
         settings = Settings(embedding_mode="bogus")
-        svc = EmbeddingService(settings)
-
-        async def _call() -> None:
-            await svc.embed_texts(["x"])
-
-        with pytest.raises(ValueError, match="Unknown embedding_mode"):
-            import asyncio
-
-            asyncio.run(_call())
+        with pytest.raises(EmbeddingCompatibilityError, match="unsupported embedding_mode"):
+            EmbeddingService(settings)
