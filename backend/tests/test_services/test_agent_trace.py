@@ -136,18 +136,16 @@ def test_projection_strips_raw_payload_keys() -> None:
 
 
 def test_decision_basis_extracts_structured_summary() -> None:
-    output = _SampleOutput(
-        event_id="evt-20260717-a1b2c3d4",
-        summary="critical data exfiltration detected",
-        evidence_list=[
+    output = {
+        "event_id": "evt-20260717-a1b2c3d4",
+        "decision_summary": "critical data exfiltration detected",
+        "summary": "legacy narrative must not win",
+        "evidence_list": [
             {"evidence_id": "evd-aaaaaaaa"},
             {"evidence_id": "evd-bbbbbbbb"},
         ],
-        confidence=0.95,
-        nested=_NestedModel(
-            reasoning="high confidence threat",
-        ),
-    )
+        "confidence": 0.95,
+    }
     basis = TraceProjection.decision_basis(output)
 
     assert basis["input_summary"] == "evt-20260717-a1b2c3d4"
@@ -155,6 +153,16 @@ def test_decision_basis_extracts_structured_summary() -> None:
     assert "evd-aaaaaaaa" in basis["evidence_refs"]
     assert "evd-bbbbbbbb" in basis["evidence_refs"]
     assert basis["confidence"] == 0.95
+
+
+def test_decision_basis_does_not_fallback_to_legacy_summary() -> None:
+    basis = TraceProjection.decision_basis(
+        {
+            "event_id": "evt-legacy-summary",
+            "summary": "legacy CoT narrative must not surface",
+        }
+    )
+    assert basis["structured_conclusion"] == ""
 
 
 def test_projection_redacts_chain_of_thought_keys() -> None:
@@ -295,6 +303,10 @@ async def test_log_trace_redacts_injected_cot_and_secrets(
     assert row.output_data["thought"] == "[NOT_RETAINED]"
     assert secret not in serialized
     assert "must not persist" not in serialized
+
+    record = await service_with_decision_records._decision_record_service.get_by_trace_ref(trace_id)
+    assert record is not None
+    assert secret not in record.decision_summary
 
 
 @pytest.mark.asyncio

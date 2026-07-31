@@ -88,7 +88,10 @@ def _get_decision_record_service() -> Any:
     if _decision_record_service is None:
         from app.services.decision_record_service import DecisionRecordService
 
-        _decision_record_service = DecisionRecordService(_get_session_factory())
+        _decision_record_service = DecisionRecordService(
+            _get_session_factory(),
+            degraded_flag_service=_get_degraded_flags(),
+        )
     return _decision_record_service
 
 

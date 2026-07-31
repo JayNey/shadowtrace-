@@ -43,6 +43,7 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "InvestigationGraph",
         "MemoryAgent",
         "AgentTraceService",
+        "DecisionRecordService",
     }
 )
 

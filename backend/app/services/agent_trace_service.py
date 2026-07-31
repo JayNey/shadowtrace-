@@ -58,8 +58,6 @@ _DECISION_CONCLUSION_FIELDS = frozenset(
     {
         "decision_summary",
         "narrative_summary",
-        "strategy_summary",
-        "summary",
         "structured_conclusion",
         "verdict",
         "final_verdict",
@@ -415,7 +413,7 @@ class AgentTraceService:
                                 agent_name=agent_name,
                                 trace_id=trace_id,
                                 input_data=input_data,
-                                output_data=output_data,
+                                output_data=output_projected,
                                 llm_model=llm_model,
                                 session=session,
                             )

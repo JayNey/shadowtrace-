@@ -115,7 +115,10 @@ def upgrade() -> None:
                 - 'gap'
             ) || jsonb_build_object(
                 'decision_summary',
-                COALESCE(NULLIF(output_data->>'decision_summary', ''), '')
+                COALESCE(
+                    NULLIF(output_data->>'decision_summary', ''),
+                    LEFT(COALESCE(output_data->>'summary', ''), 512)
+                )
             )
             WHERE agent_name = 'react_engine'
               AND (

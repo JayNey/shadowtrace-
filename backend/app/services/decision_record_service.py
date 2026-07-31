@@ -12,22 +12,33 @@ from typing import Any
 import orjson
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import ValidationError
+from app.core.sanitization import redact_sensitive_text
 from app.db import models as orm
 from app.models.decision_record import (
     DecisionRecord,
     DecisionRecordCandidate,
     DecisionStage,
 )
-from app.models.react import ReActGapCode, ReActUncertaintyCode
+from app.models.react import ReActUncertaintyCode
 from app.services.agent_trace_service import TraceProjection
 
 logger = logging.getLogger(__name__)
 
 DECISION_RECORD_SCHEMA_VERSION = "1.0"
 PROMPT_POLICY_VERSION = "cot-safe-v1"
+_DISPOSITION_BLOCKING_STAGES = frozenset(
+    {
+        DecisionStage.TRIAGE.value,
+        DecisionStage.VERIFY.value,
+        DecisionStage.RESPONSE.value,
+        DecisionStage.PLANNER.value,
+        DecisionStage.RISK.value,
+    }
+)
 _REF_ID_PATTERN = re.compile(
     r"^(evt|evd|act|trc|dec|wbk|disp|case|plan|report)-[0-9a-f]{4,32}$",
     re.IGNORECASE,
@@ -235,6 +246,20 @@ def _enrich_agent_output(
     return enriched
 
 
+def _sanitize_record_output(output_data: dict[str, Any]) -> dict[str, Any]:
+    """Project agent output before building durable DecisionRecord payloads."""
+    if not output_data:
+        return output_data
+    projected = TraceProjection.project(output_data)
+    if isinstance(projected, dict) and not projected.get("_truncated"):
+        return projected
+    sanitized = dict(output_data)
+    summary = sanitized.get("decision_summary")
+    if isinstance(summary, str):
+        sanitized["decision_summary"] = redact_sensitive_text(summary.strip())[:512]
+    return sanitized
+
+
 def _build_record_payload(
     *,
     event_id: str,
@@ -249,7 +274,7 @@ def _build_record_payload(
     summary = output_data.get("decision_summary")
     if not isinstance(summary, str):
         summary = ""
-    summary = summary.strip()[:512]
+    summary = redact_sensitive_text(summary.strip())[:512]
 
     reason_codes: list[str] = []
     for key in ("reason_code", "gap_code", "uncertainty_code"):
@@ -396,8 +421,42 @@ def _orm_from_record(record: DecisionRecord) -> orm.DecisionRecord:
 class DecisionRecordService:
     """Writes durable DecisionRecord rows with idempotent replay semantics."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        degraded_flag_service: Any | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._degraded_flags = degraded_flag_service
+
+    async def _mark_audit_degraded(self, event_id: str) -> None:
+        if self._degraded_flags is None:
+            return
+        try:
+            await self._degraded_flags.set_flag(
+                event_id,
+                "decision_audit_degraded",
+                True,
+                writer="DecisionRecordService",
+            )
+        except Exception:  # noqa: BLE001 - degraded annotation must not break persistence
+            logger.exception("Failed to set decision_audit_degraded event=%s", event_id)
+
+    async def _finalize_existing_record(
+        self,
+        existing: orm.DecisionRecord,
+        record: DecisionRecord,
+    ) -> str:
+        if existing.record_hash != record.record_hash:
+            logger.warning(
+                "DecisionRecord idempotency replay hash mismatch key=%s existing=%s new=%s",
+                record.idempotency_key,
+                existing.record_hash,
+                record.record_hash,
+            )
+            await self._mark_audit_degraded(record.event_id)
+        return existing.record_id
 
     async def persist_in_session(
         self,
@@ -410,7 +469,7 @@ class DecisionRecordService:
             )
         )
         if existing is not None:
-            return existing.record_id
+            return await self._finalize_existing_record(existing, record)
 
         if (
             record.stage is DecisionStage.PLANNER
@@ -437,8 +496,19 @@ class DecisionRecordService:
                     )
 
         row = _orm_from_record(record)
-        session.add(row)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+        except IntegrityError:
+            existing = await session.scalar(
+                select(orm.DecisionRecord).where(
+                    orm.DecisionRecord.idempotency_key == record.idempotency_key
+                )
+            )
+            if existing is None:
+                raise
+            return await self._finalize_existing_record(existing, record)
         return row.record_id
 
     async def persist_from_agent_trace(
@@ -455,7 +525,7 @@ class DecisionRecordService:
         if output_data is None:
             return None
         input_dict = _to_mapping(input_data)
-        output_dict = _to_mapping(output_data)
+        output_dict = _sanitize_record_output(_to_mapping(output_data))
         record = _build_record_payload(
             event_id=event_id,
             agent_name=agent_name,
@@ -542,13 +612,33 @@ class DecisionRecordService:
         *,
         session: AsyncSession | None = None,
     ) -> None:
+        if self._degraded_flags is not None and await self._degraded_flags.has_flag(
+            event_id,
+            "decision_audit_degraded",
+        ):
+            raise ValidationError(
+                "auto disposition blocked by degraded decision audit",
+                details={"event_id": event_id},
+            )
         records = await self.list_by_event(event_id, session=session)
         if not records:
             raise ValidationError(
                 "auto disposition requires decision audit records",
                 details={"event_id": event_id},
             )
-        blocking = [row.record_id for row in records if self.blocks_auto_disposition(row)]
+        material_records = [
+            row
+            for row in records
+            if str(getattr(row, "stage", "") or "") in _DISPOSITION_BLOCKING_STAGES
+        ]
+        if not material_records:
+            raise ValidationError(
+                "auto disposition requires material decision audit records",
+                details={"event_id": event_id},
+            )
+        blocking = [
+            row.record_id for row in material_records if self.blocks_auto_disposition(row)
+        ]
         if blocking:
             raise ValidationError(
                 "auto disposition blocked by decision audit",
@@ -566,6 +656,10 @@ class DecisionRecordService:
 
     @staticmethod
     def blocks_auto_disposition(record: DecisionRecord | orm.DecisionRecord) -> bool:
+        stage = getattr(record, "stage", None)
+        stage_value = stage.value if isinstance(stage, DecisionStage) else str(stage or "")
+        if stage_value not in _DISPOSITION_BLOCKING_STAGES:
+            return False
         unresolved = getattr(record, "unresolved_refs", None) or []
         if unresolved:
             return True

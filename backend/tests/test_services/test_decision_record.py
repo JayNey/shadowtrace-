@@ -18,6 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.errors import ValidationError
 from app.db import models as orm
+from app.models.decision_record import DecisionStage
 from app.services.decision_record_service import DecisionRecordService
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -116,10 +117,11 @@ async def test_unresolved_refs_blocks_auto_disposition(
     event_id = _event_id()
     record_id = await service.persist_from_agent_trace(
         event_id=event_id,
-        agent_name="react_engine",
+        agent_name="verify_agent",
         trace_id="trc-test0002",
         input_data={"event_id": event_id, "evidence_refs": ["not-a-valid-ref"]},
         output_data={
+            "stage": "verify",
             "decision_summary": "Need more evidence",
             "reason_code": "fill_evidence_gap",
             "confidence": 0.4,
@@ -242,9 +244,9 @@ async def test_blocks_auto_disposition_when_minimum_audit_missing(
             row = orm.DecisionRecord(
                 record_id=f"dec-{uuid.uuid4().hex[:12]}",
                 event_id=event_id,
-                stage="other",
+                stage=DecisionStage.VERIFY.value,
                 actor="test",
-                idempotency_key=f"{event_id}:other:test:r1",
+                idempotency_key=f"{event_id}:verify:test:r1",
                 record_hash="abc",
                 schema_version="1.0",
             )
@@ -261,10 +263,11 @@ async def test_assert_auto_disposition_allowed_rejects_unresolved_refs(
     event_id = _event_id()
     await service.persist_from_agent_trace(
         event_id=event_id,
-        agent_name="react_engine",
+        agent_name="verify_agent",
         trace_id="trc-block001",
         input_data={"event_id": event_id},
         output_data={
+            "stage": "verify",
             "decision_summary": "Need more evidence",
             "reason_code": "fill_evidence_gap",
             "confidence": 0.4,
@@ -422,3 +425,151 @@ async def test_response_agent_decision_record_summary_is_bounded_structured(
     assert "strategy must not" not in row.decision_summary
     assert "actions=1" in row.decision_summary
     assert row.rule_version is None
+
+
+@pytest.mark.asyncio
+async def test_react_unresolved_refs_do_not_block_disposition(
+    service: DecisionRecordService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="react_engine",
+        trace_id="trc-react-bad-ref",
+        input_data={"event_id": event_id, "round_index": 1},
+        output_data={
+            "stage": "react_reflect",
+            "decision_summary": "Investigation note",
+            "reason_code": "fill_evidence_gap",
+            "confidence": 0.4,
+            "evidence_refs": ["not-a-valid-ref"],
+        },
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DecisionRecord(
+                    record_id=f"dec-{uuid.uuid4().hex[:12]}",
+                    event_id=event_id,
+                    stage=DecisionStage.VERIFY.value,
+                    actor="verify_agent",
+                    decision_summary="minimum verify audit",
+                    reason_codes=["minimum_audit"],
+                    confidence=0.9,
+                    selected={"selected_action": "verify:minimum_audit"},
+                    idempotency_key=f"{event_id}:verify:seed:r1",
+                    record_hash="deadbeef",
+                    schema_version="1.0",
+                )
+            )
+    await service.assert_auto_disposition_allowed(event_id)
+
+
+@pytest.mark.asyncio
+async def test_idempotency_hash_mismatch_sets_degraded(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    degraded_calls: list[tuple[str, str, bool, str]] = []
+
+    class FakeDegradedFlags:
+        async def has_flag(self, event_id: str, flag_name: str) -> bool:
+            return any(item[1] == flag_name for item in degraded_calls)
+
+        async def set_flag(
+            self,
+            event_id: str,
+            flag_name: str,
+            value: bool,
+            writer: str,
+        ) -> list[str]:
+            degraded_calls.append((event_id, flag_name, value, writer))
+            return [f"{flag_name}=true"]
+
+    service = DecisionRecordService(session_factory, degraded_flag_service=FakeDegradedFlags())
+    payload = {
+        "stage": "verify",
+        "decision_summary": "first summary",
+        "reason_code": "minimum_audit",
+        "confidence": 0.9,
+        "selected_action": "verify:first",
+    }
+    first = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-hash-a",
+        input_data={"event_id": event_id},
+        output_data=payload,
+    )
+    second = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-hash-b",
+        input_data={"event_id": event_id},
+        output_data={**payload, "decision_summary": "corrected summary"},
+    )
+    assert first is not None
+    assert second == first
+    assert degraded_calls
+    assert degraded_calls[0][1] == "decision_audit_degraded"
+
+
+@pytest.mark.asyncio
+async def test_auto_disposition_blocked_when_audit_degraded(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+
+    class FakeDegradedFlags:
+        async def has_flag(self, event_id: str, flag_name: str) -> bool:
+            return flag_name == "decision_audit_degraded"
+
+        async def set_flag(self, *args: object, **kwargs: object) -> list[str]:
+            return ["decision_audit_degraded=true"]
+
+    service = DecisionRecordService(session_factory, degraded_flag_service=FakeDegradedFlags())
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DecisionRecord(
+                    record_id=f"dec-{uuid.uuid4().hex[:12]}",
+                    event_id=event_id,
+                    stage=DecisionStage.VERIFY.value,
+                    actor="verify_agent",
+                    decision_summary="minimum verify audit",
+                    reason_codes=["minimum_audit"],
+                    confidence=0.9,
+                    selected={"selected_action": "verify:minimum_audit"},
+                    idempotency_key=f"{event_id}:verify:seed:r1",
+                    record_hash="deadbeef",
+                    schema_version="1.0",
+                )
+            )
+    with pytest.raises(ValidationError, match="degraded decision audit"):
+        await service.assert_auto_disposition_allowed(event_id)
+
+
+@pytest.mark.asyncio
+async def test_decision_record_summary_redacts_secrets_on_persist(
+    service: DecisionRecordService,
+) -> None:
+    secret = "Bearer super-secret-token-131"
+    event_id = _event_id()
+    record_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-redact001",
+        input_data={"event_id": event_id},
+        output_data={
+            "stage": "verify",
+            "decision_summary": f"action selected {secret}",
+            "reason_code": "minimum_audit",
+            "confidence": 0.9,
+            "selected_action": "verify:redacted",
+        },
+    )
+    assert record_id is not None
+    row = await service.get_by_trace_ref("trc-redact001")
+    assert row is not None
+    assert secret not in row.decision_summary
