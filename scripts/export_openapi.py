@@ -1,5 +1,12 @@
 """Export the OpenAPI 3.1 document to ``contracts/openapi/openapi.json``.
 
+Prefer updating all committed contracts together::
+
+    make update-contracts
+
+This script exports OpenAPI only. CI ``check-contract-drift`` compares the full
+``contracts/`` tree; partial exports will fail the drift gate.
+
 Usage:
     python scripts/export_openapi.py [--out contracts/openapi/openapi.json]
 """

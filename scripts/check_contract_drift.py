@@ -2,6 +2,8 @@
 
 Exports into a clean temporary directory and recursively compares the result
 against ``contracts/``. CI invokes this script; it never writes back baselines.
+
+Update all baselines with: ``make update-contracts``
 """
 
 from __future__ import annotations

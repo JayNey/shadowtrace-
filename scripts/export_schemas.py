@@ -1,5 +1,12 @@
 """Export JSON Schema for every core model into ``contracts/schemas/``.
 
+Prefer updating all committed contracts together::
+
+    make update-contracts
+
+This script exports core model schemas only. CI compares the full ``contracts/``
+tree; run ``make update-contracts`` after model changes.
+
 Usage:
     python scripts/export_schemas.py [--out contracts/schemas]
 

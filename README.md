@@ -13,6 +13,10 @@ curl http://localhost:8000/api/v1/health
 make test
 make lint
 
+# 契约 baseline 与 frozen 依赖（ISSUE-112）
+# backend/uv.lock 锁定依赖；改模型/API/Tool/Socket.IO 后执行：
+# make update-contracts && make check-contract-drift
+
 # 前端本地开发（占位页显示 ShadowTrace）
 cd frontend && pnpm install && pnpm dev
 ```
@@ -90,7 +94,7 @@ ShadowTrace 与深信服 XDR、安全 GPT 均保持解耦：
 2. 后端包根为 `backend/app/`，子包固定为：`api/`、`agents/`、`models/`、`services/`、`tools/`、`providers/`（LLMProvider、ToolProvider）、`adapters/`（SourceAdapter 与 DispositionAdapter）、`mock_xdr/`、`ingestion/`、`data_generators/`、`rag/`、`orchestration/`、`core/`、`db/`。
 3. 后端测试统一在 `backend/tests/`，单元测试按模块分目录（如 `tests/test_agents/`、`tests/test_tools/`），集成测试在 `backend/tests/integration/`。
 4. 前端源码根为 `frontend/src/`，子目录固定为：`pages/`、`components/`、`services/`、`hooks/`、`stores/`、`types/`、`utils/`、`styles/`。
-5. 契约目录：`contracts/schemas/`（JSON Schema）、`contracts/openapi/`（OpenAPI 文件）、`contracts/socketio/`（实时事件 Schema）。
+5. 契约目录：`contracts/schemas/`（JSON Schema）、`contracts/openapi/`（OpenAPI 文件）、`contracts/socketio/`（实时事件 Schema，由 `backend/app/contracts/socketio/` 导出）。
 
 ### 4.2 API 与实时通道
 

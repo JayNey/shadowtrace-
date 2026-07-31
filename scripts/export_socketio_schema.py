@@ -1,5 +1,12 @@
 """Export the Socket.IO envelope schema into ``contracts/socketio/``.
 
+Canonical source (edit here)::
+
+    backend/app/contracts/socketio/events.schema.json
+
+This script copies the canonical schema into ``contracts/socketio/`` for
+downstream consumers. Prefer ``make update-contracts`` to refresh all baselines.
+
 Usage:
     python scripts/export_socketio_schema.py [--out contracts/socketio/events.schema.json]
 """

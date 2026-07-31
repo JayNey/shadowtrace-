@@ -4,7 +4,9 @@ Acceptance criteria
 -------------------
 1. A subscribed client receives a ``state_change`` message **within 1 second**
    of a state transition.
-2. All 17 event types are declared in ``contracts/socketio/events.schema.json``
+2. All 17 event types are declared in the committed Socket.IO schema
+   (``contracts/socketio/events.schema.json``, exported from canonical
+   ``backend/app/contracts/socketio/events.schema.json``)
    and every per-type payload validates against its definition in the schema.
 3. Multiple clients subscribed to the same event room all receive the broadcast.
 
