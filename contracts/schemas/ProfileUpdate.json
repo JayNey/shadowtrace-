@@ -33,6 +33,23 @@
       },
       "title": "Behavior Tags",
       "type": "array"
+    },
+    "pending_review": {
+      "default": false,
+      "title": "Pending Review",
+      "type": "boolean"
+    },
+    "review_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Review Id"
     }
   },
   "required": [

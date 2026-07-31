@@ -9,6 +9,7 @@
     "additionalProperties": false,
     "properties": {
       "target_type": {
+        "const": "ip",
         "default": "ip",
         "title": "Target Type",
         "type": "string"

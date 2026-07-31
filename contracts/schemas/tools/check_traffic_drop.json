@@ -10,6 +10,15 @@
     "description": "Verification tool input — same target shape as the paired response tool.",
     "properties": {
       "target_type": {
+        "enum": [
+          "ip",
+          "domain",
+          "host",
+          "file",
+          "process",
+          "account",
+          "event"
+        ],
         "title": "Target Type",
         "type": "string"
       },

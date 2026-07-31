@@ -9,6 +9,7 @@
     "additionalProperties": false,
     "properties": {
       "target_type": {
+        "const": "file",
         "default": "file",
         "title": "Target Type",
         "type": "string"

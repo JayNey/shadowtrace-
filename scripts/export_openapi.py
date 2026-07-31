@@ -7,25 +7,21 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
-_BACKEND = Path(__file__).resolve().parents[1] / "backend"
-if str(_BACKEND) not in sys.path:
-    sys.path.insert(0, str(_BACKEND))
+_SCRIPTS = Path(__file__).resolve().parent
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
 
-from app.main import app  # noqa: E402
+from contract_export_lib import export_openapi as _export_openapi
 
 _DEFAULT_OUT = Path(__file__).resolve().parents[1] / "contracts" / "openapi" / "openapi.json"
 
 
 def export_openapi(out_path: Path) -> Path:
     """Write the app's OpenAPI schema to ``out_path`` and return it."""
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    schema = app.openapi()
-    out_path.write_text(json.dumps(schema, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    return out_path
+    return _export_openapi(out_path)
 
 
 def main() -> None:

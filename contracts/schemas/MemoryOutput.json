@@ -28,6 +28,23 @@
           "default": false,
           "title": "Archived",
           "type": "boolean"
+        },
+        "pending_review": {
+          "default": false,
+          "title": "Pending Review",
+          "type": "boolean"
+        },
+        "review_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Id"
         }
       },
       "required": [
@@ -61,6 +78,18 @@
           "default": true,
           "title": "Pending Review",
           "type": "boolean"
+        },
+        "review_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Id"
         }
       },
       "required": [
@@ -107,6 +136,23 @@
           },
           "title": "Behavior Tags",
           "type": "array"
+        },
+        "pending_review": {
+          "default": false,
+          "title": "Pending Review",
+          "type": "boolean"
+        },
+        "review_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Id"
         }
       },
       "required": [

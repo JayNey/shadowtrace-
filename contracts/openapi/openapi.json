@@ -815,6 +815,49 @@
         }
       }
     },
+    "/api/v1/events/{event_id}/evidence": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Get Event Evidence",
+        "description": "Return evidence collection output with gaps and per-tool query summary.",
+        "operationId": "get_event_evidence_api_v1_events__event_id__evidence_get",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventEvidenceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/events/{event_id}/decision-trace": {
       "get": {
         "tags": [
@@ -2867,6 +2910,16 @@
         ],
         "title": "ChatRequest"
       },
+      "CollectionStatus": {
+        "type": "string",
+        "enum": [
+          "completed",
+          "partial_done",
+          "degraded",
+          "failed"
+        ],
+        "title": "CollectionStatus"
+      },
       "ConfirmationEvidence": {
         "type": "string",
         "enum": [
@@ -3476,6 +3529,77 @@
         ],
         "title": "EventDetailResponse"
       },
+      "EventEvidenceResponse": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "evidence_list": {
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "type": "array",
+            "title": "Evidence List"
+          },
+          "gaps": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceGapResponse"
+            },
+            "type": "array",
+            "title": "Gaps"
+          },
+          "collection_status": {
+            "$ref": "#/components/schemas/CollectionStatus"
+          },
+          "success_sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Success Sources"
+          },
+          "failed_sources": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Failed Sources"
+          },
+          "overall_confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Overall Confidence",
+            "default": 0.0
+          },
+          "query_summary": {
+            "items": {
+              "$ref": "#/components/schemas/EvidenceQuerySummaryItem"
+            },
+            "type": "array",
+            "title": "Query Summary"
+          },
+          "triage_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EvidenceTriageContextResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "collection_status"
+        ],
+        "title": "EventEvidenceResponse",
+        "description": "GET /events/{event_id}/evidence payload (ISSUE-101)."
+      },
       "EventListItem": {
         "properties": {
           "event_id": {
@@ -3755,6 +3879,212 @@
         ],
         "title": "EventType",
         "description": "Supported security event types (intro §1); extensible via scenario packs."
+      },
+      "Evidence": {
+        "properties": {
+          "evidence_id": {
+            "type": "string",
+            "title": "Evidence Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "source": {
+            "$ref": "#/components/schemas/EvidenceSource"
+          },
+          "evidence_type": {
+            "type": "string",
+            "title": "Evidence Type"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          },
+          "related_entities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Entities"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "raw_data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Raw Data"
+          },
+          "mitre_technique": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mitre Technique"
+          },
+          "is_conflicting": {
+            "type": "boolean",
+            "title": "Is Conflicting",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "evidence_id",
+          "event_id",
+          "source",
+          "evidence_type",
+          "description",
+          "confidence"
+        ],
+        "title": "Evidence"
+      },
+      "EvidenceGapResponse": {
+        "properties": {
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "missing_source": {
+            "type": "string",
+            "title": "Missing Source"
+          },
+          "reason": {
+            "type": "string",
+            "title": "Reason"
+          },
+          "detail": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Detail"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "event_id",
+          "missing_source",
+          "reason"
+        ],
+        "title": "EvidenceGapResponse",
+        "description": "API view of ``EvidenceGap`` (ISSUE-101)."
+      },
+      "EvidenceQuerySummaryItem": {
+        "properties": {
+          "tool_name": {
+            "type": "string",
+            "title": "Tool Name"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "execution_time_ms": {
+            "type": "integer",
+            "title": "Execution Time Ms",
+            "default": 0
+          },
+          "records_count": {
+            "type": "integer",
+            "title": "Records Count",
+            "default": 0
+          },
+          "gap_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gap Reason"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "tool_name",
+          "source",
+          "status"
+        ],
+        "title": "EvidenceQuerySummaryItem",
+        "description": "Per-tool evidence collection summary for observability."
+      },
+      "EvidenceSource": {
+        "type": "string",
+        "enum": [
+          "identity",
+          "endpoint",
+          "data_security",
+          "network_flow",
+          "dns",
+          "asset",
+          "threat_intel",
+          "false_positive_match"
+        ],
+        "title": "EvidenceSource",
+        "description": "Eight evidence sources."
+      },
+      "EvidenceTriageContextResponse": {
+        "properties": {
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "default": false
+          },
+          "degradation_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Degradation Reasons"
+          },
+          "entity_rejection_summary": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Entity Rejection Summary"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "EvidenceTriageContextResponse",
+        "description": "Upstream triage context for evidence gap reason chain (ISSUE-101)."
       },
       "ExecutionJobResponse": {
         "properties": {

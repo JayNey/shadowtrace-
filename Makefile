@@ -1,6 +1,6 @@
-# Prefer the project venv when present.  Keep this resolver before every target
-# so all Python tooling is run from the same interpreter via ``python -m``.
-PYTHON ?= $(shell if [ -x "$(CURDIR)/backend/.venv/bin/python" ]; then echo "$(CURDIR)/backend/.venv/bin/python"; else echo python3; fi)
+# Prefer uv when lockfile is present; fall back to project venv / system python.
+UV ?= uv
+PYTHON ?= $(shell if [ -f "$(CURDIR)/backend/uv.lock" ]; then echo "$(UV) run --frozen python"; elif [ -x "$(CURDIR)/backend/.venv/bin/python" ]; then echo "$(CURDIR)/backend/.venv/bin/python"; else echo python3; fi)
 
 WORKTREE_ID ?= $(shell printf '%s' "$(CURDIR)" | cksum | cut -d ' ' -f 1)
 COMPOSE_PROJECT_NAME ?= shadowtrace-$(WORKTREE_ID)
@@ -30,7 +30,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build
+.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) up -d --build
@@ -258,19 +258,26 @@ test-e2e-frontend:
 	E2E_AUTH_TOKEN="$(E2E_AUTH_TOKEN)" \
 		pnpm test:e2e
 
+# --- ISSUE-112 contract drift / frozen export -------------------------------- #
+update-contracts:
+	cd backend && $(UV) run --frozen python ../scripts/export_contracts.py
+
+check-contract-drift:
+	cd backend && $(UV) run --frozen python ../scripts/check_contract_drift.py
+
 # --- ISSUE-009 local / CI parity gates ------------------------------------ #
 ci-lint:
-	cd backend && $(PYTHON) -m pip install -e ".[dev]" -q
-	cd backend && $(PYTHON) -m ruff check app tests
-	cd backend && $(PYTHON) -m ruff format --check app tests
-	cd backend && $(PYTHON) -m mypy app
+	cd backend && $(UV) sync --frozen --extra dev
+	cd backend && $(UV) run --frozen ruff check app tests
+	cd backend && $(UV) run --frozen ruff format --check app tests
+	cd backend && $(UV) run --frozen mypy app
 	cd frontend && (corepack enable && corepack prepare pnpm@9.15.9 --activate || true)
 	cd frontend && pnpm install --frozen-lockfile
 	cd frontend && pnpm lint
 	cd frontend && pnpm typecheck
 
 ci-test:
-	cd backend && $(PYTHON) -m pip install -e ".[dev]" -q
+	cd backend && $(UV) sync --frozen --extra dev
 	@set -eu; \
 	project="$(CI_TEST_PROJECT_NAME)"; \
 	compose() { \
@@ -294,7 +301,7 @@ ci-test:
 	compose up -d --wait --wait-timeout 120 postgres redis; \
 	cd "$(CURDIR)/backend"; \
 	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
-		$(PYTHON) -m pytest --cov=app --cov-report=term --cov-report=xml:coverage.xml
+		$(UV) run --frozen pytest --cov=app --cov-report=term --cov-report=xml:coverage.xml
 
 ci-build:
 	cd frontend && (corepack enable && corepack prepare pnpm@9.15.9 --activate || true)

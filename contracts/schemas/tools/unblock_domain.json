@@ -9,6 +9,7 @@
     "additionalProperties": false,
     "properties": {
       "target_type": {
+        "const": "domain",
         "default": "domain",
         "title": "Target Type",
         "type": "string"

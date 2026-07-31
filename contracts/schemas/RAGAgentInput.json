@@ -122,6 +122,85 @@
       "title": "DomainEntity",
       "type": "object"
     },
+    "EntityConflictRecord": {
+      "additionalProperties": false,
+      "description": "Source-priority entity merge conflict (ISSUE-099).",
+      "properties": {
+        "entity_type": {
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "semantic_key": {
+          "title": "Semantic Key",
+          "type": "string"
+        },
+        "kept_source": {
+          "title": "Kept Source",
+          "type": "string"
+        },
+        "discarded_source": {
+          "title": "Discarded Source",
+          "type": "string"
+        },
+        "reason": {
+          "default": "source_priority",
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_type",
+        "semantic_key",
+        "kept_source",
+        "discarded_source"
+      ],
+      "title": "EntityConflictRecord",
+      "type": "object"
+    },
+    "EntityProvenanceRecord": {
+      "additionalProperties": false,
+      "description": "Structured source enrichment provenance (ISSUE-099, no raw payload).",
+      "properties": {
+        "source_kind": {
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "source_object_id": {
+          "title": "Source Object Id",
+          "type": "string"
+        },
+        "connector_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Connector Id"
+        },
+        "entity_category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entity Category"
+        }
+      },
+      "required": [
+        "source_kind",
+        "source_object_id"
+      ],
+      "title": "EntityProvenanceRecord",
+      "type": "object"
+    },
     "EntitySet": {
       "additionalProperties": false,
       "description": "Container of the six entity categories.",
@@ -890,6 +969,32 @@
           "default": false,
           "title": "Degraded",
           "type": "boolean"
+        },
+        "degradation_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Degradation Reasons",
+          "type": "array"
+        },
+        "entity_provenance_summary": {
+          "items": {
+            "$ref": "#/$defs/EntityProvenanceRecord"
+          },
+          "title": "Entity Provenance Summary",
+          "type": "array"
+        },
+        "entity_conflicts": {
+          "items": {
+            "$ref": "#/$defs/EntityConflictRecord"
+          },
+          "title": "Entity Conflicts",
+          "type": "array"
+        },
+        "entity_rejection_summary": {
+          "additionalProperties": true,
+          "title": "Entity Rejection Summary",
+          "type": "object"
         }
       },
       "required": [
