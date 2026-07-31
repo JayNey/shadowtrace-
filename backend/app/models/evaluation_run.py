@@ -59,6 +59,14 @@ class EvaluationRunConfig(BaseModel):
 
     seed: int = Field(..., ge=0)
     replay_mode: str = Field(default="mock_deterministic", min_length=1)
+    replay_fidelity: str = Field(
+        default="echo_truth_stub",
+        min_length=1,
+        description=(
+            "Replay fidelity label. Phase-1 uses echo_truth_stub until investigate "
+            "replay (#631) is wired; do not treat green runs as agent quality proof."
+        ),
+    )
     release_refs: EvaluationReleaseRefs = Field(default_factory=EvaluationReleaseRefs)
     scorer_ids: list[str] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)

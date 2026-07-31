@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,9 @@ DEFAULT_DATASET = REPO_ROOT / "data" / "evaluation" / "shadowtrace_demo_v1"
 def resolve_code_sha(explicit: str | None) -> str:
     if explicit and explicit.strip():
         return explicit.strip()
+    env_sha = os.environ.get("EVAL_CODE_SHA", "").strip()
+    if env_sha:
+        return env_sha
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -29,8 +33,6 @@ def resolve_code_sha(explicit: str | None) -> str:
 
 
 def _apply_migrations(database_url: str) -> None:
-    import os
-
     from alembic import command
     from alembic.config import Config
 
@@ -40,10 +42,43 @@ def _apply_migrations(database_url: str) -> None:
     command.upgrade(alembic_cfg, "head")
 
 
+async def _resolve_manifest(
+    truth_service,
+    session_factory,
+    dataset_dir: Path,
+    *,
+    tenant_id: str | None,
+    skip_fixture_load: bool,
+):
+    from app.evaluation.fixture_loader import load_fixture_dataset, load_fixture_manifest
+
+    if skip_fixture_load:
+        raw = load_fixture_manifest(dataset_dir)
+        resolved_tenant = tenant_id or str(raw.get("tenant_id", "")).strip()
+        dataset_id = str(raw.get("dataset_id", "")).strip()
+        dataset_version = str(raw.get("dataset_version", "")).strip()
+        if not resolved_tenant or not dataset_id or not dataset_version:
+            raise ValueError("manifest must include tenant_id, dataset_id, dataset_version")
+        manifest = await truth_service.get_dataset_manifest(
+            tenant_id=resolved_tenant,
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+        )
+        return manifest.case_count, manifest
+
+    async with session_factory() as session:
+        async with session.begin():
+            truths, manifest = await load_fixture_dataset(
+                truth_service,
+                dataset_dir,
+                tenant_id=tenant_id,
+            )
+    return len(truths), manifest
+
+
 async def _run(args: argparse.Namespace) -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    from app.evaluation.fixture_loader import load_fixture_dataset
     from app.evaluation.runner import run_fixture_evaluation
     from app.models.evaluation_run import EvaluationReleaseRefs
     from app.services.evaluation_truth_service import EvaluationTruthService
@@ -60,13 +95,13 @@ async def _run(args: argparse.Namespace) -> int:
     session_factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
     truth_service = EvaluationTruthService(session_factory)
 
-    async with session_factory() as session:
-        async with session.begin():
-            truths, manifest = await load_fixture_dataset(
-                truth_service,
-                dataset_dir,
-                tenant_id=args.tenant_id,
-            )
+    loaded_cases, manifest = await _resolve_manifest(
+        truth_service,
+        session_factory,
+        dataset_dir,
+        tenant_id=args.tenant_id,
+        skip_fixture_load=args.skip_fixture_load,
+    )
 
     artifact = await run_fixture_evaluation(
         truth_service,
@@ -93,8 +128,9 @@ async def _run(args: argparse.Namespace) -> int:
                 "case_count": artifact.aggregates.case_count,
                 "pass_rate": artifact.aggregates.pass_rate,
                 "gate_verdict": artifact.gate.verdict.value if artifact.gate else None,
+                "replay_fidelity": artifact.config.replay_fidelity,
                 "output": str(output_path),
-                "loaded_cases": len(truths),
+                "loaded_cases": loaded_cases,
             },
             indent=2,
         )
@@ -145,6 +181,11 @@ def main() -> None:
         "--migrate",
         action="store_true",
         help="Apply Alembic migrations before loading fixtures (CI uses separate step)",
+    )
+    parser.add_argument(
+        "--skip-fixture-load",
+        action="store_true",
+        help="Skip fixture persistence; read canonical truth already present in PostgreSQL",
     )
     args = parser.parse_args()
 

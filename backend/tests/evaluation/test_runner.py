@@ -24,11 +24,17 @@ from app.evaluation.replayer import MockDeterministicReplayer
 from app.evaluation.runner import EvaluationRunner, EvaluationRunRequest, run_fixture_evaluation
 from app.evaluation.scorers.base import ScorerRegistration
 from app.evaluation.scorers.registry import ScorerRegistry, default_scorer_registry
-from app.evaluation.threshold import evaluate_gate, load_threshold_manifest
+from app.evaluation.threshold import (
+    evaluate_gate,
+    load_threshold_manifest,
+    validate_threshold_manifest_for_run,
+)
 from app.models.evaluation_run import (
     EvaluationAggregateMetrics,
+    EvaluationQuarantinePolicy,
     EvaluationRunStatus,
     EvaluationScorerResult,
+    EvaluationThresholdManifest,
     GateVerdict,
     ScorerOutcome,
 )
@@ -126,6 +132,7 @@ async def test_demo_dataset_run_is_deterministic(
     assert first.aggregates.unevaluable_count == 1
     assert first.aggregates.error_count == 0
     assert first.status == EvaluationRunStatus.COMPLETED
+    assert first.config.replay_fidelity == "echo_truth_stub"
     assert first.gate is not None
     assert first.gate.verdict == GateVerdict.PASS
 
@@ -168,10 +175,12 @@ async def test_required_scorer_error_fail_closed(
             raise RuntimeError("simulated scorer failure")
 
     registry = default_scorer_registry()
-    registry._scorers["threat_label"] = ScorerRegistration(  # noqa: SLF001
-        scorer_id="threat_label",
-        scorer=BrokenScorer(),
-        required=True,
+    registry.replace_scorer(
+        ScorerRegistration(
+            scorer_id="threat_label",
+            scorer=BrokenScorer(),
+            required=True,
+        )
     )
 
     artifact = await run_fixture_evaluation(
@@ -426,3 +435,217 @@ def test_mock_replayer_is_deterministic_per_seed() -> None:
     second = replayer.replay(truth, seed=42)
     assert first.model_dump() == second.model_dump()
     assert first.observed_case_label == truth.slice_expectation.expected_case_label.value  # type: ignore[attr-defined]
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_artifact_hash_invariant_across_gate_manifest_path(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+    artifact = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="deadbeef",
+        threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+    )
+    assert artifact.gate is not None
+    mutated = artifact.model_copy(
+        update={
+            "gate": artifact.gate.model_copy(
+                update={"manifest_path": "/tmp/other/threshold_manifest.json"}
+            )
+        }
+    )
+    assert compute_artifact_hash(artifact) == compute_artifact_hash(mutated)
+
+
+@pytest.mark.evaluation
+def test_validate_threshold_manifest_rejects_dataset_mismatch() -> None:
+    threshold = load_threshold_manifest(DATASET_DIR / "threshold_manifest.json")
+    with pytest.raises(ValidationError, match="dataset_id mismatch"):
+        validate_threshold_manifest_for_run(
+            threshold,
+            dataset_id="wrong_dataset",
+            dataset_version="2026.07.31",
+        )
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_runner_rejects_mismatched_threshold_manifest_dataset(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+    bad = load_threshold_manifest(DATASET_DIR / "threshold_manifest.json").model_copy(
+        update={"dataset_id": "wrong_dataset"}
+    )
+    runner = EvaluationRunner(truth_service)
+    with pytest.raises(ValidationError, match="dataset_id mismatch"):
+        await runner.run(
+            EvaluationRunRequest(
+                tenant_id=manifest.tenant_id,
+                dataset_id=manifest.dataset_id,
+                dataset_version=manifest.dataset_version,
+                dataset_content_hash=manifest.content_hash,
+                seed=42,
+                code_sha="deadbeef",
+                threshold_manifest=bad,
+                threshold_manifest_path="data/evaluation/shadowtrace_demo_v1/threshold_manifest.json",
+            )
+        )
+
+
+@pytest.mark.evaluation
+def test_required_gate_true_emits_fail_closed() -> None:
+    threshold = EvaluationThresholdManifest(
+        manifest_version="test",
+        dataset_id="shadowtrace_demo_v1",
+        dataset_version="2026.07.31",
+        required_scorers=["threat_label"],
+        min_pass_rate=1.0,
+        max_error_count=0,
+        required_gate=True,
+    )
+    gate = evaluate_gate(
+        threshold,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=1,
+            pass_count=0,
+            fail_count=1,
+            unevaluable_count=0,
+            error_count=0,
+            pass_rate=0.0,
+        ),
+        case_results=[],
+        registry=default_scorer_registry(),
+    )
+    assert gate.verdict == GateVerdict.FAIL_CLOSED
+
+
+@pytest.mark.evaluation
+def test_quarantine_expired_fail_closed() -> None:
+    threshold = EvaluationThresholdManifest(
+        manifest_version="test",
+        dataset_id="shadowtrace_demo_v1",
+        dataset_version="2026.07.31",
+        required_gate=True,
+        quarantine=EvaluationQuarantinePolicy(
+            owner="eval-team",
+            expires_at=datetime(2020, 1, 1, tzinfo=UTC),
+            reason="stale quarantine",
+        ),
+    )
+    gate = evaluate_gate(
+        threshold,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=1,
+            pass_count=1,
+            fail_count=0,
+            unevaluable_count=0,
+            error_count=0,
+            pass_rate=1.0,
+        ),
+        case_results=[],
+        registry=default_scorer_registry(),
+        now=datetime(2026, 7, 31, tzinfo=UTC),
+    )
+    assert gate.verdict == GateVerdict.FAIL_CLOSED
+    assert gate.diffs[0].field == "quarantine"
+    assert gate.diffs[0].actual == "expired"
+
+
+@pytest.mark.evaluation
+def test_quarantine_active_passes_despite_threshold_diffs() -> None:
+    threshold = EvaluationThresholdManifest(
+        manifest_version="test",
+        dataset_id="shadowtrace_demo_v1",
+        dataset_version="2026.07.31",
+        required_gate=True,
+        min_pass_rate=1.0,
+        quarantine=EvaluationQuarantinePolicy(
+            owner="eval-team",
+            expires_at=datetime(2099, 1, 1, tzinfo=UTC),
+            reason="temporary flake window",
+        ),
+    )
+    gate = evaluate_gate(
+        threshold,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=2,
+            pass_count=0,
+            fail_count=2,
+            unevaluable_count=0,
+            error_count=0,
+            pass_rate=0.0,
+        ),
+        case_results=[],
+        registry=default_scorer_registry(),
+        now=datetime(2026, 7, 31, tzinfo=UTC),
+    )
+    assert gate.verdict == GateVerdict.PASS
+    assert gate.diffs[0].field == "quarantine"
+    assert gate.diffs[0].actual == "active"
+    assert any(diff.field == "pass_rate" for diff in gate.diffs)
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_required_scorer_error_count_only_counts_manifest_scorers(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+
+    class OptionalBrokenScorer:
+        scorer_id = "optional_probe"
+        supported_slices = frozenset({SliceType.THREAT})
+
+        def score(self, truth, observation, ctx) -> EvaluationScorerResult:
+            raise RuntimeError("optional scorer failure")
+
+    registry = ScorerRegistry()
+    default = default_scorer_registry()
+    for scorer_id in default.scorer_ids:
+        reg = default.get(scorer_id)
+        registry.register(reg)
+    registry.register(
+        ScorerRegistration(
+            scorer_id="optional_probe",
+            scorer=OptionalBrokenScorer(),
+            required=False,
+        )
+    )
+    artifact = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="deadbeef",
+        registry=registry,
+    )
+    assert artifact.aggregates.error_count >= 1
+    assert artifact.aggregates.required_scorer_error_count == 0
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_cli_skip_fixture_load_reuses_existing_truth(
+    truth_service: EvaluationTruthService,
+    session_factory: async_sessionmaker[AsyncSession],
+    loaded_dataset: tuple,
+) -> None:
+    from scripts import run_evaluation as cli
+
+    _, manifest = loaded_dataset
+    count, resolved = await cli._resolve_manifest(
+        truth_service,
+        session_factory,
+        DATASET_DIR,
+        tenant_id=manifest.tenant_id,
+        skip_fixture_load=True,
+    )
+    assert count == manifest.case_count
+    assert resolved.content_hash == manifest.content_hash

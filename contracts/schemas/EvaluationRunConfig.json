@@ -77,6 +77,13 @@
       "title": "Replay Mode",
       "type": "string"
     },
+    "replay_fidelity": {
+      "default": "echo_truth_stub",
+      "description": "Replay fidelity label. Phase-1 uses echo_truth_stub until investigate replay (#631) is wired; do not treat green runs as agent quality proof.",
+      "minLength": 1,
+      "title": "Replay Fidelity",
+      "type": "string"
+    },
     "release_refs": {
       "$ref": "#/$defs/EvaluationReleaseRefs"
     },

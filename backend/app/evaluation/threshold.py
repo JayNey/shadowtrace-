@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from app.models.evaluation_run import (
     EvaluationCaseResult,
     EvaluationGateDiff,
     EvaluationGateResult,
+    EvaluationQuarantinePolicy,
     EvaluationThresholdManifest,
     EvaluationThresholdRule,
     GateVerdict,
@@ -30,6 +32,31 @@ def load_threshold_manifest(path: Path) -> EvaluationThresholdManifest:
     if not isinstance(payload, dict):
         raise ValidationError("threshold manifest must be a JSON object")
     return EvaluationThresholdManifest.model_validate(payload)
+
+
+def validate_threshold_manifest_for_run(
+    manifest: EvaluationThresholdManifest,
+    *,
+    dataset_id: str,
+    dataset_version: str,
+) -> None:
+    """Ensure threshold manifest targets the dataset under evaluation."""
+    if manifest.dataset_id != dataset_id:
+        raise ValidationError(
+            "threshold manifest dataset_id mismatch",
+            details={
+                "expected": dataset_id,
+                "actual": manifest.dataset_id,
+            },
+        )
+    if manifest.dataset_version is not None and manifest.dataset_version != dataset_version:
+        raise ValidationError(
+            "threshold manifest dataset_version mismatch",
+            details={
+                "expected": dataset_version,
+                "actual": manifest.dataset_version,
+            },
+        )
 
 
 def _metric_value(metric: str, aggregates: EvaluationAggregateMetrics) -> float | int:
@@ -88,36 +115,44 @@ def _evaluate_rule(
     )
 
 
-def evaluate_gate(
-    manifest: EvaluationThresholdManifest | None,
+def _quarantine_diff(
+    quarantine: EvaluationQuarantinePolicy,
+    *,
+    now: datetime,
+) -> tuple[EvaluationGateDiff, bool]:
+    """Return quarantine diff and whether quarantine is expired."""
+    if quarantine.expires_at is not None and quarantine.expires_at < now:
+        return (
+            EvaluationGateDiff(
+                field="quarantine",
+                expected="active",
+                actual="expired",
+                reason=(
+                    f"quarantine expired at {quarantine.expires_at.isoformat()} "
+                    f"(owner={quarantine.owner})"
+                ),
+            ),
+            True,
+        )
+    detail = quarantine.reason or "flaky gate quarantined"
+    return (
+        EvaluationGateDiff(
+            field="quarantine",
+            expected="blocking",
+            actual="active",
+            reason=f"quarantine active (owner={quarantine.owner}): {detail}",
+        ),
+        False,
+    )
+
+
+def _collect_threshold_diffs(
+    manifest: EvaluationThresholdManifest,
     *,
     aggregates: EvaluationAggregateMetrics,
     case_results: list[EvaluationCaseResult],
     registry: ScorerRegistry,
-    manifest_path: str | None = None,
-) -> EvaluationGateResult:
-    """Evaluate versioned thresholds; missing manifest fail-closes when required."""
-    if manifest is None:
-        if manifest_path is not None:
-            return EvaluationGateResult(
-                verdict=GateVerdict.FAIL_CLOSED,
-                manifest_path=manifest_path,
-                diffs=[
-                    EvaluationGateDiff(
-                        field="threshold_manifest",
-                        expected="present",
-                        actual="missing",
-                        reason="threshold manifest path provided but manifest could not be loaded",
-                    )
-                ],
-            )
-        return EvaluationGateResult(
-            verdict=GateVerdict.PASS,
-            manifest_version="",
-            manifest_path=None,
-            diffs=[],
-        )
-
+) -> list[EvaluationGateDiff]:
     diffs: list[EvaluationGateDiff] = []
 
     registered = set(registry.scorer_ids)
@@ -192,6 +227,65 @@ def evaluate_gate(
         if delta is not None:
             diffs.append(delta)
 
+    return diffs
+
+
+def evaluate_gate(
+    manifest: EvaluationThresholdManifest | None,
+    *,
+    aggregates: EvaluationAggregateMetrics,
+    case_results: list[EvaluationCaseResult],
+    registry: ScorerRegistry,
+    manifest_path: str | None = None,
+    now: datetime | None = None,
+) -> EvaluationGateResult:
+    """Evaluate versioned thresholds; missing manifest fail-closes when required."""
+    if manifest is None:
+        if manifest_path is not None:
+            return EvaluationGateResult(
+                verdict=GateVerdict.FAIL_CLOSED,
+                manifest_path=manifest_path,
+                diffs=[
+                    EvaluationGateDiff(
+                        field="threshold_manifest",
+                        expected="present",
+                        actual="missing",
+                        reason="threshold manifest path provided but manifest could not be loaded",
+                    )
+                ],
+            )
+        return EvaluationGateResult(
+            verdict=GateVerdict.PASS,
+            manifest_version="",
+            manifest_path=None,
+            diffs=[],
+        )
+
+    evaluated_at = now or datetime.now(tz=UTC)
+    diffs = _collect_threshold_diffs(
+        manifest,
+        aggregates=aggregates,
+        case_results=case_results,
+        registry=registry,
+    )
+
+    if manifest.quarantine is not None:
+        quarantine_diff, expired = _quarantine_diff(manifest.quarantine, now=evaluated_at)
+        diffs.insert(0, quarantine_diff)
+        if expired:
+            return EvaluationGateResult(
+                verdict=GateVerdict.FAIL_CLOSED,
+                manifest_version=manifest.manifest_version,
+                manifest_path=manifest_path,
+                diffs=diffs,
+            )
+        return EvaluationGateResult(
+            verdict=GateVerdict.PASS,
+            manifest_version=manifest.manifest_version,
+            manifest_path=manifest_path,
+            diffs=diffs,
+        )
+
     if diffs:
         verdict = GateVerdict.FAIL_CLOSED if manifest.required_gate else GateVerdict.FAIL
     else:
@@ -205,4 +299,8 @@ def evaluate_gate(
     )
 
 
-__all__ = ["evaluate_gate", "load_threshold_manifest"]
+__all__ = [
+    "evaluate_gate",
+    "load_threshold_manifest",
+    "validate_threshold_manifest_for_run",
+]

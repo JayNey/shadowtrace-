@@ -32,6 +32,7 @@ class MockDeterministicReplayer:
     """Deterministic mock replay for evaluation cases."""
 
     replay_mode = "mock_deterministic"
+    replay_fidelity = "echo_truth_stub"
 
     def replay(self, truth: EvaluationCaseTruth, *, seed: int) -> CaseObservation:
         slice_type = SliceType(truth.slice_expectation.slice_type)

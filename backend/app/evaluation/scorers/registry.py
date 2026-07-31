@@ -21,6 +21,15 @@ class ScorerRegistry:
             )
         self._scorers[registration.scorer_id] = registration
 
+    def replace_scorer(self, registration: ScorerRegistration) -> None:
+        """Replace an existing scorer registration (tests and controlled overrides)."""
+        if registration.scorer_id not in self._scorers:
+            raise ValidationError(
+                f"scorer not registered: {registration.scorer_id}",
+                details={"scorer_id": registration.scorer_id},
+            )
+        self._scorers[registration.scorer_id] = registration
+
     def get(self, scorer_id: str) -> ScorerRegistration:
         reg = self._scorers.get(scorer_id)
         if reg is None:

@@ -16,7 +16,12 @@ from app.evaluation.artifact import finalize_artifact
 from app.evaluation.replayer import MockDeterministicReplayer
 from app.evaluation.scorers.base import ScorerContext
 from app.evaluation.scorers.registry import ScorerRegistry, default_scorer_registry
-from app.evaluation.threshold import evaluate_gate, load_threshold_manifest
+from app.evaluation.paths import repo_relative_manifest_path
+from app.evaluation.threshold import (
+    evaluate_gate,
+    load_threshold_manifest,
+    validate_threshold_manifest_for_run,
+)
 from app.models.evaluation_run import (
     EvaluationAggregateMetrics,
     EvaluationCaseResult,
@@ -62,7 +67,11 @@ def _case_status(
     return EvaluationRunStatus.FAILED
 
 
-def _aggregate(case_results: list[EvaluationCaseResult]) -> EvaluationAggregateMetrics:
+def _aggregate(
+    case_results: list[EvaluationCaseResult],
+    *,
+    required_scorer_ids: frozenset[str],
+) -> EvaluationAggregateMetrics:
     pass_count = fail_count = unevaluable_count = error_count = 0
     required_scorer_error_count = 0
 
@@ -73,7 +82,9 @@ def _aggregate(case_results: list[EvaluationCaseResult]) -> EvaluationAggregateM
         elif ScorerOutcome.ERROR in outcomes:
             error_count += 1
             required_scorer_error_count += sum(
-                1 for r in case.scorer_results if r.outcome == ScorerOutcome.ERROR
+                1
+                for r in case.scorer_results
+                if r.outcome == ScorerOutcome.ERROR and r.scorer_id in required_scorer_ids
             )
         elif ScorerOutcome.FAIL in outcomes or case.case_status == EvaluationRunStatus.FAILED:
             fail_count += 1
@@ -97,6 +108,15 @@ def _aggregate(case_results: list[EvaluationCaseResult]) -> EvaluationAggregateM
         pass_rate=pass_rate,
         required_scorer_error_count=required_scorer_error_count,
     )
+
+
+def _required_scorer_ids(
+    manifest: EvaluationThresholdManifest | None,
+    registry: ScorerRegistry,
+) -> frozenset[str]:
+    if manifest is not None and manifest.required_scorers:
+        return frozenset(manifest.required_scorers)
+    return frozenset(registry.all_required_ids())
 
 
 def _run_status(
@@ -210,6 +230,7 @@ class EvaluationRunner:
         config = EvaluationRunConfig(
             seed=request.seed,
             replay_mode=self._replayer.replay_mode,
+            replay_fidelity=getattr(self._replayer, "replay_fidelity", "echo_truth_stub"),
             release_refs=request.release_refs,
             scorer_ids=scorer_ids,
         )
@@ -264,7 +285,17 @@ class EvaluationRunner:
                 )
             )
 
-        aggregates = _aggregate(case_results)
+        if request.threshold_manifest is not None:
+            validate_threshold_manifest_for_run(
+                request.threshold_manifest,
+                dataset_id=request.dataset_id,
+                dataset_version=request.dataset_version,
+            )
+
+        aggregates = _aggregate(
+            case_results,
+            required_scorer_ids=_required_scorer_ids(request.threshold_manifest, self._registry),
+        )
         gate = evaluate_gate(
             request.threshold_manifest,
             aggregates=aggregates,
@@ -308,7 +339,7 @@ async def run_fixture_evaluation(
     threshold: EvaluationThresholdManifest | None = None
     threshold_path_str: str | None = None
     if threshold_manifest_path is not None:
-        threshold_path_str = str(threshold_manifest_path)
+        threshold_path_str = repo_relative_manifest_path(threshold_manifest_path)
         threshold = load_threshold_manifest(threshold_manifest_path)
 
     runner = EvaluationRunner(truth_service, registry=registry)
