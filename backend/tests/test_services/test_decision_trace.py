@@ -972,6 +972,39 @@ class TestDecisionTraceDegradationAndEdgeCases:
         assert agent.detail.get("input_summary") == "legacy input"
 
     @pytest.mark.asyncio
+    async def test_legacy_react_trace_exposes_not_retained_compat_keys(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """ISSUE-131: legacy CoT keys surface as [NOT_RETAINED] on read path."""
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="react_engine",
+                    output_data={
+                        "decision_summary": "bounded react summary",
+                        "thought": "hidden chain-of-thought",
+                        "reflection": "also hidden",
+                        "reasoning": "free text reasoning",
+                    },
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        agent = next(
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        )
+        assert agent.detail["thought"] == "[NOT_RETAINED]"
+        assert agent.detail["reflection"] == "[NOT_RETAINED]"
+        assert agent.detail["reasoning"] == "[NOT_RETAINED]"
+        assert "hidden chain-of-thought" not in str(agent.detail)
+
+    @pytest.mark.asyncio
     async def test_running_agent_title_uses_in_progress_wording(
         self,
         service: DecisionTraceService,

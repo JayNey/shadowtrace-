@@ -19,7 +19,6 @@ from app.mock_xdr.state import MockXDRState
 from app.services.context_service import EventContextStore
 from app.services.decision_record_service import DecisionRecordService
 from app.services.degraded_flag_service import DegradedFlagService
-from app.services.degraded_flag_service import DegradedFlagService
 from app.services.disposition_command_factory import DispositionCommandFactory
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_audit_log_service import EventAuditLogService

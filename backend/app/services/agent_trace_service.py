@@ -57,7 +57,6 @@ _DECISION_ID_FIELDS = frozenset(
 _DECISION_CONCLUSION_FIELDS = frozenset(
     {
         "decision_summary",
-        "narrative_summary",
         "structured_conclusion",
         "verdict",
         "final_verdict",

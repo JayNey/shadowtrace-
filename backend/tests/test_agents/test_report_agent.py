@@ -631,6 +631,22 @@ def test_builder_preserves_section_order() -> None:
     assert [s.key for s in sections] == list(SECTION_KEYS)
 
 
+def test_builder_risk_section_excludes_factor_reasoning() -> None:
+    """ISSUE-131: report section data must not persist risk factor CoT reasoning."""
+    builder = ReportSectionBuilder()
+    event_id = "evt-risk-no-reasoning"
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=_main_evidence(event_id),
+        risk_assessment=_high_risk(),
+        triage_result=_main_triage(),
+    )
+    risk = next(section for section in sections if section.key == "risk_scoring")
+    factors = risk.data.get("factors", [])
+    assert factors
+    assert all("reasoning" not in factor for factor in factors)
+
+
 def test_report_includes_impact_assessment_hint() -> None:
     """ISSUE-079: recommendations reference high-impact assessments from context."""
     builder = ReportSectionBuilder()

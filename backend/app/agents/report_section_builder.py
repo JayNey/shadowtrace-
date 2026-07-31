@@ -147,7 +147,6 @@ class ReportSectionBuilder:
                         "weight": f.weight,
                         "raw_score": f.raw_score,
                         "weighted_score": f.weighted_score,
-                        "reasoning": f.reasoning,
                     }
                     for f in risk_assessment.risk_factors
                 ],

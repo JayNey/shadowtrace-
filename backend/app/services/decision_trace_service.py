@@ -150,6 +150,17 @@ def _agent_detail(row: orm.AgentTrace, inferred: bool) -> dict[str, Any]:
     }
     output_data = row.output_data if isinstance(row.output_data, dict) else {}
     basis = _agent_decision_basis(output_data)
+    compat = TraceProjection.project_for_compat(output_data)
+    for legacy_key in (
+        "thought",
+        "reflection",
+        "rationale",
+        "reasoning",
+        "chain_of_thought",
+        "chain-of-thought",
+    ):
+        if legacy_key in compat:
+            detail[legacy_key] = compat[legacy_key]
     for key in (
         "input_summary",
         "structured_conclusion",

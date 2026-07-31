@@ -188,9 +188,11 @@ def test_projection_compat_restores_not_retained_placeholders() -> None:
         {
             "decision_summary": "bounded summary",
             "thought": "hidden reasoning must not persist",
+            "reasoning": "free text triage reasoning",
         }
     )
     assert compat["thought"] == "[NOT_RETAINED]"
+    assert compat["reasoning"] == "[NOT_RETAINED]"
     assert compat["decision_summary"] == "bounded summary"
 
 
