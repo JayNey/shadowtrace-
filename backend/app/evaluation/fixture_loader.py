@@ -154,9 +154,7 @@ async def load_fixture_dataset(
                 f"{expected_hash}, got {service_manifest.content_hash}"
             )
 
-    local_hash = compute_dataset_manifest_hash(
-        sorted(truth.content_hash for truth in persisted)
-    )
+    local_hash = compute_dataset_manifest_hash(sorted(truth.content_hash for truth in persisted))
     if local_hash != service_manifest.content_hash:
         raise ValueError(
             "fixture loader manifest hash diverged from EvaluationTruthService: "

@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "EvaluationGateDiff": {
+      "additionalProperties": false,
+      "description": "Machine-readable threshold comparison delta.",
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "expected": {
+          "default": null,
+          "title": "Expected"
+        },
+        "actual": {
+          "default": null,
+          "title": "Actual"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "reason"
+      ],
+      "title": "EvaluationGateDiff",
+      "type": "object"
+    },
+    "GateVerdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "fail_closed"
+      ],
+      "title": "GateVerdict",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Threshold/baseline gate outcome.",
+  "properties": {
+    "verdict": {
+      "$ref": "#/$defs/GateVerdict"
+    },
+    "manifest_version": {
+      "default": "",
+      "maxLength": 64,
+      "title": "Manifest Version",
+      "type": "string"
+    },
+    "manifest_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Manifest Path"
+    },
+    "diffs": {
+      "items": {
+        "$ref": "#/$defs/EvaluationGateDiff"
+      },
+      "title": "Diffs",
+      "type": "array"
+    }
+  },
+  "required": [
+    "verdict"
+  ],
+  "title": "EvaluationGateResult",
+  "type": "object"
+}

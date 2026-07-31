@@ -67,6 +67,14 @@ from app.models.evaluation_truth import (
     TruthObservationRef,
     UnevaluableSliceExpectation,
 )
+from app.models.evaluation_run import (
+    EvaluationAggregateMetrics,
+    EvaluationCaseResult,
+    EvaluationGateResult,
+    EvaluationRunArtifact,
+    EvaluationRunConfig,
+    EvaluationThresholdManifest,
+)
 from app.models.embedding import (
     EmbeddingProviderHealth,
     EmbeddingRelease,
@@ -236,6 +244,13 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "BenignSliceExpectation": BenignSliceExpectation,
     "UnevaluableSliceExpectation": UnevaluableSliceExpectation,
     "TruthObservationRef": TruthObservationRef,
+    # evaluation run artifact (ISSUE-105)
+    "EvaluationRunArtifact": EvaluationRunArtifact,
+    "EvaluationRunConfig": EvaluationRunConfig,
+    "EvaluationCaseResult": EvaluationCaseResult,
+    "EvaluationAggregateMetrics": EvaluationAggregateMetrics,
+    "EvaluationGateResult": EvaluationGateResult,
+    "EvaluationThresholdManifest": EvaluationThresholdManifest,
     # embedding / vector contract (ISSUE-140)
     "EmbeddingRelease": EmbeddingRelease,
     "VectorRecordIdentity": VectorRecordIdentity,

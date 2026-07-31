@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "EvaluationThresholdRule": {
+      "additionalProperties": false,
+      "description": "One fail-closed threshold rule.",
+      "properties": {
+        "metric": {
+          "minLength": 1,
+          "title": "Metric",
+          "type": "string"
+        },
+        "op": {
+          "pattern": "^(gte|lte|eq)$",
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "metric",
+        "op",
+        "value"
+      ],
+      "title": "EvaluationThresholdRule",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned gate manifest for a dataset evaluation profile.",
+  "properties": {
+    "manifest_version": {
+      "minLength": 1,
+      "title": "Manifest Version",
+      "type": "string"
+    },
+    "dataset_id": {
+      "minLength": 1,
+      "title": "Dataset Id",
+      "type": "string"
+    },
+    "dataset_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dataset Version"
+    },
+    "required_scorers": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Scorers",
+      "type": "array"
+    },
+    "thresholds": {
+      "items": {
+        "$ref": "#/$defs/EvaluationThresholdRule"
+      },
+      "title": "Thresholds",
+      "type": "array"
+    },
+    "min_pass_rate": {
+      "default": 1.0,
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Min Pass Rate",
+      "type": "number"
+    },
+    "max_error_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Max Error Count",
+      "type": "integer"
+    },
+    "required_gate": {
+      "default": false,
+      "title": "Required Gate",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "manifest_version",
+    "dataset_id"
+  ],
+  "title": "EvaluationThresholdManifest",
+  "type": "object"
+}

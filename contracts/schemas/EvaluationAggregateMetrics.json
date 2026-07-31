@@ -1,0 +1,53 @@
+{
+  "additionalProperties": false,
+  "description": "Dataset-level rollups with explicit denominators.",
+  "properties": {
+    "case_count": {
+      "minimum": 0,
+      "title": "Case Count",
+      "type": "integer"
+    },
+    "pass_count": {
+      "minimum": 0,
+      "title": "Pass Count",
+      "type": "integer"
+    },
+    "fail_count": {
+      "minimum": 0,
+      "title": "Fail Count",
+      "type": "integer"
+    },
+    "unevaluable_count": {
+      "minimum": 0,
+      "title": "Unevaluable Count",
+      "type": "integer"
+    },
+    "error_count": {
+      "minimum": 0,
+      "title": "Error Count",
+      "type": "integer"
+    },
+    "pass_rate": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Pass Rate",
+      "type": "number"
+    },
+    "required_scorer_error_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Required Scorer Error Count",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "case_count",
+    "pass_count",
+    "fail_count",
+    "unevaluable_count",
+    "error_count",
+    "pass_rate"
+  ],
+  "title": "EvaluationAggregateMetrics",
+  "type": "object"
+}

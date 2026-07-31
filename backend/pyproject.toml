@@ -65,6 +65,7 @@ markers = [
   "system: full-system quality gate (ISSUE-086; requires PostgreSQL + Redis)",
   "regression: golden-path snapshot regression gate (ISSUE-087; requires PostgreSQL + Redis)",
   "baseline_refresh: explicit baseline overwrite (ISSUE-087; UPDATE_BASELINE=1 only)",
+  "evaluation: evaluation pipeline gate (ISSUE-105; requires PostgreSQL)",
   "unit: pure unit tests with no external services",
   "opensearch: requires OpenSearch service (ISSUE-084)",
   "neo4j: requires Neo4j service (docker compose --profile optional up -d neo4j)",

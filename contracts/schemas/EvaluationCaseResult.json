@@ -1,0 +1,191 @@
+{
+  "$defs": {
+    "CaseObservation": {
+      "additionalProperties": false,
+      "description": "Deterministic mock-replay observation for one evaluation case.",
+      "properties": {
+        "case_id": {
+          "minLength": 1,
+          "title": "Case Id",
+          "type": "string"
+        },
+        "slice_type": {
+          "$ref": "#/$defs/SliceType"
+        },
+        "observed_case_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Case Label"
+        },
+        "observed_final_verdict": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Final Verdict"
+        },
+        "observation_available": {
+          "default": true,
+          "title": "Observation Available",
+          "type": "boolean"
+        },
+        "replay_notes": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Replay Notes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "slice_type"
+      ],
+      "title": "CaseObservation",
+      "type": "object"
+    },
+    "EvaluationRunStatus": {
+      "enum": [
+        "completed",
+        "failed",
+        "unevaluable"
+      ],
+      "title": "EvaluationRunStatus",
+      "type": "string"
+    },
+    "EvaluationScorerResult": {
+      "additionalProperties": false,
+      "description": "One scorer outcome for a single case.",
+      "properties": {
+        "scorer_id": {
+          "minLength": 1,
+          "title": "Scorer Id",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ScorerOutcome"
+        },
+        "reason_code": {
+          "default": "",
+          "maxLength": 128,
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Message",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "scorer_id",
+        "outcome"
+      ],
+      "title": "EvaluationScorerResult",
+      "type": "object"
+    },
+    "ScorerOutcome": {
+      "description": "Typed scorer result; unevaluable/error never count as pass.",
+      "enum": [
+        "pass",
+        "fail",
+        "unevaluable",
+        "error",
+        "skipped"
+      ],
+      "title": "ScorerOutcome",
+      "type": "string"
+    },
+    "SliceType": {
+      "description": "First-round evaluation slices; extend via reviewed schema revision only.",
+      "enum": [
+        "threat",
+        "benign",
+        "unevaluable"
+      ],
+      "title": "SliceType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Aggregated per-case evaluation output.",
+  "properties": {
+    "case_id": {
+      "minLength": 1,
+      "title": "Case Id",
+      "type": "string"
+    },
+    "truth_id": {
+      "minLength": 1,
+      "title": "Truth Id",
+      "type": "string"
+    },
+    "truth_revision": {
+      "minimum": 1,
+      "title": "Truth Revision",
+      "type": "integer"
+    },
+    "truth_content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Truth Content Hash",
+      "type": "string"
+    },
+    "slice_type": {
+      "$ref": "#/$defs/SliceType"
+    },
+    "observation": {
+      "$ref": "#/$defs/CaseObservation"
+    },
+    "scorer_results": {
+      "items": {
+        "$ref": "#/$defs/EvaluationScorerResult"
+      },
+      "title": "Scorer Results",
+      "type": "array"
+    },
+    "case_status": {
+      "$ref": "#/$defs/EvaluationRunStatus"
+    },
+    "unevaluable_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Unevaluable Reason"
+    }
+  },
+  "required": [
+    "case_id",
+    "truth_id",
+    "truth_revision",
+    "truth_content_hash",
+    "slice_type",
+    "observation",
+    "case_status"
+  ],
+  "title": "EvaluationCaseResult",
+  "type": "object"
+}

@@ -266,6 +266,66 @@ jobs:
       - name: ISSUE-087 regression golden-path gate
         run: uv run --frozen pytest tests/regression/ -m regression -v --tb=short -o addopts=
 
+  backend-evaluation:
+    name: backend-evaluation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shadowtrace
+          POSTGRES_PASSWORD: shadowtrace
+          POSTGRES_DB: shadowtrace
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowtrace -d shadowtrace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify uv.lock
+        run: uv lock --check
+
+      - name: Install backend (frozen dev)
+        run: uv sync --frozen --extra dev
+
+      - name: Apply migrations
+        run: uv run --frozen python -m alembic upgrade head
+
+      - name: ISSUE-105 evaluation pipeline tests
+        run: uv run --frozen pytest tests/evaluation/ -m evaluation -v --tb=short -o addopts=
+
+      - name: Run mock evaluation (artifact-only)
+        run: |
+          uv run --frozen python -m scripts.run_evaluation \
+            --output "${GITHUB_WORKSPACE}/artifacts/evaluation/ci_run.json" \
+            --code-sha "${GITHUB_SHA}"
+
+      - name: Upload evaluation artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-run-artifact
+          path: artifacts/evaluation/ci_run.json
+          if-no-files-found: error
+
   frontend-build:
     name: frontend-build
     runs-on: ubuntu-latest

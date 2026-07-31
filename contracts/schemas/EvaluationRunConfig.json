@@ -1,0 +1,101 @@
+{
+  "$defs": {
+    "EvaluationReleaseRefs": {
+      "additionalProperties": false,
+      "description": "Pinned release identifiers for reproducibility.",
+      "properties": {
+        "model_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Id"
+        },
+        "prompt_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Release Id"
+        },
+        "rule_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Release Id"
+        },
+        "kb_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kb Release Id"
+        },
+        "config_profile": {
+          "default": "mock_p0",
+          "minLength": 1,
+          "title": "Config Profile",
+          "type": "string"
+        }
+      },
+      "title": "EvaluationReleaseRefs",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Frozen runner configuration bound into the artifact.",
+  "properties": {
+    "seed": {
+      "minimum": 0,
+      "title": "Seed",
+      "type": "integer"
+    },
+    "replay_mode": {
+      "default": "mock_deterministic",
+      "minLength": 1,
+      "title": "Replay Mode",
+      "type": "string"
+    },
+    "release_refs": {
+      "$ref": "#/$defs/EvaluationReleaseRefs"
+    },
+    "scorer_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Scorer Ids",
+      "type": "array"
+    },
+    "extra": {
+      "additionalProperties": true,
+      "title": "Extra",
+      "type": "object"
+    }
+  },
+  "required": [
+    "seed"
+  ],
+  "title": "EvaluationRunConfig",
+  "type": "object"
+}

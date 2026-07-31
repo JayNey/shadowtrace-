@@ -1,0 +1,531 @@
+{
+  "$defs": {
+    "CaseObservation": {
+      "additionalProperties": false,
+      "description": "Deterministic mock-replay observation for one evaluation case.",
+      "properties": {
+        "case_id": {
+          "minLength": 1,
+          "title": "Case Id",
+          "type": "string"
+        },
+        "slice_type": {
+          "$ref": "#/$defs/SliceType"
+        },
+        "observed_case_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Case Label"
+        },
+        "observed_final_verdict": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Observed Final Verdict"
+        },
+        "observation_available": {
+          "default": true,
+          "title": "Observation Available",
+          "type": "boolean"
+        },
+        "replay_notes": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Replay Notes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "slice_type"
+      ],
+      "title": "CaseObservation",
+      "type": "object"
+    },
+    "EvaluationAggregateMetrics": {
+      "additionalProperties": false,
+      "description": "Dataset-level rollups with explicit denominators.",
+      "properties": {
+        "case_count": {
+          "minimum": 0,
+          "title": "Case Count",
+          "type": "integer"
+        },
+        "pass_count": {
+          "minimum": 0,
+          "title": "Pass Count",
+          "type": "integer"
+        },
+        "fail_count": {
+          "minimum": 0,
+          "title": "Fail Count",
+          "type": "integer"
+        },
+        "unevaluable_count": {
+          "minimum": 0,
+          "title": "Unevaluable Count",
+          "type": "integer"
+        },
+        "error_count": {
+          "minimum": 0,
+          "title": "Error Count",
+          "type": "integer"
+        },
+        "pass_rate": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Pass Rate",
+          "type": "number"
+        },
+        "required_scorer_error_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Required Scorer Error Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "case_count",
+        "pass_count",
+        "fail_count",
+        "unevaluable_count",
+        "error_count",
+        "pass_rate"
+      ],
+      "title": "EvaluationAggregateMetrics",
+      "type": "object"
+    },
+    "EvaluationCaseResult": {
+      "additionalProperties": false,
+      "description": "Aggregated per-case evaluation output.",
+      "properties": {
+        "case_id": {
+          "minLength": 1,
+          "title": "Case Id",
+          "type": "string"
+        },
+        "truth_id": {
+          "minLength": 1,
+          "title": "Truth Id",
+          "type": "string"
+        },
+        "truth_revision": {
+          "minimum": 1,
+          "title": "Truth Revision",
+          "type": "integer"
+        },
+        "truth_content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Truth Content Hash",
+          "type": "string"
+        },
+        "slice_type": {
+          "$ref": "#/$defs/SliceType"
+        },
+        "observation": {
+          "$ref": "#/$defs/CaseObservation"
+        },
+        "scorer_results": {
+          "items": {
+            "$ref": "#/$defs/EvaluationScorerResult"
+          },
+          "title": "Scorer Results",
+          "type": "array"
+        },
+        "case_status": {
+          "$ref": "#/$defs/EvaluationRunStatus"
+        },
+        "unevaluable_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unevaluable Reason"
+        }
+      },
+      "required": [
+        "case_id",
+        "truth_id",
+        "truth_revision",
+        "truth_content_hash",
+        "slice_type",
+        "observation",
+        "case_status"
+      ],
+      "title": "EvaluationCaseResult",
+      "type": "object"
+    },
+    "EvaluationGateDiff": {
+      "additionalProperties": false,
+      "description": "Machine-readable threshold comparison delta.",
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "expected": {
+          "default": null,
+          "title": "Expected"
+        },
+        "actual": {
+          "default": null,
+          "title": "Actual"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "reason"
+      ],
+      "title": "EvaluationGateDiff",
+      "type": "object"
+    },
+    "EvaluationGateResult": {
+      "additionalProperties": false,
+      "description": "Threshold/baseline gate outcome.",
+      "properties": {
+        "verdict": {
+          "$ref": "#/$defs/GateVerdict"
+        },
+        "manifest_version": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Manifest Version",
+          "type": "string"
+        },
+        "manifest_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Path"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/EvaluationGateDiff"
+          },
+          "title": "Diffs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "verdict"
+      ],
+      "title": "EvaluationGateResult",
+      "type": "object"
+    },
+    "EvaluationReleaseRefs": {
+      "additionalProperties": false,
+      "description": "Pinned release identifiers for reproducibility.",
+      "properties": {
+        "model_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Id"
+        },
+        "prompt_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Release Id"
+        },
+        "rule_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Release Id"
+        },
+        "kb_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kb Release Id"
+        },
+        "config_profile": {
+          "default": "mock_p0",
+          "minLength": 1,
+          "title": "Config Profile",
+          "type": "string"
+        }
+      },
+      "title": "EvaluationReleaseRefs",
+      "type": "object"
+    },
+    "EvaluationRunConfig": {
+      "additionalProperties": false,
+      "description": "Frozen runner configuration bound into the artifact.",
+      "properties": {
+        "seed": {
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "replay_mode": {
+          "default": "mock_deterministic",
+          "minLength": 1,
+          "title": "Replay Mode",
+          "type": "string"
+        },
+        "release_refs": {
+          "$ref": "#/$defs/EvaluationReleaseRefs"
+        },
+        "scorer_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scorer Ids",
+          "type": "array"
+        },
+        "extra": {
+          "additionalProperties": true,
+          "title": "Extra",
+          "type": "object"
+        }
+      },
+      "required": [
+        "seed"
+      ],
+      "title": "EvaluationRunConfig",
+      "type": "object"
+    },
+    "EvaluationRunStatus": {
+      "enum": [
+        "completed",
+        "failed",
+        "unevaluable"
+      ],
+      "title": "EvaluationRunStatus",
+      "type": "string"
+    },
+    "EvaluationScorerResult": {
+      "additionalProperties": false,
+      "description": "One scorer outcome for a single case.",
+      "properties": {
+        "scorer_id": {
+          "minLength": 1,
+          "title": "Scorer Id",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ScorerOutcome"
+        },
+        "reason_code": {
+          "default": "",
+          "maxLength": 128,
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Message",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "scorer_id",
+        "outcome"
+      ],
+      "title": "EvaluationScorerResult",
+      "type": "object"
+    },
+    "GateVerdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "fail_closed"
+      ],
+      "title": "GateVerdict",
+      "type": "string"
+    },
+    "ScorerOutcome": {
+      "description": "Typed scorer result; unevaluable/error never count as pass.",
+      "enum": [
+        "pass",
+        "fail",
+        "unevaluable",
+        "error",
+        "skipped"
+      ],
+      "title": "ScorerOutcome",
+      "type": "string"
+    },
+    "SliceType": {
+      "description": "First-round evaluation slices; extend via reviewed schema revision only.",
+      "enum": [
+        "threat",
+        "benign",
+        "unevaluable"
+      ],
+      "title": "SliceType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Complete evaluation run artifact (persisted as JSON, not a fact DB).",
+  "properties": {
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "tenant_id": {
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "dataset_id": {
+      "minLength": 1,
+      "title": "Dataset Id",
+      "type": "string"
+    },
+    "dataset_version": {
+      "minLength": 1,
+      "title": "Dataset Version",
+      "type": "string"
+    },
+    "dataset_content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Dataset Content Hash",
+      "type": "string"
+    },
+    "code_sha": {
+      "maxLength": 64,
+      "minLength": 7,
+      "title": "Code Sha",
+      "type": "string"
+    },
+    "config": {
+      "$ref": "#/$defs/EvaluationRunConfig"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/EvaluationRunStatus"
+    },
+    "case_results": {
+      "items": {
+        "$ref": "#/$defs/EvaluationCaseResult"
+      },
+      "title": "Case Results",
+      "type": "array"
+    },
+    "aggregates": {
+      "$ref": "#/$defs/EvaluationAggregateMetrics"
+    },
+    "gate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvaluationGateResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "artifact_hash": {
+      "default": "",
+      "maxLength": 64,
+      "minLength": 0,
+      "title": "Artifact Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "tenant_id",
+    "dataset_id",
+    "dataset_version",
+    "dataset_content_hash",
+    "code_sha",
+    "config",
+    "started_at",
+    "completed_at",
+    "status",
+    "aggregates"
+  ],
+  "title": "EvaluationRunArtifact",
+  "type": "object"
+}
