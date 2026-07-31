@@ -118,3 +118,16 @@ def test_competing_process_records_conflict() -> None:
     assert len(result.entities.processes) == 1
     assert result.entities.processes[0].name == "good.exe"
     assert len(result.conflicts) == 1
+
+
+def test_same_layer_keeps_multiple_distinct_hostnames() -> None:
+    llm = EntitySet(
+        hosts=[
+            HostEntity(entity_id="h1", hostname="DEV-WKS-012", attributes={"provenance": "llm"}),
+            HostEntity(entity_id="h2", hostname="WKS-HOST-007", attributes={"provenance": "llm"}),
+        ]
+    )
+    result = merge_entity_sets(llm=llm)
+    hostnames = {h.hostname for h in result.entities.hosts}
+    assert hostnames == {"DEV-WKS-012", "WKS-HOST-007"}
+    assert result.conflicts == ()

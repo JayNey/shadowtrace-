@@ -11,7 +11,7 @@ from app.agents.rules.entity_extraction_rules import extract_entities_regex
 from app.agents.rules.entity_validation import validate_entity_set, validate_host_entity
 from app.agents.triage_agent import TriageAgent
 from app.core.llm.base import LLMResponse
-from app.models.agent_io import EvidenceAgentInput, TriageResult
+from app.models.agent_io import TriageResult
 from app.models.entities import EntitySet, HostEntity
 from app.models.enums import EventType, Severity
 from tests.test_agents.test_triage_agent import (
@@ -342,51 +342,6 @@ def test_alert_short_tokens_never_extracted_as_hostnames(phrase: str) -> None:
 def test_vm_contextual_low_confidence_hostname_accepted() -> None:
     extracted = extract_entities_regex("vm myserver compromised")
     assert "myserver" in extracted.hostnames
-
-
-@pytest.mark.asyncio
-async def test_evidence_collect_skips_edr_when_no_valid_host(
-    tool_executor: object,
-) -> None:
-    from app.services.evidence_projection import bind_evidence_query_scope
-    from tests.test_agents.test_evidence_agent import (
-        InMemoryEvidenceRepository,
-        _build_agent,
-        _FakeWorkingMemory,
-        _seed_event_context,
-    )
-    from tests.test_tools.tool_system_fixtures import DEFAULT_SCOPE, new_sfx
-
-    class _EdrCallRecorder:
-        def __init__(self, inner: object) -> None:
-            self.inner = inner
-            self.edr_calls: list[dict[str, object]] = []
-
-        async def call(self, tool_name: str, params: dict[str, object], **kwargs: object) -> object:
-            if tool_name == "query_edr_process":
-                self.edr_calls.append(params)
-            return await self.inner.call(tool_name, params, **kwargs)
-
-    event_id = f"evt-100-edr-skip-{new_sfx()}"
-    wm = _FakeWorkingMemory()
-    await _seed_event_context(wm, event_id)
-    recorder = _EdrCallRecorder(tool_executor)
-    agent = _build_agent(
-        tool_executor=recorder,
-        wm=wm,
-        evidence_repo=InMemoryEvidenceRepository(),
-    )
-    triage = TriageResult(
-        event_type=EventType.MALICIOUS_PROCESS,
-        severity=Severity.HIGH,
-        need_investigation=True,
-        entities=EntitySet(),
-    )
-    with bind_evidence_query_scope(DEFAULT_SCOPE):
-        output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
-
-    assert recorder.edr_calls == []
-    assert any(gap.reason == "missing_entity" for gap in output.gaps)
 
 
 @pytest.mark.asyncio

@@ -55,7 +55,8 @@ _HIGH_CONF_HOST = re.compile(
     re.IGNORECASE,
 )
 
-# Natural-language tokens that must not pass as short hostnames without context.
+# Natural-language alert jargon (stage/level/phase + digit) — not scenario blocklist.
+# Extend only with paired negative regression samples in test_entity_extraction_rules.
 _ALERT_SHORT_TOKEN = frozenset(
     {
         "stage",

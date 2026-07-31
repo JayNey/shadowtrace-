@@ -430,6 +430,43 @@ async def test_parser_source_mapping_and_login_template() -> None:
     assert rows[0].confidence == 0.8
 
 
+async def test_evidence_collect_skips_edr_when_no_valid_host(
+    tool_executor: Any,
+) -> None:
+    """ISSUE-100: empty triage entities must not invoke query_edr_process."""
+
+    class _EdrCallRecorder:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.edr_calls: list[dict[str, object]] = []
+
+        async def call(self, tool_name: str, params: dict[str, object], **kwargs: object) -> object:
+            if tool_name == "query_edr_process":
+                self.edr_calls.append(params)
+            return await self.inner.call(tool_name, params, **kwargs)
+
+    event_id = f"evt-100-edr-skip-{new_sfx()}"
+    wm = _FakeWorkingMemory()
+    await _seed_event_context(wm, event_id)
+    recorder = _EdrCallRecorder(tool_executor)
+    agent = _build_agent(
+        tool_executor=recorder,
+        wm=wm,
+        evidence_repo=InMemoryEvidenceRepository(),
+    )
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+    )
+    with bind_evidence_query_scope(DEFAULT_SCOPE):
+        output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.edr_calls == []
+    assert any(gap.reason == "missing_entity" for gap in output.gaps)
+
+
 async def test_evidence_table_count_matches_list_after_upsert(
     tool_executor: Any,
     evidence_projection: EvidenceProjection,

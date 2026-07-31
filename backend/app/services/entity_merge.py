@@ -1,8 +1,9 @@
 """Source-priority entity merge contract (ISSUE-099).
 
 Merge order: validated structured source > validated LLM > validated regex.
-Dedup by semantic identity; slot competition keeps one primary hostname/account
-per category when layers disagree.
+Dedup by semantic identity; cross-layer slot competition keeps the higher-priority
+primary hostname/account/process when layers disagree. Multiple distinct entities
+from the same layer are all retained.
 """
 
 from __future__ import annotations
@@ -202,8 +203,6 @@ def _merge_accounts(
             continue
         additions.append(item)
         index[key] = (item, layer_name)
-        if primary is None:
-            primary = username_lower
     return additions, conflicts
 
 
@@ -259,8 +258,6 @@ def _merge_hosts(
             continue
         additions.append(item)
         index[key] = (item, layer_name)
-        if hostname and primary_hostname is None:
-            primary_hostname = hostname.lower()
     return additions, conflicts
 
 
@@ -353,8 +350,6 @@ def _merge_processes(
             continue
         additions.append(item)
         index[key] = (item, layer_name)
-        if primary is None:
-            primary = name_lower
     return additions, conflicts
 
 
