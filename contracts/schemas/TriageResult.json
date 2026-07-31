@@ -739,6 +739,11 @@
       },
       "title": "Entity Conflicts",
       "type": "array"
+    },
+    "entity_rejection_summary": {
+      "default": {},
+      "title": "Entity Rejection Summary",
+      "type": "object"
     }
   },
   "required": [

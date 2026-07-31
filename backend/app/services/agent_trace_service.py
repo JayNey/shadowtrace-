@@ -97,6 +97,7 @@ _DECISION_ENTITY_FIELDS = frozenset(
     {
         "entity_provenance_summary",
         "entity_conflicts",
+        "entity_rejection_summary",
     }
 )
 

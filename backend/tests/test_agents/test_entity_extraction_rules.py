@@ -1,0 +1,229 @@
+"""Tests for regex entity extraction and semantic validation (ISSUE-100 / #603)."""
+
+from __future__ import annotations
+
+import time
+
+import pytest
+
+from app.agents.evidence_agent import EvidenceAgent
+from app.agents.rules.entity_extraction_rules import extract_entities_regex
+from app.agents.rules.entity_validation import validate_entity_set, validate_host_entity
+from app.agents.triage_agent import TriageAgent
+from app.core.llm.base import LLMResponse
+from app.models.agent_io import TriageResult
+from app.models.entities import EntitySet, HostEntity
+from app.models.enums import EventType, Severity
+from tests.test_agents.test_triage_agent import (
+    _make_input,
+    _MockBoundWorkingMemory,
+    _MockLLMClient,
+)
+
+# --------------------------------------------------------------------------- #
+# Positive hostname extraction
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("alert_text", "expected_host"),
+    [
+        ("Host DEV-WKS-012 compromised", "DEV-WKS-012"),
+        ("PC-FIN-023 uploaded sensitive data", "PC-FIN-023"),
+        ("Malicious process on db01 detected", "db01"),
+        ("workstation ip-10-0-0-4 seen in logs", "ip-10-0-0-4"),
+        ("endpoint ubuntu-prod-01 restarted", "ubuntu-prod-01"),
+    ],
+)
+def test_positive_hostname_extraction(alert_text: str, expected_host: str) -> None:
+    extracted = extract_entities_regex(alert_text)
+    assert expected_host in extracted.hostnames
+
+
+def test_ransomware_like_title_produces_no_hostname() -> None:
+    alert = "Malicious process spawned — ransomware-like behavior"
+    extracted = extract_entities_regex(alert)
+    assert extracted.hostnames == []
+    validated = validate_entity_set(
+        EntitySet(hosts=[HostEntity(entity_id="h1", hostname="ransomware-like")]),
+        provenance="regex",
+        alert_text=alert,
+    )
+    assert validated.entity_set.hosts == []
+
+
+# --------------------------------------------------------------------------- #
+# Negative natural-language samples (≥20)
+# --------------------------------------------------------------------------- #
+
+_NEGATIVE_PHRASES: tuple[str, ...] = (
+    "Malicious process spawned — ransomware-like behavior",
+    "persistent beacon detected on endpoint",
+    "lateral movement observed across network",
+    "suspicious activity observed in environment",
+    "behavior detected on endpoint",
+    "like pattern observed during scan",
+    "stage chain attempt blocked",
+    "unknown anomaly flagged by sensor",
+    "malicious activity related to download",
+    "suspicious process-based execution chain",
+    "credential-based attack attempt detected",
+    "data exfiltration-like behavior observed",
+    "command-and-control-like traffic pattern",
+    "file-less attack stage detected",
+    "multi-stage ransomware-like campaign",
+    "beacon-like communication detected",
+    "policy violation related to upload",
+    "anomaly chain detected by analytics",
+    "suspicious lateral-movement pattern",
+    "unknown threat-like indicator observed",
+    "persistent-beacon style activity noted",
+    "behavior-based detection triggered",
+)
+
+
+@pytest.mark.parametrize("phrase", _NEGATIVE_PHRASES)
+def test_negative_samples_no_hostname_false_positives(phrase: str) -> None:
+    extracted = extract_entities_regex(phrase)
+    validated = validate_entity_set(
+        EntitySet(
+            hosts=[
+                HostEntity(entity_id=f"h{i}", hostname=h)
+                for i, h in enumerate(extracted.hostnames, 1)
+            ]
+        ),
+        provenance="regex",
+        alert_text=phrase,
+    )
+    assert validated.entity_set.hosts == []
+
+
+# --------------------------------------------------------------------------- #
+# LLM + regex share validator
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("hostname", "provenance"),
+    [
+        ("ransomware-like", "regex"),
+        ("ransomware-like", "llm"),
+    ],
+)
+def test_llm_and_regex_reject_same_invalid_hostname(
+    hostname: str, provenance: str
+) -> None:
+    alert = "Malicious process spawned — ransomware-like behavior"
+    entities = EntitySet(hosts=[HostEntity(entity_id="h1", hostname=hostname)])
+    result = validate_entity_set(entities, provenance=provenance, alert_text=alert)  # type: ignore[arg-type]
+    assert result.entity_set.hosts == []
+    assert result.rejection_summary["total_rejected"] == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_invalid_entities_fall_back_to_validated_regex() -> None:
+    from app.agents.prompts.triage_prompt import TriageLLMResponse
+
+    llm_entities = EntitySet(
+        hosts=[HostEntity(entity_id="bad", hostname="ransomware-like")]
+    )
+    llm_response = LLMResponse(
+        content="",
+        parsed=TriageLLMResponse(
+            event_type=EventType.MALICIOUS_PROCESS,
+            entities=llm_entities,
+            reasoning="",
+        ),
+        model_name="mock",
+    )
+    wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+    agent = TriageAgent(llm_client=_MockLLMClient(response=llm_response), working_memory=wm)
+    alert = "Malicious process spawned — ransomware-like behavior"
+    llm_out, regex_out, degraded, _ = await agent._extract_entities(alert, "evt-100")
+    assert llm_out == EntitySet()
+    assert regex_out.hosts == []
+    assert degraded is True
+
+
+# --------------------------------------------------------------------------- #
+# EvidenceAgent skips rejected / missing host entities
+# --------------------------------------------------------------------------- #
+
+
+def test_evidence_skips_query_edr_when_hostname_rejected() -> None:
+    agent = EvidenceAgent(llm_client=None, tool_executor=None)
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+    )
+    params = agent._build_params(
+        "query_edr_process",
+        triage.entities,
+        {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"},
+    )
+    assert params is None
+
+
+@pytest.mark.asyncio
+async def test_triage_ransomware_title_no_edr_host_id() -> None:
+    llm_response = LLMResponse(content="", parsed=None, model_name="mock")
+    wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+    agent = TriageAgent(llm_client=_MockLLMClient(response=llm_response), working_memory=wm)
+    alert = "Malicious process spawned — ransomware-like behavior"
+    result = await agent._run(_make_input(raw_event_summary=alert))
+    assert not result.entities.hosts
+    evidence = EvidenceAgent(llm_client=None, tool_executor=None)
+    params = evidence._build_params(
+        "query_edr_process",
+        result.entities,
+        {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"},
+    )
+    assert params is None
+
+
+# --------------------------------------------------------------------------- #
+# Performance / regex safety (no fragile millisecond gate)
+# --------------------------------------------------------------------------- #
+
+
+def test_validator_completes_on_4kb_alert_without_catastrophic_cost() -> None:
+    base = "Malicious process spawned — ransomware-like behavior. "
+    alert = (base * 200)[:4096]
+    assert len(alert) >= 4000
+
+    started = time.perf_counter()
+    for _ in range(50):
+        extracted = extract_entities_regex(alert)
+        validate_entity_set(
+            EntitySet(
+                hosts=[
+                    HostEntity(entity_id=f"h{i}", hostname=h)
+                    for i, h in enumerate(extracted.hostnames, 1)
+                ]
+            ),
+            provenance="regex",
+            alert_text=alert,
+        )
+    elapsed = time.perf_counter() - started
+    # CI-stable: 50 passes over 4KB should finish quickly; avoid fixed per-call ms threshold.
+    assert elapsed < 2.0
+
+
+def test_validate_host_entity_api() -> None:
+    ok, reason = validate_host_entity(
+        "DEV-WKS-012",
+        provenance="regex",
+        alert_text="Host DEV-WKS-012 compromised",
+    )
+    assert ok is True
+    assert reason == ""
+
+    ok, reason = validate_host_entity(
+        "ransomware-like",
+        provenance="regex",
+        alert_text="Malicious process spawned — ransomware-like behavior",
+    )
+    assert ok is False
+    assert reason == "phrase_without_host_context"

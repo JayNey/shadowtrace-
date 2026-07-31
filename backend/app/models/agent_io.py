@@ -150,6 +150,7 @@ class TriageResult(BaseModel):
     degradation_reasons: list[str] = Field(default_factory=list)
     entity_provenance_summary: list[EntityProvenanceRecord] = Field(default_factory=list)
     entity_conflicts: list[EntityConflictRecord] = Field(default_factory=list)
+    entity_rejection_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 # --------------------------------------------------------------------------- #

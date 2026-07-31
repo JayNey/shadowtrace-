@@ -25,6 +25,7 @@ from app.agents.rules.entity_extraction_rules import (
     IP_PATTERN,
     extract_entities_regex,
 )
+from app.agents.rules.entity_validation import validate_entity_set
 from app.core.errors import (
     DependencyUnavailableError,
     GuardrailViolationError,
@@ -50,7 +51,6 @@ from app.models.entities import (
 )
 from app.models.enums import EventType, Severity
 from app.services.entity_merge import EntityMergeResult, merge_entity_sets
-from app.services.entity_validator import validate_entity_set
 from app.services.working_memory import BoundWorkingMemory
 
 logger = logging.getLogger(__name__)
@@ -578,13 +578,23 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 f"Resolved {len(merge_result.conflicts)} entity conflict(s) with source priority."
             )
         rejected_total = 0
-        for validated in (llm_validated, regex_validated):
-            if validated is not None:
-                rejected_total += validated.rejection_summary["total_rejected"]
+        rejection_counts: dict[str, int] = {}
+        for validated in (source_validated, llm_validated, regex_validated):
+            if validated is None:
+                continue
+            summary = validated.rejection_summary
+            rejected_total += summary["total_rejected"]
+            for code, count in summary["rejection_counts"].items():
+                rejection_counts[code] = rejection_counts.get(code, 0) + count
         if rejected_total:
             reasoning_parts.append(
                 f"Rejected {rejected_total} invalid text-derived entity candidate(s)."
             )
+        entity_rejection_summary = (
+            {"rejection_counts": rejection_counts, "total_rejected": rejected_total}
+            if rejected_total
+            else {}
+        )
         if source_validated.rejection_summary["total_rejected"]:
             degradation_reasons.append("source_enrichment_partial")
 
@@ -608,6 +618,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             degradation_reasons=degradation_reasons,
             entity_provenance_summary=_provenance_from_hint_entities(input.hint_entities),
             entity_conflicts=_conflicts_to_records(merge_result),
+            entity_rejection_summary=entity_rejection_summary,
         )
 
         # 7. Persist to EventContext.
@@ -653,20 +664,31 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
 
             if response.parsed is not None and isinstance(response.parsed, TriageLLMResponse):
                 parsed: TriageLLMResponse = response.parsed
-                entities = parsed.entities
-                if not any(
+                llm_validated = validate_entity_set(
+                    parsed.entities,
+                    provenance="llm",
+                    alert_text=alert_text,
+                )
+                if any(
                     (
-                        entities.accounts,
-                        entities.hosts,
-                        entities.ips,
-                        entities.domains,
-                        entities.processes,
-                        entities.files,
+                        llm_validated.entity_set.accounts,
+                        llm_validated.entity_set.hosts,
+                        llm_validated.entity_set.ips,
+                        llm_validated.entity_set.domains,
+                        llm_validated.entity_set.processes,
+                        llm_validated.entity_set.files,
                     )
                 ):
-                    regex_entities = await self._regex_fallback(alert_text)
-                    return empty, regex_entities, True, parsed.reasoning or ""
-                return entities, empty, False, parsed.reasoning or ""
+                    reasoning = parsed.reasoning or ""
+                    rejected = llm_validated.rejection_summary["total_rejected"]
+                    if rejected:
+                        reasoning = (
+                            f"{reasoning} LLM validation rejected {rejected} entity candidate(s)."
+                        ).strip()
+                    return llm_validated.entity_set, empty, False, reasoning
+
+                regex_entities = await self._regex_fallback(alert_text)
+                return empty, regex_entities, True, parsed.reasoning or ""
 
             regex_entities = await self._regex_fallback(alert_text)
             return empty, regex_entities, True, ""
@@ -710,9 +732,9 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             return empty, regex_entities, True, ""
 
     async def _regex_fallback(self, alert_text: str) -> EntitySet:
-        """Run regex extraction and convert to ``EntitySet``."""
+        """Run regex extraction, validate, and return only accepted entities."""
         raw = extract_entities_regex(alert_text)
-        return EntitySet(
+        candidates = EntitySet(
             accounts=[
                 AccountEntity(
                     entity_id=f"acct-{i}",
@@ -763,6 +785,11 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 for i, f in enumerate(raw.files, 1)
             ],
         )
+        return validate_entity_set(
+            candidates,
+            provenance="regex",
+            alert_text=alert_text,
+        ).entity_set
 
     # ------------------------------------------------------------------ #
     # Persistence
