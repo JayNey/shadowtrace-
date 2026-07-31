@@ -55,6 +55,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app /app
+# Entrypoint lives at the image root (ISSUE-088/ISSUE-077 contract). The builder
+# stage chmod +x it; COPY --from preserves the executable bit. Without this the
+# runtime stage only copies /app and `ENTRYPOINT ["/docker-entrypoint.sh"]`
+# fails with "no such file or directory" (ISSUE-142 regression from ISSUE-112).
+COPY --from=builder /docker-entrypoint.sh /docker-entrypoint.sh
 
 ENV PATH="/app/.venv/bin:$PATH"
 
