@@ -118,16 +118,12 @@ def _collect_input_refs(input_data: Any) -> tuple[list[dict[str, str]], list[str
 
 
 def _infer_stage(agent_name: str, output_data: dict[str, Any]) -> DecisionStage:
-    if agent_name == "react_engine":
-        if output_data.get("selected_action") == "finish:":
-            return DecisionStage.REACT_REFLECT
-        if output_data.get("gap_code") not in (None, "", ReActGapCode.NONE.value):
-            return DecisionStage.REACT_REFLECT
-        if output_data.get("evidence_refs"):
-            return DecisionStage.REACT_REFLECT
-        if output_data.get("confidence") is not None:
-            return DecisionStage.REACT_REFLECT
-        return DecisionStage.REACT_THINK
+    explicit = output_data.get("stage")
+    if isinstance(explicit, str) and explicit.strip():
+        try:
+            return DecisionStage(explicit.strip())
+        except ValueError:
+            logger.debug("unknown decision stage %r for agent=%s", explicit, agent_name)
     mapping = {
         "planner_agent": DecisionStage.PLANNER,
         "risk_agent": DecisionStage.RISK,
@@ -223,10 +219,15 @@ def _enrich_agent_output(
         plan_id = output_data.get("plan_id")
         if isinstance(plan_id, str) and plan_id.strip():
             enriched.setdefault("selected_action", f"response_plan:{plan_id.strip()}")
-        strategy = output_data.get("strategy_summary")
-        if isinstance(strategy, str) and strategy.strip():
-            enriched.setdefault("decision_summary", strategy.strip()[:512])
+        action_count = len(actions) if isinstance(actions, list) else 0
         generated = output_data.get("generated_by")
+        enriched.setdefault(
+            "decision_summary",
+            (
+                f"response_plan actions={action_count} "
+                f"plan_id={plan_id or 'none'} generated_by={generated or 'unknown'}"
+            )[:512],
+        )
         if generated is not None:
             enriched.setdefault("reason_code", str(generated))
     if isinstance(input_data.get("event_id"), str):
@@ -291,7 +292,28 @@ def _build_record_payload(
         return None
 
     stage = _infer_stage(agent_name, output_data)
+    try:
+        revision = max(1, int(output_data.get("revision", 1)))
+    except (TypeError, ValueError):
+        revision = 1
+
+    rule_version = output_data.get("rule_version")
+    if rule_version is None and agent_name == "risk_agent":
+        scoring_mode = output_data.get("scoring_mode")
+        if scoring_mode is not None:
+            rule_version = str(scoring_mode)
+    kb_version = output_data.get("kb_version")
+    if kb_version is not None:
+        kb_version = str(kb_version)[:128]
+
     idempotency_key = _idempotency_key(event_id, stage, agent_name, input_data, output_data)
+    if revision > 1 and agent_name == "planner_agent":
+        plan_id = output_data.get("plan_id")
+        if isinstance(plan_id, str) and plan_id.strip():
+            idempotency_key = (
+                f"{event_id}:{stage.value}:{agent_name}:{plan_id.strip()}:rev{revision}"
+            )
+
     record_id = f"dec-{uuid.uuid4().hex[:12]}"
 
     record = DecisionRecord(
@@ -304,8 +326,10 @@ def _build_record_payload(
         selected=selected,
         reason_codes=reason_codes[:20],
         decision_summary=summary,
+        rule_version=str(rule_version)[:128] if rule_version is not None else None,
         model_version=llm_model,
         prompt_policy_version=PROMPT_POLICY_VERSION,
+        kb_version=kb_version,
         confidence=confidence_value,
         uncertainty_codes=[
             code
@@ -323,7 +347,7 @@ def _build_record_payload(
         trace_ref=trace_id,
         schema_version=DECISION_RECORD_SCHEMA_VERSION,
         idempotency_key=idempotency_key,
-        revision=1,
+        revision=revision,
         retention_policy="standard",
         unresolved_refs=sorted(set(unresolved_from_input))[:50],
         owner=agent_name,
@@ -387,6 +411,31 @@ class DecisionRecordService:
         )
         if existing is not None:
             return existing.record_id
+
+        if (
+            record.stage is DecisionStage.PLANNER
+            and record.revision > 1
+        ):
+            selected_action = str(record.selected.get("selected_action", ""))
+            if selected_action.startswith("plan:"):
+                plan_id = selected_action.removeprefix("plan:")
+                prev_key = (
+                    f"{record.event_id}:{DecisionStage.PLANNER.value}:"
+                    f"planner_agent:{plan_id}:rev{record.revision - 1}"
+                )
+                prev = await session.scalar(
+                    select(orm.DecisionRecord).where(
+                        orm.DecisionRecord.idempotency_key == prev_key
+                    )
+                )
+                if prev is not None:
+                    record = record.model_copy(
+                        update={
+                            "parent_record_id": prev.record_id,
+                            "supersedes_record_id": prev.record_id,
+                        }
+                    )
+
         row = _orm_from_record(record)
         session.add(row)
         await session.flush()

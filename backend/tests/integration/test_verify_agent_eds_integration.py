@@ -57,9 +57,11 @@ from app.models.ids import new_job_id
 from app.models.source import SourceReference
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.services.context_service import EventContextStore, event_summary_from_security_event
+from app.services.decision_record_service import DecisionRecordService
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService
 from app.services.working_memory import WorkingMemory
+from tests.helpers.decision_audit import seed_minimum_disposition_audit
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
     fetch_mock_concurrency_token,
@@ -348,6 +350,7 @@ def disposition_service(
         disposition_sync=disposition_sync,
         context_store=context_store,
         event_bus=EventBus(redis_client),
+        decision_record_service=DecisionRecordService(session_factory),
     )
 
 
@@ -413,6 +416,7 @@ async def test_verify_agent_after_real_eds_activate_routes_waiting_without_recei
         action_id=immediate_id,
         job_id=job_id,
     )
+    await seed_minimum_disposition_audit(session_factory, event_id)
 
     wm = WorkingMemory(store=context_store, redis=redis_client)
     agent = VerifyAgent(
@@ -497,6 +501,7 @@ async def test_verify_agent_full_closure_after_outbox_delivery_and_confirm(
         action_id=immediate_id,
         job_id=job_id,
     )
+    await seed_minimum_disposition_audit(session_factory, event_id)
 
     wm = WorkingMemory(store=context_store, redis=redis_client)
     agent = VerifyAgent(

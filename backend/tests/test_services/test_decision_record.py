@@ -327,3 +327,98 @@ async def test_migration_redacts_legacy_react_cot_fields(
         assert "reflection" not in output
         assert "summary" not in output
         assert output.get("decision_summary") == "kept summary"
+
+
+@pytest.mark.asyncio
+async def test_react_finish_round_stage_is_react_think(
+    service: DecisionRecordService,
+) -> None:
+    event_id = _event_id()
+    record_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="react_engine",
+        trace_id="trc-stage01",
+        input_data={"event_id": event_id, "round_index": 1},
+        output_data={
+            "stage": "react_think",
+            "decision_summary": "finish round think",
+            "reason_code": "stop_sufficient",
+            "selected_action": "finish:",
+            "confidence": 0.9,
+        },
+    )
+    assert record_id is not None
+    row = await service.get_by_trace_ref("trc-stage01")
+    assert row is not None
+    assert row.stage == "react_think"
+
+
+@pytest.mark.asyncio
+async def test_planner_revision_links_parent_and_supersedes(
+    service: DecisionRecordService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    plan_id = "plan-revtest"
+    first_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="planner_agent",
+        trace_id="trc-plan-r1",
+        input_data={"event_id": event_id},
+        output_data={
+            "plan_id": plan_id,
+            "revision": 1,
+            "steps": [{"assigned_agent": "EvidenceAgent", "step_goal": "collect", "step_order": 1}],
+        },
+    )
+    second_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="planner_agent",
+        trace_id="trc-plan-r2",
+        input_data={"event_id": event_id},
+        output_data={
+            "plan_id": plan_id,
+            "revision": 2,
+            "steps": [{"assigned_agent": "RiskAgent", "step_goal": "score", "step_order": 1}],
+        },
+    )
+    assert first_id is not None
+    assert second_id is not None
+    assert second_id != first_id
+    async with session_factory() as session:
+        second = await session.get(orm.DecisionRecord, second_id)
+        assert second is not None
+        assert second.revision == 2
+        assert second.parent_record_id == first_id
+        assert second.supersedes_record_id == first_id
+
+
+@pytest.mark.asyncio
+async def test_response_agent_decision_record_summary_is_bounded_structured(
+    service: DecisionRecordService,
+) -> None:
+    event_id = _event_id()
+    record_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="response_agent",
+        trace_id="trc-resp001",
+        input_data={"event_id": event_id},
+        output_data={
+            "plan_id": "plan-resp01",
+            "generated_by": "template",
+            "strategy_summary": "This free-text strategy must not become decision_summary",
+            "actions": [
+                {
+                    "action_id": "act-resp01",
+                    "action_name": "block ip",
+                    "tool_name": "block_ip",
+                }
+            ],
+        },
+    )
+    assert record_id is not None
+    row = await service.get_by_trace_ref("trc-resp001")
+    assert row is not None
+    assert "strategy must not" not in row.decision_summary
+    assert "actions=1" in row.decision_summary
+    assert row.rule_version is None

@@ -51,6 +51,7 @@ from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService, _action_from_row
 from app.services.event_service import EventService
 from app.services.state_machine_service import StateMachineService
+from tests.helpers.decision_audit import seed_minimum_disposition_audit
 from tests.integration.conftest import FailingLLMClient, FlakyToolExecutor
 from tests.system.scenario_expectations import ScenarioExpectation, risk_bounds_for
 
@@ -453,6 +454,7 @@ async def run_full_response_chain(
                 },
             )
 
+    await seed_minimum_disposition_audit(session_factory, event_id)
     result = await event_disposition_service.activate_and_submit(
         event_id,
         plan_revision=1,
@@ -854,6 +856,7 @@ async def run_l3_approval_response_chain(
                 },
             )
 
+    await seed_minimum_disposition_audit(session_factory, event_id)
     result = await event_disposition_service.activate_and_submit(
         event_id,
         plan_revision=1,

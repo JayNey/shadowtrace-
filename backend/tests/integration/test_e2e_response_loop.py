@@ -91,6 +91,7 @@ from app.services.context_service import (
     EventContextStore,
     append_context_journal_in_session,
 )
+from app.services.decision_record_service import DecisionRecordService
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.disposition_command_factory import DispositionCommandFactory
 from app.services.disposition_sync_service import DispositionSyncService
@@ -103,6 +104,7 @@ from app.services.event_service import EventService
 from app.services.state_machine_service import StateMachineService
 from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 from app.services.working_memory import WorkingMemory
+from tests.helpers.decision_audit import seed_minimum_disposition_audit
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
 )
@@ -642,6 +644,7 @@ async def event_disposition_service(
 ) -> EventDispositionService:
     """S3 fix: EventBus receives a properly-typed RedisClient, not ``Any``."""
     event_bus = EventBus(redis_client)
+
     return EventDispositionService(
         session_factory,
         disposition_sync=disposition_sync_service,
@@ -650,6 +653,7 @@ async def event_disposition_service(
         factory=disposition_command_factory,
         event_bus=event_bus,
         event_disposition_supported=True,
+        decision_record_service=DecisionRecordService(session_factory),
     )
 
 
@@ -681,6 +685,7 @@ async def workflow_runtime_service(
         session_factory,
         event_service=event_service,
         readiness_resolver=_ready,
+        decision_record_service=DecisionRecordService(session_factory),
     )
 
 
@@ -812,6 +817,7 @@ async def test_scenario_1_xdr_managed_full_loop(
 
     # --- Act: activate terminal disposition ---
     plan_revision = 1
+    await seed_minimum_disposition_audit(session_factory, event_id)
     result = await event_disposition_service.activate_and_submit(
         event_id,
         plan_revision,
@@ -1069,6 +1075,7 @@ async def test_scenario_2_low_confidence_l3_manual_approval(
     # includes resolver, factory, and event_bus wiring.  This ensures the
     # test benefits from any future fixture-level initialization changes
     # (e.g., event subscriptions).
+    await seed_minimum_disposition_audit(session_factory, event_id)
     activation = await event_disposition_service.activate_and_submit(
         event_id,
         plan_revision=1,
@@ -1246,6 +1253,7 @@ async def test_scenario_2_plan_revision_gate_blocks_until_all_approved(
             assert row is not None
             row.status = ActionStatus.SUCCESS.value
 
+    await seed_minimum_disposition_audit(session_factory, event_id)
     activation = await event_disposition_service.activate_and_submit(
         event_id,
         plan_revision,
@@ -1739,6 +1747,7 @@ async def test_scenario_3b_deferred_event_status_update_after_direct_tool(
             )
 
     # --- Act: activate terminal disposition after DIRECT_TOOL completion ---
+    await seed_minimum_disposition_audit(session_factory, event_id)
     result = await event_disposition_service.activate_and_submit(
         event_id,
         plan_revision=1,

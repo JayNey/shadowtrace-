@@ -132,6 +132,23 @@ def upgrade() -> None:
     redacted_count = len(result.fetchall())
     _logger.info("ISSUE-131: redacted CoT fields from %d react_engine agent_trace rows", redacted_count)
 
+    basis_result = conn.execute(
+        sa.text(
+            """
+            UPDATE agent_trace
+            SET output_data = output_data - '_decision_basis'
+            WHERE agent_name = 'react_engine'
+              AND output_data ? '_decision_basis'
+            RETURNING trace_id
+            """
+        )
+    )
+    basis_count = len(basis_result.fetchall())
+    _logger.info(
+        "ISSUE-131: removed legacy _decision_basis from %d react_engine agent_trace rows",
+        basis_count,
+    )
+
 
 def downgrade() -> None:
     op.drop_index("ix_decision_record_trace_ref", table_name="decision_record")

@@ -891,8 +891,9 @@ class TestDecisionTraceDegradationAndEdgeCases:
                     output_data={
                         "severity": "high",
                         "event_type": "data_exfiltration",
+                        "decision_summary": "critical exfiltration detected",
                         "_decision_basis": {
-                            "structured_conclusion": "critical exfiltration detected",
+                            "structured_conclusion": "legacy CoT must not leak",
                             "confidence": 0.95,
                             "evidence_refs": ["evd-1"],
                         },
@@ -907,6 +908,40 @@ class TestDecisionTraceDegradationAndEdgeCases:
         assert agent.detail["severity"] == "high"
         assert agent.detail["structured_conclusion"] == "critical exfiltration detected"
         assert agent.detail["confidence"] == 0.95
+
+    @pytest.mark.asyncio
+    async def test_legacy_react_trace_decision_basis_does_not_leak_cot(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """ISSUE-131: legacy _decision_basis CoT must not surface in decision trace."""
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="react_engine",
+                    output_data={
+                        "decision_summary": "bounded react summary",
+                        "confidence": 0.72,
+                        "_decision_basis": {
+                            "structured_conclusion": "hidden chain-of-thought reasoning",
+                            "input_summary": "legacy input",
+                        },
+                    },
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        agent = next(
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        )
+        assert agent.detail["structured_conclusion"] == "bounded react summary"
+        assert "hidden chain-of-thought" not in str(agent.detail)
+        assert agent.detail.get("input_summary") == "legacy input"
 
     @pytest.mark.asyncio
     async def test_running_agent_title_uses_in_progress_wording(

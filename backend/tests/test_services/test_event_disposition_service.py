@@ -60,7 +60,9 @@ from app.models.enums import (
 from app.models.source import SourceReference
 from app.services.context_service import EventContextStore, event_summary_from_security_event
 from app.services.disposition_sync_service import DispositionSyncService
+from app.services.decision_record_service import DecisionRecordService
 from app.services.event_disposition_service import EventDispositionService
+from tests.helpers.decision_audit import seed_minimum_disposition_audit
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
     fetch_mock_concurrency_token,
@@ -184,6 +186,7 @@ async def disposition_service(
         disposition_sync=disposition_sync,
         context_store=store,
         event_bus=EventBus(redis_client),
+        decision_record_service=DecisionRecordService(session_factory),
     )
 
 
@@ -203,6 +206,7 @@ async def cleanup(
                 orm.DispositionReceipt,
                 orm.DispositionOutbox,
                 orm.Action,
+                orm.DecisionRecord,
                 orm.Evidence,
                 orm.Report,
                 orm.SourceEventLink,
@@ -467,6 +471,7 @@ async def test_activate_required_plan_submits_event_status_update(
     )
     await _insert_action(session_factory, event_id, deferred)
     await _seed_effect_verification(store, event_id, action_id=immediate_id)
+    await seed_minimum_disposition_audit(session_factory, event_id)
 
     result = await disposition_service.activate_and_submit(event_id, 1, "test-operator")
     assert result.activated is True
@@ -532,6 +537,7 @@ async def test_disposition_only_false_positive_activates_ignored(
         approved=[SourceDisposition.IGNORED],
     )
     await _insert_action(session_factory, event_id, deferred)
+    await seed_minimum_disposition_audit(session_factory, event_id)
 
     result = await disposition_service.activate_and_submit(event_id, 1, "test-operator")
     assert result.activated is True
@@ -638,6 +644,7 @@ async def test_idempotent_replay_returns_existing_ids(
         approved=[SourceDisposition.IGNORED],
     )
     await _insert_action(session_factory, event_id, deferred)
+    await seed_minimum_disposition_audit(session_factory, event_id)
 
     first = await disposition_service.activate_and_submit(event_id, 1, "test-operator")
     second = await disposition_service.activate_and_submit(event_id, 1, "test-operator")
@@ -766,6 +773,7 @@ async def test_activate_plan_revision_2_uses_closure_cycle_2(
     )
     await _insert_action(session_factory, event_id, deferred)
     await _seed_effect_verification(store, event_id, action_id=immediate_id)
+    await seed_minimum_disposition_audit(session_factory, event_id)
 
     result = await disposition_service.activate_and_submit(event_id, 2, "test-operator")
     assert result.activated is True
@@ -779,6 +787,53 @@ async def test_activate_plan_revision_2_uses_closure_cycle_2(
         assert outbox is not None
         assert outbox.closure_cycle == 2
         assert outbox.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value
+
+
+@pytest.mark.asyncio
+async def test_activate_blocked_without_decision_audit(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    disposition_service: EventDispositionService,
+    cleanup: None,
+) -> None:
+    from app.core.errors import ValidationError
+
+    await _seed_connector_and_source(session_factory, mock_xdr_client=mock_xdr_client)
+    event_id = await _create_event(session_factory, store)
+    immediate_id = f"act-imm-{_sfx()}"
+    deferred = _deferred_action(event_id=event_id)
+    locator = _locator()
+    await _insert_action(
+        session_factory,
+        event_id,
+        Action.model_validate(
+            {
+                "action_id": immediate_id,
+                "event_id": event_id,
+                "plan_revision": 1,
+                "action_fingerprint": f"fp-{immediate_id}",
+                "action_category": ActionCategory.RESPONSE,
+                "action_name": "block ip",
+                "tool_name": "block_ip",
+                "action_level": ActionLevel.L2,
+                "execution_owner": ExecutionOwner.XDR_MANAGED,
+                "status": ActionStatus.SUCCESS,
+                "target_type": "ip",
+                "target": "203.0.113.88",
+                "writeback_required": True,
+                "writeback_applicable": True,
+                "writeback_readiness": WritebackReadiness.READY,
+                "disposition_source_ref": locator,
+                "idempotency_key": f"idem-{immediate_id}",
+            }
+        ),
+    )
+    await _insert_action(session_factory, event_id, deferred)
+    await _seed_effect_verification(store, event_id, action_id=immediate_id)
+
+    with pytest.raises(ValidationError, match="requires decision audit records"):
+        await disposition_service.activate_and_submit(event_id, 1, "test-operator")
 
 
 def test_resolver_false_positive_to_ignored() -> None:

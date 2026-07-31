@@ -817,11 +817,14 @@ class ReActEngine:
                 output_data["gap_code"] = reflect.gap_code.value
                 if reflect.uncertainty_code is not ReActUncertaintyCode.NONE:
                     output_data["uncertainty_code"] = reflect.uncertainty_code.value
+                output_data["stage"] = "react_reflect"
                 # Shaped as {"evidence_id": ...} mappings so the ISSUE-028
                 # TraceProjection extracts them into decision_basis.evidence_refs.
                 output_data["evidence_refs"] = [
                     {"evidence_id": ref} for ref in reflect.evidence_refs
                 ]
+            else:
+                output_data["stage"] = "react_think"
             # Real round timing (same convention as BaseAgent traces): the round
             # started at loop top; completed when its trace is written.
             completed_at = datetime.now(UTC)

@@ -75,12 +75,26 @@ def _agent_status_verb(status: str) -> str:
 
 
 def _agent_decision_basis(output_data: Any) -> dict[str, Any]:
+    """Return sanitized decision basis; never trust legacy stored CoT (ISSUE-131)."""
     if not isinstance(output_data, dict):
         return {}
+    basis = TraceProjection.decision_basis(output_data)
     stored = output_data.get("_decision_basis")
-    if isinstance(stored, dict) and stored:
-        return stored
-    return TraceProjection.decision_basis(output_data)
+    if not isinstance(stored, dict) or not stored:
+        return basis
+    # Preserve non-conclusion metadata from stored basis, but structured_conclusion
+    # always comes from TraceProjection (decision_summary-first, CoT keys redacted).
+    for key in (
+        "input_summary",
+        "model_name",
+        "model_version",
+        "rule_version",
+        "rules_applied",
+    ):
+        value = stored.get(key)
+        if value not in (None, "", [], {}) and key not in basis:
+            basis[key] = value
+    return basis
 
 
 def _agent_title(agent_name: str, status: str, output_data: Any) -> str:

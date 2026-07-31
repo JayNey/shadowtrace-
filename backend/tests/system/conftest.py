@@ -17,6 +17,7 @@ from app.core.redis_client import RedisClient
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
 from app.services.context_service import EventContextStore
+from app.services.decision_record_service import DecisionRecordService
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.disposition_command_factory import DispositionCommandFactory
 from app.services.disposition_sync_service import DispositionSyncService
@@ -87,6 +88,7 @@ async def event_disposition_service(
         factory=DispositionCommandFactory(),
         event_bus=EventBus(redis_client),
         event_disposition_supported=True,
+        decision_record_service=DecisionRecordService(session_factory),
     )
 
 

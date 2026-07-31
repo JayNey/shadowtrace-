@@ -24,6 +24,7 @@ from app.models.enums import (
 from app.models.source import SourceReference
 from app.orchestration.workflow_runtime import WorkflowRuntimeService
 from app.services.context_service import append_context_journal_in_session
+from app.services.decision_record_service import DecisionRecordService
 from app.services.event_service import EventService, IngestableSource
 
 pytestmark = [
@@ -120,6 +121,38 @@ async def test_begin_disposition_only_is_atomic_and_idempotent(
         assert intent_count == 1
 
     assert await runtime.read_disposition_only_intent(event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_begin_disposition_only_creates_fp_decision_record(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-131: disposition-only path must persist durable FP audit before activation."""
+    event_id = await _seed_required_fp(
+        event_service,
+        session_factory,
+        "INC-workflow-runtime-fp-audit",
+    )
+    runtime = WorkflowRuntimeService(
+        session_factory,
+        event_service=event_service,
+        readiness_resolver=_ready,
+        decision_record_service=DecisionRecordService(session_factory),
+    )
+
+    await runtime.begin_disposition_only(event_id)
+
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(orm.DecisionRecord).where(orm.DecisionRecord.event_id == event_id)
+        )
+    assert row is not None
+    assert row.stage == "triage"
+    assert row.actor == "workflow_runtime"
+    assert "close_as_fp" in row.reason_codes
+    assert row.decision_summary
+    assert not DecisionRecordService.blocks_auto_disposition(row)
 
 
 @pytest.mark.asyncio

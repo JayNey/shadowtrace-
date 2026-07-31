@@ -754,6 +754,7 @@ async def test_finish_round_trace_has_no_evidence_refs(
     assert "thought" not in output
     assert "reflection" not in output
     assert "summary" not in output
+    assert output["stage"] == "react_think"
 
 
 async def test_run_rejects_invalid_max_rounds(tool_executor: ToolExecutor) -> None:
