@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from app.agents.rules.entity_validation import validate_host_entity
+from app.agents.rules.entity_validation import HOST_CONTEXTUAL_PATTERN, validate_host_entity
 
 # --------------------------------------------------------------------------- #
 # Regex patterns (compiled once at import time)
@@ -30,8 +30,13 @@ _HOST_SEGMENT_NUMERIC: re.Pattern[str] = re.compile(
     r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)-\d+\b"
 )
 
-# Short NetBIOS / asset tags (db01, srv12).
-_HOST_SHORT_DIGIT: re.Pattern[str] = re.compile(r"\b[A-Za-z]{2,}\d{1,4}\b")
+# Segmented names with interior digit token (web-01-prod, app-3-east).
+_HOST_SEGMENT_MIDDLE_DIGIT: re.Pattern[str] = re.compile(
+    r"\b[A-Za-z0-9]+-\d+-[A-Za-z0-9]+\b"
+)
+
+# Short NetBIOS / asset tags (db01, srv12) — require >=2 trailing digits.
+_HOST_SHORT_DIGIT: re.Pattern[str] = re.compile(r"\b[A-Za-z]{2,}\d{2,4}\b")
 
 # Cloud-style ip-10-0-0-4 tokens.
 _HOST_IP_STYLE: re.Pattern[str] = re.compile(r"\bip-\d+-\d+-\d+-\d+\b", re.IGNORECASE)
@@ -43,13 +48,6 @@ _HOST_ROLE_SUFFIX: re.Pattern[str] = re.compile(
     r"MGMT|MON|LOG|SIEM|XDR|EDR|IAM|NFW|DLP|CASB|WAF|IDS|IPS|SAN|NAS|WORKER|CRON|"
     r"JOB|TASK|BATCH|ETL|DW|BI|ML|AI|GPU|CPU|MEM|DISK|VOL|SNAP|BACKUP|DR|HA|VIP)"
     r"[A-Za-z0-9_-]*\b",
-    re.IGNORECASE,
-)
-
-# Explicit host/device context prefix.
-_HOST_CONTEXTUAL: re.Pattern[str] = re.compile(
-    r"\b(?:host(?:name)?|server|endpoint|workstation|device|asset|node|vm|wks|srv|pc)"
-    r"\s+([A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)\b",
     re.IGNORECASE,
 )
 
@@ -92,6 +90,7 @@ def extract_entities_regex(alert_text: str) -> EntityExtractionResult:
     hostname_candidates: list[str] = []
     for pattern in (
         _HOST_SEGMENT_NUMERIC,
+        _HOST_SEGMENT_MIDDLE_DIGIT,
         _HOST_SHORT_DIGIT,
         _HOST_IP_STYLE,
         _HOST_ROLE_SUFFIX,
@@ -100,7 +99,7 @@ def extract_entities_regex(alert_text: str) -> EntityExtractionResult:
             if pattern is _HOST_SEGMENT_NUMERIC and match.lower().startswith("ip-"):
                 continue
             hostname_candidates.append(match)
-    for match in _HOST_CONTEXTUAL.finditer(alert_text):
+    for match in HOST_CONTEXTUAL_PATTERN.finditer(alert_text):
         hostname_candidates.append(match.group(1))
 
     hostnames = _unique(

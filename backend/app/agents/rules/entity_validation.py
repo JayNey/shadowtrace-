@@ -24,6 +24,16 @@ from app.models.entities import (
 
 EntityProvenance = Literal["source", "llm", "regex"]
 
+# Shared host/device context keywords (extract + validate must stay aligned).
+HOST_CONTEXT_PREFIX = (
+    r"host(?:name)?|server|endpoint|workstation|device|asset|node|vm|wks|srv|pc"
+)
+HOST_CONTEXTUAL_PATTERN: re.Pattern[str] = re.compile(
+    rf"\b(?:{HOST_CONTEXT_PREFIX})\s+"
+    r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)\b",
+    re.IGNORECASE,
+)
+
 # RFC-ish hostname label syntax (single token or dotted).
 _HOSTNAME_SYNTAX = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)*$"
@@ -32,8 +42,9 @@ _HOSTNAME_SYNTAX = re.compile(
 # High-confidence shapes accepted without explicit host/device context in alert text.
 _HIGH_CONF_HOST = re.compile(
     r"^(?:"
-    r"[A-Za-z]{2,}\d{1,4}"  # db01, srv12, short NetBIOS-style
-    r"|[A-Za-z0-9]+(?:-[A-Za-z0-9]+)-\d+"  # DEV-WKS-012, PC-FIN-023, ubuntu-prod-01
+    r"[A-Za-z]{2,}\d{2,4}"  # db01, srv12 — require >=2 trailing digits
+    r"|[A-Za-z0-9]+(?:-[A-Za-z0-9]+)-\d+"  # DEV-WKS-012, ubuntu-prod-01
+    r"|[A-Za-z0-9]+-\d+-[A-Za-z0-9]+"  # web-01-prod, app-3-east
     r"|ip-\d+-\d+-\d+-\d+"  # ip-10-0-0-4 cloud style
     r"|[A-Za-z0-9]+-(?:WKS|SRV|DC|DB|WEB|OPS|FIN|SQL|AD|FS|APP|JUMP|ADMIN|MAIL|"
     r"PROXY|VPN|NODE|PRD|STG|DEV|HOST|PC|LAP|VM|K8S|GW|FW|LB|API|BASTION|CORE|EDGE|"
@@ -44,12 +55,24 @@ _HIGH_CONF_HOST = re.compile(
     re.IGNORECASE,
 )
 
-# Context keyword must immediately precede the candidate hostname in alert text.
-_HOST_CONTEXTUAL = re.compile(
-    r"\b(?:host(?:name)?|server|endpoint|workstation|device|asset|node)\s+"
-    r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)\b",
-    re.IGNORECASE,
+# Natural-language tokens that must not pass as short hostnames without context.
+_ALERT_SHORT_TOKEN = frozenset(
+    {
+        "stage",
+        "level",
+        "phase",
+        "step",
+        "tier",
+        "type",
+        "file",
+        "less",
+        "like",
+        "chain",
+        "beacon",
+    }
 )
+
+# Context keyword must immediately precede the candidate hostname in alert text.
 
 _PROCESS_SYNTAX = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]{0,126}\.(?:exe|dll|sys|bat|cmd|ps1|vbs|py|sh|bin|run|out)$",
@@ -253,6 +276,8 @@ def _validate_hostname(
         return False, "phrase_without_host_context"
     if len(parts) >= 2 and all(part.isalpha() and len(part) <= 12 for part in parts):
         return False, "phrase_without_host_context"
+    if _is_alert_short_token(hostname):
+        return False, "phrase_without_host_context"
     if _HIGH_CONF_HOST.match(hostname):
         return True, ""
     if _hostname_has_explicit_context(hostname, alert_text):
@@ -265,17 +290,29 @@ def _hostname_has_explicit_context(hostname: str, alert_text: str) -> bool:
     if not hostname or not alert_text:
         return False
     pattern = re.compile(
-        r"\b(?:host(?:name)?|server|endpoint|workstation|device|asset|node)\s+"
-        + re.escape(hostname)
-        + r"\b",
+        rf"\b(?:{HOST_CONTEXT_PREFIX})\s+{re.escape(hostname)}\b",
         re.IGNORECASE,
     )
     if pattern.search(alert_text):
         return True
-    for match in _HOST_CONTEXTUAL.finditer(alert_text):
+    for match in HOST_CONTEXTUAL_PATTERN.finditer(alert_text):
         if match.group(1).lower() == hostname.lower():
             return True
     return False
+
+
+def _is_alert_short_token(hostname: str) -> bool:
+    """Reject single-token alert jargon like stage3/level2/phase1."""
+    token = hostname.lower()
+    if "-" in token:
+        return False
+    match = re.fullmatch(r"([a-z]+)(\d+)", token)
+    if match is None:
+        return False
+    word, digits = match.groups()
+    if word in _ALERT_SHORT_TOKEN:
+        return True
+    return len(digits) == 1 and word in _PHRASE_TAIL
 
 
 def _valid_ip_literal(value: str) -> bool:
@@ -290,6 +327,8 @@ __all__ = [
     "EntityProvenance",
     "EntityRejection",
     "EntityValidationResult",
+    "HOST_CONTEXTUAL_PATTERN",
+    "HOST_CONTEXT_PREFIX",
     "is_plausible_regex_hostname",
     "validate_entity_set",
     "validate_host_entity",

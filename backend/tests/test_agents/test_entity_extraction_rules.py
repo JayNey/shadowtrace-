@@ -11,7 +11,7 @@ from app.agents.rules.entity_extraction_rules import extract_entities_regex
 from app.agents.rules.entity_validation import validate_entity_set, validate_host_entity
 from app.agents.triage_agent import TriageAgent
 from app.core.llm.base import LLMResponse
-from app.models.agent_io import TriageResult
+from app.models.agent_io import EvidenceAgentInput, TriageResult
 from app.models.entities import EntitySet, HostEntity
 from app.models.enums import EventType, Severity
 from tests.test_agents.test_triage_agent import (
@@ -33,6 +33,7 @@ from tests.test_agents.test_triage_agent import (
         ("Malicious process on db01 detected", "db01"),
         ("workstation ip-10-0-0-4 seen in logs", "ip-10-0-0-4"),
         ("endpoint ubuntu-prod-01 restarted", "ubuntu-prod-01"),
+        ("activity on web-01-prod detected", "web-01-prod"),
     ],
 )
 def test_positive_hostname_extraction(alert_text: str, expected_host: str) -> None:
@@ -79,6 +80,9 @@ _NEGATIVE_PHRASES: tuple[str, ...] = (
     "unknown threat-like indicator observed",
     "persistent-beacon style activity noted",
     "behavior-based detection triggered",
+    "attack stage3 detected",
+    "level2 alert triggered",
+    "phase1 complete",
 )
 
 
@@ -321,6 +325,88 @@ def test_validator_completes_on_4kb_alert_without_catastrophic_cost() -> None:
     elapsed = time.perf_counter() - started
     # CI-stable: 50 passes over 4KB should finish quickly; avoid fixed per-call ms threshold.
     assert elapsed < 2.0
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "attack stage3 detected",
+        "level2 alert triggered",
+        "phase1 complete",
+    ],
+)
+def test_alert_short_tokens_never_extracted_as_hostnames(phrase: str) -> None:
+    assert extract_entities_regex(phrase).hostnames == []
+
+
+def test_vm_contextual_low_confidence_hostname_accepted() -> None:
+    extracted = extract_entities_regex("vm myserver compromised")
+    assert "myserver" in extracted.hostnames
+
+
+@pytest.mark.asyncio
+async def test_evidence_collect_skips_edr_when_no_valid_host(
+    tool_executor: object,
+) -> None:
+    from app.services.evidence_projection import bind_evidence_query_scope
+    from tests.test_agents.test_evidence_agent import (
+        InMemoryEvidenceRepository,
+        _build_agent,
+        _FakeWorkingMemory,
+        _seed_event_context,
+    )
+    from tests.test_tools.tool_system_fixtures import DEFAULT_SCOPE, new_sfx
+
+    class _EdrCallRecorder:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.edr_calls: list[dict[str, object]] = []
+
+        async def call(self, tool_name: str, params: dict[str, object], **kwargs: object) -> object:
+            if tool_name == "query_edr_process":
+                self.edr_calls.append(params)
+            return await self.inner.call(tool_name, params, **kwargs)
+
+    event_id = f"evt-100-edr-skip-{new_sfx()}"
+    wm = _FakeWorkingMemory()
+    await _seed_event_context(wm, event_id)
+    recorder = _EdrCallRecorder(tool_executor)
+    agent = _build_agent(
+        tool_executor=recorder,
+        wm=wm,
+        evidence_repo=InMemoryEvidenceRepository(),
+    )
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+    )
+    with bind_evidence_query_scope(DEFAULT_SCOPE):
+        output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.edr_calls == []
+    assert any(gap.reason == "missing_entity" for gap in output.gaps)
+
+
+@pytest.mark.asyncio
+async def test_triage_reasoning_splits_source_and_text_rejections() -> None:
+    from app.models.entities import AccountEntity
+
+    wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+    agent = TriageAgent(
+        llm_client=_MockLLMClient(
+            response=LLMResponse(content="", parsed=None, model_name="mock"),
+        ),
+        working_memory=wm,
+    )
+    hint = EntitySet(
+        accounts=[AccountEntity(entity_id="bad", username="not a valid user!")],
+    )
+    alert = "Malicious process spawned — ransomware-like behavior"
+    result = await agent._run(_make_input(raw_event_summary=alert, hint_entities=hint))
+    assert "invalid source entity candidate(s)" in result.reasoning
+    assert result.entity_rejection_summary.get("total_rejected", 0) >= 1
 
 
 def test_validate_host_entity_api() -> None:

@@ -592,10 +592,15 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             extraction.rejection_summary,
             source_validated,
         )
-        rejected_total = int(entity_rejection_summary.get("total_rejected", 0))
-        if rejected_total:
+        text_rejected = int((extraction.rejection_summary or {}).get("total_rejected", 0))
+        source_rejected = int(source_validated.rejection_summary.get("total_rejected", 0))
+        if text_rejected:
             reasoning_parts.append(
-                f"Rejected {rejected_total} invalid text-derived entity candidate(s)."
+                f"Rejected {text_rejected} invalid text-derived entity candidate(s)."
+            )
+        if source_rejected:
+            reasoning_parts.append(
+                f"Rejected {source_rejected} invalid source entity candidate(s)."
             )
         if source_validated.rejection_summary["total_rejected"]:
             degradation_reasons.append("source_enrichment_partial")
