@@ -2059,7 +2059,8 @@ class EventService:
         Supporting objects (assets, logs) carry the structured host/account/process fields
         that enrich entities but are ingested standalone. The adapter records their
         ``parent_source_object_id`` back to the owning incident/alert; we read that
-        relationship rather than inferring one.
+        relationship rather than inferring one. Child objects may use a different
+        connector than the parent (e.g. log-only vs disposition connectors).
         """
         parent_ids = {
             ref.source_object_id

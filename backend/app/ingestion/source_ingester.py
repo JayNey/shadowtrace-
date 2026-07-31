@@ -690,17 +690,18 @@ class SourceIngester:
                         incoming_updated_at=ref.source_updated_at,
                         incoming_token=ref.source_concurrency_token,
                     ):
-                        return True
-                    existing.current_source_status_raw = ref.source_status_raw
-                    existing.current_source_disposition = ref.source_disposition.value
-                    existing.current_concurrency_token = ref.source_concurrency_token
-                    existing.current_source_updated_at = ref.source_updated_at
-                    existing.current_state_version += 1
-                    existing.source_sync_state = "synced"
-                    if projected:
-                        existing.normalized = projected
-                    await session.flush()
-                    idempotent = True
+                        idempotent = True
+                    else:
+                        existing.current_source_status_raw = ref.source_status_raw
+                        existing.current_source_disposition = ref.source_disposition.value
+                        existing.current_concurrency_token = ref.source_concurrency_token
+                        existing.current_source_updated_at = ref.source_updated_at
+                        existing.current_state_version += 1
+                        existing.source_sync_state = "synced"
+                        if projected:
+                            existing.normalized = projected
+                        await session.flush()
+                        idempotent = True
                 else:
                     session.add(
                         orm.SourceObject(
