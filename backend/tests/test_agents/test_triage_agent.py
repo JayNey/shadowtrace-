@@ -1636,7 +1636,7 @@ class TestTriageSourceEntityMerge:
         from app.core.llm.base import LLMResponse
 
         llm_entities = EntitySet(
-            hosts=[HostEntity(entity_id="llm-host", hostname="EVIL-HOST")]
+            hosts=[HostEntity(entity_id="llm-host", hostname="WKS-HOST-007")]
         )
         llm_response = LLMResponse(
             content="",
@@ -1710,7 +1710,13 @@ class TestTriageDecisionBasisProjection:
                 }
             ],
             degradation_reasons=["text_extraction_empty"],
+            entity_rejection_summary={
+                "rejection_counts": {"phrase_without_host_context": 2},
+                "total_rejected": 2,
+            },
         )
         basis = TraceProjection.decision_basis(result.model_dump(mode="json"))
         assert basis["entity_provenance_summary"]
         assert basis["degradation_reasons"] == ["text_extraction_empty"]
+        assert basis["entity_rejection_summary"]["total_rejected"] == 2
+        assert basis["entity_rejection_summary"]["rejection_counts"]["phrase_without_host_context"] == 2

@@ -1,4 +1,4 @@
-"""Tests for entity semantic validation (ISSUE-099 / #603)."""
+"""Tests for entity semantic validation (ISSUE-100)."""
 
 from __future__ import annotations
 
