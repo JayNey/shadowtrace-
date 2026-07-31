@@ -128,6 +128,7 @@ def _agent_detail(row: orm.AgentTrace, inferred: bool) -> dict[str, Any]:
         "model_version",
         "rule_version",
         "warnings",
+        "decision_record_ref",
     ):
         value = basis.get(key)
         if value not in (None, "", [], {}):
@@ -151,6 +152,9 @@ def _agent_detail(row: orm.AgentTrace, inferred: bool) -> dict[str, Any]:
     ):
         if key in output_data and output_data[key] is not None:
             detail[key] = output_data[key]
+    record_ref = output_data.get("decision_record_ref")
+    if isinstance(record_ref, str) and record_ref.strip():
+        detail["decision_record_ref"] = record_ref.strip()
     return _maybe_inferred_detail(detail, inferred)
 
 
@@ -163,6 +167,8 @@ def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEnt
     entries: list[DecisionTraceEntry] = []
     for row in rows:
         ts, inferred = _require_ts(row, "started_at", "completed_at")
+        output_data = row.output_data if isinstance(row.output_data, dict) else {}
+        record_ref = output_data.get("decision_record_ref")
         entries.append(
             DecisionTraceEntry(
                 entry_id=_new_entry_id(),
@@ -172,6 +178,9 @@ def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEnt
                 title=_agent_title(row.agent_name, row.status, row.output_data),
                 detail=_agent_detail(row, inferred),
                 ref_id=row.trace_id,
+                decision_record_ref=(
+                    record_ref.strip() if isinstance(record_ref, str) and record_ref.strip() else None
+                ),
             )
         )
     return entries

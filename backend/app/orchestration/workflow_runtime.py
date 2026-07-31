@@ -82,10 +82,12 @@ class WorkflowRuntimeService:
         *,
         event_service: _EventServicePort,
         readiness_resolver: (Callable[[str], Awaitable[WritebackReadiness]] | None) = None,
+        decision_record_service: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._event_service = event_service
         self._readiness_resolver = readiness_resolver
+        self._decision_records = decision_record_service
 
     async def begin_disposition_only(self, event_id: str) -> None:
         """Atomically persist FP verdict, confidence floor, and trusted intent."""
@@ -140,6 +142,16 @@ class WorkflowRuntimeService:
                     raise ValidationError(
                         "begin_disposition_only requires close_as_fp false_positive_match",
                         details={"event_id": event_id},
+                    )
+                if self._decision_records is not None:
+                    await self._decision_records.ensure_fp_disposition_audit(
+                        session,
+                        event_id=event_id,
+                        fp_match=fp,
+                    )
+                    await self._decision_records.assert_auto_disposition_allowed(
+                        event_id,
+                        session=session,
                     )
                 try:
                     fp_score = max(0.0, min(1.0, float(fp.get("max_score") or 0.0)))

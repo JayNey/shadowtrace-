@@ -8,6 +8,7 @@ payloads, secrets, prompts, or hidden reasoning chains.
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from collections.abc import Mapping
 from datetime import datetime
@@ -22,10 +23,22 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.sanitization import REDACTED, is_sensitive_key, redact_sensitive_text
 from app.db import models as orm
 
+logger = logging.getLogger(__name__)
+
 MAX_AUDIT_FIELD_BYTES = 1_048_576
 _MAX_DECISION_TEXT_CHARS = 4_096
 _MAX_AUDIT_DEPTH = 32
 _RAW_KEYS = frozenset({"raw_payload", "raw_data", "source_snapshot", "raw_result", "prompt"})
+_COT_KEYS = frozenset(
+    {
+        "thought",
+        "reflection",
+        "rationale",
+        "chain_of_thought",
+        "chain-of-thought",
+    }
+)
+_NOT_RETAINED = "[NOT_RETAINED]"
 
 # Fields that TraceProjection extracts for the structured decision_basis summary.
 _DECISION_ID_FIELDS = frozenset(
@@ -42,6 +55,7 @@ _DECISION_ID_FIELDS = frozenset(
 )
 _DECISION_CONCLUSION_FIELDS = frozenset(
     {
+        "decision_summary",
         "reasoning",
         "narrative_summary",
         "strategy_summary",
@@ -137,6 +151,7 @@ def _is_raw_key(key: str) -> bool:
     lowered = key.lower()
     return (
         lowered in _RAW_KEYS
+        or lowered in _COT_KEYS
         or "raw_payload" in lowered
         or "raw_data" in lowered
         or "prompt" in lowered
@@ -152,7 +167,10 @@ def _project_tree(value: Any, *, project_raw: bool = True, depth: int = 0) -> An
         for raw_key, item in value.items():
             key = str(raw_key)
             if project_raw and _is_raw_key(key):
-                projected[key] = _audit_hash_reference(item, reason="raw_block")
+                if key.lower() in _COT_KEYS:
+                    projected[key] = _NOT_RETAINED
+                else:
+                    projected[key] = _audit_hash_reference(item, reason="raw_block")
             elif is_sensitive_key(key):
                 projected[key] = REDACTED
             else:
@@ -257,7 +275,9 @@ class TraceProjection:
         id_scalar = _extract_scalar(data, _DECISION_ID_FIELDS)
         input_summary = str(id_scalar) if id_scalar is not None else f"keys={sorted(data)[:20]}"
 
-        raw_conclusion = _extract_scalar(data, _DECISION_CONCLUSION_FIELDS)
+        raw_conclusion = data.get("decision_summary")
+        if raw_conclusion in (None, ""):
+            raw_conclusion = _extract_scalar(data, _DECISION_CONCLUSION_FIELDS)
         structured_conclusion = (
             _truncate_text(str(raw_conclusion)) if raw_conclusion is not None else ""
         )
@@ -326,8 +346,16 @@ class TraceProjection:
 class AgentTraceService:
     """Writes and queries ``agent_trace`` rows with redacted I/O projections."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        decision_record_service: Any | None = None,
+        degraded_flag_service: Any | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._decision_record_service = decision_record_service
+        self._degraded_flag_service = degraded_flag_service
 
     @staticmethod
     def new_trace_id() -> str:
@@ -376,11 +404,53 @@ class AgentTraceService:
             llm_model=llm_model,
             llm_tokens_used=llm_tokens_used,
         )
+
+        decision_record_ref: str | None = None
+        audit_degraded = False
         async with self._session_factory() as session:
             async with session.begin():
+                if self._decision_record_service is not None and output_data is not None:
+                    try:
+                        decision_record_ref = (
+                            await self._decision_record_service.persist_from_agent_trace(
+                                event_id=event_id,
+                                agent_name=agent_name,
+                                trace_id=trace_id,
+                                input_data=input_data,
+                                output_data=output_data,
+                                llm_model=llm_model,
+                                session=session,
+                            )
+                        )
+                    except Exception:  # noqa: BLE001 - decision record must not break tracing
+                        logger.exception(
+                            "DecisionRecord persist failed event=%s trace=%s",
+                            event_id,
+                            trace_id,
+                        )
+                        audit_degraded = True
+                if decision_record_ref is not None:
+                    output_projected["decision_record_ref"] = decision_record_ref
+                    row.output_data = output_projected
                 session.add(row)
                 await session.flush()
+
+        if audit_degraded:
+            await self._mark_decision_audit_degraded(event_id)
         return trace_id
+
+    async def _mark_decision_audit_degraded(self, event_id: str) -> None:
+        if self._degraded_flag_service is None:
+            return
+        try:
+            await self._degraded_flag_service.set_flag(
+                event_id,
+                "decision_audit_degraded",
+                True,
+                writer="AgentTraceService",
+            )
+        except Exception:  # noqa: BLE001 - degraded annotation must not break tracing
+            logger.exception("Failed to set decision_audit_degraded event=%s", event_id)
 
     async def get_traces_by_event(self, event_id: str) -> list[orm.AgentTrace]:
         async with self._session_factory() as session:

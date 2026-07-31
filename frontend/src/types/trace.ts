@@ -70,6 +70,7 @@ export interface DecisionTraceEntry {
   title: string;
   detail: Record<string, unknown>;
   ref_id: string | null;
+  decision_record_ref?: string | null;
 }
 
 export interface DecisionTraceSummary {

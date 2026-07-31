@@ -1,8 +1,9 @@
 {
   "content": {
-    "reflection": "Default reflection: progress cannot be assessed without scenario-specific evidence.",
+    "decision_summary": "Progress cannot be assessed without scenario-specific evidence.",
     "confidence": 0.3,
-    "gap": "scenario-specific evidence missing",
+    "gap_code": "scenario_evidence_missing",
+    "uncertainty_code": "low_confidence",
     "evidence_refs": []
   },
   "model_name": "mock-model",

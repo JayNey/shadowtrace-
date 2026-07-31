@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "description": "Candidate considered during a decision (type/name/id only).",
+  "properties": {
+    "candidate_type": {
+      "minLength": 1,
+      "title": "Candidate Type",
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "candidate_id": {
+      "default": "",
+      "title": "Candidate Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "candidate_type",
+    "name"
+  ],
+  "title": "DecisionRecordCandidate",
+  "type": "object"
+}

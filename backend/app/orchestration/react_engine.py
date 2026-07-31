@@ -50,11 +50,13 @@ from app.models.enums import ToolCategory
 from app.models.react import (
     ReActAction,
     ReActActionType,
+    ReActGapCode,
     ReActReflectOutput,
     ReActResult,
     ReActRound,
     ReActStopReason,
     ReActThinkOutput,
+    ReActUncertaintyCode,
 )
 from app.models.tool_meta import ToolResultStatus
 from app.models.workflow import CONFIDENCE_THRESHOLD
@@ -436,10 +438,10 @@ class ReActEngine:
                 round_ = ReActRound(
                     round_index=round_index,
                     observation=observation,
-                    thought=think.thought,
+                    decision_summary=think.decision_summary,
+                    reason_code=think.reason_code,
                     action=action,
                     action_result=None,
-                    reflection="",
                     confidence=last_confidence,
                 )
                 rounds.append(round_)
@@ -456,10 +458,10 @@ class ReActEngine:
                 round_ = ReActRound(
                     round_index=round_index,
                     observation=observation,
-                    thought=think.thought,
+                    decision_summary=think.decision_summary,
+                    reason_code=think.reason_code,
                     action=action,
                     action_result=None,
-                    reflection="",
                     confidence=last_confidence,
                 )
                 rounds.append(round_)
@@ -526,10 +528,10 @@ class ReActEngine:
                 round_ = ReActRound(
                     round_index=round_index,
                     observation=observation,
-                    thought=think.thought,
+                    decision_summary=think.decision_summary,
+                    reason_code=think.reason_code,
                     action=action,
                     action_result=action_result,
-                    reflection="",
                     confidence=last_confidence,
                 )
                 rounds.append(round_)
@@ -550,10 +552,12 @@ class ReActEngine:
             round_ = ReActRound(
                 round_index=round_index,
                 observation=observation,
-                thought=think.thought,
+                decision_summary=reflect.decision_summary or think.decision_summary,
+                reason_code=think.reason_code,
+                gap_code=reflect.gap_code,
+                uncertainty_code=reflect.uncertainty_code,
                 action=action,
                 action_result=action_result,
-                reflection=reflect.reflection,
                 confidence=reflect.confidence,
             )
             rounds.append(round_)
@@ -608,9 +612,17 @@ class ReActEngine:
                 content=(
                     "You are the ShadowTrace ReAct investigation engine. Choose the next "
                     "read-only step toward the goal. Reply with JSON only: "
-                    '{"thought": str, "action": {"action_type": "call_tool|call_agent|finish", '
-                    '"target_name": str, "params": object, "rationale": str} | null, '
-                    '"candidates": [str]}. Only call_tool targets from query_tools and '
+                    '{"decision_summary": str (max 512 chars), '
+                    '"reason_code": "corroborate_indicator|resolve_entity|confirm_path|'
+                    'fill_evidence_gap|stop_sufficient|stop_no_target|'
+                    'default_fallback|unspecified", '
+                    '"action": {"action_type": "call_tool|call_agent|finish", '
+                    '"target_name": str, "params": object, '
+                    '"reason_code": str, "decision_summary": str (max 256 chars)} | null, '
+                    '"candidates": [{"candidate_type": "call_tool|call_agent|finish", '
+                    '"name": str, "candidate_id": str}]}. '
+                    "Do not include chain-of-thought, prompts, or free-text rationale. "
+                    "Only call_tool targets from query_tools and "
                     "call_agent targets from read_only_agents are legal; anything else is "
                     "denied before execution. Use action=null or action_type=finish to stop.\n"
                     f"Legal targets: {targets}"
@@ -655,8 +667,13 @@ class ReActEngine:
                 content=(
                     "You are the ShadowTrace ReAct reflection step. Assess progress toward "
                     "the goal from the last action result. Reply with JSON only: "
-                    '{"reflection": str, "confidence": number (0..1), "gap": str, '
-                    '"evidence_refs": [str]}. confidence is your calibrated estimate that '
+                    '{"decision_summary": str (max 512 chars), "confidence": number (0..1), '
+                    '"gap_code": "none|evidence_missing|entity_unresolved|path_unconfirmed|'
+                    'scenario_evidence_missing", '
+                    '"uncertainty_code": "none|low_confidence|conflicting_evidence|'
+                    'incomplete_coverage", '
+                    '"evidence_refs": [str]}. Do not include chain-of-thought or free-text gap '
+                    "descriptions. confidence is your calibrated estimate that "
                     "the goal is fully answered by the evidence gathered so far."
                 ),
             ),
@@ -707,7 +724,9 @@ class ReActEngine:
         action: ReActAction, action_result: dict[str, Any], reflect: ReActReflectOutput
     ) -> str:
         status = action_result.get("status", "success")
-        gap = f"; gap: {reflect.gap}" if reflect.gap else ""
+        gap = ""
+        if reflect.gap_code is not ReActGapCode.NONE:
+            gap = f"; gap_code: {reflect.gap_code.value}"
         return (
             f"{action.action_type.value} {action.target_name} -> {status} "
             f"(confidence={reflect.confidence:.2f}{gap})"
@@ -781,21 +800,28 @@ class ReActEngine:
                 "observation_summary": self._truncate(round_.observation, 500),
                 "context_keys": sorted(map(str, context)),
             }
+            decision_summary = round_.decision_summary or think.decision_summary
+            if reflect is not None and reflect.decision_summary:
+                decision_summary = reflect.decision_summary
             output_data: dict[str, Any] = {
-                "summary": round_.reflection or round_.thought,
-                "candidate_actions": think.candidates,
+                "decision_summary": self._truncate(decision_summary, 512),
+                "reason_code": think.reason_code.value,
+                "candidate_actions": [
+                    candidate.model_dump(mode="json") for candidate in think.candidates
+                ],
                 "selected_action": selected_action,
                 "confidence": round_.confidence,
                 "warnings": warnings,
             }
             if reflect is not None:
+                output_data["gap_code"] = reflect.gap_code.value
+                if reflect.uncertainty_code is not ReActUncertaintyCode.NONE:
+                    output_data["uncertainty_code"] = reflect.uncertainty_code.value
                 # Shaped as {"evidence_id": ...} mappings so the ISSUE-028
                 # TraceProjection extracts them into decision_basis.evidence_refs.
                 output_data["evidence_refs"] = [
                     {"evidence_id": ref} for ref in reflect.evidence_refs
                 ]
-                if reflect.gap:
-                    output_data["gap"] = reflect.gap
             # Real round timing (same convention as BaseAgent traces): the round
             # started at loop top; completed when its trace is written.
             completed_at = datetime.now(UTC)

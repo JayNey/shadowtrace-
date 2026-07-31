@@ -1,13 +1,18 @@
 {
   "content": {
-    "thought": "Threat intel flags the indicator as suspicious; next resolve the suspicious domain to confirm it points at the same infrastructure.",
+    "decision_summary": "Resolve the suspicious domain to confirm it points at the flagged infrastructure.",
+    "reason_code": "resolve_entity",
     "action": {
       "action_type": "call_tool",
       "target_name": "query_dns",
       "params": {"domain": "unknown-upload-example.com", "time_range": {"start": "2024-06-15T08:00:00Z", "end": "2024-06-15T10:00:00Z"}},
-      "rationale": "DNS resolution links the domain observed in the alert to the flagged IP"
+      "reason_code": "resolve_entity",
+      "decision_summary": "Link domain observed in alert to flagged IP"
     },
-    "candidates": ["query_dns", "query_network_flow"]
+    "candidates": [
+      {"candidate_type": "call_tool", "name": "query_dns", "candidate_id": ""},
+      {"candidate_type": "call_tool", "name": "query_network_flow", "candidate_id": ""}
+    ]
   },
   "model_name": "mock-model",
   "prompt_tokens": 64,

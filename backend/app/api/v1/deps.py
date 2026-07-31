@@ -50,6 +50,7 @@ _tool_call_log: Any = None  # ToolCallLogService
 _graph_sync_service: Any = None  # GraphSyncService (ISSUE-082)
 _neo4j_client: Any = None  # Neo4jClient (ISSUE-082)
 _memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
+_decision_record_service: Any = None  # DecisionRecordService (ISSUE-131)
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -80,6 +81,15 @@ def _get_degraded_flags() -> Any:
 
         _degraded_flags = DegradedFlagService(_get_context_store(), _get_session_factory())
     return _degraded_flags
+
+
+def _get_decision_record_service() -> Any:
+    global _decision_record_service
+    if _decision_record_service is None:
+        from app.services.decision_record_service import DecisionRecordService
+
+        _decision_record_service = DecisionRecordService(_get_session_factory())
+    return _decision_record_service
 
 
 def _get_audit_log() -> Any:
@@ -219,6 +229,7 @@ async def _get_workflow_runtime() -> Any:
         _workflow_runtime = WorkflowRuntimeService(
             _get_session_factory(),
             event_service=await get_event_service(),
+            decision_record_service=_get_decision_record_service(),
         )
     return _workflow_runtime
 
@@ -264,6 +275,7 @@ async def get_event_disposition_service() -> Any:
             disposition_sync=await get_disposition_sync(),
             context_store=_get_context_store(),
             event_bus=_get_event_bus(),
+            decision_record_service=_get_decision_record_service(),
         )
     return _event_disposition
 
@@ -502,7 +514,11 @@ async def _build_investigation_agents() -> dict[str, Any]:
     session_factory = _get_session_factory()
     budget_service = BudgetService(redis=_get_redis(), settings=settings)
     output_guard = OutputGuard()
-    trace_service = AgentTraceService(session_factory)
+    trace_service = AgentTraceService(
+        session_factory,
+        decision_record_service=_get_decision_record_service(),
+        degraded_flag_service=_get_degraded_flags(),
+    )
     llm_client = get_llm_client(settings=settings, budget_service=budget_service)
     tool_executor = get_tool_executor()
     tool_executor.budget_service = budget_service
@@ -727,7 +743,7 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
-    global _memory_governance
+    global _memory_governance, _decision_record_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
     from app.services.evidence_projection import reset_evidence_projection_default
@@ -759,3 +775,4 @@ def reset_deps() -> None:
     _graph_sync_service = None
     _neo4j_client = None
     _memory_governance = None
+    _decision_record_service = None

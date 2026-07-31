@@ -1,11 +1,13 @@
 {
   "content": {
-    "thought": "No further read-only investigation is warranted from the current observation; stopping the loop.",
+    "decision_summary": "No further read-only investigation is warranted; stopping the loop.",
+    "reason_code": "stop_sufficient",
     "action": {
       "action_type": "finish",
       "target_name": "",
       "params": {},
-      "rationale": "default fallback: stop instead of guessing a target"
+      "reason_code": "default_fallback",
+      "decision_summary": "Stop instead of guessing a target"
     },
     "candidates": []
   },

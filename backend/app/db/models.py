@@ -480,6 +480,50 @@ class AgentTrace(Base):
     llm_tokens_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class DecisionRecord(Base):
+    """Durable sanitized decision artifact (ISSUE-131 Phase B)."""
+
+    __tablename__ = "decision_record"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_decision_record_idempotency_key"),
+        Index("ix_decision_record_event_id", "event_id"),
+        Index("ix_decision_record_trace_ref", "trace_ref"),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(String, nullable=False)
+    stage: Mapped[str] = mapped_column(String, nullable=False)
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    input_refs: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    candidates: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    selected: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    reason_codes: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    decision_summary: Mapped[str] = mapped_column(String, default="", nullable=False)
+    rule_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    model_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    prompt_policy_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    kb_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    uncertainty_codes: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    guardrail_flags: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    degraded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    trace_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    record_hash: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    parent_record_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("decision_record.record_id"), nullable=True
+    )
+    supersedes_record_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("decision_record.record_id"), nullable=True
+    )
+    retention_policy: Mapped[str] = mapped_column(String, default="standard", nullable=False)
+    unresolved_refs: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    owner: Mapped[str] = mapped_column(String, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
 class EventAuditLog(Base):
     __tablename__ = "event_audit_log"
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
@@ -117,6 +117,7 @@ class EventDispositionService:
         factory: DispositionCommandFactory | None = None,
         event_bus: EventBus | None = None,
         event_disposition_supported: bool = True,
+        decision_record_service: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._sync = disposition_sync
@@ -125,6 +126,7 @@ class EventDispositionService:
         self._factory = factory or DispositionCommandFactory()
         self._bus = event_bus
         self._event_disposition_supported = event_disposition_supported
+        self._decision_records = decision_record_service
 
     async def get_deferred_action(self, event_id: str, plan_revision: int) -> Action | None:
         async with self._session_factory() as session:
@@ -241,6 +243,9 @@ class EventDispositionService:
                 skipped_reason="effect_not_ready",
                 derived_disposition=resolve.disposition,
             )
+
+        if self._decision_records is not None:
+            await self._decision_records.assert_auto_disposition_allowed(event_id)
 
         async with self._session_factory() as session:
             async with session.begin():

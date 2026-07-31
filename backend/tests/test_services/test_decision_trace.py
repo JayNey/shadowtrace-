@@ -70,6 +70,7 @@ async def clean_tables(
             await session.execute(delete(orm.ToolCallLog))
             await session.execute(delete(orm.LLMCallLog))
             await session.execute(delete(orm.EventAuditLog))
+            await session.execute(delete(orm.DecisionRecord))
             await session.execute(delete(orm.AgentTrace))
             await session.execute(delete(ApprovalRecordORM))
             await session.execute(delete(orm.Action))
@@ -88,6 +89,7 @@ async def clean_tables(
             await session.execute(delete(orm.ToolCallLog))
             await session.execute(delete(orm.LLMCallLog))
             await session.execute(delete(orm.EventAuditLog))
+            await session.execute(delete(orm.DecisionRecord))
             await session.execute(delete(orm.AgentTrace))
             await session.execute(delete(ApprovalRecordORM))
             await session.execute(delete(orm.Action))
@@ -971,3 +973,39 @@ class TestDecisionTraceDegradationAndEdgeCases:
         )
         assert "query_timings" in agent_e.detail
         assert agent_e.detail["collection_status"] == "degraded"
+
+
+class TestDecisionRecordRef:
+    @pytest.mark.asyncio
+    async def test_agent_execution_entry_includes_decision_record_ref(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        event_id = _id("evt")
+        record_ref = "dec-abc123456789"
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="react_engine",
+                    output_data={
+                        "decision_summary": "bounded summary",
+                        "decision_record_ref": record_ref,
+                        "_decision_basis": {
+                            "structured_conclusion": "bounded summary",
+                            "confidence": 0.5,
+                        },
+                    },
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        agent_entries = [
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        ]
+        assert len(agent_entries) == 1
+        assert agent_entries[0].decision_record_ref == record_ref
+        assert agent_entries[0].detail["decision_record_ref"] == record_ref

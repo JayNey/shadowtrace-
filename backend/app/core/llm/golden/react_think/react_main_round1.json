@@ -1,13 +1,18 @@
 {
   "content": {
-    "thought": "The upload destination IP has no reputation data yet; query threat intelligence first to establish whether the indicator is known-malicious.",
+    "decision_summary": "Query threat intelligence to establish whether the upload destination is known-malicious.",
+    "reason_code": "corroborate_indicator",
     "action": {
       "action_type": "call_tool",
       "target_name": "query_threat_intel",
       "params": {"indicator": "203.0.113.88"},
-      "rationale": "threat intel corroborates the exfiltration destination before deeper queries"
+      "reason_code": "corroborate_indicator",
+      "decision_summary": "Corroborate exfiltration destination before deeper queries"
     },
-    "candidates": ["query_threat_intel", "query_dns"]
+    "candidates": [
+      {"candidate_type": "call_tool", "name": "query_threat_intel", "candidate_id": ""},
+      {"candidate_type": "call_tool", "name": "query_dns", "candidate_id": ""}
+    ]
   },
   "model_name": "mock-model",
   "prompt_tokens": 58,

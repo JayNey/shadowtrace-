@@ -30,6 +30,7 @@ class DecisionTraceEntry(BaseModel):
     title: str
     detail: dict[str, Any] = Field(default_factory=dict)
     ref_id: str | None = None
+    decision_record_ref: str | None = None
 
 
 class DecisionTraceSummary(BaseModel):

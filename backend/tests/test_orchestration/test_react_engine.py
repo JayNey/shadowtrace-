@@ -31,6 +31,9 @@ from app.core.llm.mock_client import MockLLMClient
 from app.models.react import (
     ReActAction,
     ReActActionType,
+    ReActCandidate,
+    ReActGapCode,
+    ReActReasonCode,
     ReActReflectOutput,
     ReActStopReason,
     ReActThinkOutput,
@@ -110,11 +113,16 @@ class ScriptedLLM:
             item = queue.pop(0)
         elif prompt_key == "react_think":
             item = ReActThinkOutput(
-                thought="default scripted finish",
-                action=ReActAction(action_type=ReActActionType.FINISH, rationale="default"),
+                decision_summary="Default scripted finish",
+                reason_code=ReActReasonCode.STOP_SUFFICIENT,
+                action=ReActAction(
+                    action_type=ReActActionType.FINISH,
+                    reason_code=ReActReasonCode.DEFAULT_FALLBACK,
+                    decision_summary="default",
+                ),
             )
         else:
-            item = ReActReflectOutput(reflection="default", confidence=0.0)
+            item = ReActReflectOutput(decision_summary="default", confidence=0.0)
         if isinstance(item, Exception):
             raise item
         return LLMResponse(
@@ -157,35 +165,46 @@ class RecordingTraceSink:
 
 def think_tool(tool_name: str, params: dict[str, Any] | None = None) -> ReActThinkOutput:
     return ReActThinkOutput(
-        thought=f"need {tool_name}",
+        decision_summary=f"Need {tool_name}",
+        reason_code=ReActReasonCode.FILL_EVIDENCE_GAP,
         action=ReActAction(
             action_type=ReActActionType.CALL_TOOL,
             target_name=tool_name,
             params=params or {"indicator": "203.0.113.88"},
-            rationale="scripted",
+            reason_code=ReActReasonCode.FILL_EVIDENCE_GAP,
+            decision_summary="scripted",
         ),
-        candidates=[tool_name],
+        candidates=[
+            ReActCandidate(candidate_type=ReActActionType.CALL_TOOL, name=tool_name),
+        ],
     )
 
 
 def think_agent(agent_name: str, params: dict[str, Any] | None = None) -> ReActThinkOutput:
     return ReActThinkOutput(
-        thought=f"need agent {agent_name}",
+        decision_summary=f"Need agent {agent_name}",
+        reason_code=ReActReasonCode.FILL_EVIDENCE_GAP,
         action=ReActAction(
             action_type=ReActActionType.CALL_AGENT,
             target_name=agent_name,
             params=params or {},
-            rationale="scripted",
+            reason_code=ReActReasonCode.FILL_EVIDENCE_GAP,
+            decision_summary="scripted",
         ),
-        candidates=[agent_name],
+        candidates=[
+            ReActCandidate(candidate_type=ReActActionType.CALL_AGENT, name=agent_name),
+        ],
     )
 
 
-def reflect(confidence: float, gap: str = "more") -> ReActReflectOutput:
+def reflect(
+    confidence: float,
+    gap_code: ReActGapCode = ReActGapCode.EVIDENCE_MISSING,
+) -> ReActReflectOutput:
     return ReActReflectOutput(
-        reflection="scripted reflection",
+        decision_summary="scripted reflection",
         confidence=confidence,
-        gap=gap,
+        gap_code=gap_code,
         evidence_refs=["ev-x"],
     )
 
@@ -273,11 +292,11 @@ async def test_main_scenario_three_round_convergence(
     # Acceptance 2: every round fully populated.
     for round_ in result.rounds:
         assert round_.observation
-        assert round_.thought
+        assert round_.decision_summary
         assert round_.action is not None
         assert round_.action_result is not None
         assert round_.action_result["status"] == "success"
-        assert round_.reflection
+        assert round_.confidence >= 0.0
         assert 0.0 <= round_.confidence <= 1.0
     assert [r.round_index for r in result.rounds] == [1, 2, 3]
     assert len(result.outputs["action_results"]) == 3
@@ -302,8 +321,12 @@ async def test_main_scenario_three_round_convergence(
         basis = TraceProjection.decision_basis(entry["output_data"])
         assert basis["selected_action"]
         assert basis["confidence"] is not None
+        output = entry["output_data"]
+        assert "thought" not in output
+        assert "reflection" not in output
+        assert "summary" not in output
     last_basis = TraceProjection.decision_basis(trace_sink.entries[-1]["output_data"])
-    assert last_basis["evidence_refs"] == ["ev-ti-001", "ev-dns-002", "ev-flow-003"]
+    assert last_basis["evidence_refs"] == ["evd-dead0001", "evd-beef0002", "evd-cafe0003"]
     assert "query_network_flow" in last_basis["selected_action"]
     assert last_basis["confidence"] == pytest.approx(0.85)
 
@@ -352,7 +375,7 @@ async def test_finish_stops_early_with_mock_default_golden(
 
 async def test_null_action_stops_as_finished(tool_executor: ToolExecutor) -> None:
     llm = ScriptedLLM()
-    llm.think_queue.append(ReActThinkOutput(thought="nothing to do", action=None))
+    llm.think_queue.append(ReActThinkOutput(decision_summary="nothing to do", action=None))
     engine = ReActEngine(llm)  # type: ignore[arg-type]
     executor = ReadOnlyReActExecutor(tool_executor, event_id=EVENT_ID)
 
@@ -668,7 +691,7 @@ async def test_whitelisted_read_only_agent_executes(
         return {"status": "success", "agent_name": "evidence_gap_probe", "data": {"gaps": []}}
 
     llm = ScriptedLLM()
-    llm.add_round(think_agent("evidence_gap_probe", {"focus": "dns"}), reflect(0.9, gap=""))
+    llm.add_round(think_agent("evidence_gap_probe", {"focus": "dns"}), reflect(0.9, gap_code=ReActGapCode.NONE))
     engine = ReActEngine(llm)  # type: ignore[arg-type]
     executor = ReadOnlyReActExecutor(
         tool_executor,
@@ -701,9 +724,16 @@ async def test_finish_round_trace_has_no_evidence_refs(
     llm = ScriptedLLM()
     llm.think_queue.append(
         ReActThinkOutput(
-            thought="done",
-            action=ReActAction(action_type=ReActActionType.FINISH, rationale="enough"),
-            candidates=["query_dns"],
+            decision_summary="done",
+            reason_code=ReActReasonCode.STOP_SUFFICIENT,
+            action=ReActAction(
+                action_type=ReActActionType.FINISH,
+                reason_code=ReActReasonCode.STOP_SUFFICIENT,
+                decision_summary="enough",
+            ),
+            candidates=[
+                ReActCandidate(candidate_type=ReActActionType.CALL_TOOL, name="query_dns"),
+            ],
         )
     )
     engine = ReActEngine(llm, trace_sink=trace_sink)  # type: ignore[arg-type]
@@ -715,10 +745,15 @@ async def test_finish_round_trace_has_no_evidence_refs(
     assert len(trace_sink.entries) == 1
     output = trace_sink.entries[0]["output_data"]
     assert output["selected_action"] == "finish:"
-    assert output["candidate_actions"] == ["query_dns"]
+    assert output["candidate_actions"] == [
+        {"candidate_type": "call_tool", "name": "query_dns", "candidate_id": ""}
+    ]
     assert "evidence_refs" not in output
     # No hidden chain-of-thought / prompt material in the trace payload.
     assert "prompt" not in str(output).lower()
+    assert "thought" not in output
+    assert "reflection" not in output
+    assert "summary" not in output
 
 
 async def test_run_rejects_invalid_max_rounds(tool_executor: ToolExecutor) -> None:

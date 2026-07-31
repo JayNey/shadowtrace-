@@ -1,9 +1,10 @@
 {
   "content": {
-    "reflection": "Flow records confirm sustained outbound transfers from 10.20.30.23 to the flagged IP during the window; the exfiltration path is fully corroborated.",
+    "decision_summary": "Flow records confirm sustained outbound transfers to the flagged IP; exfiltration path corroborated.",
     "confidence": 0.85,
-    "gap": "",
-    "evidence_refs": ["ev-ti-001", "ev-dns-002", "ev-flow-003"]
+    "gap_code": "none",
+    "uncertainty_code": "none",
+    "evidence_refs": ["evd-dead0001", "evd-beef0002", "evd-cafe0003"]
   },
   "model_name": "mock-model",
   "prompt_tokens": 62,

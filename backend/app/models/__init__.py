@@ -53,6 +53,7 @@ from app.models.agent_io import (
     VerifyAgentInput,
 )
 from app.models.context import EventContext
+from app.models.decision_record import DecisionRecord, DecisionRecordCandidate, DecisionStage
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
 from app.models.embedding import (
     EmbeddingProviderHealth,
@@ -209,6 +210,9 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "DecisionTraceEntry": DecisionTraceEntry,
     "DecisionTraceSummary": DecisionTraceSummary,
     "DecisionTrace": DecisionTrace,
+    # decision record (ISSUE-131)
+    "DecisionRecord": DecisionRecord,
+    "DecisionRecordCandidate": DecisionRecordCandidate,
     # embedding / vector contract (ISSUE-140)
     "EmbeddingRelease": EmbeddingRelease,
     "VectorRecordIdentity": VectorRecordIdentity,

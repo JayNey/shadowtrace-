@@ -54,6 +54,18 @@
       ],
       "default": null,
       "title": "Ref Id"
+    },
+    "decision_record_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Decision Record Ref"
     }
   },
   "required": [

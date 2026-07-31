@@ -1,0 +1,285 @@
+{
+  "$defs": {
+    "DecisionRecordCandidate": {
+      "additionalProperties": false,
+      "description": "Candidate considered during a decision (type/name/id only).",
+      "properties": {
+        "candidate_type": {
+          "minLength": 1,
+          "title": "Candidate Type",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "candidate_id": {
+          "default": "",
+          "title": "Candidate Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "candidate_type",
+        "name"
+      ],
+      "title": "DecisionRecordCandidate",
+      "type": "object"
+    },
+    "DecisionStage": {
+      "description": "Decision lifecycle stage (bounded vocabulary).",
+      "enum": [
+        "react_think",
+        "react_reflect",
+        "planner",
+        "risk",
+        "response",
+        "triage",
+        "evidence",
+        "verify",
+        "other"
+      ],
+      "title": "DecisionStage",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Sanitized durable decision artifact.",
+  "properties": {
+    "record_id": {
+      "minLength": 1,
+      "title": "Record Id",
+      "type": "string"
+    },
+    "event_id": {
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "stage": {
+      "$ref": "#/$defs/DecisionStage"
+    },
+    "actor": {
+      "minLength": 1,
+      "title": "Actor",
+      "type": "string"
+    },
+    "input_refs": {
+      "items": {
+        "additionalProperties": {
+          "type": "string"
+        },
+        "type": "object"
+      },
+      "title": "Input Refs",
+      "type": "array"
+    },
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/DecisionRecordCandidate"
+      },
+      "title": "Candidates",
+      "type": "array"
+    },
+    "selected": {
+      "additionalProperties": true,
+      "title": "Selected",
+      "type": "object"
+    },
+    "reason_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reason Codes",
+      "type": "array"
+    },
+    "decision_summary": {
+      "default": "",
+      "maxLength": 512,
+      "title": "Decision Summary",
+      "type": "string"
+    },
+    "rule_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rule Version"
+    },
+    "model_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Version"
+    },
+    "prompt_policy_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Prompt Policy Version"
+    },
+    "kb_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Kb Version"
+    },
+    "confidence": {
+      "anyOf": [
+        {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Confidence"
+    },
+    "uncertainty_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Uncertainty Codes",
+      "type": "array"
+    },
+    "guardrail_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Guardrail Flags",
+      "type": "array"
+    },
+    "degraded": {
+      "default": false,
+      "title": "Degraded",
+      "type": "boolean"
+    },
+    "trace_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Trace Ref"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "record_hash": {
+      "default": "",
+      "minLength": 0,
+      "title": "Record Hash",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "revision": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "parent_record_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Parent Record Id"
+    },
+    "supersedes_record_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Supersedes Record Id"
+    },
+    "retention_policy": {
+      "default": "standard",
+      "minLength": 1,
+      "title": "Retention Policy",
+      "type": "string"
+    },
+    "unresolved_refs": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Unresolved Refs",
+      "type": "array"
+    },
+    "owner": {
+      "default": "",
+      "maxLength": 128,
+      "title": "Owner",
+      "type": "string"
+    },
+    "created_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created At"
+    }
+  },
+  "required": [
+    "record_id",
+    "event_id",
+    "stage",
+    "actor",
+    "idempotency_key"
+  ],
+  "title": "DecisionRecord",
+  "type": "object"
+}
