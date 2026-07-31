@@ -1341,7 +1341,9 @@ async def test_scenario_2b_deferred_rejection_zero_entity_execution(
                 operator="ApprovalEngine",
                 detail={
                     "rule_applied": "level_l3_requires_human",
-                    "reason": "L3 requires human approval (severity/confidence do not auto-approve)",
+                    "reason": (
+                        "L3 requires human approval (severity/confidence do not auto-approve)"
+                    ),
                 },
                 requested_at=datetime.now(UTC),
                 timeout_at=datetime(2025, 12, 31, 23, 59, 59, tzinfo=UTC),

@@ -1602,9 +1602,7 @@ class TestTriageSourceEntityMerge:
         from app.agents.prompts.triage_prompt import TriageLLMResponse
         from app.core.llm.base import LLMResponse
 
-        llm_entities = EntitySet(
-            hosts=[HostEntity(entity_id="llm-host", hostname="DEV-WKS-012")]
-        )
+        llm_entities = EntitySet(hosts=[HostEntity(entity_id="llm-host", hostname="DEV-WKS-012")])
         llm_response = LLMResponse(
             content="",
             parsed=TriageLLMResponse(
@@ -1642,9 +1640,7 @@ class TestTriageSourceEntityMerge:
         from app.agents.prompts.triage_prompt import TriageLLMResponse
         from app.core.llm.base import LLMResponse
 
-        llm_entities = EntitySet(
-            hosts=[HostEntity(entity_id="llm-host", hostname="WKS-HOST-007")]
-        )
+        llm_entities = EntitySet(hosts=[HostEntity(entity_id="llm-host", hostname="WKS-HOST-007")])
         llm_response = LLMResponse(
             content="",
             parsed=TriageLLMResponse(
@@ -1726,4 +1722,7 @@ class TestTriageDecisionBasisProjection:
         assert basis["entity_provenance_summary"]
         assert basis["degradation_reasons"] == ["text_extraction_empty"]
         assert basis["entity_rejection_summary"]["total_rejected"] == 2
-        assert basis["entity_rejection_summary"]["rejection_counts"]["phrase_without_host_context"] == 2
+        assert (
+            basis["entity_rejection_summary"]["rejection_counts"]["phrase_without_host_context"]
+            == 2
+        )

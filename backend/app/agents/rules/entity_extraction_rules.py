@@ -26,14 +26,10 @@ _DOMAIN_PATTERN: re.Pattern[str] = re.compile(
 )
 
 # Segmented names ending in digits (DEV-WKS-012, PC-FIN-023, ubuntu-prod-01).
-_HOST_SEGMENT_NUMERIC: re.Pattern[str] = re.compile(
-    r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)-\d+\b"
-)
+_HOST_SEGMENT_NUMERIC: re.Pattern[str] = re.compile(r"\b[A-Za-z0-9]+(?:-[A-Za-z0-9]+)-\d+\b")
 
 # Segmented names with interior digit token (web-01-prod, app-3-east).
-_HOST_SEGMENT_MIDDLE_DIGIT: re.Pattern[str] = re.compile(
-    r"\b[A-Za-z0-9]+-\d+-[A-Za-z0-9]+\b"
-)
+_HOST_SEGMENT_MIDDLE_DIGIT: re.Pattern[str] = re.compile(r"\b[A-Za-z0-9]+-\d+-[A-Za-z0-9]+\b")
 
 # Short NetBIOS / asset tags (db01, srv12) — require >=2 trailing digits.
 _HOST_SHORT_DIGIT: re.Pattern[str] = re.compile(r"\b[A-Za-z]{2,}\d{2,4}\b")

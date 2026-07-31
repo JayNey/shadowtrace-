@@ -139,7 +139,10 @@ def validate_vector_prefilter(filter_: VectorQueryFilter) -> None:
 
 
 def build_prefiltered_vector_sql(*, include_vector_order: bool = True) -> str:
-    """SQL template for future ``knowledge_vector`` store (#634); not wired to KnowledgeStore yet."""
+    """SQL template for future ``knowledge_vector`` store (#634).
+
+    Not wired to KnowledgeStore yet.
+    """
     order_clause = (
         "\n            ORDER BY embedding <=> :query_vector\n            LIMIT :top_k"
         if include_vector_order

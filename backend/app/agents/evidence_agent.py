@@ -21,12 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
 from app.agents.conflict_detector import ConflictDetector
-from app.agents.rules.entity_validation import EntityValidationResult, validate_entity_set
 from app.agents.evidence_parser import (
     TOOL_SOURCE_MAP,
     EvidenceParser,
     truncate_timestamp_to_second,
 )
+from app.agents.rules.entity_validation import EntityValidationResult, validate_entity_set
 from app.db import models as orm
 from app.models.agent_io import CollectionStatus, EvidenceAgentInput, EvidenceOutput, TriageResult
 from app.models.entities import (
@@ -233,11 +233,7 @@ def _threat_intel_indicator_keys(
     entities: EntitySet,
     iocs: list[str],
 ) -> set[str]:
-    external_ips = {
-        ip.address
-        for ip in entities.ips
-        if ip.address and ip.scope == "external"
-    }
+    external_ips = {ip.address for ip in entities.ips if ip.address and ip.scope == "external"}
     domains = {d.fqdn for d in entities.domains if d.fqdn}
     return set(iocs) | external_ips | domains
 
@@ -264,17 +260,9 @@ def _skip_reason_for_tool(
         raw_values = {d.fqdn for d in raw.domains if d.fqdn}
         valid_values = {d.fqdn for d in validated.domains if d.fqdn}
     elif tool_name == "query_asset_info":
-        raw_values = {
-            value
-            for host in raw.hosts
-            for value in (host.hostname, host.ip)
-            if value
-        }
+        raw_values = {value for host in raw.hosts for value in (host.hostname, host.ip) if value}
         valid_values = {
-            value
-            for host in validated.hosts
-            for value in (host.hostname, host.ip)
-            if value
+            value for host in validated.hosts for value in (host.hostname, host.ip) if value
         }
     elif tool_name == "query_threat_intel":
         raw_values = _threat_intel_indicator_keys(raw, list(raw_iocs or []))
@@ -590,9 +578,12 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         if not alert_text:
             alert_text = await self._resolve_alert_text(input.event_id)
         if _should_skip_all_queries(input.triage_result):
-            collected, success_sources, failed_sources, gaps = await self._collect_all_triage_degraded(
-                input
-            )
+            (
+                collected,
+                success_sources,
+                failed_sources,
+                gaps,
+            ) = await self._collect_all_triage_degraded(input)
         elif mode == "concurrent":
             collected, success_sources, failed_sources, gaps = await self._collect_concurrent(
                 input,
@@ -718,8 +709,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 input.event_id,
                 reason="triage_degraded",
                 description=(
-                    "triage degraded without source-enriched entities; "
-                    f"skipped {tool_name}"
+                    f"triage degraded without source-enriched entities; skipped {tool_name}"
                 ),
             )
             await self._merge_outcome(

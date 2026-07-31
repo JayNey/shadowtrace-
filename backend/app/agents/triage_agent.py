@@ -662,9 +662,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
     # Entity extraction (LLM primary → regex fallback)
     # ------------------------------------------------------------------ #
 
-    async def _extract_entities(
-        self, alert_text: str, event_id: str
-    ) -> TextExtractionResult:
+    async def _extract_entities(self, alert_text: str, event_id: str) -> TextExtractionResult:
         """Extract entities via LLM (JSON mode) with optional regex fallback."""
         empty = EntitySet()
         empty_summary: dict[str, Any] = {}

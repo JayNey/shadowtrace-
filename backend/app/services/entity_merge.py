@@ -81,9 +81,7 @@ def merge_entity_sets(
         degradation.append("text_extraction_empty")
     elif not llm_empty or not regex_empty:
         if llm_empty and not regex_empty:
-            degradation.append(
-                "text_extraction_empty" if source_present else "regex_fallback"
-            )
+            degradation.append("text_extraction_empty" if source_present else "regex_fallback")
 
     return EntityMergeResult(
         entities=merged,

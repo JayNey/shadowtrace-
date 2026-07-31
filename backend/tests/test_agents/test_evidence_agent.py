@@ -736,12 +736,12 @@ async def test_invalid_hostname_produces_invalid_entity_gap_without_tool_call(
     )
     with bind_evidence_projection(evidence_projection):
         with bind_evidence_query_scope(DEFAULT_SCOPE):
-            output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+            output = await agent.execute(
+                EvidenceAgentInput(event_id=event_id, triage_result=triage)
+            )
 
     assert recorder.edr_calls == []
-    endpoint_gaps = [
-        gap for gap in output.gaps if gap.missing_source is EvidenceSource.ENDPOINT
-    ]
+    endpoint_gaps = [gap for gap in output.gaps if gap.missing_source is EvidenceSource.ENDPOINT]
     assert len(endpoint_gaps) == 1
     assert endpoint_gaps[0].reason == "invalid_entity"
 
@@ -777,12 +777,12 @@ async def test_threat_intel_skips_invalid_ioc_in_list_without_tool_call(
     )
     with bind_evidence_projection(evidence_projection):
         with bind_evidence_query_scope(DEFAULT_SCOPE):
-            output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+            output = await agent.execute(
+                EvidenceAgentInput(event_id=event_id, triage_result=triage)
+            )
 
     assert recorder.threat_intel_calls == []
-    intel_gaps = [
-        gap for gap in output.gaps if gap.missing_source is EvidenceSource.THREAT_INTEL
-    ]
+    intel_gaps = [gap for gap in output.gaps if gap.missing_source is EvidenceSource.THREAT_INTEL]
     assert len(intel_gaps) == 1
     assert intel_gaps[0].reason == "invalid_entity"
 
@@ -877,7 +877,9 @@ async def test_triage_degraded_with_source_entities_still_collects(
     )
     with bind_evidence_projection(evidence_projection):
         with bind_evidence_query_scope(DEFAULT_SCOPE):
-            output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+            output = await agent.execute(
+                EvidenceAgentInput(event_id=event_id, triage_result=triage)
+            )
 
     assert not any(gap.reason == "triage_degraded" for gap in output.gaps)
     assert len(output.success_sources) >= 1
@@ -900,9 +902,7 @@ async def test_query_timings_include_records_count_and_gap_reason(
                 EvidenceAgentInput(event_id=event_id, triage_result=_main_scenario_triage())
             )
 
-    dns_timing = next(
-        row for row in agent.last_query_timings if row["tool_name"] == "query_dns"
-    )
+    dns_timing = next(row for row in agent.last_query_timings if row["tool_name"] == "query_dns")
     assert dns_timing["records_count"] == 0
     assert dns_timing["gap_reason"] == "no_records"
     success_timing = next(
@@ -937,7 +937,9 @@ async def test_malicious_process_with_source_entities_produces_evidence(
                     source_refs=[ref],
                 ),
             ],
-            accounts=[AccountEntity(entity_id="ent-acc-mp", username="svc-backup", source_refs=[ref])],
+            accounts=[
+                AccountEntity(entity_id="ent-acc-mp", username="svc-backup", source_refs=[ref])
+            ],
             ips=[
                 IPEntity(
                     entity_id="ent-ip-mp",
@@ -958,7 +960,9 @@ async def test_malicious_process_with_source_entities_produces_evidence(
     )
     with bind_evidence_projection(evidence_projection):
         with bind_evidence_query_scope(DEFAULT_SCOPE):
-            output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+            output = await agent.execute(
+                EvidenceAgentInput(event_id=event_id, triage_result=triage)
+            )
 
     assert len(output.evidence_list) >= 1
     assert output.collection_status in {

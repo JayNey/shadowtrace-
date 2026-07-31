@@ -25,9 +25,7 @@ from app.models.entities import (
 EntityProvenance = Literal["source", "llm", "regex"]
 
 # Shared host/device context keywords (extract + validate must stay aligned).
-HOST_CONTEXT_PREFIX = (
-    r"host(?:name)?|server|endpoint|workstation|device|asset|node|vm|wks|srv|pc"
-)
+HOST_CONTEXT_PREFIX = r"host(?:name)?|server|endpoint|workstation|device|asset|node|vm|wks|srv|pc"
 HOST_CONTEXTUAL_PATTERN: re.Pattern[str] = re.compile(
     rf"\b(?:{HOST_CONTEXT_PREFIX})\s+"
     r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)\b",
@@ -80,9 +78,7 @@ _PROCESS_SYNTAX = re.compile(
     re.IGNORECASE,
 )
 _ACCOUNT_SYNTAX = re.compile(r"^[A-Za-z0-9@._-]{1,64}$")
-_DOMAIN_SYNTAX = re.compile(
-    r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$"
-)
+_DOMAIN_SYNTAX = re.compile(r"^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$")
 _FILE_SYNTAX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
 
 # English phrase tails that hyphenated regex captures must not become hostnames.
@@ -169,9 +165,7 @@ def validate_entity_set(
         if not username:
             continue
         if not _ACCOUNT_SYNTAX.match(username):
-            rejections.append(
-                EntityRejection("account", username, "invalid_account_syntax")
-            )
+            rejections.append(EntityRejection("account", username, "invalid_account_syntax"))
             continue
         accounts.append(account)
 
@@ -179,9 +173,7 @@ def validate_entity_set(
         hostname = (host.hostname or "").strip()
         ip_value = (host.ip or "").strip()
         if hostname:
-            ok, reason = _validate_hostname(
-                hostname, provenance=provenance, alert_text=alert_text
-            )
+            ok, reason = _validate_hostname(hostname, provenance=provenance, alert_text=alert_text)
             if not ok:
                 rejections.append(EntityRejection("host", hostname, reason))
                 hostname = ""
@@ -190,9 +182,7 @@ def validate_entity_set(
             ip_value = ""
         if hostname or ip_value:
             hosts.append(
-                host.model_copy(
-                    update={"hostname": hostname or None, "ip": ip_value or None}
-                )
+                host.model_copy(update={"hostname": hostname or None, "ip": ip_value or None})
             )
 
     for ip_entity in entities.ips:

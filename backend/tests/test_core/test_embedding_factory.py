@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -56,7 +56,9 @@ def test_get_embedding_client_warns_when_settings_ignored(
     caplog.set_level(logging.WARNING)
     reset_embedding_client()
     get_embedding_client(settings=Settings(embedding_mode="mock", embedding_release_id="mock-v1"))
-    get_embedding_client(settings=Settings(embedding_mode="mock", embedding_release_id="other-release"))
+    get_embedding_client(
+        settings=Settings(embedding_mode="mock", embedding_release_id="other-release")
+    )
     assert any("ignored" in record.message for record in caplog.records)
     reset_embedding_client()
 

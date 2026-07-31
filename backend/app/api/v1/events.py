@@ -19,13 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1 import schemas as s
 from app.api.v1.deps import (
+    _get_context_store,
     _get_session_factory,
     get_event_lease,
     get_event_service,
     get_pipeline,
     get_state_machine,
     get_super_agent,
-    _get_context_store,
 )
 from app.api.v1.errors import (
     DispositionPermissionDenied,
@@ -1358,8 +1358,7 @@ def _query_summary_from_agent_traces(rows: list[Any]) -> list[s.EvidenceQuerySum
     from app.services.evidence_observability import build_query_summary_items
 
     return [
-        s.EvidenceQuerySummaryItem.model_validate(item)
-        for item in build_query_summary_items(rows)
+        s.EvidenceQuerySummaryItem.model_validate(item) for item in build_query_summary_items(rows)
     ]
 
 

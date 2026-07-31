@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.config import Settings
 from app.core.embedding.base import EmbeddingCompatibilityError, EmbeddingPrefilterError
 from app.core.embedding.compat import (
     assert_prefilter_in_sql,
@@ -15,7 +16,6 @@ from app.core.embedding.compat import (
     validate_vector_query_context,
 )
 from app.core.embedding.release import build_embedding_release
-from app.core.config import Settings
 from app.models.embedding import VectorQueryContext, VectorQueryFilter
 
 

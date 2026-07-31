@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 
 import pytest
 
@@ -11,7 +10,12 @@ from app.core.config import Settings
 from app.core.embedding.compat import compute_content_hash, validate_vector_query_context
 from app.core.embedding.release import build_embedding_release
 from app.core.embedding.service import EmbeddingService
-from app.models.embedding import VectorImportUpsert, VectorQueryContext, VectorQueryFilter, VectorRecordIdentity
+from app.models.embedding import (
+    VectorImportUpsert,
+    VectorQueryContext,
+    VectorQueryFilter,
+    VectorRecordIdentity,
+)
 
 _GOLDEN_TEXTS = ("hello world", "shadowtrace golden probe")
 

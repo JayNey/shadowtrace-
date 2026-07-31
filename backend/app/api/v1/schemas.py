@@ -36,6 +36,7 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
+from app.models.evidence import Evidence
 from app.models.report import InvestigationReport, ReportSection
 
 # EventListItem / EventSummary live in app.models.security_event (ISSUE-094 §2)
@@ -45,7 +46,6 @@ from app.models.report import InvestigationReport, ReportSection
 from app.models.security_event import EventListItem as EventListItem
 from app.models.security_event import EventSummary as EventSummary
 from app.models.security_event import SecurityEvent
-from app.models.evidence import Evidence
 from app.models.source import SourceReference
 
 

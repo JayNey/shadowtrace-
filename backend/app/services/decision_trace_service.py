@@ -233,7 +233,10 @@ def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEnt
 def _evidence_query_timing_by_tool(
     agent_rows: list[orm.AgentTrace],
 ) -> dict[str, dict[str, Any]]:
-    """Backward-compatible alias; prefer ``evidence_observability.evidence_query_timing_by_tool``."""
+    """Backward-compatible alias.
+
+    Prefer ``evidence_observability.evidence_query_timing_by_tool``.
+    """
     from app.services.evidence_observability import evidence_query_timing_by_tool
 
     return evidence_query_timing_by_tool(agent_rows)
@@ -491,9 +494,7 @@ class DecisionTraceService:
             try:
                 tool_rows = await self._fetch_tool_calls(session, event_id)
                 timing_by_tool = _evidence_query_timing_by_tool(agent_rows)
-                all_entries.extend(
-                    _normalize_tool_calls(tool_rows, timing_by_tool=timing_by_tool)
-                )
+                all_entries.extend(_normalize_tool_calls(tool_rows, timing_by_tool=timing_by_tool))
             except Exception as exc:
                 logger.warning("Failed to fetch tool calls for %s: %s", event_id, exc)
                 missing.append("tool_call_log")

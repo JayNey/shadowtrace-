@@ -54,7 +54,10 @@ class MockEmbedder:
                 vector = [0.0] * self.dim
             else:
                 vector = [v / norm for v in raw]
-            if self._release is not None and self._release.normalization == VectorNormalization.UNIT_L2:
+            if (
+                self._release is not None
+                and self._release.normalization == VectorNormalization.UNIT_L2
+            ):
                 validate_vector_dimension(
                     vector,
                     expected_dimension=self._release.dimension,

@@ -224,9 +224,7 @@ def _entity_counts(entity_set: EntitySet) -> dict[str, int]:
 
 def _diff_counts(before: dict[str, int], after: dict[str, int]) -> dict[str, int]:
     return {
-        key: after[key] - before.get(key, 0)
-        for key in after
-        if after[key] > before.get(key, 0)
+        key: after[key] - before.get(key, 0) for key in after if after[key] > before.get(key, 0)
     }
 
 

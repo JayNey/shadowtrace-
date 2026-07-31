@@ -8,7 +8,9 @@ from app.services.entity_merge import merge_entity_sets, merge_source_layers
 
 def test_source_wins_over_llm_duplicate_semantic_identity() -> None:
     source = EntitySet(
-        hosts=[HostEntity(entity_id="s1", hostname="DEV-WKS-012", attributes={"provenance": "source"})]
+        hosts=[
+            HostEntity(entity_id="s1", hostname="DEV-WKS-012", attributes={"provenance": "source"})
+        ]
     )
     llm = EntitySet(
         hosts=[HostEntity(entity_id="l1", hostname="DEV-WKS-012", attributes={"provenance": "llm"})]
@@ -21,7 +23,9 @@ def test_source_wins_over_llm_duplicate_semantic_identity() -> None:
 
 def test_source_wins_over_llm_competing_hostname() -> None:
     source = EntitySet(
-        hosts=[HostEntity(entity_id="s1", hostname="DEV-WKS-012", attributes={"provenance": "source"})]
+        hosts=[
+            HostEntity(entity_id="s1", hostname="DEV-WKS-012", attributes={"provenance": "source"})
+        ]
     )
     llm = EntitySet(
         hosts=[HostEntity(entity_id="l1", hostname="EVIL-HOST", attributes={"provenance": "llm"})]
@@ -38,12 +42,16 @@ def test_source_wins_over_llm_competing_hostname() -> None:
 def test_semantic_dedupe_ignores_entity_id() -> None:
     source = EntitySet(
         accounts=[
-            AccountEntity(entity_id="a1", username="dev-user-012", attributes={"provenance": "source"})
+            AccountEntity(
+                entity_id="a1", username="dev-user-012", attributes={"provenance": "source"}
+            )
         ]
     )
     llm = EntitySet(
         accounts=[
-            AccountEntity(entity_id="different-id", username="dev-user-012", attributes={"provenance": "llm"})
+            AccountEntity(
+                entity_id="different-id", username="dev-user-012", attributes={"provenance": "llm"}
+            )
         ]
     )
     result = merge_entity_sets(source=source, llm=llm)
@@ -54,7 +62,9 @@ def test_semantic_dedupe_ignores_entity_id() -> None:
 def test_competing_account_records_conflict() -> None:
     source = EntitySet(
         accounts=[
-            AccountEntity(entity_id="a1", username="dev-user-012", attributes={"provenance": "source"})
+            AccountEntity(
+                entity_id="a1", username="dev-user-012", attributes={"provenance": "source"}
+            )
         ]
     )
     llm = EntitySet(
@@ -71,10 +81,16 @@ def test_competing_account_records_conflict() -> None:
 
 def test_text_extraction_empty_reason_when_source_present() -> None:
     source = EntitySet(
-        hosts=[HostEntity(entity_id="s1", hostname="DEV-WKS-012", attributes={"provenance": "source"})]
+        hosts=[
+            HostEntity(entity_id="s1", hostname="DEV-WKS-012", attributes={"provenance": "source"})
+        ]
     )
     regex = EntitySet(
-        hosts=[HostEntity(entity_id="r1", hostname="ransomware-like", attributes={"provenance": "regex"})]
+        hosts=[
+            HostEntity(
+                entity_id="r1", hostname="ransomware-like", attributes={"provenance": "regex"}
+            )
+        ]
     )
     result = merge_entity_sets(source=source, regex=regex)
     assert "text_extraction_empty" in result.degradation_reasons
@@ -84,10 +100,14 @@ def test_text_extraction_empty_reason_when_source_present() -> None:
 
 def test_merge_source_layers_labels_discarded_as_source() -> None:
     base = EntitySet(
-        hosts=[HostEntity(entity_id="s1", hostname="DEV-WKS-012", attributes={"provenance": "source"})]
+        hosts=[
+            HostEntity(entity_id="s1", hostname="DEV-WKS-012", attributes={"provenance": "source"})
+        ]
     )
     incoming = EntitySet(
-        hosts=[HostEntity(entity_id="s2", hostname="EVIL-HOST", attributes={"provenance": "source"})]
+        hosts=[
+            HostEntity(entity_id="s2", hostname="EVIL-HOST", attributes={"provenance": "source"})
+        ]
     )
     result = merge_source_layers(base, incoming)
     assert len(result.entities.hosts) == 1
@@ -95,9 +115,7 @@ def test_merge_source_layers_labels_discarded_as_source() -> None:
 
 
 def test_ip_on_host_skips_duplicate_ip_entity() -> None:
-    source = EntitySet(
-        hosts=[HostEntity(entity_id="h1", hostname="DEV-WKS-012", ip="10.60.1.10")]
-    )
+    source = EntitySet(hosts=[HostEntity(entity_id="h1", hostname="DEV-WKS-012", ip="10.60.1.10")])
     llm = EntitySet(ips=[IPEntity(entity_id="ip1", address="10.60.1.10")])
     result = merge_entity_sets(source=source, llm=llm)
     assert result.entities.ips == []

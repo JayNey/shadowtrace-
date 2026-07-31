@@ -111,7 +111,7 @@ def _contract_db_free(monkeypatch: pytest.MonkeyPatch) -> None:
     async def _empty_aggregate(_session: Any) -> s.StatsResponse:
         return s.StatsResponse()
 
-    monkeypatch.setattr(stats_mod, "_try_get_session_factory", lambda: (lambda: _StatsStubSession()))
+    monkeypatch.setattr(stats_mod, "_try_get_session_factory", lambda: lambda: _StatsStubSession())
     monkeypatch.setattr(stats_mod, "_aggregate_stats", _empty_aggregate)
 
 

@@ -48,7 +48,9 @@ class EmbeddingRelease(BaseModel):
         description="Sanitized artifact/config fingerprint (never secrets)",
     )
 
-    @field_validator("model_id", "release_id", "content_schema_version", "preprocess_schema_version")
+    @field_validator(
+        "model_id", "release_id", "content_schema_version", "preprocess_schema_version"
+    )
     @classmethod
     def _strip_non_empty(cls, value: str) -> str:
         stripped = value.strip()
@@ -96,7 +98,9 @@ class VectorRecordIdentity(BaseModel):
     release_id: str = Field(..., min_length=1)
     embedding_release_id: str = Field(..., min_length=1)
     content_hash: str = Field(..., min_length=1, description="SHA-256 hex of normalized content")
-    vector_revision: int = Field(default=1, ge=1, description="Monotonic revision on content/release change")
+    vector_revision: int = Field(
+        default=1, ge=1, description="Monotonic revision on content/release change"
+    )
 
     @computed_field  # type: ignore[prop-decorator]
     def idempotency_key(self) -> str:
@@ -134,7 +138,9 @@ class VectorQueryContext(BaseModel):
 
     filter: VectorQueryFilter
     active_release: EmbeddingRelease
-    query_vector: list[float] = Field(default_factory=list, description="Populated after embed step")
+    query_vector: list[float] = Field(
+        default_factory=list, description="Populated after embed step"
+    )
 
     def with_query_vector(self, vector: list[float]) -> VectorQueryContext:
         return self.model_copy(update={"query_vector": vector})
@@ -152,7 +158,9 @@ class EmbeddingProviderHealth(BaseModel):
     dimension: int
     store_vector_dimension: int = Field(
         ...,
-        description="Deployed pgvector column dimension (P0 knowledge_chunk / future knowledge_vector)",
+        description=(
+            "Deployed pgvector column dimension (P0 knowledge_chunk / future knowledge_vector)"
+        ),
     )
     index_schema_ok: bool = Field(
         default=True,

@@ -73,7 +73,9 @@ class Settings(BaseSettings):
     embedding_dimension: int = Field(default=1024, alias="EMBEDDING_DIMENSION")
     embedding_distance_metric: str = Field(default="cosine", alias="EMBEDDING_DISTANCE_METRIC")
     embedding_normalization: str = Field(default="unit_l2", alias="EMBEDDING_NORMALIZATION")
-    embedding_content_schema_version: str = Field(default="1", alias="EMBEDDING_CONTENT_SCHEMA_VERSION")
+    embedding_content_schema_version: str = Field(
+        default="1", alias="EMBEDDING_CONTENT_SCHEMA_VERSION"
+    )
     embedding_preprocess_schema_version: str = Field(
         default="1",
         alias="EMBEDDING_PREPROCESS_SCHEMA_VERSION",

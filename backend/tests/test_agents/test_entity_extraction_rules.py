@@ -126,9 +126,7 @@ def test_negative_samples_reject_injected_llm_phrase_hostnames(phrase: str) -> N
         ("ransomware-like", "llm"),
     ],
 )
-def test_llm_and_regex_reject_same_invalid_hostname(
-    hostname: str, provenance: str
-) -> None:
+def test_llm_and_regex_reject_same_invalid_hostname(hostname: str, provenance: str) -> None:
     alert = "Malicious process spawned — ransomware-like behavior"
     entities = EntitySet(hosts=[HostEntity(entity_id="h1", hostname=hostname)])
     result = validate_entity_set(entities, provenance=provenance, alert_text=alert)  # type: ignore[arg-type]
@@ -140,9 +138,7 @@ def test_llm_and_regex_reject_same_invalid_hostname(
 async def test_llm_invalid_entities_fall_back_to_validated_regex() -> None:
     from app.agents.prompts.triage_prompt import TriageLLMResponse
 
-    llm_entities = EntitySet(
-        hosts=[HostEntity(entity_id="bad", hostname="ransomware-like")]
-    )
+    llm_entities = EntitySet(hosts=[HostEntity(entity_id="bad", hostname="ransomware-like")])
     llm_response = LLMResponse(
         content="",
         parsed=TriageLLMResponse(
@@ -244,9 +240,7 @@ async def test_triage_keeps_valid_host_when_llm_also_returns_phrase_hostname() -
 async def test_triage_entity_rejection_summary_counts_llm_rejections() -> None:
     from app.agents.prompts.triage_prompt import TriageLLMResponse
 
-    llm_entities = EntitySet(
-        hosts=[HostEntity(entity_id="bad", hostname="ransomware-like")]
-    )
+    llm_entities = EntitySet(hosts=[HostEntity(entity_id="bad", hostname="ransomware-like")])
     llm_response = LLMResponse(
         content="",
         parsed=TriageLLMResponse(
