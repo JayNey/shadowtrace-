@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "description": "Flaky-test quarantine metadata for CI gate management.",
+  "properties": {
+    "owner": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Owner",
+      "type": "string"
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expires At"
+    },
+    "reason": {
+      "default": "",
+      "maxLength": 512,
+      "title": "Reason",
+      "type": "string"
+    }
+  },
+  "required": [
+    "owner"
+  ],
+  "title": "EvaluationQuarantinePolicy",
+  "type": "object"
+}

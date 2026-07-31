@@ -141,9 +141,15 @@ def main() -> None:
         default="postgresql+asyncpg://shadowtrace:shadowtrace@127.0.0.1:5432/shadowtrace",
         help="PostgreSQL URL for canonical truth persistence",
     )
+    parser.add_argument(
+        "--migrate",
+        action="store_true",
+        help="Apply Alembic migrations before loading fixtures (CI uses separate step)",
+    )
     args = parser.parse_args()
 
-    _apply_migrations(args.database_url)
+    if args.migrate:
+        _apply_migrations(args.database_url)
 
     import asyncio
 

@@ -25,7 +25,7 @@ class ScorerOutcome(StrEnum):
     FAIL = "fail"
     UNEVALUABLE = "unevaluable"
     ERROR = "error"
-    SKIPPED = "skipped"
+    SKIPPED = "skipped"  # reserved: explicit scorer opt-out (#642+)
 
 
 class EvaluationRunStatus(StrEnum):
@@ -151,6 +151,16 @@ class EvaluationThresholdRule(BaseModel):
     value: float
 
 
+class EvaluationQuarantinePolicy(BaseModel):
+    """Flaky-test quarantine metadata for CI gate management."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    owner: str = Field(..., min_length=1, max_length=128)
+    expires_at: datetime | None = None
+    reason: str = Field(default="", max_length=512)
+
+
 class EvaluationThresholdManifest(BaseModel):
     """Versioned gate manifest for a dataset evaluation profile."""
 
@@ -164,6 +174,7 @@ class EvaluationThresholdManifest(BaseModel):
     min_pass_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     max_error_count: int = Field(default=0, ge=0)
     required_gate: bool = Field(default=False)
+    quarantine: EvaluationQuarantinePolicy | None = None
 
 
 class EvaluationRunArtifact(BaseModel):
@@ -201,6 +212,7 @@ __all__ = [
     "EvaluationRunConfig",
     "EvaluationRunStatus",
     "EvaluationScorerResult",
+    "EvaluationQuarantinePolicy",
     "EvaluationThresholdManifest",
     "EvaluationThresholdRule",
     "GateVerdict",

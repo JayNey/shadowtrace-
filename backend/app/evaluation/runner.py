@@ -49,9 +49,13 @@ def _case_status(
 ) -> EvaluationRunStatus:
     if slice_type == SliceType.UNEVALUABLE:
         return EvaluationRunStatus.UNEVALUABLE
+    if not scorer_results:
+        return EvaluationRunStatus.FAILED
     if any(r.outcome == ScorerOutcome.ERROR for r in scorer_results):
         return EvaluationRunStatus.FAILED
     if any(r.outcome == ScorerOutcome.FAIL for r in scorer_results):
+        return EvaluationRunStatus.FAILED
+    if any(r.outcome == ScorerOutcome.SKIPPED for r in scorer_results):
         return EvaluationRunStatus.FAILED
     if all(r.outcome == ScorerOutcome.PASS for r in scorer_results):
         return EvaluationRunStatus.COMPLETED
@@ -73,7 +77,10 @@ def _aggregate(case_results: list[EvaluationCaseResult]) -> EvaluationAggregateM
             )
         elif ScorerOutcome.FAIL in outcomes or case.case_status == EvaluationRunStatus.FAILED:
             fail_count += 1
-        elif all(r.outcome == ScorerOutcome.PASS for r in case.scorer_results):
+        elif (
+            case.scorer_results
+            and all(r.outcome == ScorerOutcome.PASS for r in case.scorer_results)
+        ):
             pass_count += 1
         else:
             fail_count += 1
@@ -95,7 +102,10 @@ def _aggregate(case_results: list[EvaluationCaseResult]) -> EvaluationAggregateM
 def _run_status(
     aggregates: EvaluationAggregateMetrics,
     gate_verdict: GateVerdict | None,
+    errors: list[str],
 ) -> EvaluationRunStatus:
+    if errors:
+        return EvaluationRunStatus.FAILED
     if gate_verdict in {GateVerdict.FAIL, GateVerdict.FAIL_CLOSED}:
         return EvaluationRunStatus.FAILED
     if aggregates.error_count > 0 or aggregates.fail_count > 0:
@@ -162,6 +172,23 @@ class EvaluationRunner:
             )
         return sorted(truths, key=lambda t: t.case_id)
 
+    async def _validate_dataset_content_hash(self, request: EvaluationRunRequest) -> None:
+        manifest = await self._truth_service.get_dataset_manifest(
+            tenant_id=request.tenant_id,
+            dataset_id=request.dataset_id,
+            dataset_version=request.dataset_version,
+        )
+        if manifest.content_hash != request.dataset_content_hash:
+            raise ValidationError(
+                "dataset content hash mismatch",
+                details={
+                    "expected": manifest.content_hash,
+                    "actual": request.dataset_content_hash,
+                    "dataset_id": request.dataset_id,
+                    "dataset_version": request.dataset_version,
+                },
+            )
+
     def _resolve_scorers(self, request: EvaluationRunRequest) -> list[str]:
         if request.scorer_ids:
             for scorer_id in request.scorer_ids:
@@ -171,6 +198,7 @@ class EvaluationRunner:
 
     async def run(self, request: EvaluationRunRequest) -> EvaluationRunArtifact:
         started_at = datetime.now(tz=UTC)
+        await self._validate_dataset_content_hash(request)
         truths = await self._load_truths(request)
         scorer_ids = self._resolve_scorers(request)
         ctx = ScorerContext(
@@ -193,14 +221,20 @@ class EvaluationRunner:
             slice_type = _slice_type(truth)
             observation = self._replayer.replay(truth, seed=request.seed)
             registrations = self._registry.list_for_slice(slice_type)
-            if not registrations:
-                errors.append(
-                    f"no scorers registered for slice {slice_type.value}: {truth.case_id}"
-                )
+            active_registrations = [r for r in registrations if r.scorer_id in scorer_ids]
+            if slice_type != SliceType.UNEVALUABLE and not active_registrations:
+                if registrations:
+                    errors.append(
+                        "no active scorers for slice "
+                        f"{slice_type.value} case {truth.case_id} "
+                        f"(configured scorer_ids={scorer_ids})"
+                    )
+                else:
+                    errors.append(
+                        f"no scorers registered for slice {slice_type.value}: {truth.case_id}"
+                    )
             scorer_results: list[EvaluationScorerResult] = []
-            for registration in registrations:
-                if registration.scorer_id not in scorer_ids:
-                    continue
+            for registration in active_registrations:
                 try:
                     scorer_results.append(registration.scorer.score(truth, observation, ctx))
                 except Exception as exc:  # noqa: BLE001 — scorer boundary fail-closed
@@ -238,7 +272,7 @@ class EvaluationRunner:
             registry=self._registry,
             manifest_path=request.threshold_manifest_path,
         )
-        status = _run_status(aggregates, gate.verdict if gate else None)
+        status = _run_status(aggregates, gate.verdict if gate else None, errors)
         completed_at = datetime.now(tz=UTC)
 
         artifact = EvaluationRunArtifact(

@@ -71,6 +71,7 @@ from app.models.evaluation_run import (
     EvaluationAggregateMetrics,
     EvaluationCaseResult,
     EvaluationGateResult,
+    EvaluationQuarantinePolicy,
     EvaluationRunArtifact,
     EvaluationRunConfig,
     EvaluationThresholdManifest,
@@ -250,6 +251,7 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "EvaluationCaseResult": EvaluationCaseResult,
     "EvaluationAggregateMetrics": EvaluationAggregateMetrics,
     "EvaluationGateResult": EvaluationGateResult,
+    "EvaluationQuarantinePolicy": EvaluationQuarantinePolicy,
     "EvaluationThresholdManifest": EvaluationThresholdManifest,
     # embedding / vector contract (ISSUE-140)
     "EmbeddingRelease": EmbeddingRelease,

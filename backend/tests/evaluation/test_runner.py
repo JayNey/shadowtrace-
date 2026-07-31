@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from sqlalchemy.pool import NullPool
 from app.core.errors import ValidationError
 from app.db import models as orm
 from app.evaluation.artifact import compute_artifact_hash
+from app.evaluation.diff import diff_artifacts
 from app.evaluation.fixture_loader import load_fixture_dataset
 from app.evaluation.replayer import MockDeterministicReplayer
 from app.evaluation.runner import EvaluationRunner, EvaluationRunRequest, run_fixture_evaluation
@@ -30,7 +32,12 @@ from app.models.evaluation_run import (
     GateVerdict,
     ScorerOutcome,
 )
-from app.models.evaluation_truth import EvaluationTruthQuery, SliceType
+from app.models.evaluation_truth import (
+    BenignSliceExpectation,
+    EvaluationTruthQuery,
+    LabelProvenance,
+    SliceType,
+)
 from app.services.evaluation_truth_service import EvaluationTruthService
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -229,6 +236,142 @@ async def test_unevaluable_case_not_counted_as_pass(
     unevaluable = next(c for c in artifact.case_results if c.slice_type == SliceType.UNEVALUABLE)
     assert unevaluable.case_status == EvaluationRunStatus.UNEVALUABLE
     assert all(r.outcome == ScorerOutcome.UNEVALUABLE for r in unevaluable.scorer_results)
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_empty_scorer_results_fail_closed_on_threat_case(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+    registry = ScorerRegistry()
+    registry.register(
+        ScorerRegistration(
+            scorer_id="benign_label",
+            scorer=default_scorer_registry().get("benign_label").scorer,
+            required=True,
+        )
+    )
+    artifact = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="deadbeef",
+        registry=registry,
+    )
+    threat = next(c for c in artifact.case_results if c.slice_type == SliceType.THREAT)
+    assert threat.scorer_results == []
+    assert threat.case_status == EvaluationRunStatus.FAILED
+    assert artifact.status == EvaluationRunStatus.FAILED
+    assert artifact.errors
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_partial_scorer_ids_missing_required_scorer_fail_gate(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+    runner = EvaluationRunner(truth_service)
+    artifact = await runner.run(
+        EvaluationRunRequest(
+            tenant_id=manifest.tenant_id,
+            dataset_id=manifest.dataset_id,
+            dataset_version=manifest.dataset_version,
+            dataset_content_hash=manifest.content_hash,
+            seed=42,
+            code_sha="deadbeef",
+            scorer_ids=["benign_label"],
+            threshold_manifest=load_threshold_manifest(DATASET_DIR / "threshold_manifest.json"),
+            threshold_manifest_path=str(DATASET_DIR / "threshold_manifest.json"),
+        )
+    )
+    assert artifact.status == EvaluationRunStatus.FAILED
+    assert artifact.gate is not None
+    assert any(diff.actual == "missing" for diff in artifact.gate.diffs)
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_runner_rejects_dataset_content_hash_mismatch(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+    runner = EvaluationRunner(truth_service)
+    with pytest.raises(ValidationError, match="dataset content hash mismatch"):
+        await runner.run(
+            EvaluationRunRequest(
+                tenant_id=manifest.tenant_id,
+                dataset_id=manifest.dataset_id,
+                dataset_version=manifest.dataset_version,
+                dataset_content_hash="0" * 64,
+                seed=42,
+                code_sha="deadbeef",
+            )
+        )
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_runner_uses_latest_truth_revision_after_correction(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    truths, manifest = loaded_dataset
+    threat = next(t for t in truths if t.case_id == "malicious_process_exfil")
+    corrected = await truth_service.append_correction(
+        tenant_id=manifest.tenant_id,
+        supersedes_truth_id=threat.truth_id,
+        slice_expectation=BenignSliceExpectation(),
+        label_provenance=LabelProvenance(
+            adjudicator="reviewer",
+            adjudicated_at=datetime(2026, 7, 31, 9, 0, tzinfo=UTC),
+            source_kind="manual_review",
+            revision_notes="corrected during evaluation test",
+        ),
+        correction_reason="adjudication overturned in test",
+    )
+    updated_manifest = await truth_service.get_dataset_manifest(
+        tenant_id=manifest.tenant_id,
+        dataset_id=manifest.dataset_id,
+        dataset_version=manifest.dataset_version,
+    )
+    artifact = await run_fixture_evaluation(
+        truth_service,
+        updated_manifest,
+        seed=42,
+        code_sha="deadbeef",
+    )
+    case = next(c for c in artifact.case_results if c.case_id == "malicious_process_exfil")
+    assert case.truth_id == corrected.truth_id
+    assert case.truth_revision == corrected.revision
+    assert case.slice_type == SliceType.BENIGN
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_artifact_diff_reports_field_deltas(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+    baseline = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="deadbeef",
+    )
+    candidate = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=99,
+        code_sha="deadbeef",
+    )
+    diffs = diff_artifacts(baseline, candidate)
+    assert any(diff.field == "artifact_hash" for diff in diffs)
 
 
 @pytest.mark.evaluation

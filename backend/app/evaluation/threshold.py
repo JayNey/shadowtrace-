@@ -60,6 +60,19 @@ def _compare(op: str, actual: Any, expected: float) -> bool:
     raise ValidationError(f"unsupported threshold op: {op}", details={"op": op})
 
 
+def _scorer_applies_to_case(
+    scorer_id: str,
+    case: EvaluationCaseResult,
+    registry: ScorerRegistry,
+) -> bool:
+    registration = registry.get(scorer_id)
+    return case.slice_type in registration.scorer.supported_slices
+
+
+def _case_has_scorer_result(case: EvaluationCaseResult, scorer_id: str) -> bool:
+    return any(result.scorer_id == scorer_id for result in case.scorer_results)
+
+
 def _evaluate_rule(
     rule: EvaluationThresholdRule,
     aggregates: EvaluationAggregateMetrics,
@@ -123,6 +136,21 @@ def evaluate_gate(
         if scorer_id not in registered:
             continue
         for case in case_results:
+            if not _scorer_applies_to_case(scorer_id, case, registry):
+                continue
+            if not _case_has_scorer_result(case, scorer_id):
+                diffs.append(
+                    EvaluationGateDiff(
+                        field=f"scorer:{scorer_id}",
+                        expected="executed",
+                        actual="missing",
+                        reason=(
+                            f"required scorer did not run on case {case.case_id} "
+                            f"(slice={case.slice_type.value})"
+                        ),
+                    )
+                )
+                continue
             for result in case.scorer_results:
                 if result.scorer_id != scorer_id:
                     continue
