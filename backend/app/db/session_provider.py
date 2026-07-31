@@ -10,6 +10,7 @@ hidden module caches.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from typing import Literal
@@ -51,6 +52,10 @@ class SessionProvider:
     def pool_policy(self) -> PoolPolicy:
         return self._pool
 
+    @property
+    def is_engine_initialized(self) -> bool:
+        return self._engine is not None
+
     def engine(self) -> AsyncEngine:
         if self._engine is None:
             kwargs: dict[str, object] = {"pool_pre_ping": True, "future": True}
@@ -90,18 +95,47 @@ class SessionProvider:
         self._factory = None
 
 
+def peek_session_provider() -> SessionProvider | None:
+    """Return the current provider without creating one (tests/diagnostics)."""
+    return _provider
+
+
+def _dispose_provider_sync(provider: SessionProvider) -> None:
+    """Best-effort synchronous dispose when no event loop is running."""
+    if not provider.is_engine_initialized:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(provider.dispose())
+    else:
+        logger.warning(
+            "SessionProvider engine not disposed synchronously because an event loop "
+            "is running; await dispose_session_provider() instead"
+        )
+
+
 def get_session_provider(*, pool: PoolPolicy = "pooled") -> SessionProvider:
     """Return the process-local provider, creating a pooled one on first use."""
     global _provider
     if _provider is None:
         settings = get_settings()
         _provider = SessionProvider(settings.database_url, pool=pool)
+    elif _provider.pool_policy != pool:
+        logger.warning(
+            "get_session_provider(pool=%r) ignored: provider already initialized "
+            "with pool=%r; use init_worker_session_provider() for Celery workers",
+            pool,
+            _provider.pool_policy,
+        )
     return _provider
 
 
 def init_worker_session_provider() -> SessionProvider:
     """Initialize a NullPool provider in a Celery worker child (post-fork)."""
     global _provider
+    if _provider is not None:
+        _dispose_provider_sync(_provider)
     settings = get_settings()
     _provider = SessionProvider(settings.database_url, pool="nullpool")
     return _provider
@@ -114,9 +148,13 @@ def set_session_provider(provider: SessionProvider | None) -> None:
 
 
 def reset_session_provider() -> None:
-    """Clear the provider reference without disposing (tests — prefer ``dispose``)."""
+    """Dispose (when possible) and clear the process-local provider (tests)."""
     global _provider
+    if _provider is None:
+        return
+    provider = _provider
     _provider = None
+    _dispose_provider_sync(provider)
 
 
 async def dispose_session_provider() -> None:

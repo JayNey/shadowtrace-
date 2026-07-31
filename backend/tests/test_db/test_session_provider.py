@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import socket
 from collections.abc import Iterator
 from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import urlparse
 
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.pool import NullPool, QueuePool
 
@@ -19,6 +21,7 @@ from app.db.session_provider import (
     dispose_session_provider,
     get_session_provider,
     init_worker_session_provider,
+    peek_session_provider,
     reset_session_provider,
     set_session_provider,
 )
@@ -66,11 +69,29 @@ def test_set_session_provider_override() -> None:
 
 
 def test_reset_deps_clears_session_provider() -> None:
-    get_session_provider()
+    get_session_provider().engine()
     reset_deps()
-    from app.db import session_provider as sp_module
+    assert peek_session_provider() is None
 
-    assert sp_module._provider is None
+
+def test_get_session_provider_warns_on_pool_mismatch(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
+    get_session_provider(pool="pooled")
+    get_session_provider(pool="nullpool")
+    assert any(
+        "get_session_provider(pool='nullpool') ignored" in record.message
+        for record in caplog.records
+    )
+
+
+def test_reset_session_provider_disposes_engine() -> None:
+    provider = SessionProvider(DATABASE_URL, pool="nullpool")
+    set_session_provider(provider)
+    _ = provider.engine()
+    assert provider.is_engine_initialized
+    reset_session_provider()
+    assert peek_session_provider() is None
+    assert not provider.is_engine_initialized
 
 
 @pytest.mark.asyncio
@@ -80,7 +101,7 @@ async def test_dispose_clears_engine_and_factory() -> None:
     _ = provider.engine()
     _ = provider.session_factory()
     await dispose_session_provider()
-    assert provider._engine is None
+    assert not provider.is_engine_initialized
     assert provider._factory is None
 
 
@@ -103,15 +124,13 @@ def test_consecutive_asyncio_run_with_nullpool_provider() -> None:
 
 
 def test_celery_app_module_does_not_eagerly_create_engine() -> None:
-    from app.db import session_provider as sp_module
-
     reset_session_provider()
     import importlib
 
     import app.core.celery_app as celery_module
 
     importlib.reload(celery_module)
-    assert sp_module._provider is None
+    assert peek_session_provider() is None
 
 
 def test_init_worker_telemetry_uses_worker_provider_engine(
@@ -133,6 +152,17 @@ def test_init_worker_telemetry_uses_worker_provider_engine(
     assert get_session_provider().engine() is engine
 
 
+def test_shutdown_worker_session_provider_disposes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispose_mock = AsyncMock()
+    monkeypatch.setattr("app.db.session_provider.dispose_session_provider", dispose_mock)
+    from app.core.celery_app import shutdown_worker_session_provider
+
+    shutdown_worker_session_provider(sender=None)
+    dispose_mock.assert_awaited_once()
+
+
 def test_check_postgres_uses_provider_ping(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.api.v1 import health as health_module
 
@@ -145,3 +175,19 @@ def test_check_postgres_uses_provider_ping(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert asyncio.run(_run()) == "ok"
     mock_provider.ping_postgres.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_disposes_session_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.main import _lifespan
+
+    dispose_mock = AsyncMock()
+    monkeypatch.setattr("app.main.dispose_session_provider", dispose_mock)
+    monkeypatch.setattr("app.main._socketio_manager.start", AsyncMock())
+    monkeypatch.setattr("app.main._socketio_manager.stop", AsyncMock())
+    monkeypatch.setattr("app.main.shutdown_health_clients", AsyncMock())
+
+    async with _lifespan(FastAPI()):
+        pass
+
+    dispose_mock.assert_awaited_once()
