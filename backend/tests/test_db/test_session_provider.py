@@ -26,7 +26,10 @@ from app.db.session_provider import (
     reset_session_provider_async,
     set_session_provider,
 )
-from app.services.evidence_projection import get_evidence_projection, reset_evidence_projection_default
+from app.services.evidence_projection import (
+    get_evidence_projection,
+    reset_evidence_projection_default,
+)
 
 DATABASE_URL = get_settings().database_url
 
@@ -99,13 +102,48 @@ def test_reset_deps_clears_evidence_projection_default() -> None:
     assert ep_module._default_projection is None
 
 
-def test_get_session_provider_warns_on_pool_mismatch(caplog: pytest.LogCaptureFixture) -> None:
-    caplog.set_level(logging.WARNING)
-    get_session_provider(pool="pooled")
-    get_session_provider(pool="nullpool")
+def test_get_session_provider_warns_on_pool_mismatch() -> None:
+    """A pooled provider exists; requesting nullpool must emit the ISSUE-118
+    observability warning.
+
+    The autouse fixture guarantees deterministic provider state (pooled created
+    first, nullpool then mismatches). Capture the warning on the module logger
+    directly instead of via ``caplog`` so the assertion no longer depends on root
+    logger propagation, suite import order, or global logging config -- the prior
+    source of flakiness.
+
+    Migration tests (test_migrations.py) run Alembic ``command`` which calls
+    ``fileConfig(disable_existing_loggers=True)`` in migrations/env.py, leaving the
+    ``app.db.session_provider`` logger with ``disabled=True``. A disabled logger
+    drops records before any handler, so the warning was silently swallowed when
+    this case ran after a migration test. Force the logger enabled for the
+    duration of the assertion and restore its prior state afterwards.
+    """
+    reset_session_provider()
+
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture(level=logging.WARNING)
+    provider_logger = logging.getLogger("app.db.session_provider")
+    previous_level = provider_logger.level
+    previous_disabled = provider_logger.disabled
+    provider_logger.addHandler(handler)
+    provider_logger.setLevel(logging.WARNING)
+    provider_logger.disabled = False
+    try:
+        assert get_session_provider(pool="pooled").pool_policy == "pooled"
+        get_session_provider(pool="nullpool")
+    finally:
+        provider_logger.removeHandler(handler)
+        provider_logger.setLevel(previous_level)
+        provider_logger.disabled = previous_disabled
+
     assert any(
-        "get_session_provider(pool='nullpool') ignored" in record.message
-        for record in caplog.records
+        "get_session_provider(pool='nullpool') ignored" in record.getMessage() for record in records
     )
 
 
