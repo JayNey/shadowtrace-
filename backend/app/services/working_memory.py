@@ -67,7 +67,7 @@ FIELD_OWNERSHIP: dict[str, str] = {
     "storyline_degraded": "StorylineService",
 }
 
-# P0 RuleBasedFalsePositiveHook shares the FalsePositiveMatcher writer identity.
+# Legacy writer alias kept for journal entries written before ISSUE-114 hook removal.
 WRITER_ALIASES: dict[str, str] = {
     "RuleBasedFalsePositiveHook": "FalsePositiveMatcher",
 }

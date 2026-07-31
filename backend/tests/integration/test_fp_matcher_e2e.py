@@ -315,21 +315,13 @@ async def test_fp_matcher_required_disposition_false_positive_no_auto_close(
     build_analysis_pipeline: Any,
     working_memory: Any,
 ) -> None:
-    """REQUIRED disposition + FP match → no auto-close, full investigation runs.
+    """REQUIRED disposition + pre-evidence FP signal → no auto-close, full investigation.
 
-    insider_data_exfiltration has disposition_policy=REQUIRED.  Even when
-    false_positive_match recommends close_as_fp, the pipeline must NOT
-    short-circuit: it runs the full investigation (evidence, risk, report)
-    and stays at REPORTING so the out-of-band disposition writeback can
-    execute the close.  This validates the "disposition-only closure" path
-    where zero IMMEDIATE actions are taken and only the disposition layer
-    closes the event through EVENT_STATUS_UPDATE → CLOSED.
-
-    To simulate a vector-based FP match on a REQUIRED-disposition event,
-    we pre-write a close_as_fp false_positive_match via the canonical
-    "FalsePositiveMatcher" writer before the pipeline runs.  The
-    VerdictResolver must return FALSE_POSITIVE, and the pipeline must
-    NOT auto-close.
+    insider_data_exfiltration has disposition_policy=REQUIRED.  Pre-evidence
+    ``investigate_with_flag`` (or legacy injected ``close_as_fp`` with
+    ``phase=pre_evidence``) must not skip evidence collection or auto-close.
+    Post-evidence ``fp_adjudication`` alone may authorize closure via the
+    disposition layer after REPORTING.
     """
     # Ingest insider_data_exfiltration (disposition=REQUIRED).
     summary = await source_ingester.poll(source_adapter, ALL_SOURCE_KINDS, batch_size=10)
@@ -344,10 +336,9 @@ async def test_fp_matcher_required_disposition_false_positive_no_auto_close(
     assert row is not None
     event_id = row.event_id
 
-    # Pre-write a simulated vector-based close_as_fp false_positive_match
-    # using the canonical "FalsePositiveMatcher" writer identity.  This
-    # simulates what the FalsePositiveMatcherHook would write when the
-    # vector KB returns a high-confidence hit.
+    # Pre-write a legacy pre-evidence close_as_fp journal entry (injection).
+    # ISSUE-114 hooks must not upgrade this to an auto-close; post-evidence
+    # adjudication is still required for REQUIRED disposition events.
     fp_wm = working_memory.for_writer("FalsePositiveMatcher")
     await fp_wm.write(
         event_id,
@@ -358,6 +349,7 @@ async def test_fp_matcher_required_disposition_false_positive_no_auto_close(
             "matched_case_id": "case-simulated",
             "matched_pattern": "Simulated vector FP match for testing",
             "recommendation": "close_as_fp",
+            "phase": "pre_evidence",
             "source": "FalsePositiveMatcher",
             "matched_at": "2026-01-01T00:00:00+00:00",
         },
@@ -405,4 +397,5 @@ async def test_fp_matcher_required_disposition_false_positive_no_auto_close(
 
     verify_fp = await fp_wm.read(event_id, "false_positive_match")
     assert isinstance(verify_fp, dict)
-    assert verify_fp.get("recommendation") == "close_as_fp"
+    assert verify_fp.get("phase") == "pre_evidence"
+    assert verify_fp.get("recommendation") in {"investigate_with_flag", "close_as_fp"}

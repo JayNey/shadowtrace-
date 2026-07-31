@@ -137,7 +137,7 @@ class FalsePositiveMatcherHook:
     regex-extracted placeholder entities.
 
     Uses its own ``BoundWorkingMemory`` bound to the ``FalsePositiveMatcher``
-    writer identity (same as ``RuleBasedFalsePositiveHook`` via WRITER_ALIASES).
+    writer identity (via ``WRITER_ALIASES`` when legacy journal writers are present).
     Does NOT change EventStatus, call set_final_verdict, or write reports —
     those actions are owned by the orchestration layer.
 

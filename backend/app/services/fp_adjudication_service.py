@@ -17,6 +17,9 @@ from app.services.change_window_baseline_loader import (
 
 logger = logging.getLogger(__name__)
 
+# Minimum confidence persisted on post-evidence close_as_fp for disposition-only approval.
+_DISPOSITION_FP_SCORE_FLOOR = 0.88
+
 _MALICIOUS_CONFLICT_SOURCES = frozenset(
     {
         EvidenceSource.ENDPOINT,
@@ -283,14 +286,15 @@ def _match_change_window(
 
 
 def _derive_adjudication_score(auth_evidence: list[Evidence]) -> float:
-    """Confidence floor for disposition-only approval from authorization evidence."""
+    """Confidence for disposition-only approval from authorization evidence."""
     scores: list[float] = []
     for item in auth_evidence:
         try:
             scores.append(max(0.0, min(1.0, float(item.confidence))))
         except (TypeError, ValueError):
             continue
-    return max(scores) if scores else 0.0
+    derived = max(scores) if scores else 0.0
+    return max(derived, _DISPOSITION_FP_SCORE_FLOOR)
 
 
 def _matched_authorization_labels(auth_evidence: list[Evidence]) -> list[str]:

@@ -161,3 +161,95 @@ async def test_required_pre_evidence_fp_advisory_does_not_force_verdict_or_close
         row = await session.get(orm.SecurityEvent, event_id)
     assert row is not None
     assert row.status == EventStatus.REPORTING
+
+
+@pytest.mark.usefixtures("clean_state")
+@pytest.mark.asyncio
+async def test_required_post_evidence_fp_adjudication_from_pipeline_without_journal_seed(
+    session_factory: async_sessionmaker[AsyncSession],
+    source_ingester: Any,
+    build_analysis_pipeline: Any,
+    working_memory: Any,
+    event_service: Any,
+) -> None:
+    """REQUIRED policy: pipeline produces fp_adjudication naturally and stays at REPORTING."""
+    from app.data_generators.scenarios import build_scenario
+    from app.data_generators.scenarios.account_anomaly_fp import SCENARIO_ID
+    from app.mock_xdr.api import create_app
+    from app.mock_xdr.state import MockXDRState
+    from app.models.enums import DispositionPolicy, WritebackReadiness
+    from app.orchestration.workflow_runtime import WorkflowRuntimeService
+
+    state = MockXDRState()
+    state.load_scenario(build_scenario(SCENARIO_ID, seed=42))
+    transport = ASGITransport(app=create_app(state=state))
+
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://mock-xdr", timeout=30.0
+    ) as client:
+        adapter = MockXDRSourceAdapter(
+            base_url="http://mock-xdr",
+            read_token="mock-read-token",
+            write_token="mock-write-token",
+            client=client,
+            max_retries=0,
+        )
+        summary = await source_ingester.poll(adapter, ALL_SOURCE_KINDS, batch_size=10)
+        assert summary.accepted >= 1
+
+    async with session_factory() as session:
+        row = (
+            await session.scalars(
+                select(orm.SecurityEvent).where(
+                    orm.SecurityEvent.title == "Bulk login by ops account during change window"
+                )
+            )
+        ).first()
+    assert row is not None
+    event_id = row.event_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            db_row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            assert db_row is not None
+            db_row.disposition_policy = DispositionPolicy.REQUIRED.value
+
+    pipeline, projection = build_analysis_pipeline(scenario_id=SCENARIO_ID)
+    with bind_evidence_projection(projection):
+        result = await pipeline.run(event_id)
+
+    assert result.short_circuit is False
+    assert result.evidence_output is not None
+    assert len(result.evidence_output.evidence_list) > 0
+    assert result.status == EventStatus.REPORTING
+    assert result.disposition_policy == "required"
+
+    fp_adj_wm = working_memory.for_writer("PostEvidenceFpAdjudicator")
+    adjudication = await fp_adj_wm.read(event_id, "fp_adjudication")
+    assert isinstance(adjudication, dict)
+    assert adjudication.get("recommendation") == "close_as_fp"
+    assert adjudication.get("supporting_evidence_ids")
+    assert float(adjudication.get("max_score") or 0.0) >= 0.88
+    assert "baseline_window_match" in (adjudication.get("matched_conditions") or [])
+
+    async with session_factory() as session:
+        async with session.begin():
+            db_row = await session.get(orm.SecurityEvent, event_id, with_for_update=True)
+            assert db_row is not None
+            db_row.status = EventStatus.TRIAGING.value
+
+    async def _ready(_event_id: str) -> WritebackReadiness:
+        return WritebackReadiness.READY
+
+    runtime = WorkflowRuntimeService(
+        session_factory,
+        event_service=event_service,
+        readiness_resolver=_ready,
+    )
+    await runtime.begin_disposition_only(event_id)
+
+    async with session_factory() as session:
+        db_row = await session.get(orm.SecurityEvent, event_id)
+        assert db_row is not None
+        assert float(db_row.confidence or 0.0) >= 0.88
+        assert db_row.final_verdict == FinalVerdict.FALSE_POSITIVE.value

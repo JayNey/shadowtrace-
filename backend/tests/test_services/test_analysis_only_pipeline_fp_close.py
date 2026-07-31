@@ -56,3 +56,18 @@ async def test_complete_not_required_close_reason_includes_matched_rule() -> Non
     reason = build_fp_close_reason(fp_match, default="analysis_pipeline:complete_not_required")
     assert "ops_change_window_bulk_login" in reason
     assert reason != "analysis_pipeline:complete_not_required"
+
+
+def test_post_evidence_adjudication_close_reason_uses_window_and_evidence() -> None:
+    reason = build_fp_close_reason(
+        None,
+        fp_adjudication={
+            "recommendation": "close_as_fp",
+            "matched_window_id": "cw-scheduled-ops-maintenance",
+            "supporting_evidence_ids": ["evd-auth-001", "evd-asset-001"],
+        },
+        default="analysis_pipeline:complete_not_required",
+    )
+    assert reason.startswith("close_as_fp post_evidence")
+    assert "window=cw-scheduled-ops-maintenance" in reason
+    assert "evidence=2" in reason

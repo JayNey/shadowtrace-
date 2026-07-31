@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from app.agents.verdict_resolver import VerdictResolver
 from app.models.agent_io import CollectionStatus, EvidenceOutput, RiskAssessment, ScoringMode, TriageResult
 from app.models.entities import AccountEntity, EntitySet
@@ -56,7 +57,7 @@ def _auth_evidence(*, change_window: bool = True) -> Evidence:
 
 def _malicious_edr_evidence() -> Evidence:
     return Evidence(
-        evidence_id="evd-mal-001",
+        evidence_id="evd-mal-edr-001",
         event_id="evt-001",
         source=EvidenceSource.ENDPOINT,
         evidence_type="process",
@@ -65,6 +66,32 @@ def _malicious_edr_evidence() -> Evidence:
         timestamp=datetime(2024, 6, 15, 9, 35, tzinfo=UTC),
         raw_data={"malicious": True, "process": "evil.exe"},
         is_conflicting=True,
+    )
+
+
+def _malicious_dlp_evidence() -> Evidence:
+    return Evidence(
+        evidence_id="evd-mal-dlp-001",
+        event_id="evt-001",
+        source=EvidenceSource.DATA_SECURITY,
+        evidence_type="file_access",
+        description="sensitive file blocked by DLP",
+        confidence=0.92,
+        timestamp=datetime(2024, 6, 15, 9, 36, tzinfo=UTC),
+        raw_data={"dlp_blocked": True, "file_name": "secret.docx"},
+    )
+
+
+def _malicious_ti_evidence() -> Evidence:
+    return Evidence(
+        evidence_id="evd-mal-ti-001",
+        event_id="evt-001",
+        source=EvidenceSource.THREAT_INTEL,
+        evidence_type="indicator",
+        description="TI malicious indicator",
+        confidence=0.91,
+        timestamp=datetime(2024, 6, 15, 9, 37, tzinfo=UTC),
+        raw_data={"ti_malicious": True, "indicator": "evil.example"},
     )
 
 
@@ -144,6 +171,28 @@ def test_post_evidence_close_with_authorization(tmp_path: Path) -> None:
     assert result.max_score == 0.9
 
 
+def test_close_as_fp_max_score_floor_when_auth_confidence_low(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    low_conf_auth = _auth_evidence().model_copy(update={"confidence": 0.7})
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[low_conf_auth, _asset_evidence()],
+            conflicts=[],
+            gaps=[],
+            success_sources=["identity", "asset"],
+            failed_sources=[],
+            overall_confidence=0.7,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+    )
+    assert result.recommendation == "close_as_fp"
+    assert result.max_score == 0.88
+
+
 def test_missing_asset_group_blocks_fp_close(tmp_path: Path) -> None:
     adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
     result = adjudicator.adjudicate(
@@ -196,7 +245,7 @@ def test_malicious_conflicts_block_fp_close(tmp_path: Path) -> None:
                     conflict_id="cfl-1",
                     event_id="evt-001",
                     description="endpoint contradicts benign login",
-                    evidence_ids=["evd-auth-001", "evd-mal-001"],
+                    evidence_ids=["evd-auth-001", "evd-mal-edr-001"],
                     sources=[EvidenceSource.IDENTITY, EvidenceSource.ENDPOINT],
                 )
             ],
@@ -210,6 +259,38 @@ def test_malicious_conflicts_block_fp_close(tmp_path: Path) -> None:
         source_snapshot={"source_tenant_id": "tenant-demo"},
     )
     assert result.recommendation == "investigate"
+    assert result.conflicts
+    assert "no_malicious_conflicts" in result.missing_conditions
+
+
+@pytest.mark.parametrize(
+    ("malicious_evidence", "description"),
+    [
+        (_malicious_dlp_evidence(), "dlp blocked sensitive exfiltration"),
+        (_malicious_ti_evidence(), "threat intel malicious indicator"),
+    ],
+)
+def test_malicious_source_conflicts_block_fp_close_without_conflict_record(
+    tmp_path: Path,
+    malicious_evidence: Evidence,
+    description: str,
+) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[_auth_evidence(), malicious_evidence],
+            conflicts=[],
+            gaps=[],
+            success_sources=["identity", malicious_evidence.source.value],
+            failed_sources=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+    )
+    assert result.recommendation == "investigate", description
     assert result.conflicts
     assert "no_malicious_conflicts" in result.missing_conditions
 
