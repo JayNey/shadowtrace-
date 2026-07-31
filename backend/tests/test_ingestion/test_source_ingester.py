@@ -18,9 +18,12 @@ from app.models.enums import (
     CapabilityState,
     ConnectorCapability,
     ConnectorStatus,
+    EventType,
+    Severity,
     SourceObjectKind,
 )
-from app.models.source import SourceAlert, SourceAsset, SourceIncident, SourceReference
+from app.models.source import SourceAlert, SourceAsset, SourceIncident, SourceLog, SourceReference
+from app.services.event_service import EventService, IngestableSource
 
 
 class FakePagedAdapter(BaseSourceAdapter):
@@ -736,3 +739,79 @@ async def test_legacy_global_watermark_is_ignored_and_replayed(
 
     assert adapter.calls[0][1] is None
     assert summary.watermark_before is None
+
+
+@pytest.mark.asyncio
+async def test_persist_supporting_object_refreshes_on_stale_skip(
+    source_ingester: SourceIngester,
+    event_service: EventService,
+) -> None:
+    """Stale CAS skip must still refresh parent entities (#655 / ISSUE-148)."""
+    suffix = _suffix()
+    adapter_name = f"adapter-stale-{suffix}"
+    incident_conn = f"conn-inc-{suffix}"
+    log_conn = f"conn-log-{suffix}"
+    incident_id = f"INC-{suffix}"
+    newer = datetime(2026, 7, 13, 12, 0, tzinfo=UTC)
+    older = datetime(2026, 7, 13, 11, 0, tzinfo=UTC)
+    tenant = "tenant-ingestion"
+
+    log_ref = SourceReference(
+        source_kind=SourceObjectKind.LOG,
+        source_product="mock_xdr",
+        source_tenant_id=tenant,
+        connector_id=log_conn,
+        source_object_id=f"LOG-{suffix}",
+        parent_source_object_id=incident_id,
+        source_updated_at=newer,
+        source_concurrency_token="token-v2",
+        schema_version="1",
+    )
+    log_item = SourceLog(
+        reference=log_ref,
+        normalized={"hostname": "DEV-WKS-012", "account": "dev-user-012"},
+        device_source="edr",
+    )
+    first_summary, _ = await source_ingester.ingest_items([log_item], source_type=adapter_name)
+    assert first_summary.accepted == 1
+
+    incident_ref = SourceReference(
+        source_kind=SourceObjectKind.INCIDENT,
+        source_product="mock_xdr",
+        source_tenant_id=tenant,
+        connector_id=incident_conn,
+        source_object_id=incident_id,
+        ingested_at=datetime.now(UTC),
+    )
+    inc = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=incident_ref,
+            title="incident after log",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            source_type="mock_xdr",
+        )
+    )
+    assert inc.event_id
+    event_before = await event_service.get_event(inc.event_id)
+    assert event_before is not None
+    assert not {h.hostname for h in event_before.entities.hosts if h.hostname}
+
+    stale_ref = log_ref.model_copy(
+        update={
+            "source_updated_at": older,
+            "source_concurrency_token": "token-v1",
+        }
+    )
+    stale_log = SourceLog(
+        reference=stale_ref,
+        normalized={"hostname": "DEV-WKS-012", "account": "dev-user-012"},
+        device_source="edr",
+    )
+    second_summary, _ = await source_ingester.ingest_items([stale_log], source_type=adapter_name)
+    assert second_summary.duplicate == 1
+
+    event_after = await event_service.get_event(inc.event_id)
+    assert event_after is not None
+    hostnames = {h.hostname for h in event_after.entities.hosts if h.hostname}
+    assert "DEV-WKS-012" in hostnames

@@ -2089,6 +2089,66 @@ class EventService:
                 resolved.append((_ref_from_source_object(obj), dict(obj.normalized)))
         return resolved
 
+    @staticmethod
+    async def _resolve_linked_parent_for_supporting_ref(
+        session: AsyncSession,
+        ref: SourceReference,
+        parent_id: str,
+    ) -> tuple[orm.SourceObject, orm.SourceEventLink] | None:
+        """Resolve a parent incident/alert when ``parent_id`` repeats across connectors.
+
+        Supporting logs/assets may reference a parent by ``source_object_id`` alone while
+        using a different ``connector_id``. When multiple parent rows share that id within
+        the same product/tenant, prefer the candidate that already has an event link, with
+        PRIMARY links winning over PROVISIONAL/related roles.
+        """
+        candidates = (
+            await session.scalars(
+                select(orm.SourceObject)
+                .where(
+                    orm.SourceObject.source_product == ref.source_product,
+                    orm.SourceObject.source_tenant_id == ref.source_tenant_id,
+                    orm.SourceObject.source_object_id == parent_id,
+                    orm.SourceObject.source_kind.in_(
+                        [SourceObjectKind.ALERT.value, SourceObjectKind.INCIDENT.value]
+                    ),
+                )
+                .order_by(orm.SourceObject.source_record_id)
+            )
+        ).all()
+        if not candidates:
+            return None
+
+        best: tuple[orm.SourceObject, orm.SourceEventLink] | None = None
+        best_rank: tuple[int, str, int] | None = None
+        for obj in candidates:
+            link = await session.scalar(
+                select(orm.SourceEventLink)
+                .where(orm.SourceEventLink.source_record_id == obj.source_record_id)
+                .order_by(
+                    case(
+                        (orm.SourceEventLink.role == LINK_ROLE_PRIMARY, 0),
+                        (orm.SourceEventLink.role == LINK_ROLE_PROVISIONAL, 1),
+                        else_=2,
+                    ),
+                    orm.SourceEventLink.id,
+                )
+            )
+            if link is None:
+                continue
+            role_rank = (
+                0
+                if link.role == LINK_ROLE_PRIMARY
+                else 1
+                if link.role == LINK_ROLE_PROVISIONAL
+                else 2
+            )
+            rank = (role_rank, obj.source_record_id, int(link.id or 0))
+            if best_rank is None or rank < best_rank:
+                best_rank = rank
+                best = (obj, link)
+        return best
+
     async def refresh_events_for_supporting_ref(self, ref: SourceReference) -> None:
         """Re-enrich the parent event once a supporting object (asset/log) is ingested.
 
@@ -2104,32 +2164,12 @@ class EventService:
         refreshed: orm.SecurityEvent | None = None
         async with self._session_factory() as session:
             async with session.begin():
-                parent_obj = await session.scalar(
-                    select(orm.SourceObject).where(
-                        orm.SourceObject.source_product == ref.source_product,
-                        orm.SourceObject.source_tenant_id == ref.source_tenant_id,
-                        orm.SourceObject.source_object_id == parent_id,
-                        orm.SourceObject.source_kind.in_(
-                            [SourceObjectKind.ALERT.value, SourceObjectKind.INCIDENT.value]
-                        ),
-                    )
+                resolved = await self._resolve_linked_parent_for_supporting_ref(
+                    session, ref, parent_id
                 )
-                if parent_obj is None:
+                if resolved is None:
                     return
-                parent_link = await session.scalar(
-                    select(orm.SourceEventLink)
-                    .where(orm.SourceEventLink.source_record_id == parent_obj.source_record_id)
-                    .order_by(
-                        case(
-                            (orm.SourceEventLink.role == LINK_ROLE_PRIMARY, 0),
-                            (orm.SourceEventLink.role == LINK_ROLE_PROVISIONAL, 1),
-                            else_=2,
-                        ),
-                        orm.SourceEventLink.id,
-                    )
-                )
-                if parent_link is None:
-                    return
+                _parent_obj, parent_link = resolved
                 event = await session.get(orm.SecurityEvent, parent_link.event_id)
                 if event is None:
                     return

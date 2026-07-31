@@ -1521,3 +1521,196 @@ async def test_transition_ignores_forged_disposition_only_intent(
             EventStatus.PLANNING_RESPONSE,
             context=forged,
         )
+
+
+# --------------------------------------------------------------------------- #
+# ISSUE-148 supporting source entity enrichment
+# --------------------------------------------------------------------------- #
+
+
+async def _insert_supporting_source_object(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    ref: SourceReference,
+    normalized: dict[str, object],
+    parent_source_object_id: str,
+) -> None:
+    from app.ingestion.source_ingester import source_identity
+    from app.services.event_service import stable_source_record_id
+
+    identity = source_identity(ref)
+    record_id = stable_source_record_id(identity=identity)
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            connector = await session.get(orm.SourceConnector, ref.connector_id)
+            if connector is None:
+                session.add(
+                    orm.SourceConnector(
+                        connector_id=ref.connector_id,
+                        source_product=ref.source_product,
+                        display_name=f"test-{ref.connector_id}",
+                        status="online",
+                        connector_metadata={
+                            "ingestion_adapter": "mock_xdr",
+                            "source_tenant_id": ref.source_tenant_id,
+                        },
+                    )
+                )
+            session.add(
+                orm.SourceObject(
+                    source_record_id=record_id,
+                    source_product=ref.source_product,
+                    source_tenant_id=ref.source_tenant_id,
+                    connector_id=ref.connector_id,
+                    source_kind=ref.source_kind.value,
+                    source_object_id=ref.source_object_id,
+                    parent_source_object_id=parent_source_object_id,
+                    source_disposition="unknown",
+                    source_concurrency_token=ref.source_concurrency_token,
+                    source_updated_at=ref.source_updated_at or now,
+                    schema_version=ref.schema_version,
+                    ingested_at=now,
+                    normalized=normalized,
+                    current_source_status_raw="active",
+                    current_source_disposition="unknown",
+                    current_concurrency_token=ref.source_concurrency_token,
+                    current_source_updated_at=ref.source_updated_at or now,
+                    current_state_version=1,
+                    source_sync_state="synced",
+                )
+            )
+
+
+@pytest.mark.asyncio
+async def test_supporting_sources_for_refs_resolves_by_parent_id(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sfx = _sfx()
+    incident_id = f"INC-parent-{sfx}"
+    incident_ref = _ref(kind=SourceObjectKind.INCIDENT, object_id=incident_id)
+    inc = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=incident_ref,
+            title="parent incident",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            source_type="mock_xdr",
+        )
+    )
+    assert inc.event_id
+    log_ref = _ref(
+        kind=SourceObjectKind.LOG,
+        object_id=f"LOG-{sfx}",
+        connector_id=f"conn-log-{sfx}",
+    ).model_copy(update={"parent_source_object_id": incident_id})
+    await _insert_supporting_source_object(
+        session_factory,
+        ref=log_ref,
+        normalized={"hostname": "DEV-WKS-012", "account": "dev-user-012"},
+        parent_source_object_id=incident_id,
+    )
+
+    async with session_factory() as session:
+        resolved = await EventService._supporting_sources_for_refs(session, [incident_ref])
+
+    assert len(resolved) == 1
+    child_ref, child_normalized = resolved[0]
+    assert child_ref.source_object_id == log_ref.source_object_id
+    assert child_normalized["hostname"] == "DEV-WKS-012"
+
+
+@pytest.mark.asyncio
+async def test_refresh_events_for_supporting_ref_prefers_linked_primary_parent(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sfx = _sfx()
+    incident_id = f"INC-dup-{sfx}"
+    linked_ref = _ref(
+        kind=SourceObjectKind.INCIDENT,
+        object_id=incident_id,
+        connector_id=f"conn-linked-{sfx}",
+    )
+    orphan_ref = _ref(
+        kind=SourceObjectKind.INCIDENT,
+        object_id=incident_id,
+        connector_id=f"conn-orphan-{sfx}",
+    )
+    linked = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=linked_ref,
+            title="linked parent",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            source_type="mock_xdr",
+        )
+    )
+    assert linked.event_id
+    await _insert_supporting_source_object(
+        session_factory,
+        ref=orphan_ref,
+        normalized={"hostname": "wrong-host"},
+        parent_source_object_id=incident_id,
+    )
+    log_ref = _ref(
+        kind=SourceObjectKind.LOG,
+        object_id=f"LOG-{sfx}",
+        connector_id=f"conn-log-{sfx}",
+    ).model_copy(update={"parent_source_object_id": incident_id})
+    await _insert_supporting_source_object(
+        session_factory,
+        ref=log_ref,
+        normalized={"hostname": "DEV-WKS-012", "account": "dev-user-012"},
+        parent_source_object_id=incident_id,
+    )
+
+    await event_service.refresh_events_for_supporting_ref(log_ref)
+
+    event = await event_service.get_event(linked.event_id)
+    assert event is not None
+    hostnames = {h.hostname for h in event.entities.hosts if h.hostname}
+    assert "DEV-WKS-012" in hostnames
+    assert "wrong-host" not in hostnames
+
+
+@pytest.mark.asyncio
+async def test_supporting_parent_back_reference_enriches_entities(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sfx = _sfx()
+    incident_id = f"INC-backref-{sfx}"
+    incident_ref = _ref(kind=SourceObjectKind.INCIDENT, object_id=incident_id)
+    inc = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=incident_ref,
+            title="incident without hostname",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            source_type="mock_xdr",
+        )
+    )
+    assert inc.event_id
+    event_before = await event_service.get_event(inc.event_id)
+    assert event_before is not None
+    assert not {h.hostname for h in event_before.entities.hosts if h.hostname}
+
+    log_ref = _ref(
+        kind=SourceObjectKind.LOG,
+        object_id=f"LOG-{sfx}",
+        connector_id=f"conn-log-{sfx}",
+    ).model_copy(update={"parent_source_object_id": incident_id})
+    await _insert_supporting_source_object(
+        session_factory,
+        ref=log_ref,
+        normalized={"hostname": "DEV-WKS-012", "account": "dev-user-012"},
+        parent_source_object_id=incident_id,
+    )
+    await event_service.refresh_events_for_supporting_ref(log_ref)
+
+    event_after = await event_service.get_event(inc.event_id)
+    assert event_after is not None
+    hostnames = {h.hostname for h in event_after.entities.hosts if h.hostname}
+    assert "DEV-WKS-012" in hostnames

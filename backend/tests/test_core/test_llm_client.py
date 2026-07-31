@@ -504,3 +504,8 @@ async def test_unknown_mock_prompt_fails_explicitly() -> None:
     assert [(entry.status, entry.fallback_level) for entry in audit.entries] == [
         ("llm_provider_error", 2)
     ]
+
+
+def test_mock_llm_client_requires_audit_recorder() -> None:
+    with pytest.raises(ValueError, match="audit_recorder is required"):
+        MockLLMClient()
