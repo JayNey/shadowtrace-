@@ -1424,6 +1424,8 @@ def build_investigation_graph(
         graph.add_node(name, cast(Any, _wrap_node(services, node)))
 
     register(NODE_TRIAGE, triage_graph_node)
+    # ISSUE-114: disposition-only is API-triggered via WorkflowRuntimeService.
+    # This node has no graph incoming edges; tests/resume hooks invoke it directly.
     register(NODE_BEGIN_DISPOSITION_ONLY, begin_disposition_only_node)
     register(NODE_MANUAL_HOLD, manual_hold_node)
     register(NODE_CLOSE, close_node)

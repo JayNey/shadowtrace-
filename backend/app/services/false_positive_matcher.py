@@ -409,22 +409,6 @@ def build_fp_close_reason(
             parts.append(f"evidence={len(evidence_ids)}")
         return " ".join(parts)
 
-    if isinstance(false_positive_match, dict):
-        if false_positive_match.get("recommendation") == "close_as_fp":
-            # Legacy callers may still pass close_as_fp — keep audit text stable.
-            case_id = false_positive_match.get("matched_case_id")
-            pattern = false_positive_match.get("matched_pattern") or false_positive_match.get(
-                "matched_rule"
-            )
-            parts = ["close_as_fp"]
-            if case_id:
-                parts.append(f"matched {case_id}")
-            elif pattern:
-                parts.append("matched")
-            if pattern:
-                parts.append(str(pattern))
-            return " ".join(parts)
-
     return default
 
 

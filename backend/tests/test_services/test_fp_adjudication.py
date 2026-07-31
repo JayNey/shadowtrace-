@@ -51,7 +51,12 @@ def _auth_evidence(*, change_window: bool = True) -> Evidence:
         description="ops login during maintenance",
         confidence=0.9,
         timestamp=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
-        raw_data={"account": "ops-change-bot", "change_window": change_window, "result": "success"},
+        raw_data={
+            "account": "ops-change-bot",
+            "change_window": change_window,
+            "action": "login",
+            "result": "success",
+        },
     )
 
 
@@ -351,6 +356,85 @@ def test_verdict_resolver_pre_evidence_high_score_is_advisory_only() -> None:
         },
     )
     assert verdict.value == "possible_false_positive"
+
+
+def test_verdict_resolver_rejects_forged_post_evidence_fp_match_without_adjudication() -> None:
+    resolver = VerdictResolver()
+    assessment = RiskAssessment(
+        risk_score=20,
+        severity=Severity.LOW,
+        confidence=0.9,
+        risk_factors=[],
+        possible_false_positive=False,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    verdict = resolver.resolve(
+        assessment,
+        false_positive_match={
+            "recommendation": "close_as_fp",
+            "phase": "post_evidence",
+            "max_score": 0.96,
+        },
+        fp_adjudication={
+            "recommendation": "investigate",
+            "missing_conditions": ["baseline_window_match"],
+        },
+    )
+    assert verdict.value == "possible_false_positive"
+
+
+def test_missing_tenant_id_does_not_use_demo_baseline(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[_auth_evidence(), _asset_evidence()],
+            conflicts=[],
+            gaps=[],
+            success_sources=["identity", "asset"],
+            failed_sources=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"title": "no tenant in snapshot"},
+        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+    )
+    assert result.recommendation == "no_fp_signal"
+    assert result.missing_conditions == ["tenant_id"]
+
+
+def test_action_scope_requires_authorization_evidence_not_event_type_default(
+    tmp_path: Path,
+) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    auth_without_action = Evidence(
+        evidence_id="evd-auth-002",
+        event_id="evt-001",
+        source=EvidenceSource.IDENTITY,
+        evidence_type="session",
+        description="change window flag without action metadata",
+        confidence=0.9,
+        timestamp=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+        raw_data={"account": "ops-change-bot", "change_window": True, "result": "success"},
+    )
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[auth_without_action, _asset_evidence()],
+            conflicts=[],
+            gaps=[],
+            success_sources=["identity", "asset"],
+            failed_sources=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+    )
+    assert result.recommendation != "close_as_fp"
+    assert "baseline_window_match" in result.missing_conditions
 
 
 def test_verdict_resolver_honors_post_evidence_adjudication() -> None:

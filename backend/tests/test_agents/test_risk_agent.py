@@ -392,15 +392,21 @@ async def test_false_positive_scenario_score_below_40(
 ) -> None:
     event_id = f"evt-risk-fp-{uuid4().hex[:8]}"
     wm.values[(event_id, "false_positive_match")] = {
-        "recommendation": "close_as_fp",
+        "recommendation": "investigate_with_flag",
         "max_score": 0.96,
+        "phase": "pre_evidence",
+    }
+    wm.values[(event_id, "fp_adjudication")] = {
+        "recommendation": "close_as_fp",
+        "matched_window_id": "cw-test",
+        "max_score": 0.9,
     }
     agent = RiskAgent(
         llm_client=_FailingLLM(),
         working_memory=wm,
         event_service=event_service,
     )
-    # Weak evidence → rule_only low score; close_as_fp forces FP verdict.
+    # Weak evidence → rule_only low score; post-evidence close_as_fp forces FP verdict.
     output = await agent.execute(
         RiskAgentInput(
             event_id=event_id,

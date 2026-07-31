@@ -57,15 +57,15 @@ def load_change_window_baseline(path: str | None = None) -> dict[str, OrgChangeW
     return indexed
 
 
-def resolve_tenant_id(source_snapshot: dict[str, Any] | None) -> str:
-    """Best-effort tenant id from immutable source snapshot."""
+def resolve_tenant_id(source_snapshot: dict[str, Any] | None) -> str | None:
+    """Resolve tenant id from immutable source snapshot; None when absent."""
     if not isinstance(source_snapshot, dict):
-        return "tenant-demo"
+        return None
     for key in ("source_tenant_id", "tenant_id"):
         value = source_snapshot.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return "tenant-demo"
+    return None
 
 
 __all__ = ["load_change_window_baseline", "resolve_tenant_id"]

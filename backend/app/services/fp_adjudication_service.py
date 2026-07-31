@@ -62,6 +62,12 @@ class PostEvidenceFpAdjudicator:
         """Return a structured post-evidence FP recommendation."""
         now = datetime.now(UTC).isoformat()
         tenant_id = resolve_tenant_id(source_snapshot)
+        if tenant_id is None:
+            return FpAdjudicationResult(
+                recommendation="no_fp_signal",
+                missing_conditions=["tenant_id"],
+                adjudicated_at=now,
+            )
         baseline = load_change_window_baseline(self._baseline_path).get(tenant_id)
         if baseline is None or not baseline.change_windows:
             return FpAdjudicationResult(
@@ -214,11 +220,9 @@ def _collect_accounts(triage_result: TriageResult, auth_evidence: list[Evidence]
     return accounts
 
 
-def _collect_actions(triage_result: TriageResult, auth_evidence: list[Evidence]) -> set[str]:
+def _collect_actions(_triage_result: TriageResult, auth_evidence: list[Evidence]) -> set[str]:
+    """Collect observed actions from authorization evidence only (ISSUE-114)."""
     actions: set[str] = set()
-    if triage_result.event_type.value == "account_anomaly":
-        actions.add("login")
-        actions.add("bulk_login")
     for item in auth_evidence:
         for key in ("event_type", "action"):
             value = (item.raw_data or {}).get(key)

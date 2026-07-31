@@ -581,7 +581,7 @@ class AnalysisOnlyPipeline:
 
         ctx = TransitionContext(
             need_investigation=False,
-            recommendation="close_as_fp",
+            recommendation="low_risk_no_investigation",
         )
         await self._transition(
             event_id,

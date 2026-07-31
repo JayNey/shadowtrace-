@@ -19,12 +19,12 @@ class VerdictResolver:
     Priority (ISSUE-035 / ISSUE-047 / ISSUE-114):
     1. ``fp_adjudication.recommendation == close_as_fp`` → false_positive
        (post-evidence typed decision; never overridden by risk_score >= 70)
-    2. Legacy post-evidence ``false_positive_match.close_as_fp`` → false_positive
-    3. Pre-evidence vector / RAG FP signal → possible_false_positive (advisory only)
-    4. risk_score >= 70 → confirmed_threat
-    5. else → none
+    2. Pre-evidence vector / RAG FP signal → possible_false_positive (advisory only)
+    3. risk_score >= 70 → confirmed_threat
+    4. else → none
 
-    Pre-evidence ``false_positive_match`` must never independently yield false_positive.
+    Pre-evidence ``false_positive_match`` must never yield false_positive.
+    Legacy ``false_positive_match`` journal entries are advisory only.
     """
 
     def resolve(
@@ -39,10 +39,6 @@ class VerdictResolver:
             return FinalVerdict.FALSE_POSITIVE
 
         fp = false_positive_match or {}
-        recommendation = str(fp.get("recommendation") or "").strip().lower()
-        if recommendation == "close_as_fp" and fp.get("phase") == "post_evidence":
-            return FinalVerdict.FALSE_POSITIVE
-
         fp_score = self._fp_score(fp, rag_output)
         risk_score = int(risk_assessment.risk_score)
 

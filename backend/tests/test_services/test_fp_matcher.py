@@ -801,7 +801,22 @@ def test_verdict_resolver_no_fp_match_uses_risk() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_build_fp_close_reason_includes_case_id() -> None:
+def test_build_fp_close_reason_post_evidence_match_mirror_uses_window() -> None:
+    from app.services.false_positive_matcher import build_fp_close_reason
+
+    reason = build_fp_close_reason(
+        {
+            "recommendation": "close_as_fp",
+            "phase": "post_evidence",
+            "matched_window_id": "cw-test",
+            "supporting_evidence_ids": ["evd-1"],
+        }
+    )
+    assert reason.startswith("close_as_fp post_evidence")
+    assert "window=cw-test" in reason
+
+
+def test_build_fp_close_reason_pre_evidence_close_as_fp_uses_default() -> None:
     from app.services.false_positive_matcher import build_fp_close_reason
 
     reason = build_fp_close_reason(
@@ -809,10 +824,11 @@ def test_build_fp_close_reason_includes_case_id() -> None:
             "recommendation": "close_as_fp",
             "matched_case_id": "case-00000001",
             "matched_pattern": "ops-change-bot pattern",
-        }
+            "phase": "pre_evidence",
+        },
+        default="investigation:close",
     )
-    assert "case-00000001" in reason
-    assert "ops-change-bot pattern" in reason
+    assert reason == "investigation:close"
 
 
 def test_build_fp_close_reason_uses_matched_rule_when_no_case_id() -> None:
@@ -822,9 +838,11 @@ def test_build_fp_close_reason_uses_matched_rule_when_no_case_id() -> None:
         {
             "recommendation": "close_as_fp",
             "matched_rule": "ops_change_window_bulk_login",
-        }
+            "phase": "pre_evidence",
+        },
+        default="custom:close",
     )
-    assert "ops_change_window_bulk_login" in reason
+    assert reason == "custom:close"
 
 
 def test_build_fp_close_reason_default_when_not_fp() -> None:

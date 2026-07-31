@@ -48,14 +48,14 @@ async def test_read_false_positive_match_returns_none_without_store() -> None:
 
 
 @pytest.mark.asyncio
-async def test_complete_not_required_close_reason_includes_matched_rule() -> None:
+async def test_pre_evidence_close_as_fp_close_reason_falls_back_to_default() -> None:
     fp_match = {
         "recommendation": "close_as_fp",
+        "phase": "pre_evidence",
         "matched_rule": "ops_change_window_bulk_login",
     }
     reason = build_fp_close_reason(fp_match, default="analysis_pipeline:complete_not_required")
-    assert "ops_change_window_bulk_login" in reason
-    assert reason != "analysis_pipeline:complete_not_required"
+    assert reason == "analysis_pipeline:complete_not_required"
 
 
 def test_post_evidence_adjudication_close_reason_uses_window_and_evidence() -> None:
