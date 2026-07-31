@@ -415,6 +415,7 @@ def build_analysis_pipeline(
             output_guard=output_guard,
             trace_service=agent_trace_service,
             fp_matcher=fp_matcher,
+            scenario_id=scenario_id,
         )
         evidence = EvidenceAgent(
             llm_client=effective_llm,
@@ -517,6 +518,7 @@ def build_super_agent(
             output_guard=output_guard,
             trace_service=agent_trace_service,
             fp_matcher=fp_matcher,
+            scenario_id=scenario_id,
         )
         evidence = EvidenceAgent(
             llm_client=effective_llm,

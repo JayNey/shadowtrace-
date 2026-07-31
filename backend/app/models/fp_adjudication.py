@@ -44,6 +44,10 @@ class FpAdjudicationResult(BaseModel):
     missing_conditions: list[str] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     matched_window_id: str | None = None
+    max_score: float | None = Field(
+        default=None,
+        description="Confidence score for close_as_fp recommendations (0.0–1.0).",
+    )
     adjudicated_at: str | None = None
     source: str = "PostEvidenceFpAdjudicator"
 

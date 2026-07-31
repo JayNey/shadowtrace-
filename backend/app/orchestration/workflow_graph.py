@@ -1458,7 +1458,6 @@ def build_investigation_graph(
         route_after_triage,
         {
             ROUTE_CLOSE: NODE_CLOSE,
-            ROUTE_DISPOSITION_ONLY: NODE_BEGIN_DISPOSITION_ONLY,
             ROUTE_MANUAL_HOLD: NODE_MANUAL_HOLD,
             ROUTE_INVESTIGATE: NODE_PLANNER,
         },

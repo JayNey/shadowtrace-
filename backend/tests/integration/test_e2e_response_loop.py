@@ -15,17 +15,17 @@ DESIGN NOTES (ISSUE-064 review):
   DispositionReceipt/Action rows directly.  Real retry/replan end-to-end
   verification (DispositionSyncService → WritebackRecoveryHandler) lives in
   ``tests/test_orchestration/test_writeback_recovery.py`` (ISSUE-062).
-- _seed_required_fp bypasses RuleBasedFalsePositiveHook and the vector
-  matching pipeline by seeding the journal directly.  This is an intentional
-  downgrade for the primary scenario-5 test; ``test_scenario_5_via_rule_based_fp_hook``
-  exercises the real RuleBasedFalsePositiveHook path.
+- _seed_required_fp bypasses the post-evidence adjudication pipeline by seeding
+  the journal directly.  This is an intentional shortcut for the primary
+  scenario-5 test; ``test_scenario_5_via_post_evidence_fp_adjudication``
+  seeds a realistic ``fp_adjudication`` payload (as PostEvidenceFpAdjudicator
+  would produce) before ``begin_disposition_only``.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -33,7 +33,6 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.response_agent import build_mock_capability_manifest, compute_template_hash
-from app.agents.triage_agent import RuleBasedFalsePositiveHook
 from app.core.auth import Principal
 from app.core.errors import ValidationError
 from app.core.event_bus import EventBus
@@ -46,7 +45,6 @@ from app.models.agent_io import (
     CollectionStatus,
     RiskAssessment,
     ScoringMode,
-    TriageAgentInput,
     VerificationOverallStatus,
     VerificationPhase,
 )
@@ -366,7 +364,7 @@ async def _insert_action(
 
 
 # ---------------------------------------------------------------------------
-# Shared helper: seed false_positive_match journal for disposition-only path
+# Shared helper: seed fp_adjudication journal for disposition-only path
 # ---------------------------------------------------------------------------
 
 
@@ -376,32 +374,66 @@ async def _seed_required_fp(
     *,
     max_score: float = 0.88,
 ) -> None:
-    """Seed a ``false_positive_match`` journal entry so
+    """Seed an ``fp_adjudication`` journal entry so
     ``WorkflowRuntimeService.begin_disposition_only`` can proceed.
 
     .. warning::
 
-       This bypasses the normal false-positive matching pipeline
-       (RuleBasedFalsePositiveHook / vector matching) by writing directly
-       to the journal.  This is an intentional downgrade for ISSUE-064;
-       the real pipeline requires ISSUE-032 fixture-injection support.
+       This bypasses the normal post-evidence FP adjudication pipeline
+       by writing directly to the journal.  This is an intentional shortcut
+       for ISSUE-064 disposition-only tests.
 
-       When ISSUE-032 delivers fixture-injection support, consider deprecating
-       this helper in favour of shared fixtures.  The companion test
-       ``test_scenario_5_via_rule_based_fp_hook`` already covers the real
-       RuleBasedFalsePositiveHook path.
+       ``test_scenario_5_via_post_evidence_fp_adjudication`` seeds a richer
+       ``fp_adjudication`` payload representative of
+       :class:`PostEvidenceFpAdjudicator` output.
     """
     async with session_factory() as session:
         async with session.begin():
             await append_context_journal_in_session(
                 session,
                 event_id,
-                "false_positive_match",
+                "fp_adjudication",
                 {
                     "recommendation": "close_as_fp",
                     "max_score": max_score,
+                    "matched_window_id": "cw-test",
+                    "supporting_evidence_ids": ["evd-seed-001"],
                 },
             )
+
+
+async def _seed_post_evidence_fp_adjudication(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> dict[str, Any]:
+    """Seed a realistic post-evidence ``fp_adjudication`` journal entry."""
+    payload = {
+        "recommendation": "close_as_fp",
+        "phase": "post_evidence",
+        "source": "PostEvidenceFpAdjudicator",
+        "max_score": 0.88,
+        "matched_window_id": "cw-scheduled-ops-maintenance",
+        "supporting_evidence_ids": ["evd-fp-auth-001"],
+        "matched_conditions": [
+            "change_window_authorization_present",
+            "baseline_window_match",
+            "identity_scope_match",
+            "action_scope_match",
+            "time_match",
+            "no_malicious_conflicts",
+        ],
+        "missing_conditions": [],
+        "conflicts": [],
+    }
+    async with session_factory() as session:
+        async with session.begin():
+            await append_context_journal_in_session(
+                session,
+                event_id,
+                "fp_adjudication",
+                payload,
+            )
+    return payload
 
 
 def _low_confidence_risk() -> RiskAssessment:
@@ -482,49 +514,6 @@ async def _submit_entity_action_once(
         "IMMEDIATE entity action must submit to MockXDR exactly once"
     )
     return outbox_id
-
-
-async def _run_rule_based_fp_hook(
-    session_factory: async_sessionmaker[AsyncSession],
-    working_memory: WorkingMemory,
-    event_id: str,
-    *,
-    scenario: str = "account_anomaly_fp",
-    title: str = "Bulk login by ops account during change window",
-) -> dict[str, Any]:
-    """Exercise RuleBasedFalsePositiveHook (not journal injection)."""
-    async with session_factory() as session:
-        async with session.begin():
-            await append_context_journal_in_session(
-                session,
-                event_id,
-                "source_snapshot",
-                {
-                    "scenario": scenario,
-                    "title": title,
-                },
-            )
-
-    hook = RuleBasedFalsePositiveHook(
-        working_memory=working_memory.for_writer("RuleBasedFalsePositiveHook"),
-    )
-    triage_agent = MagicMock()
-    triage_agent.working_memory = working_memory.for_writer("TriageAgent")
-    await hook(
-        triage_agent,
-        TriageAgentInput(event_id=event_id, raw_event_summary=title),
-    )
-
-    fp_match = await working_memory.for_writer("FalsePositiveMatcher").read(
-        event_id,
-        "false_positive_match",
-    )
-    assert isinstance(fp_match, dict), (
-        f"RuleBasedFalsePositiveHook must write false_positive_match, got {fp_match!r}"
-    )
-    assert fp_match.get("source") == "RuleBasedFalsePositiveHook"
-    assert fp_match.get("recommendation") == "close_as_fp"
-    return fp_match
 
 
 # ---------------------------------------------------------------------------
@@ -2480,18 +2469,18 @@ async def test_scenario_4f_unactivated_deferred_not_counted_as_failed(
 
 
 @pytest.mark.usefixtures("clean_state")
-async def test_scenario_5_via_rule_based_fp_hook(
+async def test_scenario_5_via_post_evidence_fp_adjudication(
     session_factory: async_sessionmaker[AsyncSession],
     context_store: EventContextStore,
     workflow_runtime_service: WorkflowRuntimeService,
     event_disposition_service: EventDispositionService,
-    working_memory: WorkingMemory,
     mock_xdr_state: MockXDRState,
 ) -> None:
-    """Scenario 5 companion: false_positive_match via RuleBasedFalsePositiveHook.
+    """Scenario 5 companion: disposition-only after post-evidence fp_adjudication.
 
-    Exercises the real pre-triage hook path (not ``_seed_required_fp`` journal
-    injection) before ``begin_disposition_only`` → activate_and_submit.
+    Seeds a realistic ``fp_adjudication`` payload (as produced by
+    :class:`PostEvidenceFpAdjudicator`) before ``begin_disposition_only``
+    → activate_and_submit.
     """
     identity = f"mock_xdr|tenant-a|conn-1|incident|{SCENARIO_INCIDENT_ID}-fp-hook"
     occurred = datetime(2024, 6, 15, 9, 0, 0, tzinfo=UTC)
@@ -2504,7 +2493,7 @@ async def test_scenario_5_via_rule_based_fp_hook(
                     event_id=event_id,
                     event_type=EventType.DATA_EXFILTRATION.value,
                     title="Bulk login by ops account during change window",
-                    description="RuleBasedFalsePositiveHook companion test",
+                    description="Post-evidence FP adjudication companion test",
                     status=EventStatus.TRIAGING.value,
                     severity=Severity.MEDIUM.value,
                     risk_score=0,
@@ -2540,12 +2529,10 @@ async def test_scenario_5_via_rule_based_fp_hook(
         {"reference": {"source_disposition": "unknown"}},
     )
 
-    fp_match = await _run_rule_based_fp_hook(
-        session_factory,
-        working_memory,
-        event_id,
-    )
-    assert fp_match.get("matched_rule") == "ops_change_window_bulk_login"
+    fp_adj = await _seed_post_evidence_fp_adjudication(session_factory, event_id)
+    assert fp_adj.get("recommendation") == "close_as_fp"
+    assert fp_adj.get("matched_window_id") == "cw-scheduled-ops-maintenance"
+    assert "baseline_window_match" in (fp_adj.get("matched_conditions") or [])
 
     await workflow_runtime_service.begin_disposition_only(event_id)
 
@@ -2653,7 +2640,7 @@ async def test_scenario_5_disposition_only_false_positive_closed(
         {"reference": {"source_disposition": "unknown"}},
     )
 
-    # Seed the false_positive_match journal (required by begin_disposition_only)
+    # Seed the fp_adjudication journal (required by begin_disposition_only)
     await _seed_required_fp(session_factory, event_id)
 
     # --- Act: begin_disposition_only ---

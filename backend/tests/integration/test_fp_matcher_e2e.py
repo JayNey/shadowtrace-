@@ -5,7 +5,7 @@ Scenarios:
 2. FP matcher does not prevent triage_result persistence
 3. FP match metadata not leaked in outbound disposition
 4. TriageAgent wired with fp_matcher in the analysis pipeline
-5. account_anomaly_fp → short-circuit, evidence skipped
+5. account_anomaly_fp → post-evidence adjudication close (ISSUE-114)
 6. required disposition + FP match → full investigation, no auto-close
 """
 
@@ -236,7 +236,7 @@ def test_deps_triage_agent_wires_fp_matcher() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Scenario 5: account_anomaly_fp → short-circuit, evidence skipped
+# Scenario 5: account_anomaly_fp → post-evidence close (ISSUE-114)
 # --------------------------------------------------------------------------- #
 
 

@@ -263,16 +263,21 @@ async def test_regression_fails_when_agent_verdict_changes(
     context_store: EventContextStore,
     run_graph_investigation: object,
 ) -> None:
-    from app.agents.triage_agent import RuleBasedFalsePositiveHook
+    from app.services.fp_adjudication_service import PostEvidenceFpAdjudicator
 
-    async def _disable_fp_hook(
-        self: RuleBasedFalsePositiveHook,
-        agent: object,
-        input: object,
-    ) -> None:
-        del self, agent, input
+    def _disable_fp_adjudication(
+        self: PostEvidenceFpAdjudicator,
+        **kwargs: object,
+    ) -> object:
+        del self, kwargs
+        from app.models.fp_adjudication import FpAdjudicationResult
 
-    monkeypatch.setattr(RuleBasedFalsePositiveHook, "__call__", _disable_fp_hook)
+        return FpAdjudicationResult(
+            recommendation="no_fp_signal",
+            missing_conditions=["disabled_for_regression"],
+        )
+
+    monkeypatch.setattr(PostEvidenceFpAdjudicator, "adjudicate", _disable_fp_adjudication)
 
     scenario_id = "account_anomaly_fp"
     baseline = load_baseline(scenario_id)

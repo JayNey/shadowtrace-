@@ -76,6 +76,7 @@ async def _seed_required_fp(
                     "recommendation": "close_as_fp",
                     "matched_window_id": "cw-test",
                     "supporting_evidence_ids": ["evd-seed-001"],
+                    "max_score": 0.88,
                 },
             )
     return event.event_id

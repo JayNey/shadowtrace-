@@ -60,7 +60,6 @@ from app.orchestration.workflow_graph import (
     P0_NODE_SEQUENCE,
     ROUTE_CLOSE,
     ROUTE_CONTINUE,
-    ROUTE_DISPOSITION_ONLY,
     ROUTE_EVIDENCE,
     ROUTE_EXECUTE,
     ROUTE_HALT,

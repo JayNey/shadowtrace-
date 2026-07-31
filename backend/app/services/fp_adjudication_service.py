@@ -140,6 +140,7 @@ class PostEvidenceFpAdjudicator:
             missing_conditions=[],
             conflicts=[],
             matched_window_id=matched_window.window_id,
+            max_score=0.88,
             adjudicated_at=now,
         )
 
@@ -151,7 +152,7 @@ def _authorization_evidence(evidence_list: list[Evidence]) -> list[Evidence]:
         if item.source is not EvidenceSource.IDENTITY:
             continue
         raw = item.raw_data or {}
-        if raw.get("change_window") is True:
+        if raw.get("change_window") in (True, "true", "True", 1, "1"):
             authorized.append(item)
     return authorized
 

@@ -394,6 +394,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         audit_service: Any | None = None,
         event_bus: Any | None = None,
         fp_matcher: Any | None = None,
+        scenario_id: str | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -405,6 +406,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             audit_service=audit_service,
             event_bus=event_bus,
         )
+        self.scenario_id = scenario_id
 
         # Convenience aliases matching the Issue-032 naming convention.
         self.pre_triage_hooks = self.pre_hooks
@@ -554,6 +556,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 event_id=event_id,
                 agent_name=self.agent_name,
                 prompt_key="triage_extract",
+                scenario_id=self.scenario_id,
                 json_mode=True,
                 response_model=TriageLLMResponse,
                 temperature=0.3,
