@@ -244,9 +244,6 @@ class EventDispositionService:
                 derived_disposition=resolve.disposition,
             )
 
-        if self._decision_records is not None:
-            await self._decision_records.assert_auto_disposition_allowed(event_id)
-
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(
@@ -310,6 +307,12 @@ class EventDispositionService:
                         activated=False,
                         skipped_reason="effect_not_ready",
                         derived_disposition=resolve.disposition,
+                    )
+
+                if self._decision_records is not None:
+                    await self._decision_records.assert_auto_disposition_allowed(
+                        event_id,
+                        session=session,
                     )
 
                 template_unchanged = _template_unchanged(action)

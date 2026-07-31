@@ -86,13 +86,24 @@ def _agent_decision_basis(output_data: Any) -> dict[str, Any]:
     # always comes from TraceProjection (decision_summary-first, CoT keys redacted).
     for key in (
         "input_summary",
+        "confidence",
+        "evidence_refs",
+        "selected_action",
+        "warnings",
         "model_name",
         "model_version",
         "rule_version",
         "rules_applied",
     ):
         value = stored.get(key)
-        if value not in (None, "", [], {}) and key not in basis:
+        if value in (None, "", [], {}):
+            continue
+        existing = basis.get(key)
+        if existing in (None, "", [], {}) or (
+            key == "input_summary"
+            and isinstance(existing, str)
+            and existing.startswith("keys=")
+        ):
             basis[key] = value
     return basis
 
@@ -133,6 +144,7 @@ def _agent_detail(row: orm.AgentTrace, inferred: bool) -> dict[str, Any]:
     output_data = row.output_data if isinstance(row.output_data, dict) else {}
     basis = _agent_decision_basis(output_data)
     for key in (
+        "input_summary",
         "structured_conclusion",
         "confidence",
         "evidence_refs",

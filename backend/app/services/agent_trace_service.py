@@ -36,6 +36,7 @@ _COT_KEYS = frozenset(
         "rationale",
         "chain_of_thought",
         "chain-of-thought",
+        "reasoning",
     }
 )
 _NOT_RETAINED = "[NOT_RETAINED]"
@@ -56,7 +57,6 @@ _DECISION_ID_FIELDS = frozenset(
 _DECISION_CONCLUSION_FIELDS = frozenset(
     {
         "decision_summary",
-        "reasoning",
         "narrative_summary",
         "strategy_summary",
         "summary",
@@ -151,7 +151,6 @@ def _is_raw_key(key: str) -> bool:
     lowered = key.lower()
     return (
         lowered in _RAW_KEYS
-        or lowered in _COT_KEYS
         or "raw_payload" in lowered
         or "raw_data" in lowered
         or "prompt" in lowered
@@ -167,10 +166,9 @@ def _project_tree(value: Any, *, project_raw: bool = True, depth: int = 0) -> An
         for raw_key, item in value.items():
             key = str(raw_key)
             if project_raw and _is_raw_key(key):
-                if key.lower() in _COT_KEYS:
-                    projected[key] = _NOT_RETAINED
-                else:
-                    projected[key] = _audit_hash_reference(item, reason="raw_block")
+                projected[key] = _audit_hash_reference(item, reason="raw_block")
+            elif depth == 0 and key.lower() in _COT_KEYS:
+                projected[key] = _NOT_RETAINED
             elif is_sensitive_key(key):
                 projected[key] = REDACTED
             else:

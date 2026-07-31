@@ -283,8 +283,15 @@ def mock_llm_client(budget_service: BudgetService) -> MockLLMClient:
 @pytest.fixture
 def agent_trace_service(
     session_factory: async_sessionmaker[AsyncSession],
+    degraded_flags: DegradedFlagService,
 ) -> AgentTraceService:
-    return AgentTraceService(session_factory)
+    from app.services.decision_record_service import DecisionRecordService
+
+    return AgentTraceService(
+        session_factory,
+        decision_record_service=DecisionRecordService(session_factory),
+        degraded_flag_service=degraded_flags,
+    )
 
 
 @pytest.fixture

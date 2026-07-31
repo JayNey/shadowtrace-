@@ -164,6 +164,7 @@ def test_projection_redacts_chain_of_thought_keys() -> None:
             "thought": "hidden reasoning must not persist",
             "reflection": "also hidden",
             "rationale": "free text rationale",
+            "reasoning": "free text triage reasoning",
         }
     )
 
@@ -171,6 +172,17 @@ def test_projection_redacts_chain_of_thought_keys() -> None:
     assert projected["thought"] == "[NOT_RETAINED]"
     assert projected["reflection"] == "[NOT_RETAINED]"
     assert projected["rationale"] == "[NOT_RETAINED]"
+    assert projected["reasoning"] == "[NOT_RETAINED]"
+
+
+def test_decision_basis_ignores_redacted_reasoning_fallback() -> None:
+    basis = TraceProjection.decision_basis(
+        {
+            "reasoning": "[NOT_RETAINED]",
+            "decision_summary": "structured triage summary",
+        }
+    )
+    assert basis["structured_conclusion"] == "structured triage summary"
 
 
 def test_decision_basis_prefers_decision_summary_over_legacy_summary() -> None:
@@ -283,6 +295,64 @@ async def test_log_trace_redacts_injected_cot_and_secrets(
     assert row.output_data["thought"] == "[NOT_RETAINED]"
     assert secret not in serialized
     assert "must not persist" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_log_trace_sets_decision_audit_degraded_on_persist_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """When DecisionRecord persist fails, trace still saves and degraded flag is set."""
+
+    class FailingDecisionRecords:
+        async def persist_from_agent_trace(self, **kwargs: object) -> None:
+            raise RuntimeError("decision record persist failed")
+
+    degraded_calls: list[tuple[str, str, bool, str]] = []
+
+    class FakeDegradedFlags:
+        async def set_flag(
+            self,
+            event_id: str,
+            flag_name: str,
+            value: bool,
+            writer: str,
+        ) -> list[str]:
+            degraded_calls.append((event_id, flag_name, value, writer))
+            return [f"{flag_name}=true"]
+
+    svc = AgentTraceService(
+        session_factory,
+        decision_record_service=FailingDecisionRecords(),
+        degraded_flag_service=FakeDegradedFlags(),
+    )
+    event_id = _id("evt")
+    started_at = datetime(2026, 7, 31, 10, 0, 0, tzinfo=UTC)
+    completed_at = started_at + timedelta(milliseconds=50)
+
+    trace_id = await svc.log_trace(
+        event_id=event_id,
+        agent_name="triage",
+        input_data={"event_id": event_id},
+        output_data={
+            "decision_summary": "Escalate for manual review",
+            "reason_code": "insufficient_context",
+            "confidence": 0.4,
+        },
+        status="success",
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+
+    assert trace_id
+    row = await svc.get_trace(trace_id)
+    assert row is not None
+    assert len(degraded_calls) == 1
+    assert degraded_calls[0] == (
+        event_id,
+        "decision_audit_degraded",
+        True,
+        "AgentTraceService",
+    )
 
 
 def test_oversized_field_is_truncated_to_hash_marker() -> None:
