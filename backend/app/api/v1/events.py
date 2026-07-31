@@ -7,6 +7,7 @@ that drive the full analysis lifecycle.
 from __future__ import annotations
 
 import logging
+import socket
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
@@ -971,7 +972,7 @@ async def _db_read(
             event_id,
         )
         return [], 0
-    except (ConnectionRefusedError, TimeoutError, OSError, sa_exc.OperationalError):
+    except (ConnectionRefusedError, TimeoutError, socket.gaierror, sa_exc.OperationalError):
         logger.warning(
             "DB read degraded (transient error) for table=%s event=%s",
             getattr(table, "__tablename__", table),
@@ -1354,27 +1355,12 @@ def _triage_context_from_context(context: Any) -> s.EvidenceTriageContextRespons
 
 
 def _query_summary_from_agent_traces(rows: list[Any]) -> list[s.EvidenceQuerySummaryItem]:
-    from app.services.decision_trace_service import _evidence_query_timing_by_tool
+    from app.services.evidence_observability import build_query_summary_items
 
-    timing_by_tool = _evidence_query_timing_by_tool(rows)
-    summary: list[s.EvidenceQuerySummaryItem] = []
-    for tool_name in sorted(timing_by_tool):
-        item = timing_by_tool[tool_name]
-        if not isinstance(item, dict):
-            continue
-        summary.append(
-            s.EvidenceQuerySummaryItem(
-                tool_name=str(item.get("tool_name") or tool_name),
-                source=str(item.get("source") or ""),
-                status=str(item.get("status") or ""),
-                execution_time_ms=int(item.get("execution_time_ms") or 0),
-                records_count=int(item.get("records_count") or 0),
-                gap_reason=(
-                    str(item["gap_reason"]) if item.get("gap_reason") is not None else None
-                ),
-            )
-        )
-    return summary
+    return [
+        s.EvidenceQuerySummaryItem.model_validate(item)
+        for item in build_query_summary_items(rows)
+    ]
 
 
 # --------------------------------------------------------------------------- #

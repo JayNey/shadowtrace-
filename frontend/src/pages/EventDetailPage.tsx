@@ -17,6 +17,7 @@ import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useEffect, useMemo } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import type { ColumnsType } from "antd/es/table";
+import { triageContextFromSnapshot } from "../utils/evidenceContext";
 import ReportViewer from "../components/report/ReportViewer";
 import { coerceInvestigationReport } from "../types/report";
 import EventOverviewCard from "../components/event/EventOverviewCard";
@@ -435,6 +436,8 @@ export default function EventDetailPage() {
 
   const context = event.event.event_context_snapshot;
   const evidenceOutput = evidenceDetail ?? context?.evidence_output;
+  const triageContext =
+    evidenceDetail?.triage_context ?? triageContextFromSnapshot(context) ?? null;
   const writebackSummary = context?.writeback_summary;
 
   const sourceContent = (
@@ -528,7 +531,7 @@ export default function EventDetailPage() {
           successSources={evidenceOutput?.success_sources ?? []}
           failedSources={evidenceOutput?.failed_sources ?? []}
           querySummary={evidenceDetail?.query_summary ?? []}
-          triageContext={evidenceDetail?.triage_context ?? null}
+          triageContext={triageContext}
         />
       ),
     },

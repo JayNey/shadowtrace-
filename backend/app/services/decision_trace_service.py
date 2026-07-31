@@ -180,24 +180,10 @@ def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEnt
 def _evidence_query_timing_by_tool(
     agent_rows: list[orm.AgentTrace],
 ) -> dict[str, dict[str, Any]]:
-    """Build tool_name -> query timing map from the latest evidence_agent trace."""
-    timing_by_tool: dict[str, dict[str, Any]] = {}
-    for row in reversed(agent_rows):
-        if row.agent_name != "evidence_agent":
-            continue
-        output_data = row.output_data if isinstance(row.output_data, dict) else {}
-        timings = output_data.get("query_timings")
-        if not isinstance(timings, list):
-            continue
-        for item in timings:
-            if not isinstance(item, dict):
-                continue
-            tool_name = item.get("tool_name")
-            if isinstance(tool_name, str) and tool_name:
-                timing_by_tool.setdefault(tool_name, item)
-        if timing_by_tool:
-            break
-    return timing_by_tool
+    """Backward-compatible alias; prefer ``evidence_observability.evidence_query_timing_by_tool``."""
+    from app.services.evidence_observability import evidence_query_timing_by_tool
+
+    return evidence_query_timing_by_tool(agent_rows)
 
 
 def _normalize_tool_calls(

@@ -8,6 +8,7 @@ force conflict field sync.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import time
@@ -195,11 +196,59 @@ def _validate_entities_for_evidence(
     )
 
 
+def _validate_ioc_list(iocs: list[str]) -> tuple[list[str], list[str]]:
+    """Validate triage IOC strings before threat_intel queries (ISSUE-101)."""
+    valid: list[str] = []
+    rejected: list[str] = []
+    for raw in iocs:
+        item = raw.strip()
+        if not item:
+            continue
+        if _indicator_is_valid(item):
+            valid.append(item)
+        else:
+            rejected.append(item)
+    return valid, rejected
+
+
+def _indicator_is_valid(indicator: str) -> bool:
+    """Return True when *indicator* is a valid IP literal or domain syntax."""
+    text = indicator.strip()
+    if not text:
+        return False
+    try:
+        ipaddress.ip_address(text)
+    except ValueError:
+        pass
+    else:
+        return True
+    domain_result = validate_entity_set(
+        EntitySet(domains=[DomainEntity(entity_id="ioc-check", fqdn=text)]),
+        provenance="llm",
+    )
+    return bool(domain_result.entity_set.domains)
+
+
+def _threat_intel_indicator_keys(
+    entities: EntitySet,
+    iocs: list[str],
+) -> set[str]:
+    external_ips = {
+        ip.address
+        for ip in entities.ips
+        if ip.address and ip.scope == "external"
+    }
+    domains = {d.fqdn for d in entities.domains if d.fqdn}
+    return set(iocs) | external_ips | domains
+
+
 def _skip_reason_for_tool(
     tool_name: str,
     *,
     raw: EntitySet,
     validated: EntitySet,
+    raw_iocs: list[str] | None = None,
+    valid_iocs: list[str] | None = None,
 ) -> str:
     """Distinguish invalid_entity (rejected by validator) from source_skipped."""
     if tool_name in {"query_account_login", "query_file_access"}:
@@ -228,16 +277,8 @@ def _skip_reason_for_tool(
             if value
         }
     elif tool_name == "query_threat_intel":
-        raw_values = {
-            ip.address
-            for ip in raw.ips
-            if ip.address and ip.scope == "external"
-        } | {d.fqdn for d in raw.domains if d.fqdn}
-        valid_values = {
-            ip.address
-            for ip in validated.ips
-            if ip.address and ip.scope == "external"
-        } | {d.fqdn for d in validated.domains if d.fqdn}
+        raw_values = _threat_intel_indicator_keys(raw, list(raw_iocs or []))
+        valid_values = _threat_intel_indicator_keys(validated, list(valid_iocs or []))
     else:
         return "source_skipped"
 
@@ -615,6 +656,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             raw_entities,
             alert_text=alert_text,
         ).entity_set
+        raw_iocs = [item for item in input.triage_result.ioc_list if item]
+        valid_iocs, _rejected_iocs = _validate_ioc_list(raw_iocs)
 
         for tool_name in EVIDENCE_QUERY_ORDER:
             source = TOOL_SOURCE_MAP[tool_name]
@@ -622,13 +665,15 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 tool_name,
                 validated_entities,
                 time_range,
-                ioc_list=list(input.triage_result.ioc_list),
+                ioc_list=valid_iocs,
             )
             if params is None:
                 skip_reason = _skip_reason_for_tool(
                     tool_name,
                     raw=raw_entities,
                     validated=validated_entities,
+                    raw_iocs=raw_iocs,
+                    valid_iocs=valid_iocs,
                 )
                 outcome = self._skipped_entity_outcome(
                     tool_name,
@@ -709,19 +754,23 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             raw_entities,
             alert_text=alert_text,
         ).entity_set
+        raw_iocs = [item for item in input.triage_result.ioc_list if item]
+        valid_iocs, _rejected_iocs = _validate_ioc_list(raw_iocs)
         for tool_name in EVIDENCE_QUERY_ORDER:
             source = TOOL_SOURCE_MAP[tool_name]
             params = self._build_params(
                 tool_name,
                 validated_entities,
                 time_range,
-                ioc_list=list(input.triage_result.ioc_list),
+                ioc_list=valid_iocs,
             )
             if params is None:
                 skip_reason = _skip_reason_for_tool(
                     tool_name,
                     raw=raw_entities,
                     validated=validated_entities,
+                    raw_iocs=raw_iocs,
+                    valid_iocs=valid_iocs,
                 )
                 outcome = self._skipped_entity_outcome(
                     tool_name,

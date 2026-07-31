@@ -21,6 +21,7 @@ import {
   listConnectors,
   listDispositions,
 } from "../services/eventApi";
+import { shouldFetchEventEvidence } from "../utils/evidenceContext";
 import { socketClient } from "../services/socketClient";
 
 type DetailResource =
@@ -126,16 +127,14 @@ export function useEventDetail(eventId: string | undefined) {
           ? listDispositions(eventId)
           : null;
       const connectorsPromise = isAll ? listConnectors() : null;
-      const evidencePromise = isAll || resource === "event" ? getEventEvidence(eventId) : null;
 
-      const [eventResult, tracesResult, actionsResult, dispositionsResult, connectorsResult, evidenceResult] =
+      const [eventResult, tracesResult, actionsResult, dispositionsResult, connectorsResult] =
         await Promise.allSettled([
           eventPromise,
           tracesPromise,
           actionsPromise,
           dispositionsPromise,
           connectorsPromise,
-          evidencePromise,
         ]);
       if (!mountedRef.current) return;
 
@@ -161,8 +160,18 @@ export function useEventDetail(eventId: string | undefined) {
       if (connectorsResult.status === "fulfilled" && connectorsResult.value) {
         setConnectors(connectorsResult.value.data.items);
       }
-      if (evidenceResult.status === "fulfilled" && evidenceResult.value) {
-        setEvidenceDetail(evidenceResult.value.data);
+
+      if ((isAll || resource === "event") && shouldFetchEventEvidence(nextEvent)) {
+        try {
+          const evidenceResult = await getEventEvidence(eventId);
+          if (mountedRef.current) {
+            setEvidenceDetail(evidenceResult.data);
+          }
+        } catch {
+          if (mountedRef.current) {
+            setEvidenceDetail(null);
+          }
+        }
       } else if (isAll || resource === "event") {
         setEvidenceDetail(null);
       }

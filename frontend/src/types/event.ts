@@ -477,6 +477,11 @@ export interface EventContextSnapshot {
     writeback_ids?: string[];
     [key: string]: unknown;
   } | null;
+  triage_result?: {
+    degraded?: boolean;
+    degradation_reasons?: string[];
+    entity_rejection_summary?: Record<string, unknown>;
+  } | null;
   disposition_commands?: DispositionCommand[];
   disposition_receipts?: DispositionReceipt[];
   writeback_summary?: WritebackSummary | null;

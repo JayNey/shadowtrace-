@@ -49,6 +49,7 @@ CORE_ENDPOINTS = {
     ("get", "/api/v1/events/{event_id}/tool-calls"),
     ("get", "/api/v1/events/{event_id}/timeline"),
     ("get", "/api/v1/events/{event_id}/graph"),
+    ("get", "/api/v1/events/{event_id}/evidence"),
     ("get", "/api/v1/events/{event_id}/decision-trace"),
     ("post", "/api/v1/events/{event_id}/chat"),
     ("get", "/api/v1/events/{event_id}/actions"),
@@ -90,6 +91,28 @@ _DEV_TOKENS = json.dumps(
 @pytest.fixture(autouse=True)
 def _dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEV_AUTH_TOKENS", _DEV_TOKENS)
+
+
+@pytest.fixture(autouse=True)
+def _contract_db_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Direct _try_get_session_factory calls bypass FastAPI dependency overrides."""
+    import app.api.v1.events as events_mod
+    import app.api.v1.stats as stats_mod
+
+    monkeypatch.setattr(events_mod, "_try_get_session_factory", lambda: None)
+
+    class _StatsStubSession:
+        async def __aenter__(self) -> _StatsStubSession:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    async def _empty_aggregate(_session: Any) -> s.StatsResponse:
+        return s.StatsResponse()
+
+    monkeypatch.setattr(stats_mod, "_try_get_session_factory", lambda: (lambda: _StatsStubSession()))
+    monkeypatch.setattr(stats_mod, "_aggregate_stats", _empty_aggregate)
 
 
 @pytest.fixture
@@ -231,7 +254,27 @@ class _MockContextStore:
                         ],
                     }
                 ],
-            }
+            },
+            evidence_output={
+                "evidence_list": [],
+                "conflicts": [],
+                "gaps": [],
+                "success_sources": [],
+                "failed_sources": [],
+                "overall_confidence": 0.0,
+                "collection_status": "failed",
+            },
+            triage_result={
+                "event_type": "data_exfiltration",
+                "severity": "high",
+                "need_investigation": True,
+                "degraded": False,
+                "degradation_reasons": [],
+                "entity_rejection_summary": {},
+                "entities": {},
+                "ioc_list": [],
+                "reasoning": "",
+            },
         )
 
 
@@ -415,6 +458,7 @@ def test_export_openapi_writes_valid_json(tmp_path: Path) -> None:
         f"/api/v1/events/{s.EXAMPLE_EVENT_ID}/audit-logs",
         f"/api/v1/events/{s.EXAMPLE_EVENT_ID}/tool-calls",
         f"/api/v1/events/{s.EXAMPLE_EVENT_ID}/timeline",
+        f"/api/v1/events/{s.EXAMPLE_EVENT_ID}/evidence",
         f"/api/v1/events/{s.EXAMPLE_EVENT_ID}/decision-trace",
         f"/api/v1/events/{s.EXAMPLE_EVENT_ID}/actions",
         f"/api/v1/events/{s.EXAMPLE_EVENT_ID}/dispositions",

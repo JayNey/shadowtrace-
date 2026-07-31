@@ -746,6 +746,47 @@ async def test_invalid_hostname_produces_invalid_entity_gap_without_tool_call(
     assert endpoint_gaps[0].reason == "invalid_entity"
 
 
+async def test_threat_intel_skips_invalid_ioc_in_list_without_tool_call(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """ISSUE-101: invalid ioc_list entries must not invoke threat_intel; gap=invalid_entity."""
+
+    class _ThreatIntelCallRecorder:
+        def __init__(self, inner: object) -> None:
+            self.inner = inner
+            self.threat_intel_calls: list[dict[str, object]] = []
+
+        async def call(self, tool_name: str, params: dict[str, object], **kwargs: object) -> object:
+            if tool_name == "query_threat_intel":
+                self.threat_intel_calls.append(params)
+            return await self.inner.call(tool_name, params, **kwargs)
+
+    event_id = f"evt-101-invalid-ioc-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    recorder = _ThreatIntelCallRecorder(tool_executor)
+    agent = _build_agent(tool_executor=recorder, wm=wm, evidence_repo=evidence_repo)
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+        ioc_list=["stage3", "not-a-valid-indicator"],
+    )
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(EvidenceAgentInput(event_id=event_id, triage_result=triage))
+
+    assert recorder.threat_intel_calls == []
+    intel_gaps = [
+        gap for gap in output.gaps if gap.missing_source is EvidenceSource.THREAT_INTEL
+    ]
+    assert len(intel_gaps) == 1
+    assert intel_gaps[0].reason == "invalid_entity"
+
+
 async def test_triage_degraded_without_source_entities_skips_all_queries(
     tool_executor: Any,
     wm: _FakeWorkingMemory,
