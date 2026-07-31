@@ -1735,6 +1735,19 @@
       "default": null,
       "title": "False Positive Match"
     },
+    "fp_adjudication": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fp Adjudication"
+    },
     "evidence_output": {
       "anyOf": [
         {

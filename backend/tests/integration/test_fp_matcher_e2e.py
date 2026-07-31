@@ -242,28 +242,19 @@ def test_deps_triage_agent_wires_fp_matcher() -> None:
 
 @pytest.mark.usefixtures("clean_state")
 @pytest.mark.asyncio
-async def test_fp_matcher_account_anomaly_fp_skips_evidence_collection(
+async def test_fp_matcher_account_anomaly_fp_post_evidence_close(
     session_factory: async_sessionmaker[AsyncSession],
     event_service: Any,
     source_ingester: Any,
     build_analysis_pipeline: Any,
     working_memory: Any,
 ) -> None:
-    """account_anomaly_fp with fp_matcher wired → short-circuit, evidence skipped.
-
-    The account_anomaly_fp scenario (ops-change-bot bulk login during change
-    window) is a known false positive.  The RuleBasedFalsePositiveHook
-    (pre-triage) writes close_as_fp; the FalsePositiveMatcherHook (post-triage)
-    respects it and skips the vector search.  The pipeline short-circuits
-    because severity=low → need_investigation=False and disposition_policy is
-    NOT_REQUIRED — evidence collection is never started.
-    """
+    """account_anomaly_fp closes after evidence + org baseline (ISSUE-114)."""
     from app.data_generators.scenarios import build_scenario
     from app.data_generators.scenarios.account_anomaly_fp import SCENARIO_ID
     from app.mock_xdr.api import create_app
     from app.mock_xdr.state import MockXDRState
 
-    # Set up mock XDR with account_anomaly_fp scenario.
     state = MockXDRState()
     state.load_scenario(build_scenario(SCENARIO_ID, seed=42))
     transport = ASGITransport(app=create_app(state=state))
@@ -278,12 +269,9 @@ async def test_fp_matcher_account_anomaly_fp_skips_evidence_collection(
             client=client,
             max_retries=0,
         )
-
-        # Ingest the FP scenario.
         summary = await source_ingester.poll(adapter, ALL_SOURCE_KINDS, batch_size=10)
         assert summary.accepted >= 1
 
-    # Find the ingested event.
     async with session_factory() as session:
         row = (
             await session.scalars(
@@ -295,70 +283,22 @@ async def test_fp_matcher_account_anomaly_fp_skips_evidence_collection(
     assert row is not None
     event_id = row.event_id
 
-    # Run the pipeline with fp_matcher wired (scenario_id must match so
-    # RiskAgent / ReportAgent use the correct calibration).
     pipeline, projection = build_analysis_pipeline(scenario_id=SCENARIO_ID)
     with bind_evidence_projection(projection):
         result = await pipeline.run(event_id)
 
-    assert result is not None
+    assert result.short_circuit is False
+    assert result.evidence_output is not None
+    assert len(result.evidence_output.evidence_list) > 0
 
-    # RuleBasedFalsePositiveHook must detect account_anomaly_fp from the
-    # ingested source evidence (title / snapshot) without manual pre-write.
-    fp_wm = working_memory.for_writer("FalsePositiveMatcher")
-    verify_fp = await fp_wm.read(event_id, "false_positive_match")
-    assert isinstance(verify_fp, dict), (
-        f"RuleBasedFalsePositiveHook did not write false_positive_match: {verify_fp!r}"
-    )
-    assert verify_fp.get("recommendation") == "close_as_fp"
-    assert verify_fp.get("matched_rule") == "ops_change_window_bulk_login"
+    fp_adj_wm = working_memory.for_writer("PostEvidenceFpAdjudicator")
+    adjudication = await fp_adj_wm.read(event_id, "fp_adjudication")
+    assert isinstance(adjudication, dict)
+    assert adjudication.get("recommendation") == "close_as_fp"
+    assert adjudication.get("supporting_evidence_ids")
 
-    # With disposition_policy=NOT_REQUIRED, the pipeline should reach CLOSED.
-    assert result.status == EventStatus.CLOSED, (
-        f"Expected CLOSED for account_anomaly_fp, got {result.status}"
-    )
-
-    if result.short_circuit:
-        # Short-circuit path: evidence skipped, verdict is FALSE_POSITIVE.
-        assert result.evidence_output is not None
-        assert result.evidence_output.evidence_list == []
-        assert result.evidence_output.overall_confidence == 0.0
-        assert result.final_verdict == FinalVerdict.FALSE_POSITIVE, (
-            f"Expected FALSE_POSITIVE, got {result.final_verdict}"
-        )
-    else:
-        # Full-investigation path (keyword mapping didn't identify
-        # ACCOUNT_ANOMALY → MEDIUM severity → need_investigation=True):
-        # evidence was collected and the pipeline ran to completion.
-        assert result.evidence_output is not None
-        assert result.status == EventStatus.CLOSED
-
-    # false_positive_match must still be readable after the pipeline run.
-    assert verify_fp.get("recommendation") == "close_as_fp"
-
-    # Verify the event reached CLOSED in the database.
-    async with session_factory() as session:
-        row = await session.get(orm.SecurityEvent, event_id)
-        close_logs = (
-            await session.scalars(
-                select(orm.EventAuditLog)
-                .where(
-                    orm.EventAuditLog.event_id == event_id,
-                    orm.EventAuditLog.to_status == EventStatus.CLOSED.value,
-                )
-                .order_by(orm.EventAuditLog.created_at.desc())
-            )
-        ).all()
-    assert row is not None
-    assert row.status == EventStatus.CLOSED, f"DB status is {row.status}, expected CLOSED"
-    assert close_logs, "Expected audit log entry for CLOSED transition"
-    assert "ops_change_window_bulk_login" in (close_logs[0].reason or "")
-
-    # Report must explain the FP basis when short-circuited.
-    if result.report is not None:
-        overview = next((s for s in result.report.sections if s.key == "overview"), None)
-        assert overview is not None
-        assert "fp_matched_pattern" in overview.content or "fp_matched_case_id" in overview.content
+    assert result.status == EventStatus.CLOSED
+    assert result.final_verdict == FinalVerdict.FALSE_POSITIVE
 
 
 # --------------------------------------------------------------------------- #
@@ -443,11 +383,8 @@ async def test_fp_matcher_required_disposition_false_positive_no_auto_close(
         "Evidence collection was skipped — full investigation required for REQUIRED disposition"
     )
 
-    # Verdict must be FALSE_POSITIVE (from VerdictResolver priority 1:
-    # false_positive_match.recommendation == close_as_fp).
-    assert result.final_verdict == FinalVerdict.FALSE_POSITIVE, (
-        f"Expected FALSE_POSITIVE (close_as_fp beats risk_score), got {result.final_verdict}"
-    )
+    # Pre-evidence close_as_fp must not force FALSE_POSITIVE without post-evidence adjudication.
+    assert result.final_verdict != FinalVerdict.FALSE_POSITIVE
 
     # Event must stay at REPORTING (NOT auto-closed) — the disposition
     # layer must perform the close via EVENT_STATUS_UPDATE → CLOSED.
@@ -466,7 +403,6 @@ async def test_fp_matcher_required_disposition_false_positive_no_auto_close(
         f"DB status is {row.status}, expected REPORTING — disposition-only path must not auto-close"
     )
 
-    # false_positive_match must still be readable.
     verify_fp = await fp_wm.read(event_id, "false_positive_match")
     assert isinstance(verify_fp, dict)
     assert verify_fp.get("recommendation") == "close_as_fp"

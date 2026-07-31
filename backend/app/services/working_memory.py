@@ -33,6 +33,7 @@ FIELD_OWNERSHIP: dict[str, str] = {
     "source_sync_state": "SourceIngester",
     "triage_result": "TriageAgent",
     "false_positive_match": "FalsePositiveMatcher",
+    "fp_adjudication": "PostEvidenceFpAdjudicator",
     "evidence_output": "EvidenceAgent",
     "storyline": "StorylineService",
     "graph_output": "GraphAgent",

@@ -1,4 +1,4 @@
-"""P0 VerdictResolver — sole logical resolver for FinalVerdict (ISSUE-035)."""
+"""P0 VerdictResolver — sole logical resolver for FinalVerdict (ISSUE-035 / ISSUE-114)."""
 
 from __future__ import annotations
 
@@ -16,13 +16,15 @@ FP_MEDIUM_SCORE = FP_LOW_THRESHOLD
 class VerdictResolver:
     """Resolve ``FinalVerdict`` with fixed priority (must not be overridden).
 
-    Priority (ISSUE-035 / ISSUE-047):
-    1. ``false_positive_match.recommendation == close_as_fp`` → false_positive
-       (never overridden by risk_score >= 70)
+    Priority (ISSUE-035 / ISSUE-047 / ISSUE-114):
+    1. ``fp_adjudication.recommendation == close_as_fp`` → false_positive
+       (post-evidence typed decision; never overridden by risk_score >= 70)
     2. High-confidence FP evidence + risk_score < 40 → false_positive
     3. Medium FP signal → possible_false_positive
     4. risk_score >= 70 → confirmed_threat
     5. else → none
+
+    Pre-evidence ``false_positive_match`` is advisory only and must not close.
     """
 
     def resolve(
@@ -30,10 +32,15 @@ class VerdictResolver:
         risk_assessment: RiskAssessment,
         false_positive_match: dict[str, Any] | None = None,
         rag_output: RAGOutput | None = None,
+        fp_adjudication: dict[str, Any] | None = None,
     ) -> FinalVerdict:
+        adjudication = fp_adjudication or {}
+        if str(adjudication.get("recommendation") or "").strip().lower() == "close_as_fp":
+            return FinalVerdict.FALSE_POSITIVE
+
         fp = false_positive_match or {}
         recommendation = str(fp.get("recommendation") or "").strip().lower()
-        if recommendation == "close_as_fp":
+        if recommendation == "close_as_fp" and fp.get("phase") == "post_evidence":
             return FinalVerdict.FALSE_POSITIVE
 
         fp_score = self._fp_score(fp, rag_output)
@@ -66,3 +73,6 @@ class VerdictResolver:
             except (TypeError, ValueError, AttributeError):
                 pass
         return max(candidates) if candidates else 0.0
+
+
+__all__ = ["FP_HIGH_SCORE", "FP_MEDIUM_SCORE", "VerdictResolver"]

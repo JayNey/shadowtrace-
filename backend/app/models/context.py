@@ -45,6 +45,7 @@ class EventContext(BaseModel):
     # --- internal orchestration / agent outputs (typed in later issues) ---
     triage_result: dict[str, Any] | None = None
     false_positive_match: dict[str, Any] | None = None
+    fp_adjudication: dict[str, Any] | None = None
     evidence_output: dict[str, Any] | None = None
     storyline: dict[str, Any] | None = None
     graph_output: dict[str, Any] | None = None

@@ -71,8 +71,12 @@ async def _seed_required_fp(
             await append_context_journal_in_session(
                 session,
                 event.event_id,
-                "false_positive_match",
-                {"recommendation": "close_as_fp", "max_score": 0.88},
+                "fp_adjudication",
+                {
+                    "recommendation": "close_as_fp",
+                    "matched_window_id": "cw-test",
+                    "supporting_evidence_ids": ["evd-seed-001"],
+                },
             )
     return event.event_id
 
@@ -283,7 +287,7 @@ async def test_begin_disposition_only_rejects_insider_threat_event_type(
 
     ``begin_disposition_only`` must raise ``ValidationError`` for
     ``EventType.INSIDER_THREAT`` even when all other preconditions
-    (TRIAGING status, REQUIRED policy, valid false_positive_match)
+    (TRIAGING status, REQUIRED policy, valid fp_adjudication)
     are satisfied.  Insider threat scenarios require the complete
     analysis → response → verify → disposition pipeline.
     """
@@ -306,8 +310,12 @@ async def test_begin_disposition_only_rejects_insider_threat_event_type(
             await append_context_journal_in_session(
                 session,
                 event.event_id,
-                "false_positive_match",
-                {"recommendation": "close_as_fp", "max_score": 0.92},
+                "fp_adjudication",
+                {
+                    "recommendation": "close_as_fp",
+                    "matched_window_id": "cw-test",
+                    "supporting_evidence_ids": ["evd-seed-001"],
+                },
             )
 
     runtime = WorkflowRuntimeService(

@@ -47,8 +47,8 @@ def test_build_alert_text_full_snapshot() -> None:
     text = _build_alert_text(snapshot, EntitySet())
     assert "alert_type=account_anomaly" in text
     assert "Bulk login from ops account" in text
-    assert "scenario=account_anomaly_fp" in text
-    assert "signature=ops_change_window_bulk_login" in text
+    assert "scenario=" not in text
+    assert "signature=" not in text
     assert "severity=low" in text
 
 
@@ -100,16 +100,16 @@ def test_build_alert_text_with_domains_and_files() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_recommendation_close_as_fp() -> None:
-    assert _recommendation_for(FP_HIGH_THRESHOLD) == "close_as_fp"
-    assert _recommendation_for(0.95) == "close_as_fp"
-    assert _recommendation_for(1.0) == "close_as_fp"
+def test_recommendation_never_close_as_fp_pre_evidence() -> None:
+    assert _recommendation_for(FP_HIGH_THRESHOLD) == "investigate_with_flag"
+    assert _recommendation_for(0.95) == "investigate_with_flag"
+    assert _recommendation_for(1.0) == "investigate_with_flag"
 
 
 def test_recommendation_investigate_with_flag() -> None:
     assert _recommendation_for(FP_LOW_THRESHOLD) == "investigate_with_flag"
     assert _recommendation_for(0.8) == "investigate_with_flag"
-    assert _recommendation_for(0.89) == "investigate_with_flag"
+    assert _recommendation_for(0.99) == "investigate_with_flag"
 
 
 def test_recommendation_no_match() -> None:
@@ -205,11 +205,11 @@ def _chunk(case_id: str, score: float, pattern: str = "") -> RetrievedChunk:
     )
 
 
-# --- Match: high score → close_as_fp ---
+# --- Match: high score → investigate_with_flag (pre-evidence advisory) ---
 
 
 @pytest.mark.asyncio
-async def test_matcher_high_score_close_as_fp(
+async def test_matcher_high_score_investigate_with_flag(
     matcher: FalsePositiveMatcher, mock_case_kb: Any
 ) -> None:
     mock_case_kb.search_fp_cases.return_value = [_chunk("case-00000001", 0.95, "运维账号批量登录")]
@@ -224,16 +224,16 @@ async def test_matcher_high_score_close_as_fp(
     assert result.max_score == 0.95
     assert result.matched_case_id == "case-00000001"
     assert result.matched_pattern == "运维账号批量登录"
-    assert result.recommendation == "close_as_fp"
+    assert result.recommendation == "investigate_with_flag"
 
 
 @pytest.mark.asyncio
-async def test_matcher_exact_threshold_close_as_fp(
+async def test_matcher_exact_high_threshold_investigate_with_flag(
     matcher: FalsePositiveMatcher, mock_case_kb: Any
 ) -> None:
     mock_case_kb.search_fp_cases.return_value = [_chunk("case-00000001", FP_HIGH_THRESHOLD)]
     result = await matcher.match({"alert_type": "test"}, EntitySet())
-    assert result.recommendation == "close_as_fp"
+    assert result.recommendation == "investigate_with_flag"
     assert result.matched is True
 
 
@@ -414,7 +414,7 @@ def _make_matcher_returning(recommendation: str, score: float = 0.95) -> FalsePo
 
 
 @pytest.mark.asyncio
-async def test_hook_writes_close_as_fp(
+async def test_hook_writes_advisory_investigate_with_flag_for_high_score(
     fake_agent: MagicMock,
     fake_hook_wm: _FakeBoundWorkingMemory,
     fake_input: MagicMock,
@@ -435,7 +435,7 @@ async def test_hook_writes_close_as_fp(
     fake_agent_wm._store["evt-test-001:source_snapshot"] = snapshot
     fake_agent_wm._store["evt-test-001:triage_result"] = triage_result
 
-    matcher = _make_matcher_returning("close_as_fp", 0.96)
+    matcher = _make_matcher_returning("investigate_with_flag", 0.96)
     hook = FalsePositiveMatcherHook(matcher=matcher, working_memory=fake_hook_wm)  # type: ignore[arg-type]
 
     await hook(fake_agent, fake_input)
@@ -446,7 +446,8 @@ async def test_hook_writes_close_as_fp(
     assert key == "false_positive_match"
     assert value["matched"] is True
     assert value["max_score"] == 0.96
-    assert value["recommendation"] == "close_as_fp"
+    assert value["recommendation"] == "investigate_with_flag"
+    assert value["phase"] == "pre_evidence"
     assert value["source"] == "FalsePositiveMatcher"
     assert "matched_at" in value
 
@@ -648,65 +649,36 @@ def test_entities_from_triage_result_entities_not_dict() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Hook: rule-based hook already matched → vector hook skips
+# Hook: pre-evidence advisory only (ISSUE-114)
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.asyncio
-async def test_hook_skips_when_rule_hook_already_close_as_fp(
+async def test_hook_overwrites_existing_pre_evidence_advisory(
     fake_agent: MagicMock,
     fake_hook_wm: _FakeBoundWorkingMemory,
     fake_input: MagicMock,
     fake_agent_wm: _FakeBoundWorkingMemory,
 ) -> None:
-    """When rule-based hook already wrote close_as_fp, vector hook must skip."""
-    fake_agent_wm._store["evt-test-001:false_positive_match"] = {
-        "matched": True,
-        "recommendation": "close_as_fp",
-        "source": "RuleBasedFalsePositiveHook",
-        "max_score": 1.0,
-    }
-    fake_agent_wm._store["evt-test-001:source_snapshot"] = {"alert_type": "account_anomaly"}
-
-    matcher = _make_matcher_returning("close_as_fp", 0.96)
-    hook = FalsePositiveMatcherHook(matcher=matcher, working_memory=fake_hook_wm)  # type: ignore[arg-type]
-
-    await hook(fake_agent, fake_input)
-
-    # Deterministic rule already authoritative → vector hook skips entirely.
-    assert len(fake_hook_wm._writes) == 0
-
-
-@pytest.mark.asyncio
-async def test_hook_merges_with_rule_hook_investigate_with_flag(
-    fake_agent: MagicMock,
-    fake_hook_wm: _FakeBoundWorkingMemory,
-    fake_input: MagicMock,
-    fake_agent_wm: _FakeBoundWorkingMemory,
-) -> None:
-    """Rule hook wrote investigate_with_flag — vector close_as_fp upgrades it."""
     fake_agent_wm._store["evt-test-001:false_positive_match"] = {
         "matched": True,
         "recommendation": "investigate_with_flag",
-        "source": "RuleBasedFalsePositiveHook",
+        "source": "FalsePositiveMatcher",
         "max_score": 0.78,
-        "matched_rule": "ops_change_window_bulk_login",
     }
     fake_agent_wm._store["evt-test-001:source_snapshot"] = {"alert_type": "account_anomaly"}
     fake_agent_wm._store["evt-test-001:triage_result"] = {"entities": {}}
 
-    matcher = _make_matcher_returning("close_as_fp", 0.96)
+    matcher = _make_matcher_returning("investigate_with_flag", 0.96)
     hook = FalsePositiveMatcherHook(matcher=matcher, working_memory=fake_hook_wm)  # type: ignore[arg-type]
 
     await hook(fake_agent, fake_input)
 
     assert len(fake_hook_wm._writes) == 1
     value = fake_hook_wm._writes[0][2]
-    # Vector hook's stronger recommendation wins.
-    assert value["recommendation"] == "close_as_fp"
+    assert value["recommendation"] == "investigate_with_flag"
     assert value["max_score"] == 0.96
-    # Rule hook's metadata is preserved.
-    assert value["matched_rule"] == "ops_change_window_bulk_login"
+    assert value["phase"] == "pre_evidence"
 
 
 # --------------------------------------------------------------------------- #
@@ -714,8 +686,8 @@ async def test_hook_merges_with_rule_hook_investigate_with_flag(
 # --------------------------------------------------------------------------- #
 
 
-def test_verdict_resolver_consumes_close_as_fp() -> None:
-    """VerdictResolver priority 1: close_as_fp → false_positive."""
+def test_verdict_resolver_consumes_post_evidence_close_as_fp() -> None:
+    """VerdictResolver priority 1: post-evidence close_as_fp → false_positive."""
     from app.agents.verdict_resolver import VerdictResolver
     from app.models.agent_io import RiskAssessment, ScoringMode
     from app.models.enums import FinalVerdict, Severity
@@ -727,16 +699,37 @@ def test_verdict_resolver_consumes_close_as_fp() -> None:
         confidence=0.9,
         scoring_mode=ScoringMode.RULE_ONLY,
     )
-    fp_match: dict[str, Any] = {
-        "matched": True,
-        "max_score": 0.96,
-        "matched_case_id": "case-00000001",
-        "matched_pattern": "Ops change window bulk login",
-        "recommendation": "close_as_fp",
-        "source": "FalsePositiveMatcher",
-    }
-    verdict = resolver.resolve(assessment, false_positive_match=fp_match)
+    verdict = resolver.resolve(
+        assessment,
+        false_positive_match={
+            "recommendation": "investigate_with_flag",
+            "phase": "pre_evidence",
+        },
+        fp_adjudication={
+            "recommendation": "close_as_fp",
+            "matched_window_id": "cw-test",
+        },
+    )
     assert verdict is FinalVerdict.FALSE_POSITIVE
+
+
+def test_verdict_resolver_ignores_pre_evidence_close_as_fp() -> None:
+    from app.agents.verdict_resolver import VerdictResolver
+    from app.models.agent_io import RiskAssessment, ScoringMode
+    from app.models.enums import FinalVerdict, Severity
+
+    resolver = VerdictResolver()
+    assessment = RiskAssessment(
+        risk_score=95,
+        severity=Severity.CRITICAL,
+        confidence=0.9,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    verdict = resolver.resolve(
+        assessment,
+        false_positive_match={"recommendation": "close_as_fp", "phase": "pre_evidence"},
+    )
+    assert verdict is FinalVerdict.CONFIRMED_THREAT
 
 
 def test_verdict_resolver_consumes_investigate_with_flag() -> None:

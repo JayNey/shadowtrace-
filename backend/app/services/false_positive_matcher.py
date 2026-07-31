@@ -1,13 +1,11 @@
-"""FalsePositiveMatcher: vector-based false-positive pre-filter (ISSUE-078).
+"""FalsePositiveMatcher: vector-based false-positive pre-filter (ISSUE-078 / ISSUE-114).
 
 Matches alert snapshots against the ``fp_case_kb`` knowledge base to produce
-a recommendation (close_as_fp / investigate_with_flag / no_match) that is
-written to ``EventContext.false_positive_match`` via a post-triage hook.
+an **advisory** recommendation (``investigate_with_flag`` / ``no_match``) that
+is written to ``EventContext.false_positive_match`` via a post-triage hook.
 
-The hook runs AFTER entity extraction so it can enrich the matcher query with
-LLM-extracted entities (not just regex).  The deterministic
-``RuleBasedFalsePositiveHook`` runs first (pre-triage) and the vector hook
-skips when the rule hook already confirmed a close_as_fp match.
+Pre-evidence paths must never emit ``close_as_fp`` (ISSUE-114). Typed closure
+requires post-evidence adjudication via :class:`PostEvidenceFpAdjudicator`.
 """
 
 from __future__ import annotations
@@ -27,7 +25,7 @@ from app.models.entities import (
     IPEntity,
     ProcessEntity,
 )
-from app.models.workflow import FP_HIGH_THRESHOLD, FP_LOW_THRESHOLD
+from app.models.workflow import FP_LOW_THRESHOLD
 from app.services.case_kb_service import CaseKBService
 from app.services.working_memory import BoundWorkingMemory
 
@@ -43,7 +41,7 @@ class FPMatchResult(BaseModel):
 
     Fields match the ISSUE-078 unified naming:
     - ``matched``: True when max_score >= FP_LOW_THRESHOLD
-    - ``recommendation``: close_as_fp / investigate_with_flag / no_match
+    - ``recommendation``: investigate_with_flag / no_match (pre-evidence advisory only)
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -52,7 +50,7 @@ class FPMatchResult(BaseModel):
     max_score: float
     matched_case_id: str | None = None
     matched_pattern: str | None = None
-    recommendation: str = Field(..., description="close_as_fp | investigate_with_flag | no_match")
+    recommendation: str = Field(..., description="investigate_with_flag | no_match")
 
 
 # --------------------------------------------------------------------------- #
@@ -147,8 +145,6 @@ class FalsePositiveMatcherHook:
 
     * KB unavailable → logged, write skipped, investigation proceeds normally
     * ``no_match`` recommendation → write skipped (零影响 — no trace left)
-    * RuleBasedFalsePositiveHook already wrote ``close_as_fp`` → skip vector
-      search entirely (deterministic rule is authoritative)
     * Any unexpected exception in the hook body → caught, logged, write skipped;
       the TriageAgent / investigation pipeline is NOT crashed
     """
@@ -188,15 +184,6 @@ class FalsePositiveMatcherHook:
         if agent_wm is None:
             return
 
-        # Check if the deterministic RuleBasedFalsePositiveHook already
-        # wrote a definitive close_as_fp match.  The rule hook runs as a
-        # pre-triage hook (before entity extraction) and is authoritative
-        # for known fixture signatures.  When it already confirmed a FP,
-        # skip the vector search to avoid overwriting with a weaker result.
-        existing = await agent_wm.read(input.event_id, "false_positive_match")
-        if isinstance(existing, dict) and existing.get("recommendation") == "close_as_fp":
-            return
-
         snapshot = await agent_wm.read(input.event_id, "source_snapshot")
         if not isinstance(snapshot, dict):
             return
@@ -220,25 +207,9 @@ class FalsePositiveMatcherHook:
             "matched_pattern": result.matched_pattern,
             "recommendation": result.recommendation,
             "source": "FalsePositiveMatcher",
+            "phase": "pre_evidence",
             "matched_at": datetime.now(UTC).isoformat(),
         }
-
-        # Merge: if the rule-based hook already wrote an
-        # investigate_with_flag, the vector hook's result (which may be
-        # stronger, e.g. close_as_fp) takes precedence.  Preserve any
-        # fields (like matched_rule) that the vector hook doesn't carry.
-        if isinstance(existing, dict):
-            for key, value in existing.items():
-                if key not in fp_match:
-                    fp_match[key] = value
-            # Prefer the stronger recommendation.
-            if (
-                existing.get("recommendation") == "investigate_with_flag"
-                and result.recommendation == "close_as_fp"
-            ):
-                pass  # vector result wins — fp_match already has close_as_fp
-            elif existing.get("recommendation") == "close_as_fp":
-                fp_match["recommendation"] = "close_as_fp"
 
         await wm.write(input.event_id, "false_positive_match", fp_match)
 
@@ -251,8 +222,8 @@ class FalsePositiveMatcherHook:
 def _build_alert_text(source_snapshot: dict[str, Any], entities: EntitySet) -> str:
     """Build a searchable alert text from snapshot + entities for vector retrieval.
 
-    Combines alert_type, title, description, scenario, signature, and entity
-    features into a single pipe-delimited string.
+    Combines alert_type, title, description, and entity features into a single
+    pipe-delimited string. Scenario/fixture identifiers are excluded (ISSUE-114).
     """
     parts: list[str] = []
 
@@ -270,16 +241,6 @@ def _build_alert_text(source_snapshot: dict[str, Any], entities: EntitySet) -> s
     description = source_snapshot.get("description", "")
     if description:
         parts.append(str(description))
-
-    # Scenario (fixture identifier).
-    scenario = source_snapshot.get("scenario", "")
-    if scenario:
-        parts.append(f"scenario={scenario}")
-
-    # Signature.
-    signature = source_snapshot.get("signature", "")
-    if signature:
-        parts.append(f"signature={signature}")
 
     # Severity from snapshot.
     severity = source_snapshot.get("severity", "")
@@ -411,9 +372,7 @@ def _entities_from_triage_result(triage_result: Any) -> EntitySet:
 
 
 def _recommendation_for(score: float) -> str:
-    """Map a similarity score to a recommendation string."""
-    if score >= FP_HIGH_THRESHOLD:
-        return "close_as_fp"
+    """Map a similarity score to a pre-evidence advisory recommendation."""
     if score >= FP_LOW_THRESHOLD:
         return "investigate_with_flag"
     return "no_match"
@@ -431,29 +390,42 @@ def _no_match() -> FPMatchResult:
 def build_fp_close_reason(
     false_positive_match: dict[str, Any] | None,
     *,
+    fp_adjudication: dict[str, Any] | None = None,
     default: str = "investigation:close",
 ) -> str:
-    """Build an audit-friendly close reason including FP case / pattern metadata."""
-    if not isinstance(false_positive_match, dict):
-        return default
-    if false_positive_match.get("recommendation") != "close_as_fp":
-        return default
+    """Build an audit-friendly close reason from post-evidence FP adjudication."""
+    adjudication = fp_adjudication if isinstance(fp_adjudication, dict) else None
+    if adjudication is None and isinstance(false_positive_match, dict):
+        if false_positive_match.get("phase") == "post_evidence":
+            adjudication = false_positive_match
 
-    case_id = false_positive_match.get("matched_case_id")
-    pattern = (
-        false_positive_match.get("matched_pattern")
-        or false_positive_match.get("matched_rule")
-        or false_positive_match.get("scenario")
-        or false_positive_match.get("signature")
-    )
-    parts = ["close_as_fp"]
-    if case_id:
-        parts.append(f"matched {case_id}")
-    elif pattern:
-        parts.append("matched")
-    if pattern:
-        parts.append(str(pattern))
-    return " ".join(parts)
+    if isinstance(adjudication, dict) and adjudication.get("recommendation") == "close_as_fp":
+        parts = ["close_as_fp", "post_evidence"]
+        window_id = adjudication.get("matched_window_id")
+        if window_id:
+            parts.append(f"window={window_id}")
+        evidence_ids = adjudication.get("supporting_evidence_ids") or []
+        if evidence_ids:
+            parts.append(f"evidence={len(evidence_ids)}")
+        return " ".join(parts)
+
+    if isinstance(false_positive_match, dict):
+        if false_positive_match.get("recommendation") == "close_as_fp":
+            # Legacy callers may still pass close_as_fp — keep audit text stable.
+            case_id = false_positive_match.get("matched_case_id")
+            pattern = false_positive_match.get("matched_pattern") or false_positive_match.get(
+                "matched_rule"
+            )
+            parts = ["close_as_fp"]
+            if case_id:
+                parts.append(f"matched {case_id}")
+            elif pattern:
+                parts.append("matched")
+            if pattern:
+                parts.append(str(pattern))
+            return " ".join(parts)
+
+    return default
 
 
 __all__ = [

@@ -50,6 +50,7 @@ from app.orchestration.workflow_graph import (
     NODE_HALT,
     NODE_MANUAL_HOLD,
     NODE_PLANNER,
+    NODE_FP_ADJUDICATION,
     NODE_RAG,
     NODE_REPLAN,
     NODE_REPORT,
@@ -58,6 +59,7 @@ from app.orchestration.workflow_graph import (
     NODE_VERIFY,
     P0_NODE_SEQUENCE,
     ROUTE_CLOSE,
+    ROUTE_CONTINUE,
     ROUTE_DISPOSITION_ONLY,
     ROUTE_EVIDENCE,
     ROUTE_EXECUTE,
@@ -73,6 +75,7 @@ from app.orchestration.workflow_graph import (
     _resolve_verify_writeback_status,
     build_investigation_graph,
     route_after_approval,
+    route_after_fp_adjudication,
     route_after_planner,
     route_after_report,
     route_after_risk,
@@ -413,27 +416,11 @@ class TestRouteAfterTriage:
     def test_not_required_no_investigation_closes(self) -> None:
         assert route_after_triage(_base_state(need_investigation=False)) == ROUTE_CLOSE
 
-    def test_not_required_fp_closes(self) -> None:
+    def test_pre_evidence_fp_does_not_close_at_triage(self) -> None:
         state = _base_state(
-            false_positive_match={"recommendation": "close_as_fp", "max_score": 0.95}
+            false_positive_match={"recommendation": "close_as_fp", "phase": "pre_evidence"}
         )
-        assert route_after_triage(state) == ROUTE_CLOSE
-
-    def test_required_fp_ready_uses_disposition_only(self) -> None:
-        state = _base_state(
-            disposition_policy=DispositionPolicy.REQUIRED.value,
-            false_positive_match={"recommendation": "close_as_fp", "max_score": 0.95},
-            event_status_update_readiness=WritebackReadiness.READY.value,
-        )
-        assert route_after_triage(state) == ROUTE_DISPOSITION_ONLY
-
-    def test_required_fp_not_ready_holds(self) -> None:
-        state = _base_state(
-            disposition_policy=DispositionPolicy.REQUIRED.value,
-            false_positive_match={"recommendation": "close_as_fp"},
-            event_status_update_readiness=WritebackReadiness.CAPABILITY_UNKNOWN.value,
-        )
-        assert route_after_triage(state) == ROUTE_MANUAL_HOLD
+        assert route_after_triage(state) == ROUTE_INVESTIGATE
 
     @pytest.mark.parametrize(
         "state",
@@ -447,6 +434,20 @@ class TestRouteAfterTriage:
     )
     def test_other_paths_investigate(self, state: InvestigationState) -> None:
         assert route_after_triage(state) == ROUTE_INVESTIGATE
+
+
+class TestRouteAfterFpAdjudication:
+    def test_always_continues_investigation(self) -> None:
+        assert route_after_fp_adjudication(_base_state()) == ROUTE_CONTINUE
+        assert (
+            route_after_fp_adjudication(
+                _base_state(
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    fp_adjudication={"recommendation": "close_as_fp"},
+                )
+            )
+            == ROUTE_CONTINUE
+        )
 
 
 def test_remaining_route_truth_tables() -> None:
@@ -571,7 +572,8 @@ async def test_optional_rag_is_between_evidence_and_risk() -> None:
     graph_view = graph.get_graph()
     assert NODE_RAG in graph_view.nodes
     edges = {(edge.source, edge.target) for edge in graph_view.edges}
-    assert ("evidence_node", NODE_RAG) in edges
+    assert ("evidence_node", NODE_FP_ADJUDICATION) in edges
+    assert (NODE_FP_ADJUDICATION, NODE_RAG) in edges
     assert (NODE_RAG, NODE_RISK) in edges
 
 
@@ -635,6 +637,7 @@ async def test_deferred_response_not_required_reaches_closed() -> None:
         "triage_node",
         NODE_PLANNER,
         "evidence_node",
+        NODE_FP_ADJUDICATION,
         NODE_RISK,
         NODE_REPORT,
         NODE_CLOSE,
@@ -658,6 +661,7 @@ async def test_deferred_response_required_stays_reporting() -> None:
         "triage_node",
         NODE_PLANNER,
         "evidence_node",
+        NODE_FP_ADJUDICATION,
         NODE_RISK,
         NODE_REPORT,
         NODE_HALT,
@@ -723,21 +727,29 @@ async def test_required_golden_path_order_halts_at_verify() -> None:
 
 
 @pytest.mark.asyncio
-async def test_required_fp_ready_is_deterministic_and_halts_before_close() -> None:
-    first_runtime = FakeRuntime(WritebackReadiness.READY)
-    second_runtime = FakeRuntime(WritebackReadiness.READY)
-    first_graph = build_investigation_graph(
-        _agents(),
-        _services(runtime=first_runtime),
-    )
-    second_graph = build_investigation_graph(
-        _agents(),
-        _services(runtime=second_runtime),
-    )
+async def test_required_post_evidence_fp_stays_reporting_without_auto_close() -> None:
+    """REQUIRED + post-evidence FP continues through analysis and halts at REPORTING."""
+    first_graph = build_investigation_graph(_agents(), _services())
+    second_graph = build_investigation_graph(_agents(), _services())
     initial = _base_state(
         disposition_policy=DispositionPolicy.REQUIRED.value,
-        false_positive_match={"recommendation": "close_as_fp", "max_score": 0.92},
-        event_status_update_readiness=WritebackReadiness.READY.value,
+        fp_adjudication={"recommendation": "close_as_fp", "matched_window_id": "cw-test"},
+        defer_response_execution=True,
+        evidence_output={
+            "evidence_list": [],
+            "conflicts": [],
+            "gaps": [],
+            "success_sources": [],
+            "failed_sources": [],
+            "overall_confidence": 0.0,
+            "collection_status": CollectionStatus.COMPLETED.value,
+        },
+        triage_result=TriageResult(
+            event_type=EventType.ACCOUNT_ANOMALY,
+            severity=Severity.MEDIUM,
+            need_investigation=True,
+            reasoning="fp after evidence",
+        ).model_dump(mode="json"),
     )
     first = await first_graph.ainvoke(
         initial,
@@ -748,35 +760,48 @@ async def test_required_fp_ready_is_deterministic_and_halts_before_close() -> No
         {"configurable": {"thread_id": "evt-fp-b"}},
     )
 
-    assert first["execution_plan"] == second["execution_plan"]
-    assert first["execution_plan"]["revision"] == 0
-    assert len(first["execution_plan"]["steps"]) == 1
-    assert first["execution_plan"]["steps"][0]["assigned_agent"] == "response_agent"
-    assert NODE_RESPONSE in first["node_trace"]
-    assert NODE_HALT in first["node_trace"]
+    assert first["node_trace"] == second["node_trace"]
+    assert NODE_FP_ADJUDICATION in first["node_trace"]
+    assert "begin_disposition_only_node" not in first["node_trace"]
     assert NODE_CLOSE not in first["node_trace"]
-    assert first["event_status"] == EventStatus.PLANNING_RESPONSE.value
-    assert first["node_trace"][-2:] == [NODE_RESPONSE, NODE_HALT]
+    assert first["node_trace"][-2:] == [NODE_REPORT, NODE_HALT]
+    assert first["event_status"] == EventStatus.REPORTING.value
     assert first["halted"] is True
 
 
 @pytest.mark.asyncio
-async def test_blocked_fp_sets_degraded_flag_without_illegal_substate() -> None:
+async def test_required_post_evidence_fp_does_not_shortcut_to_manual_hold() -> None:
+    """Post-evidence FP no longer routes to manual_hold before analysis completes."""
     degraded = FakeDegradedFlags()
     services = _services(runtime=FakeRuntime(WritebackReadiness.CAPABILITY_UNSUPPORTED))
     services["degraded_flags"] = degraded
     final = await build_investigation_graph(_agents(), services).ainvoke(
         _base_state(
             disposition_policy=DispositionPolicy.REQUIRED.value,
-            false_positive_match={"recommendation": "close_as_fp"},
+            fp_adjudication={"recommendation": "close_as_fp"},
+            defer_response_execution=True,
             event_status_update_readiness=WritebackReadiness.CAPABILITY_UNSUPPORTED.value,
+            evidence_output={
+                "evidence_list": [],
+                "conflicts": [],
+                "gaps": [],
+                "success_sources": [],
+                "failed_sources": [],
+                "overall_confidence": 0.0,
+                "collection_status": CollectionStatus.COMPLETED.value,
+            },
+            triage_result=TriageResult(
+                event_type=EventType.ACCOUNT_ANOMALY,
+                severity=Severity.MEDIUM,
+                need_investigation=True,
+                reasoning="fp after evidence",
+            ).model_dump(mode="json"),
         ),
         {"configurable": {"thread_id": "evt-blocked"}},
     )
-    assert NODE_MANUAL_HOLD in final["node_trace"]
-    assert final["execution_substate"] == ExecutionSubstate.NONE.value
-    assert final["degraded_flags"] == ["disposition_writeback_blocked=capability_unsupported"]
-    assert degraded.calls[0][-1] == "DegradedFlagService"
+    assert NODE_MANUAL_HOLD not in final["node_trace"]
+    assert final["node_trace"][-2:] == [NODE_REPORT, NODE_HALT]
+    assert final["event_status"] == EventStatus.REPORTING.value
 
 
 @pytest.mark.asyncio

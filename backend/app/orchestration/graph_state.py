@@ -29,6 +29,7 @@ class InvestigationState(TypedDict, total=False):
     need_investigation: bool | None
     triage_result: dict[str, Any] | None
     false_positive_match: dict[str, Any] | None
+    fp_adjudication: dict[str, Any] | None
     source_snapshot: dict[str, Any] | None
     disposition_only_intent: bool
     execution_substate: str

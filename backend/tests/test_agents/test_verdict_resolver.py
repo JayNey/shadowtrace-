@@ -17,11 +17,11 @@ def _assessment(score: int, *, possible_fp: bool = False) -> RiskAssessment:
     )
 
 
-def test_close_as_fp_not_overridden_by_high_risk() -> None:
+def test_post_evidence_close_as_fp_not_overridden_by_high_risk() -> None:
     resolver = VerdictResolver()
     verdict = resolver.resolve(
         _assessment(95),
-        false_positive_match={"recommendation": "close_as_fp", "max_score": 0.99},
+        fp_adjudication={"recommendation": "close_as_fp", "matched_window_id": "cw-test"},
     )
     assert verdict is FinalVerdict.FALSE_POSITIVE
 
@@ -59,11 +59,11 @@ def test_medium_fp_with_high_risk_is_possible_false_positive() -> None:
 def test_verdict_is_sole_logical_entry() -> None:
     """Resolver is the only place encoding verdict priority rules."""
     resolver = VerdictResolver()
-    # Explicit close_as_fp wins even with confirmed-threat-level score.
+    # Explicit post-evidence close_as_fp wins even with confirmed-threat-level score.
     assert (
         resolver.resolve(
             _assessment(100),
-            false_positive_match={"recommendation": "close_as_fp"},
+            fp_adjudication={"recommendation": "close_as_fp"},
         )
         is FinalVerdict.FALSE_POSITIVE
     )

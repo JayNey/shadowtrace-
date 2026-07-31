@@ -462,6 +462,7 @@ def build_analysis_pipeline(
             risk_agent=risk,
             report_agent=report,
             context_store=context_store,
+            working_memory=working_memory,
             degraded_flags=degraded_flags,
             settings=e2e_settings,
         )

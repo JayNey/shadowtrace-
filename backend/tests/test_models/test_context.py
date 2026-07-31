@@ -23,6 +23,7 @@ EXPECTED_CONTEXT_FIELDS = {
     "source_sync_state",
     "triage_result",
     "false_positive_match",
+    "fp_adjudication",
     "evidence_output",
     "storyline",
     "graph_output",

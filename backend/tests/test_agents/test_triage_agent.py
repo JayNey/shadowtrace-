@@ -1,9 +1,4 @@
-"""Tests for TriageAgent, RuleBasedFalsePositiveHook, and helper functions (ISSUE-032).
-
-Mock interfaces MUST match the real BoundWorkingMemory signature:
-    write(self, event_id: str, key: str, value: Any) -> None
-    read(self, event_id: str, key: str) -> Any
-"""
+"""Tests for TriageAgent and helper functions (ISSUE-032 / ISSUE-114)."""
 
 from __future__ import annotations
 
@@ -15,7 +10,6 @@ import pytest
 
 from app.agents.triage_agent import (
     SEVERITY_RULES,
-    RuleBasedFalsePositiveHook,
     TriageAgent,
     _apply_severity_rules,
     _extract_iocs,
@@ -352,175 +346,30 @@ class TestMergeEntitySets:
 
 
 # --------------------------------------------------------------------------- #
-# Tests: RuleBasedFalsePositiveHook — FIELD_OWNERSHIP compliance
+# Tests: ISSUE-114 — no pre-evidence FP shortcut hook
 # --------------------------------------------------------------------------- #
 
 
-class TestFPHook:
+class TestPreEvidenceFpRemoved:
     @pytest.mark.asyncio
-    async def test_write_with_correct_writer_identity_succeeds(self):
-        """Hook with writer='FalsePositiveMatcher' can write false_positive_match."""
+    async def test_triage_does_not_write_close_as_fp_from_scenario(self):
+        """Scenario/fixture names must not produce pre-evidence close_as_fp."""
         fp_memory = _MockBoundWorkingMemory(writer_name="FalsePositiveMatcher")
-        agent_memory = _MockBoundWorkingMemory(writer_name="TriageAgent")
-        # Pre-populate agent memory with source_snapshot.
-        await agent_memory.write(
-            "evt-001",
-            "source_snapshot",
-            {
-                "scenario": "account_anomaly_fp",
-            },
-        )
-
-        agent = MagicMock()
-        agent.working_memory = agent_memory
-
-        hook = RuleBasedFalsePositiveHook(working_memory=fp_memory)
-        await hook(agent, _make_input("evt-001"))
-
-        # The hook's memory should now contain the FP match.
-        result = await fp_memory.read("evt-001", "false_positive_match")
-        assert result is not None
-        assert isinstance(result, dict)
-        assert result["matched_rule"] == "ops_change_window_bulk_login"
-        assert result["recommendation"] == "close_as_fp"
-
-    @pytest.mark.asyncio
-    async def test_write_raises_on_wrong_identity(self):
-        """Hook through wrong writer's memory → GuardrailViolationError.
-
-        The agent's memory (used for reading source_snapshot) is a plain mock.
-        The hook's memory is a guardrail-enforcing mock bound to "TriageAgent" —
-        writing "false_positive_match" via that identity must fail because
-        FIELD_OWNERSHIP["false_positive_match"] = "FalsePositiveMatcher".
-        """
-        # Agent memory: plain mock (no guardrail) so reading source_snapshot works.
         agent_memory = _MockBoundWorkingMemory(writer_name="TriageAgent")
         await agent_memory.write(
             "evt-001",
             "source_snapshot",
             {
                 "scenario": "account_anomaly_fp",
-            },
-        )
-
-        # Hook memory: guardrail-enforcing mock bound to WRONG identity.
-        hook_memory = _GuardrailMockBoundWorkingMemory(writer_name="TriageAgent")
-
-        agent = MagicMock()
-        agent.working_memory = agent_memory
-
-        # Hook receives a memory bound to the WRONG writer — TriageAgent cannot
-        # write false_positive_match (owner is FalsePositiveMatcher).
-        hook = RuleBasedFalsePositiveHook(working_memory=hook_memory)
-        with pytest.raises(GuardrailViolationError) as exc_info:
-            await hook(agent, _make_input("evt-001"))
-        assert "unauthorized_write" in str(exc_info.value.error_code)
-
-    @pytest.mark.asyncio
-    async def test_hook_noop_when_no_memory(self):
-        """Hook without memory is a no-op."""
-        agent = MagicMock()
-        agent.working_memory = _MockBoundWorkingMemory()
-        hook = RuleBasedFalsePositiveHook(working_memory=None)
-        # Should not raise.
-        await hook(agent, _make_input("evt-001"))
-
-    @pytest.mark.asyncio
-    async def test_hook_noop_when_no_agent_memory(self):
-        """Hook without agent.working_memory is a no-op."""
-        agent = MagicMock()
-        agent.working_memory = None
-        hook = RuleBasedFalsePositiveHook(
-            working_memory=_MockBoundWorkingMemory(writer_name="FalsePositiveMatcher"),
-        )
-        # Should not raise.
-        await hook(agent, _make_input("evt-001"))
-
-    @pytest.mark.asyncio
-    async def test_hook_noop_when_no_snapshot(self):
-        """Hook is no-op when source_snapshot is not a dict."""
-        fp_memory = _MockBoundWorkingMemory(writer_name="FalsePositiveMatcher")
-        agent_memory = _MockBoundWorkingMemory()
-        # source_snapshot not set → returns None.
-
-        agent = MagicMock()
-        agent.working_memory = agent_memory
-
-        hook = RuleBasedFalsePositiveHook(working_memory=fp_memory)
-        await hook(agent, _make_input("evt-001"))
-        # No write should have occurred.
-        result = await fp_memory.read("evt-001", "false_positive_match")
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_hook_matches_by_signature_field(self):
-        """Hook matches on signature (not scenario) field."""
-        fp_memory = _MockBoundWorkingMemory(writer_name="FalsePositiveMatcher")
-        agent_memory = _MockBoundWorkingMemory(writer_name="TriageAgent")
-        await agent_memory.write(
-            "evt-001",
-            "source_snapshot",
-            {
-                "signature": "ops_change_window_bulk_login",
-            },
-        )
-
-        agent = MagicMock()
-        agent.working_memory = agent_memory
-
-        hook = RuleBasedFalsePositiveHook(working_memory=fp_memory)
-        await hook(agent, _make_input("evt-001"))
-
-        result = await fp_memory.read("evt-001", "false_positive_match")
-        assert result is not None
-        assert result["signature"] == "ops_change_window_bulk_login"
-
-    @pytest.mark.asyncio
-    async def test_hook_matches_change_window_title(self):
-        """Hook matches account_anomaly_fp from incident title when scenario absent."""
-        fp_memory = _MockBoundWorkingMemory(writer_name="FalsePositiveMatcher")
-        agent_memory = _MockBoundWorkingMemory(writer_name="TriageAgent")
-        await agent_memory.write(
-            "evt-001",
-            "source_snapshot",
-            {
                 "title": "Bulk login by ops account during change window",
             },
         )
-
-        agent = MagicMock()
+        agent = TriageAgent(working_memory=agent_memory)
         agent.working_memory = agent_memory
-
-        hook = RuleBasedFalsePositiveHook(working_memory=fp_memory)
-        await hook(agent, _make_input("evt-001"))
-
-        result = await fp_memory.read("evt-001", "false_positive_match")
-        assert result is not None
-        assert result["recommendation"] == "close_as_fp"
-        assert result["scenario"] == "account_anomaly_fp"
-
-    @pytest.mark.asyncio
-    async def test_hook_matches_fp_rule_in_raw_alert_snapshot(self):
-        """Hook matches fp_rule stored in raw_alert_snapshot during ingest."""
-        fp_memory = _MockBoundWorkingMemory(writer_name="FalsePositiveMatcher")
-        agent_memory = _MockBoundWorkingMemory(writer_name="TriageAgent")
-        await agent_memory.write(
-            "evt-001",
-            "source_snapshot",
-            {
-                "raw_alert_snapshot": {"fp_rule": "ops_change_window_bulk_login"},
-            },
-        )
-
-        agent = MagicMock()
-        agent.working_memory = agent_memory
-
-        hook = RuleBasedFalsePositiveHook(working_memory=fp_memory)
-        await hook(agent, _make_input("evt-001"))
-
-        result = await fp_memory.read("evt-001", "false_positive_match")
-        assert result is not None
-        assert result["signature"] == "ops_change_window_bulk_login"
+        result = await agent.execute(_make_input("evt-001"))
+        assert isinstance(result, TriageResult)
+        fp_match = await fp_memory.read("evt-001", "false_positive_match")
+        assert fp_match is None or fp_match.get("recommendation") != "close_as_fp"
 
 
 # --------------------------------------------------------------------------- #
@@ -842,18 +691,21 @@ class TestTriageAgentHooks:
         assert agent.pre_triage_hooks is agent.pre_hooks
         assert agent.post_triage_hooks is agent.post_hooks
 
-    def test_fp_hook_installed_when_working_memory_provided(self):
-        """When working_memory is provided, FP hook is auto-installed."""
+    def test_fp_hook_installed_when_fp_matcher_provided(self):
+        """When fp_matcher is provided, vector FP hook is auto-installed post-triage."""
         wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
-        # Give the mock a _memory attribute so for_writer can be called.
         wm._memory = MagicMock()
         wm._memory.for_writer.return_value = _MockBoundWorkingMemory(
             writer_name="FalsePositiveMatcher",
         )
+        fp_matcher = MagicMock()
 
-        agent = TriageAgent(working_memory=wm)
-        assert len(agent.pre_triage_hooks) == 1
-        assert isinstance(agent.pre_triage_hooks[0], RuleBasedFalsePositiveHook)
+        agent = TriageAgent(working_memory=wm, fp_matcher=fp_matcher)
+        assert len(agent.pre_triage_hooks) == 0
+        assert len(agent.post_triage_hooks) == 1
+        from app.services.false_positive_matcher import FalsePositiveMatcherHook
+
+        assert isinstance(agent.post_triage_hooks[0], FalsePositiveMatcherHook)
 
 
 # --------------------------------------------------------------------------- #

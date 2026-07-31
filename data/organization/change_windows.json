@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "tenants": [
+    {
+      "tenant_id": "tenant-demo",
+      "change_windows": [
+        {
+          "window_id": "cw-scheduled-ops-maintenance",
+          "authorized_accounts": ["ops-change-bot"],
+          "authorized_actions": ["login", "bulk_login"],
+          "authorized_asset_groups": ["ops"],
+          "valid_from": "2024-06-15T08:00:00+00:00",
+          "valid_until": "2024-06-15T12:00:00+00:00",
+          "description": "Scheduled ops maintenance window (Mock org baseline)"
+        }
+      ]
+    }
+  ]
+}

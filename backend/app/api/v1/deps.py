@@ -333,6 +333,7 @@ async def _build_production_investigation_graph(
         "workflow_runtime": await _get_workflow_runtime(),
         "degraded_flags": stack["degraded_flags"],
         "context_store": stack["context_store"],
+        "working_memory": stack["wm"],
         "approval_engine": await get_approval_engine(),
         "action_execution": await get_action_execution(),
         "disposition_sync": await get_disposition_sync(),
@@ -669,6 +670,7 @@ async def get_pipeline() -> Any:
             risk_agent=stack["risk"],
             report_agent=stack["report"],
             context_store=stack["context_store"],
+            working_memory=stack["wm"],
             degraded_flags=stack["degraded_flags"],
             settings=stack["settings"],
         )

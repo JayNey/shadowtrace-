@@ -1,0 +1,268 @@
+"""ISSUE-114 post-evidence FP adjudication tests."""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+
+from app.agents.verdict_resolver import VerdictResolver
+from app.models.agent_io import CollectionStatus, EvidenceOutput, RiskAssessment, ScoringMode, TriageResult
+from app.models.entities import AccountEntity, EntitySet
+from app.models.enums import EventType, EvidenceSource, Severity
+from app.models.evidence import Evidence, EvidenceConflict
+from app.models.workflow import FP_HIGH_THRESHOLD, FP_LOW_THRESHOLD
+from app.services.change_window_baseline_loader import load_change_window_baseline
+from app.services.false_positive_matcher import _build_alert_text, _recommendation_for
+from app.services.fp_adjudication_service import PostEvidenceFpAdjudicator
+
+
+def _baseline_file(tmp_path: Path) -> Path:
+    payload = {
+        "schema_version": 1,
+        "tenants": [
+            {
+                "tenant_id": "tenant-demo",
+                "change_windows": [
+                    {
+                        "window_id": "cw-test",
+                        "authorized_accounts": ["ops-change-bot"],
+                        "authorized_actions": ["login", "bulk_login"],
+                        "authorized_asset_groups": ["ops"],
+                        "valid_from": "2024-06-15T08:00:00+00:00",
+                        "valid_until": "2024-06-15T12:00:00+00:00",
+                    }
+                ],
+            }
+        ],
+    }
+    path = tmp_path / "change_windows.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def _auth_evidence(*, change_window: bool = True) -> Evidence:
+    return Evidence(
+        evidence_id="evd-auth-001",
+        event_id="evt-001",
+        source=EvidenceSource.IDENTITY,
+        evidence_type="login",
+        description="ops login during maintenance",
+        confidence=0.9,
+        timestamp=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+        raw_data={"account": "ops-change-bot", "change_window": change_window, "result": "success"},
+    )
+
+
+def _malicious_edr_evidence() -> Evidence:
+    return Evidence(
+        evidence_id="evd-mal-001",
+        event_id="evt-001",
+        source=EvidenceSource.ENDPOINT,
+        evidence_type="process",
+        description="malware process",
+        confidence=0.95,
+        timestamp=datetime(2024, 6, 15, 9, 35, tzinfo=UTC),
+        raw_data={"malicious": True, "process": "evil.exe"},
+        is_conflicting=True,
+    )
+
+
+def _triage() -> TriageResult:
+    return TriageResult(
+        event_type=EventType.ACCOUNT_ANOMALY,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        reasoning="bulk login observed",
+        entities=EntitySet(
+            accounts=[
+                AccountEntity(
+                    entity_id="acct-1",
+                    entity_type="account",
+                    username="ops-change-bot",
+                )
+            ]
+        ),
+    )
+
+
+def test_pre_evidence_recommendation_never_close_as_fp() -> None:
+    assert _recommendation_for(FP_HIGH_THRESHOLD) == "investigate_with_flag"
+    assert _recommendation_for(1.0) == "investigate_with_flag"
+    assert _recommendation_for(FP_LOW_THRESHOLD) == "investigate_with_flag"
+    assert _recommendation_for(FP_LOW_THRESHOLD - 0.01) == "no_match"
+
+
+def test_vector_alert_text_excludes_scenario_and_signature() -> None:
+    text = _build_alert_text(
+        {
+            "title": "Bulk login during change window",
+            "scenario": "account_anomaly_fp",
+            "signature": "ops_change_window_bulk_login",
+        },
+        EntitySet(),
+    )
+    assert "scenario=" not in text
+    assert "signature=" not in text
+    assert "Bulk login during change window" in text
+
+
+def test_post_evidence_close_with_authorization(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[_auth_evidence()],
+            conflicts=[],
+            gaps=[],
+            success_sources=["identity"],
+            failed_sources=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+        occurred_at=datetime(2024, 6, 15, 9, 30, tzinfo=UTC),
+    )
+    assert result.recommendation == "close_as_fp"
+    assert result.supporting_evidence_ids == ["evd-auth-001"]
+    assert "baseline_window_match" in result.matched_conditions
+    assert result.matched_window_id == "cw-test"
+
+
+def test_same_telemetry_without_authorization_does_not_close(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[_auth_evidence(change_window=False)],
+            conflicts=[],
+            gaps=[],
+            success_sources=["identity"],
+            failed_sources=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+    )
+    assert result.recommendation != "close_as_fp"
+    assert "change_window_authorization_evidence" in result.missing_conditions
+
+
+def test_malicious_conflicts_block_fp_close(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[_auth_evidence(), _malicious_edr_evidence()],
+            conflicts=[
+                EvidenceConflict(
+                    conflict_id="cfl-1",
+                    event_id="evt-001",
+                    description="endpoint contradicts benign login",
+                    evidence_ids=["evd-auth-001", "evd-mal-001"],
+                    sources=[EvidenceSource.IDENTITY, EvidenceSource.ENDPOINT],
+                )
+            ],
+            gaps=[],
+            success_sources=["identity", "endpoint"],
+            failed_sources=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+    )
+    assert result.recommendation == "investigate"
+    assert result.conflicts
+    assert "no_malicious_conflicts" in result.missing_conditions
+
+
+def test_absence_of_malicious_evidence_is_not_fp_proof(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    result = adjudicator.adjudicate(
+        event_id="evt-001",
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            conflicts=[],
+            gaps=[],
+            success_sources=[],
+            failed_sources=[],
+            overall_confidence=0.0,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        triage_result=_triage(),
+        source_snapshot={"source_tenant_id": "tenant-demo"},
+    )
+    assert result.recommendation == "no_fp_signal"
+    assert "change_window_authorization_evidence" in result.missing_conditions
+
+
+def test_verdict_resolver_ignores_pre_evidence_close_as_fp() -> None:
+    resolver = VerdictResolver()
+    assessment = RiskAssessment(
+        risk_score=85,
+        severity=Severity.HIGH,
+        confidence=0.9,
+        risk_factors=[],
+        possible_false_positive=False,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    verdict = resolver.resolve(
+        assessment,
+        false_positive_match={"recommendation": "close_as_fp", "phase": "pre_evidence"},
+    )
+    assert verdict.value == "confirmed_threat"
+
+
+def test_verdict_resolver_honors_post_evidence_adjudication() -> None:
+    resolver = VerdictResolver()
+    assessment = RiskAssessment(
+        risk_score=85,
+        severity=Severity.HIGH,
+        confidence=0.9,
+        risk_factors=[],
+        possible_false_positive=False,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    verdict = resolver.resolve(
+        assessment,
+        fp_adjudication={"recommendation": "close_as_fp", "matched_window_id": "cw-test"},
+    )
+    assert verdict.value == "false_positive"
+
+
+def test_baseline_loader_indexes_tenants(tmp_path: Path) -> None:
+    load_change_window_baseline.cache_clear()
+    indexed = load_change_window_baseline(str(_baseline_file(tmp_path)))
+    assert "tenant-demo" in indexed
+    assert indexed["tenant-demo"].change_windows[0].window_id == "cw-test"
+
+
+def test_window_match_is_independent_of_scenario_field(tmp_path: Path) -> None:
+    adjudicator = PostEvidenceFpAdjudicator(baseline_path=str(_baseline_file(tmp_path)))
+    snapshot_with = {"source_tenant_id": "tenant-demo", "scenario": "account_anomaly_fp"}
+    snapshot_without = {"source_tenant_id": "tenant-demo"}
+    evidence = EvidenceOutput(
+        evidence_list=[_auth_evidence()],
+        conflicts=[],
+        gaps=[],
+        success_sources=["identity"],
+        failed_sources=[],
+        overall_confidence=0.8,
+        collection_status=CollectionStatus.COMPLETED,
+    )
+    with_scenario = adjudicator.adjudicate(
+        event_id="evt-a",
+        evidence_output=evidence,
+        triage_result=_triage(),
+        source_snapshot=snapshot_with,
+    )
+    without_scenario = adjudicator.adjudicate(
+        event_id="evt-b",
+        evidence_output=evidence,
+        triage_result=_triage(),
+        source_snapshot=snapshot_without,
+    )
+    assert with_scenario.recommendation == without_scenario.recommendation == "close_as_fp"

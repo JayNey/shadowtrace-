@@ -59,7 +59,9 @@ from app.services.analysis_only_pipeline import run_rag_stage
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService, apply_flag_to_list
 from app.services.false_positive_matcher import build_fp_close_reason
+from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
 from app.services.state_machine_service import StateMachineService
+from app.services.working_memory import WorkingMemory
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,7 @@ NODE_MANUAL_HOLD = "manual_hold_node"
 NODE_CLOSE = "close_node"
 NODE_PLANNER = "planner_node"
 NODE_EVIDENCE = "evidence_node"
+NODE_FP_ADJUDICATION = "fp_adjudication_node"
 NODE_RAG = "rag_node"
 NODE_RISK = "risk_node"
 NODE_RESPONSE = "response_node"
@@ -120,6 +123,7 @@ P0_NODE_SEQUENCE = (
     NODE_TRIAGE,
     NODE_PLANNER,
     NODE_EVIDENCE,
+    NODE_FP_ADJUDICATION,
     NODE_RISK,
     NODE_RESPONSE,
     NODE_APPROVAL,
@@ -135,6 +139,7 @@ ROUTE_MANUAL_HOLD = "manual_hold"
 ROUTE_INVESTIGATE = "investigate"
 ROUTE_RESPONSE = "response"
 ROUTE_EVIDENCE = "evidence"
+ROUTE_CONTINUE = "continue"
 ROUTE_EXECUTE = "execute"
 ROUTE_TO_APPROVAL = "approval"
 ROUTE_WAIT = "wait"
@@ -229,8 +234,8 @@ class _EventServiceLike(Protocol):
 
 
 def _is_close_as_fp(state: InvestigationState) -> bool:
-    fp = state.get("false_positive_match") or {}
-    return fp.get("recommendation") == "close_as_fp"
+    adjudication = state.get("fp_adjudication") or {}
+    return adjudication.get("recommendation") == "close_as_fp"
 
 
 def route_after_triage(state: InvestigationState) -> str:
@@ -238,22 +243,15 @@ def route_after_triage(state: InvestigationState) -> str:
     policy = DispositionPolicy(
         state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
     )
-    is_fp = _is_close_as_fp(state)
-    if policy is DispositionPolicy.NOT_REQUIRED and (
-        state.get("need_investigation") is False or is_fp
-    ):
+    if policy is DispositionPolicy.NOT_REQUIRED and state.get("need_investigation") is False:
         return ROUTE_CLOSE
-    if policy is DispositionPolicy.REQUIRED and is_fp:
-        readiness = WritebackReadiness(
-            state.get(
-                "event_status_update_readiness",
-                WritebackReadiness.CAPABILITY_UNKNOWN.value,
-            )
-        )
-        return (
-            ROUTE_DISPOSITION_ONLY if readiness is WritebackReadiness.READY else ROUTE_MANUAL_HOLD
-        )
     return ROUTE_INVESTIGATE
+
+
+def route_after_fp_adjudication(state: InvestigationState) -> str:
+    """Post-evidence adjudication never short-circuits investigation (ISSUE-114)."""
+    _ = state
+    return ROUTE_CONTINUE
 
 
 def route_after_planner(state: InvestigationState) -> str:
@@ -413,6 +411,7 @@ def _event_context_from_state(state: InvestigationState) -> EventContext:
         event=summary,
         triage_result=state.get("triage_result"),
         false_positive_match=state.get("false_positive_match"),
+        fp_adjudication=state.get("fp_adjudication"),
         source_snapshot=state.get("source_snapshot"),
         disposition_only_intent=bool(state.get("disposition_only_intent")),
         execution_substate=ExecutionSubstate(
@@ -485,6 +484,8 @@ async def build_initial_investigation_state(
         state["triage_result"] = context.triage_result
     if context.false_positive_match is not None:
         state["false_positive_match"] = context.false_positive_match
+    if context.fp_adjudication is not None:
+        state["fp_adjudication"] = context.fp_adjudication
     if context.source_snapshot is not None:
         state["source_snapshot"] = context.source_snapshot
     if context.execution_plan is not None:
@@ -509,6 +510,8 @@ async def _hydrate_context(
     context = await store.get_full_context(event_id)
     if context.false_positive_match is not None:
         target["false_positive_match"] = context.false_positive_match
+    if context.fp_adjudication is not None:
+        target["fp_adjudication"] = context.fp_adjudication
     if context.source_snapshot is not None:
         target["source_snapshot"] = context.source_snapshot
     if context.event is not None:
@@ -762,12 +765,15 @@ def build_investigation_graph(
                     )
                 ),
                 severity=triage.severity,
-                recommendation=((state.get("false_positive_match") or {}).get("recommendation")),
+                recommendation=((state.get("fp_adjudication") or {}).get("recommendation")),
                 final_verdict=FinalVerdict(final_verdict) if final_verdict else None,
                 report_exists=report_generated,
                 escalated=escalated,
             ),
-            reason=build_fp_close_reason(state.get("false_positive_match")),
+            reason=build_fp_close_reason(
+                state.get("false_positive_match"),
+                fp_adjudication=state.get("fp_adjudication"),
+            ),
         )
         return _patch_state(
             _trace(NODE_CLOSE),
@@ -834,6 +840,34 @@ def build_investigation_graph(
                 "event_status": EventStatus.ANALYZING.value,
                 "evidence_output": result.model_dump(mode="json"),
             },
+        )
+
+    async def fp_adjudication_node(state: InvestigationState) -> InvestigationState:
+        if state.get("fp_adjudication") is not None:
+            return _trace(NODE_FP_ADJUDICATION)
+
+        triage = TriageResult.model_validate(state["triage_result"])
+        evidence = EvidenceOutput.model_validate(state["evidence_output"])
+        store = cast(EventContextStore, services["context_store"])
+        context = await store.get_full_context(state["event_id"])
+        occurred_at = context.event.occurred_at if context.event is not None else None
+        wm_root = services.get("working_memory")
+        fp_wm = (
+            cast(WorkingMemory, wm_root).for_writer("PostEvidenceFpAdjudicator")
+            if wm_root is not None
+            else None
+        )
+        result = await run_post_evidence_fp_adjudication(
+            event_id=state["event_id"],
+            evidence_output=evidence,
+            triage_result=triage,
+            source_snapshot=state.get("source_snapshot"),
+            occurred_at=occurred_at,
+            working_memory=fp_wm,
+        )
+        return _patch_state(
+            _trace(NODE_FP_ADJUDICATION),
+            {"fp_adjudication": result.model_dump(mode="json")},
         )
 
     async def rag_graph_node(state: InvestigationState) -> InvestigationState:
@@ -1404,6 +1438,7 @@ def build_investigation_graph(
     register(NODE_CLOSE, close_node)
     register(NODE_PLANNER, planner_graph_node)
     register(NODE_EVIDENCE, evidence_node)
+    register(NODE_FP_ADJUDICATION, fp_adjudication_node)
     register(NODE_RISK, risk_node)
     register(NODE_RESPONSE, response_node)
     register(NODE_APPROVAL, approval_node)
@@ -1438,11 +1473,14 @@ def build_investigation_graph(
             ROUTE_EVIDENCE: NODE_EVIDENCE,
         },
     )
+    graph.add_edge(NODE_EVIDENCE, NODE_FP_ADJUDICATION)
+    graph.add_conditional_edges(
+        NODE_FP_ADJUDICATION,
+        route_after_fp_adjudication,
+        {ROUTE_CONTINUE: NODE_RAG if rag_agent is not None else NODE_RISK},
+    )
     if rag_agent is not None:
-        graph.add_edge(NODE_EVIDENCE, NODE_RAG)
         graph.add_edge(NODE_RAG, NODE_RISK)
-    else:
-        graph.add_edge(NODE_EVIDENCE, NODE_RISK)
     graph.add_conditional_edges(
         NODE_RISK,
         route_after_risk,
@@ -1687,6 +1725,7 @@ __all__ = [
     "route_after_replan",
     "route_after_report",
     "route_after_risk",
+    "route_after_fp_adjudication",
     "route_after_triage",
     "route_after_verify",
 ]

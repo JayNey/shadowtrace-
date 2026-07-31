@@ -69,8 +69,11 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
     async def _run(self, input: RiskAgentInput) -> RiskAssessment:
         storyline = await self._read_optional(input.event_id, "storyline")
         fp_match = await self._read_optional(input.event_id, "false_positive_match")
+        fp_adjudication = await self._read_optional(input.event_id, "fp_adjudication")
         if not isinstance(fp_match, dict):
             fp_match = None
+        if not isinstance(fp_adjudication, dict):
+            fp_adjudication = None
         if not isinstance(storyline, dict):
             storyline = None
 
@@ -112,7 +115,8 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         )
 
         possible_fp = bool(
-            (fp_match or {}).get("recommendation") in {"close_as_fp", "investigate_with_flag"}
+            (fp_adjudication or {}).get("recommendation") == "close_as_fp"
+            or (fp_match or {}).get("recommendation") in {"investigate_with_flag"}
         ) or (
             input.rag_output is not None
             and input.rag_output.fp_similarity is not None
@@ -135,6 +139,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             assessment,
             false_positive_match=fp_match,
             rag_output=input.rag_output,
+            fp_adjudication=fp_adjudication,
         )
         self.last_verdict = verdict
         await self._persist_verdict(input.event_id, verdict, risk_score=assessment.risk_score)

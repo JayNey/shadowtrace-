@@ -137,10 +137,10 @@ class WorkflowRuntimeService:
                         details={"event_id": event_id, "event_type": row.event_type},
                     )
 
-                fp = await self._journal_value(session, event_id, "false_positive_match")
+                fp = await self._journal_value(session, event_id, "fp_adjudication")
                 if not isinstance(fp, dict) or fp.get("recommendation") != "close_as_fp":
                     raise ValidationError(
-                        "begin_disposition_only requires close_as_fp false_positive_match",
+                        "begin_disposition_only requires close_as_fp fp_adjudication",
                         details={"event_id": event_id},
                     )
                 if self._decision_records is not None:
@@ -341,7 +341,7 @@ class WorkflowRuntimeService:
             if row is None:
                 raise KeyError(f"security_event not found: {event_id}")
             intent = await self._journal_scalar(session, event_id, "disposition_only_intent")
-            fp = await self._journal_value(session, event_id, "false_positive_match")
+            fp = await self._journal_value(session, event_id, "fp_adjudication")
         validate_transition(
             current,
             target,

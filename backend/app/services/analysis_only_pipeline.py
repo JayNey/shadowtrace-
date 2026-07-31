@@ -44,6 +44,7 @@ from app.models.report import InvestigationReport
 from app.models.workflow import TransitionContext
 from app.services.event_service import EventService, StateMachinePort
 from app.services.false_positive_matcher import build_fp_close_reason
+from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,7 @@ class AnalysisOnlyPipeline:
         event_service: EventService | Any | None = None,
         state_machine: StateMachinePort | None = None,
         context_store: Any | None = None,
+        working_memory: Any | None = None,
         degraded_flags: Any | None = None,
         settings: Settings | None = None,
     ) -> None:
@@ -189,6 +191,7 @@ class AnalysisOnlyPipeline:
         self._event_service = event_service
         self._state_machine = state_machine
         self._context_store = context_store
+        self._working_memory = working_memory
         self._degraded_flags = degraded_flags
         self._settings = settings
 
@@ -277,6 +280,13 @@ class AnalysisOnlyPipeline:
         )
         evidence_output = await self._run_evidence(event_id, triage_result, alert_text=alert_text)
 
+        fp_adjudication = await self._run_fp_adjudication(
+            event_id,
+            triage_result,
+            evidence_output,
+            event=event,
+        )
+
         await self._transition(
             event_id,
             EventStatus.ANALYZING,
@@ -342,9 +352,15 @@ class AnalysisOnlyPipeline:
                 EventStatus.CLOSED,
                 context=TransitionContext(
                     need_investigation=triage_result.need_investigation,
+                    recommendation=(
+                        (fp_adjudication or {}).get("recommendation")
+                        if isinstance(fp_adjudication, dict)
+                        else None
+                    ),
                 ),
                 reason=build_fp_close_reason(
                     await self._read_false_positive_match(event_id),
+                    fp_adjudication=fp_adjudication,
                     default="analysis_pipeline:complete_not_required",
                 ),
             )
@@ -468,6 +484,33 @@ class AnalysisOnlyPipeline:
         if report is not None and not isinstance(report, InvestigationReport):
             raise TypeError("ReportAgent must return InvestigationReport or None")
         return report
+
+    async def _run_fp_adjudication(
+        self,
+        event_id: str,
+        triage_result: TriageResult,
+        evidence_output: EvidenceOutput,
+        *,
+        event: Any | None,
+    ) -> dict[str, Any] | None:
+        source_snapshot = None
+        occurred_at = None
+        if self._context_store is not None:
+            source_snapshot = await self._context_store.get(event_id, "source_snapshot")
+        if event is not None:
+            occurred_at = getattr(event, "occurred_at", None)
+        fp_wm = None
+        if self._working_memory is not None:
+            fp_wm = self._working_memory.for_writer("PostEvidenceFpAdjudicator")
+        result = await run_post_evidence_fp_adjudication(
+            event_id=event_id,
+            evidence_output=evidence_output,
+            triage_result=triage_result,
+            source_snapshot=source_snapshot if isinstance(source_snapshot, dict) else None,
+            occurred_at=occurred_at,
+            working_memory=fp_wm,
+        )
+        return result.model_dump(mode="json")
 
     async def _read_false_positive_match(self, event_id: str) -> dict[str, Any] | None:
         if self._context_store is None:
