@@ -301,6 +301,8 @@ class TraceProjection:
             value = data.get(key)
             if isinstance(value, list) and value:
                 entity_audit[key] = value[:20]
+            elif key == "entity_rejection_summary" and isinstance(value, dict) and value:
+                entity_audit[key] = value
         degradation_reasons = data.get("degradation_reasons")
         if isinstance(degradation_reasons, list) and degradation_reasons:
             entity_audit["degradation_reasons"] = [

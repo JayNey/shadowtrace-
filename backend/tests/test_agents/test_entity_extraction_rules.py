@@ -85,6 +85,7 @@ _NEGATIVE_PHRASES: tuple[str, ...] = (
 @pytest.mark.parametrize("phrase", _NEGATIVE_PHRASES)
 def test_negative_samples_no_hostname_false_positives(phrase: str) -> None:
     extracted = extract_entities_regex(phrase)
+    assert extracted.hostnames == []
     validated = validate_entity_set(
         EntitySet(
             hosts=[
@@ -96,6 +97,17 @@ def test_negative_samples_no_hostname_false_positives(phrase: str) -> None:
         alert_text=phrase,
     )
     assert validated.entity_set.hosts == []
+
+
+@pytest.mark.parametrize("phrase", _NEGATIVE_PHRASES)
+def test_negative_samples_reject_injected_llm_phrase_hostnames(phrase: str) -> None:
+    for hostname in ("ransomware-like", "beacon-like", "lateral-movement"):
+        result = validate_entity_set(
+            EntitySet(hosts=[HostEntity(entity_id="h1", hostname=hostname)]),
+            provenance="llm",
+            alert_text=phrase,
+        )
+        assert result.entity_set.hosts == []
 
 
 # --------------------------------------------------------------------------- #
@@ -139,10 +151,11 @@ async def test_llm_invalid_entities_fall_back_to_validated_regex() -> None:
     wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
     agent = TriageAgent(llm_client=_MockLLMClient(response=llm_response), working_memory=wm)
     alert = "Malicious process spawned — ransomware-like behavior"
-    llm_out, regex_out, degraded, _ = await agent._extract_entities(alert, "evt-100")
-    assert llm_out == EntitySet()
-    assert regex_out.hosts == []
-    assert degraded is True
+    extraction = await agent._extract_entities(alert, "evt-100")
+    assert extraction.llm_entities == EntitySet()
+    assert extraction.regex_entities.hosts == []
+    assert extraction.text_degraded is True
+    assert extraction.rejection_summary.get("total_rejected", 0) >= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +163,7 @@ async def test_llm_invalid_entities_fall_back_to_validated_regex() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_evidence_skips_query_edr_when_hostname_rejected() -> None:
+def test_evidence_skips_query_edr_when_no_host_entity() -> None:
     agent = EvidenceAgent(llm_client=None, tool_executor=None)
     triage = TriageResult(
         event_type=EventType.MALICIOUS_PROCESS,
@@ -164,6 +177,105 @@ def test_evidence_skips_query_edr_when_hostname_rejected() -> None:
         {"start": "2024-01-01T00:00:00Z", "end": "2024-01-02T00:00:00Z"},
     )
     assert params is None
+
+
+def test_llm_rejects_phrase_hostname_when_alert_mentions_endpoint() -> None:
+    alert = "persistent beacon detected on endpoint"
+    for hostname in ("beacon-like", "persistent-beacon", "lateral-movement"):
+        result = validate_entity_set(
+            EntitySet(hosts=[HostEntity(entity_id="h1", hostname=hostname)]),
+            provenance="llm",
+            alert_text=alert,
+        )
+        assert result.entity_set.hosts == []
+
+
+def test_llm_rejects_ransomware_like_even_when_dev_wks_in_alert() -> None:
+    alert = "Malicious process spawned — ransomware-like behavior on DEV-WKS-012"
+    result = validate_entity_set(
+        EntitySet(
+            hosts=[
+                HostEntity(entity_id="bad", hostname="ransomware-like"),
+                HostEntity(entity_id="good", hostname="DEV-WKS-012"),
+            ]
+        ),
+        provenance="llm",
+        alert_text=alert,
+    )
+    hostnames = {h.hostname for h in result.entity_set.hosts}
+    assert "ransomware-like" not in hostnames
+    assert "DEV-WKS-012" in hostnames
+
+
+@pytest.mark.asyncio
+async def test_triage_keeps_valid_host_when_llm_also_returns_phrase_hostname() -> None:
+    from app.agents.prompts.triage_prompt import TriageLLMResponse
+
+    llm_entities = EntitySet(
+        hosts=[
+            HostEntity(entity_id="bad", hostname="ransomware-like"),
+            HostEntity(entity_id="good", hostname="DEV-WKS-012"),
+        ]
+    )
+    llm_response = LLMResponse(
+        content="",
+        parsed=TriageLLMResponse(
+            event_type=EventType.MALICIOUS_PROCESS,
+            entities=llm_entities,
+            reasoning="",
+        ),
+        model_name="mock",
+    )
+    wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+    agent = TriageAgent(llm_client=_MockLLMClient(response=llm_response), working_memory=wm)
+    alert = "Malicious process spawned — ransomware-like behavior on DEV-WKS-012"
+    result = await agent._run(_make_input(raw_event_summary=alert))
+    hostnames = {h.hostname for h in result.entities.hosts}
+    assert "ransomware-like" not in hostnames
+    assert "DEV-WKS-012" in hostnames
+    assert result.entity_rejection_summary.get("total_rejected", 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_triage_entity_rejection_summary_counts_llm_rejections() -> None:
+    from app.agents.prompts.triage_prompt import TriageLLMResponse
+
+    llm_entities = EntitySet(
+        hosts=[HostEntity(entity_id="bad", hostname="ransomware-like")]
+    )
+    llm_response = LLMResponse(
+        content="",
+        parsed=TriageLLMResponse(
+            event_type=EventType.MALICIOUS_PROCESS,
+            entities=llm_entities,
+            reasoning="",
+        ),
+        model_name="mock",
+    )
+    wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+    agent = TriageAgent(llm_client=_MockLLMClient(response=llm_response), working_memory=wm)
+    alert = "Malicious process spawned — ransomware-like behavior"
+    result = await agent._run(_make_input(raw_event_summary=alert))
+    assert result.entity_rejection_summary.get("total_rejected", 0) >= 1
+    assert "phrase_without_host_context" in result.entity_rejection_summary.get(
+        "rejection_counts", {}
+    )
+
+
+def test_decision_basis_includes_entity_rejection_summary() -> None:
+    from app.services.agent_trace_service import TraceProjection
+
+    result = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entity_rejection_summary={
+            "rejection_counts": {"phrase_without_host_context": 1},
+            "total_rejected": 1,
+        },
+    )
+    basis = TraceProjection.decision_basis(result.model_dump(mode="json"))
+    assert basis["entity_rejection_summary"]["total_rejected"] == 1
 
 
 @pytest.mark.asyncio

@@ -44,8 +44,10 @@ _HIGH_CONF_HOST = re.compile(
     re.IGNORECASE,
 )
 
-_HOST_CONTEXT = re.compile(
-    r"\b(?:host(?:name)?|server|endpoint|workstation|device|asset|node|vm|wks|srv|pc)\b",
+# Context keyword must immediately precede the candidate hostname in alert text.
+_HOST_CONTEXTUAL = re.compile(
+    r"\b(?:host(?:name)?|server|endpoint|workstation|device|asset|node)\s+"
+    r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)\b",
     re.IGNORECASE,
 )
 
@@ -244,10 +246,6 @@ def _validate_hostname(
         if re.fullmatch(r"ip-\d+-\d+-\d+-\d+", hostname, flags=re.IGNORECASE):
             return True, ""
         return False, "invalid_hostname_syntax"
-    if _HIGH_CONF_HOST.match(hostname):
-        return True, ""
-    if _HOST_CONTEXT.search(alert_text):
-        return True, ""
     if _PHRASE_SUFFIX.search(hostname):
         return False, "phrase_without_host_context"
     parts = hostname.lower().split("-")
@@ -255,7 +253,29 @@ def _validate_hostname(
         return False, "phrase_without_host_context"
     if len(parts) >= 2 and all(part.isalpha() and len(part) <= 12 for part in parts):
         return False, "phrase_without_host_context"
-    return True, ""
+    if _HIGH_CONF_HOST.match(hostname):
+        return True, ""
+    if _hostname_has_explicit_context(hostname, alert_text):
+        return True, ""
+    return False, "phrase_without_host_context"
+
+
+def _hostname_has_explicit_context(hostname: str, alert_text: str) -> bool:
+    """True when a host/device keyword immediately precedes *hostname* in alert text."""
+    if not hostname or not alert_text:
+        return False
+    pattern = re.compile(
+        r"\b(?:host(?:name)?|server|endpoint|workstation|device|asset|node)\s+"
+        + re.escape(hostname)
+        + r"\b",
+        re.IGNORECASE,
+    )
+    if pattern.search(alert_text):
+        return True
+    for match in _HOST_CONTEXTUAL.finditer(alert_text):
+        if match.group(1).lower() == hostname.lower():
+            return True
+    return False
 
 
 def _valid_ip_literal(value: str) -> bool:

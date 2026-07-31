@@ -25,7 +25,7 @@ from app.agents.rules.entity_extraction_rules import (
     IP_PATTERN,
     extract_entities_regex,
 )
-from app.agents.rules.entity_validation import validate_entity_set
+from app.agents.rules.entity_validation import EntityValidationResult, validate_entity_set
 from app.core.errors import (
     DependencyUnavailableError,
     GuardrailViolationError,
@@ -442,6 +442,37 @@ def _conflicts_to_records(merge_result: EntityMergeResult) -> list[EntityConflic
     ]
 
 
+def _aggregate_rejection_summaries(
+    *parts: dict[str, Any] | EntityValidationResult | None,
+) -> dict[str, Any]:
+    """Merge truncated rejection counts for decision trace (no raw values)."""
+    counts: dict[str, int] = {}
+    total = 0
+    for part in parts:
+        if part is None:
+            continue
+        summary = part.rejection_summary if isinstance(part, EntityValidationResult) else part
+        if not summary:
+            continue
+        total += int(summary.get("total_rejected", 0))
+        for code, count in summary.get("rejection_counts", {}).items():
+            counts[str(code)] = counts.get(str(code), 0) + int(count)
+    if not total:
+        return {}
+    return {"rejection_counts": counts, "total_rejected": total}
+
+
+@dataclass(frozen=True, slots=True)
+class TextExtractionResult:
+    """LLM/regex text extraction output with validation rejection counts."""
+
+    llm_entities: EntitySet
+    regex_entities: EntitySet
+    text_degraded: bool
+    reasoning: str
+    rejection_summary: dict[str, Any]
+
+
 # --------------------------------------------------------------------------- #
 # TriageAgent
 # --------------------------------------------------------------------------- #
@@ -527,74 +558,45 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         event_type = _map_event_type(raw_type, input.raw_event_summary)
 
         # 2. Entity extraction — LLM primary, regex fallback; merge with source hints.
-        llm_entities, regex_entities, text_degraded, llm_reasoning = await self._extract_entities(
-            input.raw_event_summary, input.event_id
-        )
+        extraction = await self._extract_entities(input.raw_event_summary, input.event_id)
         source_validated = validate_entity_set(
             input.hint_entities,
             provenance="source",
             alert_text=input.raw_event_summary,
         )
-        llm_validated = (
-            validate_entity_set(
-                llm_entities,
-                provenance="llm",
-                alert_text=input.raw_event_summary,
-            )
-            if llm_entities != EntitySet()
-            else None
-        )
-        regex_validated = (
-            validate_entity_set(
-                regex_entities,
-                provenance="regex",
-                alert_text=input.raw_event_summary,
-            )
-            if regex_entities != EntitySet()
-            else None
-        )
         merge_result = merge_entity_sets(
             source=source_validated.entity_set
             if source_validated.entity_set != EntitySet()
             else None,
-            llm=llm_validated.entity_set if llm_validated is not None else None,
-            regex=regex_validated.entity_set if regex_validated is not None else None,
+            llm=extraction.llm_entities if extraction.llm_entities != EntitySet() else None,
+            regex=extraction.regex_entities if extraction.regex_entities != EntitySet() else None,
         )
         entities = merge_result.entities
         degradation_reasons = list(merge_result.degradation_reasons)
-        degraded = text_degraded and source_validated.entity_set == EntitySet()
+        degraded = extraction.text_degraded and source_validated.entity_set == EntitySet()
 
-        if text_degraded and not degraded:
+        if extraction.text_degraded and not degraded:
             reasoning_parts.append(
                 "Text entity extraction empty; using structured source entities."
             )
-        elif text_degraded:
+        elif extraction.text_degraded:
             degraded = True
             reasoning_parts.append("Entity extraction degraded to regex fallback.")
-        if llm_reasoning:
-            reasoning_parts.append(llm_reasoning)
+        if extraction.reasoning:
+            reasoning_parts.append(extraction.reasoning)
         if merge_result.conflicts:
             reasoning_parts.append(
                 f"Resolved {len(merge_result.conflicts)} entity conflict(s) with source priority."
             )
-        rejected_total = 0
-        rejection_counts: dict[str, int] = {}
-        for validated in (source_validated, llm_validated, regex_validated):
-            if validated is None:
-                continue
-            summary = validated.rejection_summary
-            rejected_total += summary["total_rejected"]
-            for code, count in summary["rejection_counts"].items():
-                rejection_counts[code] = rejection_counts.get(code, 0) + count
+        entity_rejection_summary = _aggregate_rejection_summaries(
+            extraction.rejection_summary,
+            source_validated,
+        )
+        rejected_total = int(entity_rejection_summary.get("total_rejected", 0))
         if rejected_total:
             reasoning_parts.append(
                 f"Rejected {rejected_total} invalid text-derived entity candidate(s)."
             )
-        entity_rejection_summary = (
-            {"rejection_counts": rejection_counts, "total_rejected": rejected_total}
-            if rejected_total
-            else {}
-        )
         if source_validated.rejection_summary["total_rejected"]:
             degradation_reasons.append("source_enrichment_partial")
 
@@ -632,21 +634,28 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
 
     async def _extract_entities(
         self, alert_text: str, event_id: str
-    ) -> tuple[EntitySet, EntitySet, bool, str]:
-        """Extract entities via LLM (JSON mode) with optional regex fallback.
-
-        Returns:
-            (llm_entities, regex_entities, text_degraded, reasoning)
-            — ``text_degraded`` is True when regex was used because the LLM path
-            was unavailable or returned no entities.
-        """
+    ) -> TextExtractionResult:
+        """Extract entities via LLM (JSON mode) with optional regex fallback."""
         empty = EntitySet()
+        empty_summary: dict[str, Any] = {}
         if self.llm_client is None:
-            regex_entities = await self._regex_fallback(alert_text)
-            return empty, regex_entities, True, ""
+            regex_result = await self._regex_fallback(alert_text)
+            return TextExtractionResult(
+                llm_entities=empty,
+                regex_entities=regex_result.entity_set,
+                text_degraded=True,
+                reasoning="",
+                rejection_summary=regex_result.rejection_summary,
+            )
 
         if not alert_text.strip():
-            return empty, empty, False, ""
+            return TextExtractionResult(
+                llm_entities=empty,
+                regex_entities=empty,
+                text_degraded=False,
+                reasoning="",
+                rejection_summary=empty_summary,
+            )
 
         try:
             messages = build_triage_messages(alert_text)
@@ -685,13 +694,34 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                         reasoning = (
                             f"{reasoning} LLM validation rejected {rejected} entity candidate(s)."
                         ).strip()
-                    return llm_validated.entity_set, empty, False, reasoning
+                    return TextExtractionResult(
+                        llm_entities=llm_validated.entity_set,
+                        regex_entities=empty,
+                        text_degraded=False,
+                        reasoning=reasoning,
+                        rejection_summary=llm_validated.rejection_summary,
+                    )
 
-                regex_entities = await self._regex_fallback(alert_text)
-                return empty, regex_entities, True, parsed.reasoning or ""
+                regex_result = await self._regex_fallback(alert_text)
+                return TextExtractionResult(
+                    llm_entities=empty,
+                    regex_entities=regex_result.entity_set,
+                    text_degraded=True,
+                    reasoning=parsed.reasoning or "",
+                    rejection_summary=_aggregate_rejection_summaries(
+                        llm_validated,
+                        regex_result,
+                    ),
+                )
 
-            regex_entities = await self._regex_fallback(alert_text)
-            return empty, regex_entities, True, ""
+            regex_result = await self._regex_fallback(alert_text)
+            return TextExtractionResult(
+                llm_entities=empty,
+                regex_entities=regex_result.entity_set,
+                text_degraded=True,
+                reasoning="",
+                rejection_summary=regex_result.rejection_summary,
+            )
 
         except (TimeoutError, OSError) as exc:
             logger.warning(
@@ -700,8 +730,14 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 exc,
                 exc_info=True,
             )
-            regex_entities = await self._regex_fallback(alert_text)
-            return empty, regex_entities, True, ""
+            regex_result = await self._regex_fallback(alert_text)
+            return TextExtractionResult(
+                llm_entities=empty,
+                regex_entities=regex_result.entity_set,
+                text_degraded=True,
+                reasoning="",
+                rejection_summary=regex_result.rejection_summary,
+            )
 
         except ShadowTraceError as exc:
             if isinstance(exc, LLMError):
@@ -718,8 +754,14 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                     exc,
                     exc_info=True,
                 )
-            regex_entities = await self._regex_fallback(alert_text)
-            return empty, regex_entities, True, ""
+            regex_result = await self._regex_fallback(alert_text)
+            return TextExtractionResult(
+                llm_entities=empty,
+                regex_entities=regex_result.entity_set,
+                text_degraded=True,
+                reasoning="",
+                rejection_summary=regex_result.rejection_summary,
+            )
 
         except Exception as exc:
             logger.warning(
@@ -728,11 +770,17 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 exc,
                 exc_info=True,
             )
-            regex_entities = await self._regex_fallback(alert_text)
-            return empty, regex_entities, True, ""
+            regex_result = await self._regex_fallback(alert_text)
+            return TextExtractionResult(
+                llm_entities=empty,
+                regex_entities=regex_result.entity_set,
+                text_degraded=True,
+                reasoning="",
+                rejection_summary=regex_result.rejection_summary,
+            )
 
-    async def _regex_fallback(self, alert_text: str) -> EntitySet:
-        """Run regex extraction, validate, and return only accepted entities."""
+    async def _regex_fallback(self, alert_text: str) -> EntityValidationResult:
+        """Run regex extraction, validate, and return accepted entities + rejections."""
         raw = extract_entities_regex(alert_text)
         candidates = EntitySet(
             accounts=[
@@ -789,7 +837,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             candidates,
             provenance="regex",
             alert_text=alert_text,
-        ).entity_set
+        )
 
     # ------------------------------------------------------------------ #
     # Persistence
