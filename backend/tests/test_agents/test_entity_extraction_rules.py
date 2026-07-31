@@ -360,7 +360,7 @@ async def test_triage_reasoning_splits_source_and_text_rejections() -> None:
     )
     alert = "Malicious process spawned — ransomware-like behavior"
     result = await agent._run(_make_input(raw_event_summary=alert, hint_entities=hint))
-    assert "invalid source entity candidate(s)" in result.reasoning
+    assert "invalid source entity candidate(s)" in result.decision_summary
     assert result.entity_rejection_summary.get("total_rejected", 0) >= 1
 
 

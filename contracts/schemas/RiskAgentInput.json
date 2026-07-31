@@ -1381,8 +1381,15 @@
           "title": "Ioc List",
           "type": "array"
         },
+        "decision_summary": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Decision Summary",
+          "type": "string"
+        },
         "reasoning": {
           "default": "",
+          "deprecated": true,
           "title": "Reasoning",
           "type": "string"
         },

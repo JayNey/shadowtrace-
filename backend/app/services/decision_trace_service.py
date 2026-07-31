@@ -111,19 +111,26 @@ def _agent_decision_basis(output_data: Any) -> dict[str, Any]:
 def _agent_title(agent_name: str, status: str, output_data: Any) -> str:
     verb = _agent_status_verb(status)
     action_labels = {
+        "triage_agent": "分诊",
         "TriageAgent": "分诊",
+        "risk_agent": "风险评估",
         "RiskAgent": "风险评估",
+        "evidence_agent": "证据收集",
         "EvidenceAgent": "证据收集",
+        "planner_agent": "计划生成",
         "PlannerAgent": "计划生成",
+        "response_agent": "响应方案",
         "ResponseAgent": "响应方案",
+        "verify_agent": "效果验证",
         "VerifyAgent": "效果验证",
+        "report_agent": "报告生成",
         "ReportAgent": "报告生成",
     }
     label = action_labels.get(agent_name, "执行")
     title = f"{agent_name} {verb}{label}"
 
     basis = _agent_decision_basis(output_data)
-    if agent_name == "TriageAgent" and isinstance(output_data, dict):
+    if agent_name in {"TriageAgent", "triage_agent"} and isinstance(output_data, dict):
         severity = output_data.get("severity")
         if severity is not None:
             return f"{title}：severity={severity}"

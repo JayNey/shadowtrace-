@@ -174,9 +174,12 @@ def _enrich_agent_output(
         enriched.setdefault(
             "decision_summary",
             (
-                f"event_type={output_data.get('event_type')}, "
-                f"severity={output_data.get('severity')}, "
-                f"need_investigation={output_data.get('need_investigation')}"
+                output_data.get("decision_summary")
+                or (
+                    f"event_type={output_data.get('event_type')}, "
+                    f"severity={output_data.get('severity')}, "
+                    f"need_investigation={output_data.get('need_investigation')}"
+                )
             )[:512],
         )
         severity = output_data.get("severity")

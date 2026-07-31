@@ -177,10 +177,21 @@ def test_projection_redacts_chain_of_thought_keys() -> None:
     )
 
     assert projected["decision_summary"] == "bounded summary"
-    assert projected["thought"] == "[NOT_RETAINED]"
-    assert projected["reflection"] == "[NOT_RETAINED]"
-    assert projected["rationale"] == "[NOT_RETAINED]"
-    assert projected["reasoning"] == "[NOT_RETAINED]"
+    assert "thought" not in projected
+    assert "reflection" not in projected
+    assert "rationale" not in projected
+    assert "reasoning" not in projected
+
+
+def test_projection_compat_restores_not_retained_placeholders() -> None:
+    compat = TraceProjection.project_for_compat(
+        {
+            "decision_summary": "bounded summary",
+            "thought": "hidden reasoning must not persist",
+        }
+    )
+    assert compat["thought"] == "[NOT_RETAINED]"
+    assert compat["decision_summary"] == "bounded summary"
 
 
 def test_decision_basis_ignores_redacted_reasoning_fallback() -> None:
@@ -264,8 +275,8 @@ def test_react_trace_injection_zero_leakage() -> None:
     projected = TraceProjection.project(malicious)
     serialized = str(projected)
 
-    assert projected["thought"] == "[NOT_RETAINED]"
-    assert projected["reflection"] == "[NOT_RETAINED]"
+    assert "thought" not in projected
+    assert "reflection" not in projected
     assert secret not in serialized
     assert prompt_leak not in serialized
     assert "api_key" not in serialized or secret not in str(projected.get("raw_payload", ""))
@@ -300,13 +311,43 @@ async def test_log_trace_redacts_injected_cot_and_secrets(
     row = await service_with_decision_records.get_trace(trace_id)
     assert row is not None
     serialized = str(row.output_data)
-    assert row.output_data["thought"] == "[NOT_RETAINED]"
+    assert "thought" not in row.output_data
+    assert "reflection" not in row.output_data
     assert secret not in serialized
     assert "must not persist" not in serialized
 
     record = await service_with_decision_records._decision_record_service.get_by_trace_ref(trace_id)
     assert record is not None
     assert secret not in record.decision_summary
+
+
+@pytest.mark.asyncio
+async def test_log_trace_omits_cot_keys_from_db(
+    service_with_decision_records: AgentTraceService,
+) -> None:
+    """ISSUE-131: CoT keys must be omitted from persisted JSONB, not stored as sentinels."""
+    event_id = _id("evt")
+    started_at = datetime(2026, 7, 31, 10, 0, 0, tzinfo=UTC)
+    completed_at = started_at + timedelta(milliseconds=100)
+
+    trace_id = await service_with_decision_records.log_trace(
+        event_id=event_id,
+        agent_name="react_engine",
+        input_data={"event_id": event_id},
+        output_data={
+            "decision_summary": "bounded summary",
+            "thought": "must not persist",
+            "reasoning": "must not persist",
+        },
+        status="success",
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+    row = await service_with_decision_records.get_trace(trace_id)
+    assert row is not None
+    assert "thought" not in row.output_data
+    assert "reasoning" not in row.output_data
+    assert row.output_data["decision_summary"] == "bounded summary"
 
 
 @pytest.mark.asyncio

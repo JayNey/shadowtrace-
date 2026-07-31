@@ -389,7 +389,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                     "event_type": triage.event_type.value,
                     "severity": triage.severity.value,
                     "ioc_list": list(triage.ioc_list),
-                    "reasoning": triage.reasoning,
+                    "decision_summary": triage.decision_summary,
                     "accounts": [a.username for a in triage.entities.accounts],
                     "hosts": [h.hostname for h in triage.entities.hosts],
                     "external_ips": [
@@ -410,7 +410,6 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                         "name": f.factor_name,
                         "raw_score": f.raw_score,
                         "weighted_score": f.weighted_score,
-                        "reasoning": f.reasoning,
                     }
                     for f in input.risk_assessment.risk_factors
                 ],

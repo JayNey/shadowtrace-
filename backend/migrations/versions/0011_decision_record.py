@@ -152,6 +152,31 @@ def upgrade() -> None:
         basis_count,
     )
 
+    cot_cleanup = conn.execute(
+        sa.text(
+            """
+            UPDATE agent_trace
+            SET output_data = output_data
+                - 'thought'
+                - 'reflection'
+                - 'rationale'
+                - 'reasoning'
+                - 'chain_of_thought'
+                - 'chain-of-thought'
+            WHERE output_data ?| ARRAY[
+                'thought', 'reflection', 'rationale', 'reasoning',
+                'chain_of_thought', 'chain-of-thought'
+            ]
+            RETURNING trace_id
+            """
+        )
+    )
+    cot_cleanup_count = len(cot_cleanup.fetchall())
+    _logger.info(
+        "ISSUE-131: removed CoT keys/sentinels from %d agent_trace rows",
+        cot_cleanup_count,
+    )
+
 
 def downgrade() -> None:
     op.drop_index("ix_decision_record_trace_ref", table_name="decision_record")

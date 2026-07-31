@@ -648,7 +648,7 @@ class TestTriageAgentLLM:
             parsed=TriageLLMResponse(
                 event_type=EventType.MALICIOUS_PROCESS,
                 entities=llm_entities,
-                reasoning="Test reasoning",
+                decision_summary="Test reasoning",
             ),
             model_name="mock",
         )
@@ -662,7 +662,7 @@ class TestTriageAgentLLM:
         assert result.event_type == EventType.MALICIOUS_PROCESS
         assert len(result.entities.accounts) == 1
         assert result.entities.accounts[0].username == "testuser"
-        assert "Test reasoning" in result.reasoning
+        assert "Test reasoning" in result.decision_summary
         assert result.degraded is False
 
     @pytest.mark.asyncio
@@ -907,7 +907,7 @@ class TestGoldenResponse:
         parsed = TriageLLMResponse.model_validate(content)
         assert parsed.event_type == EventType.OTHER
         assert isinstance(parsed.entities, EntitySet)
-        assert isinstance(parsed.reasoning, str)
+        assert isinstance(parsed.decision_summary, str)
 
 
 # --------------------------------------------------------------------------- #
@@ -976,8 +976,12 @@ class TestWriteTriageResultTransientFailure:
         )
         result = await agent._run(input_)
         assert result.degraded is True
-        assert "triage_result persistence failed" in result.reasoning
-        assert "working memory unavailable" in result.reasoning
+        assert any(
+            "triage_result persistence failed" in item for item in result.degradation_reasons
+        )
+        assert any(
+            "working memory unavailable" in item for item in result.degradation_reasons
+        )
 
     @pytest.mark.asyncio
     async def test_retryable_shadowtrace_error_marks_degraded(self):
@@ -998,7 +1002,10 @@ class TestWriteTriageResultTransientFailure:
         input_ = _make_input(raw_event_summary="Test alert")
         result = await agent._run(input_)
         assert result.degraded is True
-        assert "triage_result persistence failed: db_timeout" in result.reasoning
+        assert any(
+            "triage_result persistence failed: db_timeout" in item
+            for item in result.degradation_reasons
+        )
 
     @pytest.mark.asyncio
     async def test_non_retryable_shadowtrace_error_raises(self):
@@ -1256,7 +1263,7 @@ class TestLLMFallbackModel:
             parsed=TriageLLMResponse(
                 event_type=EventType.ACCOUNT_ANOMALY,
                 entities=llm_entities,
-                reasoning="Fallback model reasoning",
+                decision_summary="Fallback model reasoning",
             ),
             model_name="fallback-model",
             fallback_level=1,  # primary unavailable, fallback succeeded
@@ -1270,7 +1277,7 @@ class TestLLMFallbackModel:
         result = await agent._run(input_)
         # Fallback model succeeded — NOT degraded (only regex fallback is degraded).
         assert result.degraded is False
-        assert "Fallback model reasoning" in result.reasoning
+        assert "Fallback model reasoning" in result.decision_summary
 
 
 # --------------------------------------------------------------------------- #
@@ -1668,7 +1675,7 @@ class TestTriageSourceEntityMerge:
         assert len(result.entities.hosts) == 1
         assert result.entities.hosts[0].hostname == "DEV-WKS-012"
         assert len(result.entity_conflicts) == 1
-        assert "entity conflict" in result.reasoning.lower()
+        assert "entity conflict" in result.decision_summary.lower()
 
     @pytest.mark.asyncio
     async def test_account_anomaly_fp_without_source_hints_unchanged(self):

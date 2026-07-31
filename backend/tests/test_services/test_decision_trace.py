@@ -910,6 +910,34 @@ class TestDecisionTraceDegradationAndEdgeCases:
         assert agent.detail["confidence"] == 0.95
 
     @pytest.mark.asyncio
+    async def test_triage_agent_production_name_severity_title(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="triage_agent",
+                    output_data={
+                        "severity": "high",
+                        "event_type": "data_exfiltration",
+                        "decision_summary": "critical exfiltration detected",
+                    },
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        agent = next(
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        )
+        assert agent.title == "triage_agent 完成分诊：severity=high"
+
+    @pytest.mark.asyncio
     async def test_legacy_react_trace_decision_basis_does_not_leak_cot(
         self,
         service: DecisionTraceService,

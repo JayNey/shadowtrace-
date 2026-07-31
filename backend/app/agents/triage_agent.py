@@ -462,6 +462,23 @@ def _aggregate_rejection_summaries(
     return {"rejection_counts": counts, "total_rejected": total}
 
 
+def _build_triage_decision_summary(
+    *,
+    event_type: EventType,
+    severity: Severity,
+    need_investigation: bool,
+    notes: list[str],
+) -> str:
+    base = (
+        f"event_type={event_type.value}, severity={severity.value}, "
+        f"need_investigation={need_investigation}"
+    )
+    if not notes:
+        return base[:512]
+    joined = "; ".join(note.strip() for note in notes if note.strip())
+    return f"{base}; {joined}"[:512]
+
+
 @dataclass(frozen=True, slots=True)
 class TextExtractionResult:
     """LLM/regex text extraction output with validation rejection counts."""
@@ -469,7 +486,7 @@ class TextExtractionResult:
     llm_entities: EntitySet
     regex_entities: EntitySet
     text_degraded: bool
-    reasoning: str
+    decision_summary: str
     rejection_summary: dict[str, Any]
 
 
@@ -550,7 +567,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
     async def _run(self, input: TriageAgentInput) -> TriageResult:
         """Execute the full triage pipeline."""
         degraded = False
-        reasoning_parts: list[str] = []
+        summary_notes: list[str] = []
 
         # 1. Map event type from source_snapshot (file fallback via raw_alert_snapshot).
         snapshot = await self._read_source_snapshot(input.event_id)
@@ -576,16 +593,16 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         degraded = extraction.text_degraded and source_validated.entity_set == EntitySet()
 
         if extraction.text_degraded and not degraded:
-            reasoning_parts.append(
+            summary_notes.append(
                 "Text entity extraction empty; using structured source entities."
             )
         elif extraction.text_degraded:
             degraded = True
-            reasoning_parts.append("Entity extraction degraded to regex fallback.")
-        if extraction.reasoning:
-            reasoning_parts.append(extraction.reasoning)
+            summary_notes.append("Entity extraction degraded to regex fallback.")
+        if extraction.decision_summary:
+            summary_notes.append(extraction.decision_summary)
         if merge_result.conflicts:
-            reasoning_parts.append(
+            summary_notes.append(
                 f"Resolved {len(merge_result.conflicts)} entity conflict(s) with source priority."
             )
         entity_rejection_summary = _aggregate_rejection_summaries(
@@ -595,11 +612,11 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         text_rejected = int((extraction.rejection_summary or {}).get("total_rejected", 0))
         source_rejected = int(source_validated.rejection_summary.get("total_rejected", 0))
         if text_rejected:
-            reasoning_parts.append(
+            summary_notes.append(
                 f"Rejected {text_rejected} invalid text-derived entity candidate(s)."
             )
         if source_rejected:
-            reasoning_parts.append(
+            summary_notes.append(
                 f"Rejected {source_rejected} invalid source entity candidate(s)."
             )
         if source_validated.rejection_summary["total_rejected"]:
@@ -613,6 +630,13 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         # 5. IOC extraction.
         ioc_list = _extract_iocs(input.raw_event_summary, entities)
 
+        decision_summary = _build_triage_decision_summary(
+            event_type=event_type,
+            severity=severity,
+            need_investigation=need_investigation,
+            notes=summary_notes,
+        )
+
         # 6. Build result.
         result = TriageResult(
             event_type=event_type,
@@ -620,7 +644,8 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             need_investigation=need_investigation,
             entities=entities,
             ioc_list=ioc_list,
-            reasoning=" ".join(reasoning_parts) if reasoning_parts else "",
+            decision_summary=decision_summary,
+            reasoning="",
             degraded=degraded,
             degradation_reasons=degradation_reasons,
             entity_provenance_summary=_provenance_from_hint_entities(input.hint_entities),
@@ -649,7 +674,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 llm_entities=empty,
                 regex_entities=regex_result.entity_set,
                 text_degraded=True,
-                reasoning="",
+                decision_summary="",
                 rejection_summary=regex_result.rejection_summary,
             )
 
@@ -658,7 +683,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 llm_entities=empty,
                 regex_entities=empty,
                 text_degraded=False,
-                reasoning="",
+                decision_summary="",
                 rejection_summary=empty_summary,
             )
 
@@ -693,17 +718,17 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                         llm_validated.entity_set.files,
                     )
                 ):
-                    reasoning = parsed.reasoning or ""
+                    summary = parsed.decision_summary or ""
                     rejected = llm_validated.rejection_summary["total_rejected"]
                     if rejected:
-                        reasoning = (
-                            f"{reasoning} LLM validation rejected {rejected} entity candidate(s)."
+                        summary = (
+                            f"{summary} LLM validation rejected {rejected} entity candidate(s)."
                         ).strip()
                     return TextExtractionResult(
                         llm_entities=llm_validated.entity_set,
                         regex_entities=empty,
                         text_degraded=False,
-                        reasoning=reasoning,
+                        decision_summary=summary[:512],
                         rejection_summary=llm_validated.rejection_summary,
                     )
 
@@ -712,7 +737,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                     llm_entities=empty,
                     regex_entities=regex_result.entity_set,
                     text_degraded=True,
-                    reasoning=parsed.reasoning or "",
+                    decision_summary=(parsed.decision_summary or "")[:512],
                     rejection_summary=_aggregate_rejection_summaries(
                         llm_validated,
                         regex_result,
@@ -724,7 +749,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 llm_entities=empty,
                 regex_entities=regex_result.entity_set,
                 text_degraded=True,
-                reasoning="",
+                decision_summary="",
                 rejection_summary=regex_result.rejection_summary,
             )
 
@@ -740,7 +765,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 llm_entities=empty,
                 regex_entities=regex_result.entity_set,
                 text_degraded=True,
-                reasoning="",
+                decision_summary="",
                 rejection_summary=regex_result.rejection_summary,
             )
 
@@ -764,7 +789,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 llm_entities=empty,
                 regex_entities=regex_result.entity_set,
                 text_degraded=True,
-                reasoning="",
+                decision_summary="",
                 rejection_summary=regex_result.rejection_summary,
             )
 
@@ -780,7 +805,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 llm_entities=empty,
                 regex_entities=regex_result.entity_set,
                 text_degraded=True,
-                reasoning="",
+                decision_summary="",
                 rejection_summary=regex_result.rejection_summary,
             )
 
@@ -854,7 +879,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         GuardrailViolationError (FIELD_OWNERSHIP mismatch) is always
         propagated — it indicates a code defect that must be fixed.
         Transient I/O failures are logged AND reflected on the result
-        (``degraded=True``, reasoning annotation).  A lightweight
+        (``degraded=True``, degradation_reason annotation).  A lightweight
         ``triage_degraded`` flag is written separately so that downstream
         agents / recovery logic can detect the persistence gap even if the
         full result was not durably stored.
@@ -884,9 +909,9 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 exc_info=True,
             )
             result.degraded = True
-            if result.reasoning:
-                result.reasoning += " "
-            result.reasoning += "triage_result persistence failed: working memory unavailable"
+            result.degradation_reasons.append(
+                "triage_result persistence failed: working memory unavailable"
+            )
             # Best-effort persistence of the degraded flag so recovery /
             # downstream agents can detect the gap.
             await self._try_persist_degraded_flag(input.event_id)
@@ -899,9 +924,9 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                     exc_info=True,
                 )
                 result.degraded = True
-                if result.reasoning:
-                    result.reasoning += " "
-                result.reasoning += f"triage_result persistence failed: {exc.error_code}"
+                result.degradation_reasons.append(
+                    f"triage_result persistence failed: {exc.error_code}"
+                )
                 await self._try_persist_degraded_flag(input.event_id)
             else:
                 raise

@@ -145,7 +145,8 @@ class TriageResult(BaseModel):
     need_investigation: bool
     entities: EntitySet = Field(default_factory=EntitySet)
     ioc_list: list[str] = Field(default_factory=list)
-    reasoning: str = ""
+    decision_summary: str = Field(default="", max_length=512)
+    reasoning: str = Field(default="", deprecated=True)
     degraded: bool = False
     degradation_reasons: list[str] = Field(default_factory=list)
     entity_provenance_summary: list[EntityProvenanceRecord] = Field(default_factory=list)

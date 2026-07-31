@@ -166,7 +166,7 @@ def _project_tree(value: Any, *, project_raw: bool = True, depth: int = 0) -> An
             if project_raw and _is_raw_key(key):
                 projected[key] = _audit_hash_reference(item, reason="raw_block")
             elif depth == 0 and key.lower() in _COT_KEYS:
-                projected[key] = _NOT_RETAINED
+                continue
             elif is_sensitive_key(key):
                 projected[key] = REDACTED
             else:
@@ -338,6 +338,17 @@ class TraceProjection:
         basis.update(entity_audit)
         return basis
 
+    @staticmethod
+    def project_for_compat(value: Any) -> dict[str, Any]:
+        """API/read-path projection: omit CoT from DB payloads but retain legacy keys."""
+        projected = TraceProjection.project(value)
+        if not isinstance(projected, dict):
+            return {}
+        for key in _COT_KEYS:
+            if key not in projected:
+                projected[key] = _NOT_RETAINED
+        return projected
+
 
 class AgentTraceService:
     """Writes and queries ``agent_trace`` rows with redacted I/O projections."""
@@ -430,9 +441,8 @@ class AgentTraceService:
                     row.output_data = output_projected
                 session.add(row)
                 await session.flush()
-
-        if audit_degraded:
-            await self._mark_decision_audit_degraded(event_id)
+                if audit_degraded:
+                    await self._mark_decision_audit_degraded(event_id)
         return trace_id
 
     async def _mark_decision_audit_degraded(self, event_id: str) -> None:

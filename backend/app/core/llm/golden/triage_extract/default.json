@@ -9,7 +9,7 @@
       "processes": [],
       "files": []
     },
-    "reasoning": "No clear threat pattern detected."
+    "decision_summary": "No clear threat pattern detected."
   },
   "model_name": "mock-model",
   "prompt_tokens": 12,

@@ -4,26 +4,28 @@ Provides the system prompt with entity type definitions and two few-shot
 examples, plus a helper to build the full message list for an LLM call.
 
 The ``TriageLLMResponse`` wrapper model bridges the prompt's three-key output
-(``event_type``, ``entities``, ``reasoning``) and the ``EntitySet`` model so
+(``event_type``, ``entities``, ``decision_summary``) and the ``EntitySet`` model so
 that LLM responses validate correctly — fixing the prompt/response_model
 mismatch noted in the PR review.
 """
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.llm.base import LLMMessage
 from app.models.entities import EntitySet
 from app.models.enums import EventType
+
+_MAX_TRIAGE_SUMMARY_CHARS = 512
 
 
 class TriageLLMResponse(BaseModel):
     """Wrapper that matches the three top-level keys the prompt asks for.
 
     The prompt's few-shot examples produce ``event_type``, ``entities``, and
-    ``reasoning`` at the top level.  Passing ``EntitySet`` directly as the
-    ``response_model`` would reject ``event_type`` and ``reasoning`` as
+    ``decision_summary`` at the top level.  Passing ``EntitySet`` directly as the
+    ``response_model`` would reject ``event_type`` and ``decision_summary`` as
     forbidden extra fields.  This wrapper accepts all three; the agent then
     extracts ``.entities`` for downstream use.
     """
@@ -32,7 +34,19 @@ class TriageLLMResponse(BaseModel):
 
     event_type: EventType
     entities: EntitySet = Field(default_factory=EntitySet)
-    reasoning: str = ""
+    decision_summary: str = Field(default="", max_length=_MAX_TRIAGE_SUMMARY_CHARS)
+    # Deprecated ISSUE-131: legacy key retained for parse compatibility only.
+    reasoning: str = Field(default="", deprecated=True)
+
+    @field_validator("decision_summary")
+    @classmethod
+    def _bound_summary(cls, value: str) -> str:
+        return value[:_MAX_TRIAGE_SUMMARY_CHARS]
+
+    @field_validator("reasoning")
+    @classmethod
+    def _reject_legacy_reasoning(cls, value: str) -> str:
+        return ""
 
 
 ENTITY_TYPE_DEFINITIONS = """
@@ -84,7 +98,7 @@ Expected output:
        "entity_id": "file-financereport"}
     ]
   },
-  "reasoning": "Insider data exfiltration pattern: account compressed \
+  "decision_summary": "Insider data exfiltration pattern: account compressed \
 sensitive file and uploaded to external IP and domain."
 }
 """  # noqa: E501
@@ -113,7 +127,7 @@ Expected output:
     "processes": [],
     "files": []
   },
-  "reasoning": "Single failed login from internal IP; likely not a threat."
+  "decision_summary": "Single failed login from internal IP; likely not a threat."
 }
 """  # noqa: E501
 
@@ -137,8 +151,9 @@ Few-shot examples:
 
 {FEW_SHOT_EXAMPLE_2}
 
-Always output valid JSON with these top-level keys: event_type, entities, reasoning.
+Always output valid JSON with these top-level keys: event_type, entities, decision_summary.
 Entities must follow the exact field schema shown in the examples.
+decision_summary must be a bounded structured summary (max 512 chars) — never chain-of-thought.
 If no entities of a category are found, return an empty list for that category."""
 )
 
