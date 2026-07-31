@@ -235,6 +235,12 @@
           },
           "title": "Diffs",
           "type": "array"
+        },
+        "quarantine_active": {
+          "default": false,
+          "description": "True when an active (non-expired) quarantine overrides threshold failures; consumers must read diffs alongside verdict.",
+          "title": "Quarantine Active",
+          "type": "boolean"
         }
       },
       "required": [

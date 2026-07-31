@@ -1,0 +1,128 @@
+{
+  "aggregates": {
+    "case_count": 3,
+    "error_count": 0,
+    "fail_count": 0,
+    "pass_count": 2,
+    "pass_rate": 1.0,
+    "required_scorer_error_count": 0,
+    "unevaluable_count": 1
+  },
+  "artifact_hash": "4698f4be4548136d773ec82ec796f34dbc35e573b809805f3f6e40439162ca43",
+  "case_results": [
+    {
+      "case_id": "malicious_process_exfil",
+      "case_status": "completed",
+      "observation": {
+        "case_id": "malicious_process_exfil",
+        "observation_available": true,
+        "observed_case_label": "true_positive",
+        "observed_final_verdict": "confirmed_threat",
+        "replay_notes": "mock_deterministic:threat;seed=42;n=f837bb5c",
+        "slice_type": "threat"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "threat expectation satisfied",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "threat_label"
+        }
+      ],
+      "slice_type": "threat",
+      "truth_content_hash": "22810ae1cb206ffee4ca6941237696d6d696b8445fef294463ef2a9fe8631f5c",
+      "truth_id": "truth-0e427ffd0ac7",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "partial_telemetry_unknown",
+      "case_status": "unevaluable",
+      "observation": {
+        "case_id": "partial_telemetry_unknown",
+        "observation_available": false,
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "replay_notes": "unevaluable:insufficient_observations;seed=42;n=47aea8c3",
+        "slice_type": "unevaluable"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "Required endpoint and identity channels missing; truth cannot be adjudicated.",
+          "outcome": "unevaluable",
+          "reason_code": "insufficient_observations",
+          "scorer_id": "unevaluable_coverage"
+        }
+      ],
+      "slice_type": "unevaluable",
+      "truth_content_hash": "9ac160e25610544e2f8d9aec6821a6293bb4097d6df3fc10e73886cab752708f",
+      "truth_id": "truth-5a4690313a2a",
+      "truth_revision": 1,
+      "unevaluable_reason": "insufficient_observations"
+    },
+    {
+      "case_id": "scheduled_task_benign",
+      "case_status": "completed",
+      "observation": {
+        "case_id": "scheduled_task_benign",
+        "observation_available": true,
+        "observed_case_label": "false_positive",
+        "observed_final_verdict": "false_positive",
+        "replay_notes": "mock_deterministic:benign;seed=42;n=3bbc7f70",
+        "slice_type": "benign"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "benign expectation satisfied",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "benign_label"
+        }
+      ],
+      "slice_type": "benign",
+      "truth_content_hash": "9051c8fcfeaaebc620e8eadeb1aee4644f2e6969bab90580a7a9337d5ecdd92d",
+      "truth_id": "truth-04dd078c79fa",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    }
+  ],
+  "code_sha": "evaluation-baseline-v1",
+  "completed_at": "2026-07-31T09:26:23.445008Z",
+  "config": {
+    "extra": {},
+    "release_refs": {
+      "config_profile": "mock_p0",
+      "kb_release_id": null,
+      "model_release_id": null,
+      "prompt_release_id": null,
+      "rule_release_id": null
+    },
+    "replay_fidelity": "echo_truth_stub",
+    "replay_mode": "mock_deterministic",
+    "scorer_ids": [
+      "benign_label",
+      "threat_label",
+      "unevaluable_coverage"
+    ],
+    "seed": 42
+  },
+  "dataset_content_hash": "8e15545dfa63e63233a434e96a06211c60fa58706ff137effa56f23fe70406f4",
+  "dataset_id": "shadowtrace_demo_v1",
+  "dataset_version": "2026.07.31",
+  "errors": [],
+  "gate": {
+    "diffs": [],
+    "manifest_path": "data/evaluation/shadowtrace_demo_v1/threshold_manifest.json",
+    "manifest_version": "2026.07.31",
+    "quarantine_active": false,
+    "verdict": "pass"
+  },
+  "run_id": "eval-f4c4a7dd-95e1-4234-a6e6-b1ed432f5d1b",
+  "schema_version": "1.0",
+  "started_at": "2026-07-31T09:26:23.438963Z",
+  "status": "completed",
+  "tenant_id": "tenant-evaluation-demo"
+}

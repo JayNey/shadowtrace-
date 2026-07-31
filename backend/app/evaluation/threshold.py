@@ -278,12 +278,14 @@ def evaluate_gate(
                 manifest_version=manifest.manifest_version,
                 manifest_path=manifest_path,
                 diffs=diffs,
+                quarantine_active=False,
             )
         return EvaluationGateResult(
             verdict=GateVerdict.PASS,
             manifest_version=manifest.manifest_version,
             manifest_path=manifest_path,
             diffs=diffs,
+            quarantine_active=True,
         )
 
     if diffs:

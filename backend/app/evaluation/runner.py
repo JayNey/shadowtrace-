@@ -13,10 +13,10 @@ from pathlib import Path
 
 from app.core.errors import ValidationError
 from app.evaluation.artifact import finalize_artifact
+from app.evaluation.paths import repo_relative_manifest_path
 from app.evaluation.replayer import MockDeterministicReplayer
 from app.evaluation.scorers.base import ScorerContext
 from app.evaluation.scorers.registry import ScorerRegistry, default_scorer_registry
-from app.evaluation.paths import repo_relative_manifest_path
 from app.evaluation.threshold import (
     evaluate_gate,
     load_threshold_manifest,
@@ -48,19 +48,34 @@ def _slice_type(truth: EvaluationCaseTruth) -> SliceType:
     return SliceType(truth.slice_expectation.slice_type)
 
 
-def _case_status(
-    slice_type: SliceType,
+def _scorer_failure_status(
     scorer_results: list[EvaluationScorerResult],
-) -> EvaluationRunStatus:
-    if slice_type == SliceType.UNEVALUABLE:
-        return EvaluationRunStatus.UNEVALUABLE
+) -> EvaluationRunStatus | None:
     if not scorer_results:
-        return EvaluationRunStatus.FAILED
+        return None
     if any(r.outcome == ScorerOutcome.ERROR for r in scorer_results):
         return EvaluationRunStatus.FAILED
     if any(r.outcome == ScorerOutcome.FAIL for r in scorer_results):
         return EvaluationRunStatus.FAILED
     if any(r.outcome == ScorerOutcome.SKIPPED for r in scorer_results):
+        return EvaluationRunStatus.FAILED
+    return None
+
+
+def _case_status(
+    slice_type: SliceType,
+    scorer_results: list[EvaluationScorerResult],
+) -> EvaluationRunStatus:
+    failure = _scorer_failure_status(scorer_results)
+    if failure is not None:
+        return failure
+    if slice_type == SliceType.UNEVALUABLE:
+        if not scorer_results:
+            return EvaluationRunStatus.UNEVALUABLE
+        if all(r.outcome == ScorerOutcome.UNEVALUABLE for r in scorer_results):
+            return EvaluationRunStatus.UNEVALUABLE
+        return EvaluationRunStatus.FAILED
+    if not scorer_results:
         return EvaluationRunStatus.FAILED
     if all(r.outcome == ScorerOutcome.PASS for r in scorer_results):
         return EvaluationRunStatus.COMPLETED
@@ -77,15 +92,15 @@ def _aggregate(
 
     for case in case_results:
         outcomes = {r.outcome for r in case.scorer_results}
-        if case.case_status == EvaluationRunStatus.UNEVALUABLE:
-            unevaluable_count += 1
-        elif ScorerOutcome.ERROR in outcomes:
+        if ScorerOutcome.ERROR in outcomes:
             error_count += 1
             required_scorer_error_count += sum(
                 1
                 for r in case.scorer_results
                 if r.outcome == ScorerOutcome.ERROR and r.scorer_id in required_scorer_ids
             )
+        elif case.case_status == EvaluationRunStatus.UNEVALUABLE:
+            unevaluable_count += 1
         elif ScorerOutcome.FAIL in outcomes or case.case_status == EvaluationRunStatus.FAILED:
             fail_count += 1
         elif (

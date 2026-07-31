@@ -18,7 +18,7 @@ from sqlalchemy.pool import NullPool
 from app.core.errors import ValidationError
 from app.db import models as orm
 from app.evaluation.artifact import compute_artifact_hash
-from app.evaluation.diff import diff_artifacts
+from app.evaluation.diff import diff_against_baseline, diff_artifacts
 from app.evaluation.fixture_loader import load_fixture_dataset
 from app.evaluation.replayer import MockDeterministicReplayer
 from app.evaluation.runner import EvaluationRunner, EvaluationRunRequest, run_fixture_evaluation
@@ -554,6 +554,7 @@ def test_quarantine_expired_fail_closed() -> None:
         now=datetime(2026, 7, 31, tzinfo=UTC),
     )
     assert gate.verdict == GateVerdict.FAIL_CLOSED
+    assert gate.quarantine_active is False
     assert gate.diffs[0].field == "quarantine"
     assert gate.diffs[0].actual == "expired"
 
@@ -587,6 +588,7 @@ def test_quarantine_active_passes_despite_threshold_diffs() -> None:
         now=datetime(2026, 7, 31, tzinfo=UTC),
     )
     assert gate.verdict == GateVerdict.PASS
+    assert gate.quarantine_active is True
     assert gate.diffs[0].field == "quarantine"
     assert gate.diffs[0].actual == "active"
     assert any(diff.field == "pass_rate" for diff in gate.diffs)
@@ -649,3 +651,111 @@ async def test_cli_skip_fixture_load_reuses_existing_truth(
     )
     assert count == manifest.case_count
     assert resolved.content_hash == manifest.content_hash
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_unevaluable_scorer_error_fail_closed(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+
+    class BrokenUnevaluableScorer:
+        scorer_id = "unevaluable_coverage"
+        supported_slices = frozenset({SliceType.UNEVALUABLE})
+
+        def score(self, truth, observation, ctx) -> EvaluationScorerResult:
+            raise RuntimeError("simulated unevaluable scorer failure")
+
+    registry = default_scorer_registry()
+    registry.replace_scorer(
+        ScorerRegistration(
+            scorer_id="unevaluable_coverage",
+            scorer=BrokenUnevaluableScorer(),
+            required=True,
+        )
+    )
+
+    artifact = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="deadbeef",
+        threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+        registry=registry,
+    )
+
+    unevaluable = next(c for c in artifact.case_results if c.slice_type == SliceType.UNEVALUABLE)
+    assert unevaluable.case_status == EvaluationRunStatus.FAILED
+    assert artifact.aggregates.error_count >= 1
+    assert artifact.aggregates.unevaluable_count == 0
+    assert artifact.status == EvaluationRunStatus.FAILED
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_diff_against_baseline_ignores_code_sha(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+    baseline = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="evaluation-baseline-v1",
+        threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+    )
+    candidate = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="different-commit-sha",
+        threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+    )
+    assert diff_artifacts(baseline, candidate)
+    assert diff_against_baseline(baseline, candidate) == []
+
+
+@pytest.mark.evaluation
+def test_diff_artifacts_reports_replay_fidelity_change() -> None:
+    from app.models.evaluation_run import (
+        EvaluationAggregateMetrics,
+        EvaluationRunArtifact,
+        EvaluationRunConfig,
+        EvaluationRunStatus,
+        EvaluationReleaseRefs,
+    )
+
+    common = dict(
+        run_id="eval-1",
+        tenant_id="tenant-evaluation-demo",
+        dataset_id="shadowtrace_demo_v1",
+        dataset_version="2026.07.31",
+        dataset_content_hash="a" * 64,
+        code_sha="evaluation-baseline-v1",
+        started_at=datetime(2026, 7, 31, tzinfo=UTC),
+        completed_at=datetime(2026, 7, 31, tzinfo=UTC),
+        status=EvaluationRunStatus.COMPLETED,
+        case_results=[],
+        aggregates=EvaluationAggregateMetrics(
+            case_count=0,
+            pass_count=0,
+            fail_count=0,
+            unevaluable_count=0,
+            error_count=0,
+            pass_rate=1.0,
+        ),
+        artifact_hash="b" * 64,
+    )
+    baseline = EvaluationRunArtifact(
+        **common,
+        config=EvaluationRunConfig(seed=42, replay_fidelity="echo_truth_stub"),
+    )
+    candidate = EvaluationRunArtifact(
+        **common,
+        config=EvaluationRunConfig(seed=42, replay_fidelity="real_replay"),
+    )
+    diffs = diff_artifacts(baseline, candidate)
+    assert any(diff.field == "config.replay_fidelity" for diff in diffs)

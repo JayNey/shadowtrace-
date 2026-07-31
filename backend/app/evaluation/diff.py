@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.evaluation.artifact import finalize_artifact
 from app.models.evaluation_run import EvaluationGateDiff, EvaluationRunArtifact
 
 
@@ -46,6 +47,28 @@ def diff_artifacts(
                 expected=baseline.config.seed,
                 actual=candidate.config.seed,
                 reason="replay seed changed",
+            )
+        )
+
+    if baseline.config.replay_fidelity != candidate.config.replay_fidelity:
+        diffs.append(
+            EvaluationGateDiff(
+                field="config.replay_fidelity",
+                expected=baseline.config.replay_fidelity,
+                actual=candidate.config.replay_fidelity,
+                reason="replay fidelity changed",
+            )
+        )
+
+    baseline_refs = baseline.config.release_refs.model_dump()
+    candidate_refs = candidate.config.release_refs.model_dump()
+    if baseline_refs != candidate_refs:
+        diffs.append(
+            EvaluationGateDiff(
+                field="config.release_refs",
+                expected=baseline_refs,
+                actual=candidate_refs,
+                reason="release refs changed",
             )
         )
 
@@ -107,4 +130,18 @@ def diff_artifacts(
     return diffs
 
 
-__all__ = ["diff_artifacts"]
+def diff_against_baseline(
+    baseline: EvaluationRunArtifact,
+    candidate: EvaluationRunArtifact,
+) -> list[EvaluationGateDiff]:
+    """Compare candidate output to a pinned baseline artifact.
+
+    Aligns ``code_sha`` to the baseline pin so CI can use ``GITHUB_SHA`` for
+    provenance while still detecting evaluation-output drift.
+    """
+    aligned = candidate.model_copy(update={"code_sha": baseline.code_sha})
+    aligned = finalize_artifact(aligned)
+    return diff_artifacts(baseline, aligned)
+
+
+__all__ = ["diff_against_baseline", "diff_artifacts"]

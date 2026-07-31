@@ -7,18 +7,6 @@
     "benign_label",
     "unevaluable_coverage"
   ],
-  "thresholds": [
-    {
-      "metric": "pass_rate",
-      "op": "gte",
-      "value": 1.0
-    },
-    {
-      "metric": "error_count",
-      "op": "lte",
-      "value": 0
-    }
-  ],
   "min_pass_rate": 1.0,
   "max_error_count": 0,
   "required_gate": false

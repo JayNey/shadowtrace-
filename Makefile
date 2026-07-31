@@ -287,7 +287,11 @@ evaluation-run:
 	cd "$(CURDIR)/backend"; \
 	DATABASE_URL="$(CI_DATABASE_URL)" $(PYTHON) -m alembic upgrade head; \
 	DATABASE_URL="$(CI_DATABASE_URL)" $(PYTHON) -m scripts.run_evaluation \
-		--output "$(CURDIR)/artifacts/evaluation/latest_run.json"
+		--output "$(CURDIR)/artifacts/evaluation/latest_run.json" \
+		--code-sha "$$(git -C "$(CURDIR)" rev-parse HEAD)" \
+		--seed 42 \
+		--threshold-manifest "$(CURDIR)/data/evaluation/shadowtrace_demo_v1/threshold_manifest.json" \
+		--compare-baseline "$(CURDIR)/data/evaluation/shadowtrace_demo_v1/baseline_artifact.json"
 
 evaluation-test:
 	@set -eu; \

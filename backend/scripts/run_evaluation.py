@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -79,8 +80,9 @@ async def _resolve_manifest(
 async def _run(args: argparse.Namespace) -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+    from app.evaluation.diff import diff_against_baseline
     from app.evaluation.runner import run_fixture_evaluation
-    from app.models.evaluation_run import EvaluationReleaseRefs
+    from app.models.evaluation_run import EvaluationReleaseRefs, EvaluationRunArtifact
     from app.services.evaluation_truth_service import EvaluationTruthService
 
     dataset_dir = Path(args.dataset_dir)
@@ -128,6 +130,7 @@ async def _run(args: argparse.Namespace) -> int:
                 "case_count": artifact.aggregates.case_count,
                 "pass_rate": artifact.aggregates.pass_rate,
                 "gate_verdict": artifact.gate.verdict.value if artifact.gate else None,
+                "quarantine_active": artifact.gate.quarantine_active if artifact.gate else False,
                 "replay_fidelity": artifact.config.replay_fidelity,
                 "output": str(output_path),
                 "loaded_cases": loaded_cases,
@@ -135,6 +138,34 @@ async def _run(args: argparse.Namespace) -> int:
             indent=2,
         )
     )
+
+    if args.compare_baseline is not None:
+        baseline_payload = json.loads(args.compare_baseline.read_text(encoding="utf-8"))
+        baseline = EvaluationRunArtifact.model_validate(baseline_payload)
+        drift = diff_against_baseline(baseline, artifact)
+        if drift:
+            print(
+                json.dumps(
+                    {
+                        "baseline_compare": "failed",
+                        "baseline_path": str(args.compare_baseline),
+                        "diffs": [item.model_dump(mode="json") for item in drift],
+                    },
+                    indent=2,
+                ),
+                file=sys.stderr,
+            )
+            await engine.dispose()
+            return 1
+        print(
+            json.dumps(
+                {
+                    "baseline_compare": "passed",
+                    "baseline_path": str(args.compare_baseline),
+                },
+                indent=2,
+            )
+        )
 
     await engine.dispose()
     if artifact.status.value != "completed":
@@ -186,6 +217,12 @@ def main() -> None:
         "--skip-fixture-load",
         action="store_true",
         help="Skip fixture persistence; read canonical truth already present in PostgreSQL",
+    )
+    parser.add_argument(
+        "--compare-baseline",
+        type=Path,
+        default=None,
+        help="Pinned baseline artifact JSON; fail when structural output drifts",
     )
     args = parser.parse_args()
 

@@ -147,6 +147,13 @@ class EvaluationGateResult(BaseModel):
     manifest_version: str = Field(default="", max_length=64)
     manifest_path: str | None = None
     diffs: list[EvaluationGateDiff] = Field(default_factory=list)
+    quarantine_active: bool = Field(
+        default=False,
+        description=(
+            "True when an active (non-expired) quarantine overrides threshold "
+            "failures; consumers must read diffs alongside verdict."
+        ),
+    )
 
 
 class EvaluationThresholdRule(BaseModel):
