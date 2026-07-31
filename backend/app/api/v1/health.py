@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Response
 from redis.asyncio import Redis
 
 from app.core.config import Settings, get_settings
-from app.db.session_provider import get_session_provider, peek_session_provider, ping_postgres_url
+from app.db.session_provider import peek_session_provider, ping_postgres_url
 
 router = APIRouter(tags=["health"])
 
