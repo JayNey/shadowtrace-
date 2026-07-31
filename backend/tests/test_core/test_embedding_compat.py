@@ -37,6 +37,13 @@ def test_validate_release_compatibility_detects_mismatch() -> None:
         validate_release_compatibility(query_release=query, stored_release=stored)
 
 
+def test_validate_release_compatibility_detects_model_id_mismatch() -> None:
+    query = build_embedding_release(Settings(embedding_mode="mock", embedding_model_id="model-a"))
+    stored = build_embedding_release(Settings(embedding_mode="mock", embedding_model_id="model-b"))
+    with pytest.raises(EmbeddingCompatibilityError, match="incompatible"):
+        validate_release_compatibility(query_release=query, stored_release=stored)
+
+
 def test_validate_vector_prefilter_requires_scope() -> None:
     with pytest.raises(EmbeddingPrefilterError, match="pre-filter required"):
         validate_vector_prefilter(
@@ -59,6 +66,17 @@ def test_prefiltered_sql_without_vector_order_still_scoped() -> None:
     sql = build_prefiltered_vector_sql(include_vector_order=False)
     assert_prefilter_in_sql(sql)
     assert "ORDER BY" not in sql
+
+
+def test_assert_prefilter_in_sql_rejects_unscoped_sql() -> None:
+    with pytest.raises(EmbeddingPrefilterError, match="missing mandatory tenant"):
+        assert_prefilter_in_sql(
+            """
+            SELECT chunk_id FROM knowledge_vector
+            WHERE kb_name = :kb_name
+            ORDER BY embedding <=> :query_vector
+            """
+        )
 
 
 def test_vector_query_context_rejects_release_mismatch() -> None:

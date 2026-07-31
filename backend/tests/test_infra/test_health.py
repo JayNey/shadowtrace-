@@ -119,6 +119,40 @@ async def test_health_degraded_returns_503_when_redis_down(client: AsyncClient) 
 
 
 @pytest.mark.asyncio
+async def test_health_degraded_returns_503_when_embedding_degraded(client: AsyncClient) -> None:
+    settings = Settings(SIMULATION_ENABLED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "degraded",
+                "mode": "remote",
+                "release_id": "remote-v1",
+                "model_id": "remote-model",
+                "dimension": 1024,
+                "distance_metric": "cosine",
+                "normalization": "unit_l2",
+                "config_hash": "",
+                "error_code": "embedding_provider_unavailable",
+                "latency_ms": 1.0,
+            },
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["embedding_provider"]["status"] == "degraded"
+
+
+@pytest.mark.asyncio
 async def test_check_postgres_returns_error_on_exception() -> None:
     with patch(
         "app.api.v1.health.peek_session_provider",

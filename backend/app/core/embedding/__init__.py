@@ -12,6 +12,7 @@ from app.core.embedding.compat import (
     compute_content_hash,
     validate_release_compatibility,
     validate_vector_dimension,
+    validate_vector_normalization,
     validate_vector_prefilter,
     validate_vector_query_context,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "reset_embedding_client",
     "validate_release_compatibility",
     "validate_vector_dimension",
+    "validate_vector_normalization",
     "validate_vector_prefilter",
     "validate_vector_query_context",
 ]

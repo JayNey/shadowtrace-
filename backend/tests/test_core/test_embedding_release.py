@@ -93,7 +93,7 @@ def test_vector_record_idempotency_key() -> None:
         content_hash="abc123",
         vector_revision=2,
     )
-    assert identity.idempotency_key == "tenant-a:attack_kb:obj-1:rel-1:mock-v1:abc123"
+    assert identity.idempotency_key == "tenant-a:attack_kb:obj-1:rel-1:mock-v1:abc123:r2"
 
 
 @pytest.mark.asyncio
@@ -110,3 +110,53 @@ async def test_mock_embeddings_are_deterministic_across_reruns() -> None:
     checksums = [hashlib.sha256(str(vec).encode()).hexdigest() for vec in first]
     assert len({*checksums}) == 2
     await svc.close()
+
+
+@pytest.mark.asyncio
+async def test_remote_embed_rejects_non_unit_vectors(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.core.embedding.base import EmbeddingCompatibilityError
+    from app.core.embedding.remote_embedder import RemoteEmbedder
+
+    settings = Settings(
+        embedding_mode="remote",
+        embedding_api_base_url="http://stub.local",
+        embedding_api_key="test-key",
+    )
+    remote = RemoteEmbedder(settings)
+
+    async def _fake_http() -> MagicMock:
+        client = MagicMock()
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        bad_vector = [2.0] + [0.0] * 1023
+        response.json.return_value = {"data": [{"embedding": bad_vector}]}
+        client.post = AsyncMock(return_value=response)
+        return client
+
+    monkeypatch.setattr(remote, "_get_http", _fake_http)
+    with pytest.raises(EmbeddingCompatibilityError, match="normalization mismatch"):
+        await remote.embed(["probe"])
+    await remote.close()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_closes_embedding_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import AsyncMock
+
+    from fastapi import FastAPI
+
+    from app.main import _lifespan
+
+    close_mock = AsyncMock()
+    monkeypatch.setattr("app.core.embedding.factory.close_embedding_client", close_mock)
+    monkeypatch.setattr("app.main._socketio_manager.start", AsyncMock())
+    monkeypatch.setattr("app.main._socketio_manager.stop", AsyncMock())
+    monkeypatch.setattr("app.main.shutdown_health_clients", AsyncMock())
+    monkeypatch.setattr("app.main.dispose_session_provider", AsyncMock())
+
+    async with _lifespan(FastAPI()):
+        pass
+
+    close_mock.assert_awaited_once()

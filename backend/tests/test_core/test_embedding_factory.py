@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from app.core.config import Settings
-from app.core.embedding.factory import get_embedding_client, reset_embedding_client
+from app.core.embedding.factory import (
+    close_embedding_client,
+    get_embedding_client,
+    reset_embedding_client,
+)
 from app.core.embedding.service import EmbeddingService
 
 
@@ -23,3 +31,26 @@ def test_reset_embedding_client_clears_singleton() -> None:
     second = get_embedding_client(settings=Settings(embedding_mode="mock"))
     assert first is not second
     reset_embedding_client()
+
+
+def test_reset_embedding_client_closes_remote_http() -> None:
+    reset_embedding_client()
+    svc = get_embedding_client(
+        settings=Settings(
+            embedding_mode="remote",
+            embedding_api_base_url="http://stub.local",
+        )
+    )
+    assert svc._remote is not None
+    close_mock = AsyncMock()
+    svc._remote.close = close_mock  # type: ignore[method-assign]
+    reset_embedding_client()
+    close_mock.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_close_embedding_client_disposes_singleton() -> None:
+    reset_embedding_client()
+    svc = get_embedding_client(settings=Settings(embedding_mode="mock"))
+    await close_embedding_client()
+    second = get_embedding_client(settings=Settings(embedding_mode="mock"))
+    assert second is not svc

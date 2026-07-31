@@ -80,6 +80,12 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         await shutdown_health_clients()
         await dispose_session_provider()
         try:
+            from app.core.embedding.factory import close_embedding_client
+
+            await close_embedding_client()
+        except Exception:
+            logger.warning("Embedding client shutdown failed", exc_info=True)
+        try:
             from app.api.v1.deps import shutdown_neo4j_client
 
             await shutdown_neo4j_client()

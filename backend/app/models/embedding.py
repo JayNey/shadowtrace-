@@ -70,9 +70,11 @@ class VectorRecordIdentity(BaseModel):
 
     @property
     def idempotency_key(self) -> str:
+        """Unique upsert key including revision for content/release changes (#634)."""
         return (
             f"{self.tenant_id}:{self.corpus_id}:{self.object_id}:"
-            f"{self.release_id}:{self.embedding_release_id}:{self.content_hash}"
+            f"{self.release_id}:{self.embedding_release_id}:"
+            f"{self.content_hash}:r{self.vector_revision}"
         )
 
 

@@ -8,7 +8,7 @@ import httpx
 
 from app.core.config import Settings
 from app.core.embedding.base import EmbeddingCompatibilityError, EmbeddingUnavailableError
-from app.core.embedding.compat import validate_vector_dimension
+from app.core.embedding.compat import validate_vector_dimension, validate_vector_normalization
 from app.core.embedding.release import build_embedding_release
 from app.models.embedding import EmbeddingRelease
 
@@ -75,6 +75,11 @@ class RemoteEmbedder:
             validate_vector_dimension(
                 vec,
                 expected_dimension=self._release.dimension,
+                context="remote_embedding",
+            )
+            validate_vector_normalization(
+                vec,
+                expected=self._release.normalization,
                 context="remote_embedding",
             )
             vectors.append(vec)

@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 
 from app.core.embedding.base import EmbeddingCompatibilityError, EmbeddingPrefilterError
-from app.models.embedding import EmbeddingRelease, VectorQueryContext, VectorQueryFilter
+from app.models.embedding import (
+    EmbeddingRelease,
+    VectorNormalization,
+    VectorQueryContext,
+    VectorQueryFilter,
+)
 
 _PREFILTER_SQL_FRAGMENT = re.compile(
     r"tenant_id\s*=\s*:tenant_id[\s\S]*corpus_id\s*=\s*:corpus_id[\s\S]*"
@@ -35,6 +41,25 @@ def validate_vector_dimension(
         )
 
 
+def validate_vector_normalization(
+    vector: list[float],
+    *,
+    expected: VectorNormalization,
+    context: str,
+    tolerance: float = 1e-3,
+) -> None:
+    """Fail closed when stored/query vectors violate the active release normalization."""
+    if expected != VectorNormalization.UNIT_L2:
+        return
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm == 0.0 or abs(norm - 1.0) > tolerance:
+        raise EmbeddingCompatibilityError(
+            message=f"{context}: vector normalization mismatch (expected unit_l2)",
+            error_code="embedding_compatibility_error",
+            details={"expected": expected.value, "l2_norm": norm},
+        )
+
+
 def validate_release_compatibility(
     *,
     query_release: EmbeddingRelease,
@@ -42,6 +67,10 @@ def validate_release_compatibility(
 ) -> None:
     """Fail closed when query and stored vectors are not from compatible releases."""
     mismatches: list[str] = []
+    if query_release.provider_mode != stored_release.provider_mode:
+        mismatches.append("provider_mode")
+    if query_release.model_id != stored_release.model_id:
+        mismatches.append("model_id")
     if query_release.release_id != stored_release.release_id:
         mismatches.append("release_id")
     if query_release.dimension != stored_release.dimension:
@@ -82,6 +111,11 @@ def validate_vector_query_context(ctx: VectorQueryContext) -> None:
             expected_dimension=ctx.active_release.dimension,
             context="query_vector",
         )
+        validate_vector_normalization(
+            ctx.query_vector,
+            expected=ctx.active_release.normalization,
+            context="query_vector",
+        )
 
 
 def validate_vector_prefilter(filter_: VectorQueryFilter) -> None:
@@ -105,7 +139,7 @@ def validate_vector_prefilter(filter_: VectorQueryFilter) -> None:
 
 
 def build_prefiltered_vector_sql(*, include_vector_order: bool = True) -> str:
-    """SQL template with mandatory tenant/release filters before vector ops."""
+    """SQL template for future ``knowledge_vector`` store (#634); not wired to KnowledgeStore yet."""
     order_clause = (
         "\n            ORDER BY embedding <=> :query_vector\n            LIMIT :top_k"
         if include_vector_order
