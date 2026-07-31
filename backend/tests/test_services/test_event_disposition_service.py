@@ -59,8 +59,8 @@ from app.models.enums import (
 )
 from app.models.source import SourceReference
 from app.services.context_service import EventContextStore, event_summary_from_security_event
-from app.services.disposition_sync_service import DispositionSyncService
 from app.services.decision_record_service import DecisionRecordService
+from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService
 from tests.helpers.decision_audit import seed_minimum_disposition_audit
 from tests.test_services._mock_xdr_test_helpers import (

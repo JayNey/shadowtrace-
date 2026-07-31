@@ -100,9 +100,7 @@ def _agent_decision_basis(output_data: Any) -> dict[str, Any]:
             continue
         existing = basis.get(key)
         if existing in (None, "", [], {}) or (
-            key == "input_summary"
-            and isinstance(existing, str)
-            and existing.startswith("keys=")
+            key == "input_summary" and isinstance(existing, str) and existing.startswith("keys=")
         ):
             basis[key] = value
     return basis
@@ -223,7 +221,9 @@ def _normalize_agent_traces(rows: list[orm.AgentTrace]) -> list[DecisionTraceEnt
                 detail=_agent_detail(row, inferred),
                 ref_id=row.trace_id,
                 decision_record_ref=(
-                    record_ref.strip() if isinstance(record_ref, str) and record_ref.strip() else None
+                    record_ref.strip()
+                    if isinstance(record_ref, str) and record_ref.strip()
+                    else None
                 ),
             )
         )

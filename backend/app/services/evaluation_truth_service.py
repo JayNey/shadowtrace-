@@ -266,9 +266,7 @@ def _truth_from_orm(row: orm.EvaluationCaseTruth) -> EvaluationCaseTruth:
         ],
         slice_expectation=_parse_slice_expectation(row.slice_expectation),
         label_provenance=LabelProvenance.model_validate(row.label_provenance),
-        operational_mapping=(
-            OperationalTruthMapping.model_validate(mapping) if mapping else None
-        ),
+        operational_mapping=(OperationalTruthMapping.model_validate(mapping) if mapping else None),
         revision=row.revision,
         supersedes_truth_id=row.supersedes_truth_id,
         correction_reason=row.correction_reason,
@@ -302,9 +300,7 @@ class EvaluationTruthService:
                     "EvaluationCaseTruth idempotency replay hash mismatch key=%s",
                     truth.idempotency_key,
                 )
-                raise ValidationError(
-                    "truth idempotency key replay with different content hash"
-                )
+                raise ValidationError("truth idempotency key replay with different content hash")
             return _truth_from_orm(existing)
 
         if truth.supersedes_truth_id:
@@ -496,9 +492,7 @@ class EvaluationTruthService:
                     )
                     .where(*filters)
                 )
-                total = await sess.scalar(
-                    select(func.count()).select_from(base_stmt.subquery())
-                )
+                total = await sess.scalar(select(func.count()).select_from(base_stmt.subquery()))
                 rows = await sess.scalars(
                     base_stmt.order_by(
                         orm.EvaluationCaseTruth.dataset_id.asc(),

@@ -614,7 +614,7 @@ class ReActEngine:
                     "read-only step toward the goal. Reply with JSON only: "
                     '{"decision_summary": str (max 512 chars), '
                     '"reason_code": "corroborate_indicator|resolve_entity|confirm_path|'
-                    'fill_evidence_gap|stop_sufficient|stop_no_target|'
+                    "fill_evidence_gap|stop_sufficient|stop_no_target|"
                     'default_fallback|unspecified", '
                     '"action": {"action_type": "call_tool|call_agent|finish", '
                     '"target_name": str, "params": object, '

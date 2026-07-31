@@ -593,9 +593,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         degraded = extraction.text_degraded and source_validated.entity_set == EntitySet()
 
         if extraction.text_degraded and not degraded:
-            summary_notes.append(
-                "Text entity extraction empty; using structured source entities."
-            )
+            summary_notes.append("Text entity extraction empty; using structured source entities.")
         elif extraction.text_degraded:
             degraded = True
             summary_notes.append("Entity extraction degraded to regex fallback.")
@@ -616,9 +614,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 f"Rejected {text_rejected} invalid text-derived entity candidate(s)."
             )
         if source_rejected:
-            summary_notes.append(
-                f"Rejected {source_rejected} invalid source entity candidate(s)."
-            )
+            summary_notes.append(f"Rejected {source_rejected} invalid source entity candidate(s).")
         if source_validated.rejection_summary["total_rejected"]:
             degradation_reasons.append("source_enrichment_partial")
 

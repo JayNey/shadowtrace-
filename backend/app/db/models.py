@@ -561,7 +561,9 @@ class EvaluationCaseTruth(Base):
         String, ForeignKey("evaluation_case_truth.truth_id"), nullable=True
     )
     correction_reason: Mapped[str | None] = mapped_column(String, nullable=True)
-    retention_policy: Mapped[str] = mapped_column(String, default="evaluation_standard", nullable=False)
+    retention_policy: Mapped[str] = mapped_column(
+        String, default="evaluation_standard", nullable=False
+    )
     schema_version: Mapped[str] = mapped_column(String, nullable=False)
     truth_hash: Mapped[str] = mapped_column(String, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False)

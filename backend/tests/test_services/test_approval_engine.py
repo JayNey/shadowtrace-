@@ -307,7 +307,7 @@ def test_evaluate_level_rules_l0_auto_approve() -> None:
     assert decision.rule_applied == "level_l0_l1"
 
 
-def test_evaluate_level_rules_l2_below_threshold() -> None:
+def test_evaluate_level_rules_l2_always_requires_approval() -> None:
     action = _action_model(action_level=ActionLevel.L2)
     decision = evaluate_level_rules(action, confidence=0.5, severity=Severity.MEDIUM)
     assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL

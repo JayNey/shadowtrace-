@@ -234,10 +234,6 @@ async def test_decision_trace_api_zero_leakage_on_injected_cot(
     assert prompt_leak not in serialized
     assert "hidden chain" not in serialized.lower()
     body = resp.json()
-    agent = next(
-        entry
-        for entry in body["entries"]
-        if entry["entry_type"] == "agent_execution"
-    )
+    agent = next(entry for entry in body["entries"] if entry["entry_type"] == "agent_execution")
     assert agent["detail"]["thought"] == "[NOT_RETAINED]"
     assert agent["detail"]["reflection"] == "[NOT_RETAINED]"

@@ -726,7 +726,6 @@ def test_diff_artifacts_reports_replay_fidelity_change() -> None:
         EvaluationRunArtifact,
         EvaluationRunConfig,
         EvaluationRunStatus,
-        EvaluationReleaseRefs,
     )
 
     common = dict(

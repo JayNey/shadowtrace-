@@ -979,9 +979,7 @@ class TestWriteTriageResultTransientFailure:
         assert any(
             "triage_result persistence failed" in item for item in result.degradation_reasons
         )
-        assert any(
-            "working memory unavailable" in item for item in result.degradation_reasons
-        )
+        assert any("working memory unavailable" in item for item in result.degradation_reasons)
 
     @pytest.mark.asyncio
     async def test_retryable_shadowtrace_error_marks_degraded(self):

@@ -94,6 +94,7 @@ select = ["E", "F", "I", "UP", "B"]
 "app/api/v1/events.py" = ["B008"]
 "app/api/v1/source_records.py" = ["B008"]
 "app/api/v1/trajectory.py" = ["B008"]
+"app/models/__init__.py" = ["I001"]  # evaluation_run before evaluation_quality (circular import)
 "tests/conftest.py" = ["E402"]
 "tests/integration/integration_fixtures.py" = ["E402"]
 

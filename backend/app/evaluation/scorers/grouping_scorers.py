@@ -110,7 +110,9 @@ class AttackTechniqueCoverageScorer:
             return _not_applicable(self.scorer_id, "unevaluable slice has no ATT&CK expectation")
         expected = expectation.expected_attack_techniques
         if not expected:
-            return _not_applicable(self.scorer_id, "no expected_attack_techniques configured in truth")
+            return _not_applicable(
+                self.scorer_id, "no expected_attack_techniques configured in truth"
+            )
         if not observation.observation_available:
             return _error(self.scorer_id, "missing_observation", "observation unavailable")
         observed = set(observation.observed_attack_techniques)
@@ -138,7 +140,9 @@ class IncidentGroupingConsistencyScorer:
         if expectation is None:
             return _not_applicable(self.scorer_id, "unevaluable slice has no incident grouping")
         if expectation.expected_incident_group_id is None:
-            return _not_applicable(self.scorer_id, "no expected_incident_group_id configured in truth")
+            return _not_applicable(
+                self.scorer_id, "no expected_incident_group_id configured in truth"
+            )
         if not observation.observation_available:
             return _error(self.scorer_id, "missing_observation", "observation unavailable")
         if observation.observed_incident_group_id is None:

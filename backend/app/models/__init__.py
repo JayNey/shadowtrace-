@@ -53,8 +53,45 @@ from app.models.agent_io import (
     VerifyAgentInput,
 )
 from app.models.context import EventContext
-from app.models.decision_record import DecisionRecord, DecisionRecordCandidate, DecisionStage
+from app.models.decision_record import DecisionRecord, DecisionRecordCandidate
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
+from app.models.evaluation_truth import (
+    BenignSliceExpectation,
+    EvaluationCaseTruth,
+    EvaluationDatasetManifest,
+    EvaluationTruthListResult,
+    EvaluationTruthQuery,
+    LabelProvenance,
+    OperationalTruthMapping,
+    ThreatSliceExpectation,
+    TruthObservationRef,
+    UnevaluableSliceExpectation,
+)
+from app.models.evaluation_run import (
+    EvaluationAggregateMetrics,
+    EvaluationCaseResult,
+    EvaluationGateResult,
+    EvaluationQuarantinePolicy,
+    EvaluationRunArtifact,
+    EvaluationRunConfig,
+    EvaluationThresholdManifest,
+)
+from app.models.evaluation_quality import (
+    ConfidenceInterval,
+    EvaluationQualityReport,
+    GroupingScorerSummary,
+    MetricDenominator,
+    QualityMetricValue,
+)
+from app.models.embedding import (
+    EmbeddingProviderHealth,
+    EmbeddingRelease,
+    VectorImportUpsert,
+    VectorIndexSchema,
+    VectorQueryContext,
+    VectorQueryFilter,
+    VectorRecordIdentity,
+)
 from app.models.disposition import (
     DispositionCommand,
     DispositionOutboxRecord,
@@ -68,15 +105,6 @@ from app.models.disposition import (
     TargetWritebackResult,
     WritebackSummary,
 )
-from app.models.embedding import (
-    EmbeddingProviderHealth,
-    EmbeddingRelease,
-    VectorImportUpsert,
-    VectorIndexSchema,
-    VectorQueryContext,
-    VectorQueryFilter,
-    VectorRecordIdentity,
-)
 from app.models.entities import (
     AccountEntity,
     DomainEntity,
@@ -85,34 +113,6 @@ from app.models.entities import (
     HostEntity,
     IPEntity,
     ProcessEntity,
-)
-from app.models.evaluation_quality import (
-    ConfidenceInterval,
-    EvaluationQualityReport,
-    GroupingScorerSummary,
-    MetricDenominator,
-    QualityMetricValue,
-)
-from app.models.evaluation_run import (
-    EvaluationAggregateMetrics,
-    EvaluationCaseResult,
-    EvaluationGateResult,
-    EvaluationQuarantinePolicy,
-    EvaluationRunArtifact,
-    EvaluationRunConfig,
-    EvaluationThresholdManifest,
-)
-from app.models.evaluation_truth import (
-    BenignSliceExpectation,
-    EvaluationCaseTruth,
-    EvaluationDatasetManifest,
-    EvaluationTruthListResult,
-    EvaluationTruthQuery,
-    LabelProvenance,
-    OperationalTruthMapping,
-    ThreatSliceExpectation,
-    TruthObservationRef,
-    UnevaluableSliceExpectation,
 )
 from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
 from app.models.execution import (

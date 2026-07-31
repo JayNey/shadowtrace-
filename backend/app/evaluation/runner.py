@@ -110,9 +110,7 @@ def _aggregate(
     required_scorer_error_count = 0
 
     for case in case_results:
-        required_results = [
-            r for r in case.scorer_results if r.scorer_id in required_scorer_ids
-        ]
+        required_results = [r for r in case.scorer_results if r.scorer_id in required_scorer_ids]
         outcomes = {r.outcome for r in required_results}
         if ScorerOutcome.ERROR in outcomes:
             error_count += 1
@@ -125,10 +123,7 @@ def _aggregate(
             unevaluable_count += 1
         elif ScorerOutcome.FAIL in outcomes or case.case_status == EvaluationRunStatus.FAILED:
             fail_count += 1
-        elif (
-            required_results
-            and all(r.outcome == ScorerOutcome.PASS for r in required_results)
-        ):
+        elif required_results and all(r.outcome == ScorerOutcome.PASS for r in required_results):
             pass_count += 1
         else:
             fail_count += 1

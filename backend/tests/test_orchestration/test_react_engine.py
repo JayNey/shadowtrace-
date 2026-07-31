@@ -691,7 +691,10 @@ async def test_whitelisted_read_only_agent_executes(
         return {"status": "success", "agent_name": "evidence_gap_probe", "data": {"gaps": []}}
 
     llm = ScriptedLLM()
-    llm.add_round(think_agent("evidence_gap_probe", {"focus": "dns"}), reflect(0.9, gap_code=ReActGapCode.NONE))
+    llm.add_round(
+        think_agent("evidence_gap_probe", {"focus": "dns"}),
+        reflect(0.9, gap_code=ReActGapCode.NONE),
+    )
     engine = ReActEngine(llm)  # type: ignore[arg-type]
     executor = ReadOnlyReActExecutor(
         tool_executor,

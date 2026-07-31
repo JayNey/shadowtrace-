@@ -181,9 +181,7 @@ async def test_idempotency_replay_with_different_hash_fails(
 
     replay = replay.model_copy(
         update={
-            "truth_hash": compute_truth_hash(
-                replay.model_dump(mode="json", exclude={"truth_hash"})
-            )
+            "truth_hash": compute_truth_hash(replay.model_dump(mode="json", exclude={"truth_hash"}))
         }
     )
     with pytest.raises(ValidationError):

@@ -361,9 +361,7 @@ def _build_record_payload(
         confidence=confidence_value,
         uncertainty_codes=[
             code
-            for code in (
-                output_data.get("uncertainty_code"),
-            )
+            for code in (output_data.get("uncertainty_code"),)
             if isinstance(code, str) and code.strip() and code != ReActUncertaintyCode.NONE.value
         ],
         guardrail_flags=[
@@ -474,10 +472,7 @@ class DecisionRecordService:
         if existing is not None:
             return await self._finalize_existing_record(existing, record)
 
-        if (
-            record.stage is DecisionStage.PLANNER
-            and record.revision > 1
-        ):
+        if record.stage is DecisionStage.PLANNER and record.revision > 1:
             selected_action = str(record.selected.get("selected_action", ""))
             if selected_action.startswith("plan:"):
                 plan_id = selected_action.removeprefix("plan:")
@@ -486,9 +481,7 @@ class DecisionRecordService:
                     f"planner_agent:{plan_id}:rev{record.revision - 1}"
                 )
                 prev = await session.scalar(
-                    select(orm.DecisionRecord).where(
-                        orm.DecisionRecord.idempotency_key == prev_key
-                    )
+                    select(orm.DecisionRecord).where(orm.DecisionRecord.idempotency_key == prev_key)
                 )
                 if prev is not None:
                     record = record.model_copy(
@@ -639,9 +632,7 @@ class DecisionRecordService:
                 "auto disposition requires material decision audit records",
                 details={"event_id": event_id},
             )
-        blocking = [
-            row.record_id for row in material_records if self.blocks_auto_disposition(row)
-        ]
+        blocking = [row.record_id for row in material_records if self.blocks_auto_disposition(row)]
         if blocking:
             raise ValidationError(
                 "auto disposition blocked by decision audit",
