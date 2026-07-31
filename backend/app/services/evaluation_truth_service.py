@@ -14,7 +14,7 @@ from typing import Any
 
 import orjson
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -122,6 +122,11 @@ def _parse_slice_expectation(raw: Any) -> SliceExpectation:
 
         return UnevaluableSliceExpectation.model_validate(raw)
     raise ValidationError(f"unsupported slice_type: {slice_type!r}")
+
+
+def compute_dataset_manifest_hash(content_hashes: list[str]) -> str:
+    """Hash sorted per-case content hashes into a dataset-level manifest hash."""
+    return hashlib.sha256(_canonical_bytes(sorted(content_hashes))).hexdigest()
 
 
 def build_evaluation_case_truth(
@@ -471,20 +476,53 @@ class EvaluationTruthService:
         offset = (query.page - 1) * query.page_size
 
         async def _run(sess: AsyncSession) -> EvaluationTruthListResult:
-            total = await sess.scalar(
-                select(func.count()).select_from(orm.EvaluationCaseTruth).where(*filters)
-            )
-            rows = await sess.scalars(
-                select(orm.EvaluationCaseTruth)
-                .where(*filters)
-                .order_by(
-                    orm.EvaluationCaseTruth.dataset_id.asc(),
-                    orm.EvaluationCaseTruth.case_id.asc(),
-                    orm.EvaluationCaseTruth.revision.asc(),
+            if query.latest_revision_only:
+                latest_subq = (
+                    select(
+                        orm.EvaluationCaseTruth.case_id,
+                        func.max(orm.EvaluationCaseTruth.revision).label("max_revision"),
+                    )
+                    .where(*filters)
+                    .group_by(orm.EvaluationCaseTruth.case_id)
+                    .subquery()
                 )
-                .offset(offset)
-                .limit(query.page_size)
-            )
+                base_stmt = (
+                    select(orm.EvaluationCaseTruth)
+                    .join(
+                        latest_subq,
+                        and_(
+                            orm.EvaluationCaseTruth.case_id == latest_subq.c.case_id,
+                            orm.EvaluationCaseTruth.revision == latest_subq.c.max_revision,
+                        ),
+                    )
+                    .where(*filters)
+                )
+                total = await sess.scalar(
+                    select(func.count()).select_from(base_stmt.subquery())
+                )
+                rows = await sess.scalars(
+                    base_stmt.order_by(
+                        orm.EvaluationCaseTruth.dataset_id.asc(),
+                        orm.EvaluationCaseTruth.case_id.asc(),
+                    )
+                    .offset(offset)
+                    .limit(query.page_size)
+                )
+            else:
+                total = await sess.scalar(
+                    select(func.count()).select_from(orm.EvaluationCaseTruth).where(*filters)
+                )
+                rows = await sess.scalars(
+                    select(orm.EvaluationCaseTruth)
+                    .where(*filters)
+                    .order_by(
+                        orm.EvaluationCaseTruth.dataset_id.asc(),
+                        orm.EvaluationCaseTruth.case_id.asc(),
+                        orm.EvaluationCaseTruth.revision.asc(),
+                    )
+                    .offset(offset)
+                    .limit(query.page_size)
+                )
             items = [_truth_from_orm(row) for row in rows]
             return EvaluationTruthListResult(
                 total=int(total or 0),
@@ -537,7 +575,7 @@ class EvaluationTruthService:
                 .order_by(orm.EvaluationCaseTruth.case_id.asc())
             )
             content_hashes = sorted(row.content_hash for row in rows)
-            dataset_hash = hashlib.sha256(_canonical_bytes(content_hashes)).hexdigest()
+            dataset_hash = compute_dataset_manifest_hash(content_hashes)
             return EvaluationDatasetManifest(
                 tenant_id=tenant_id,
                 dataset_id=dataset_id,
@@ -558,5 +596,6 @@ __all__ = [
     "build_evaluation_case_truth",
     "build_idempotency_key",
     "compute_content_hash",
+    "compute_dataset_manifest_hash",
     "compute_truth_hash",
 ]

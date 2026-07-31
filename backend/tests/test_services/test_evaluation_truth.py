@@ -345,3 +345,104 @@ async def test_revision_chain_is_queryable(
     assert chain[0].truth_id == first.truth_id
     assert chain[1].supersedes_truth_id == first.truth_id
     assert chain[1].truth_id == second.truth_id
+
+
+def test_build_truth_redacts_sensitive_provenance() -> None:
+    secret = "Bearer adjudicator-secret-token-113"
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="case-pii",
+        slice_expectation=ThreatSliceExpectation(),
+        label_provenance=LabelProvenance(
+            adjudicator=f"reviewer {secret}",
+            adjudicated_at=datetime(2026, 7, 31, 8, 0, tzinfo=UTC),
+            source_kind="manual_review",
+            revision_notes=f"notes contain {secret}",
+        ),
+    )
+    serialized = str(truth.label_provenance.model_dump(mode="json"))
+    assert secret not in serialized
+    assert "[REDACTED]" in truth.label_provenance.adjudicator
+
+
+@pytest.mark.asyncio
+async def test_query_truths_latest_revision_only_excludes_superseded(
+    service: EvaluationTruthService,
+) -> None:
+    tenant_id = _tenant()
+    original = await service.persist(_threat_truth(tenant_id=tenant_id, case_id="case-latest-only"))
+    await service.append_correction(
+        tenant_id=tenant_id,
+        supersedes_truth_id=original.truth_id,
+        slice_expectation=BenignSliceExpectation(),
+        label_provenance=_provenance(),
+        correction_reason="latest-only query test",
+    )
+
+    latest_only = await service.query_truths(
+        EvaluationTruthQuery(
+            tenant_id=tenant_id,
+            dataset_id=original.dataset_id,
+        )
+    )
+    assert latest_only.total == 1
+    assert latest_only.items[0].revision == 2
+    assert latest_only.items[0].slice_expectation.slice_type == SliceType.BENIGN.value
+
+    include_history = await service.query_truths(
+        EvaluationTruthQuery(
+            tenant_id=tenant_id,
+            dataset_id=original.dataset_id,
+            latest_revision_only=False,
+        )
+    )
+    assert include_history.total == 2
+
+
+@pytest.mark.asyncio
+async def test_append_correction_rejects_cross_tenant_supersedes(
+    service: EvaluationTruthService,
+) -> None:
+    tenant_a = _tenant()
+    tenant_b = _tenant()
+    truth = await service.persist(_threat_truth(tenant_id=tenant_a, case_id="case-cross-tenant"))
+    with pytest.raises(ResourceNotFoundError):
+        await service.append_correction(
+            tenant_id=tenant_b,
+            supersedes_truth_id=truth.truth_id,
+            slice_expectation=BenignSliceExpectation(),
+            label_provenance=_provenance(),
+            correction_reason="cross tenant must fail",
+        )
+
+
+@pytest.mark.asyncio
+async def test_append_correction_requires_non_empty_reason(
+    service: EvaluationTruthService,
+) -> None:
+    tenant_id = _tenant()
+    truth = await service.persist(_threat_truth(tenant_id=tenant_id, case_id="case-empty-reason"))
+    with pytest.raises(ValidationError, match="correction_reason is required"):
+        await service.append_correction(
+            tenant_id=tenant_id,
+            supersedes_truth_id=truth.truth_id,
+            slice_expectation=BenignSliceExpectation(),
+            label_provenance=_provenance(),
+            correction_reason="   ",
+        )
+
+
+@pytest.mark.asyncio
+async def test_fixture_loader_manifest_matches_service_after_load(
+    service: EvaluationTruthService,
+) -> None:
+    truths, loader_manifest = await load_fixture_dataset(service, DATASET_DIR)
+    service_manifest = await service.get_dataset_manifest(
+        tenant_id=loader_manifest.tenant_id,
+        dataset_id=loader_manifest.dataset_id,
+        dataset_version=loader_manifest.dataset_version,
+    )
+    assert loader_manifest.content_hash == service_manifest.content_hash
+    assert loader_manifest.case_count == service_manifest.case_count == len(truths)

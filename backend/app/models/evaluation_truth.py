@@ -169,6 +169,13 @@ class EvaluationTruthQuery(BaseModel):
     dataset_version: str | None = Field(default=None, max_length=64)
     case_id: str | None = Field(default=None, max_length=128)
     slice_type: SliceType | None = None
+    latest_revision_only: bool = Field(
+        default=True,
+        description=(
+            "When true (default), return only the highest revision per case_id. "
+            "Set false to include superseded historical revisions."
+        ),
+    )
     page: int = Field(default=1, ge=1)
     page_size: int = Field(default=50, ge=1, le=200)
 

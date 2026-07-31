@@ -23,6 +23,7 @@ from app.models.evaluation_truth import (
 from app.services.evaluation_truth_service import (
     EvaluationTruthService,
     build_evaluation_case_truth,
+    compute_dataset_manifest_hash,
 )
 
 _SLICE_BUILDERS = {
@@ -113,15 +114,6 @@ def load_fixture_cases(dataset_dir: Path) -> list[dict[str, Any]]:
     return cases
 
 
-def compute_dataset_content_hash(truths: list[EvaluationCaseTruth]) -> str:
-    import hashlib
-
-    import orjson
-
-    content_hashes = sorted(truth.content_hash for truth in truths)
-    return hashlib.sha256(orjson.dumps(content_hashes, option=orjson.OPT_SORT_KEYS)).hexdigest()
-
-
 async def load_fixture_dataset(
     service: EvaluationTruthService,
     dataset_dir: Path,
@@ -149,22 +141,29 @@ async def load_fixture_dataset(
         )
         persisted.append(await service.persist(truth))
 
-    manifest_hash = compute_dataset_content_hash(persisted)
-    expected_hash = manifest.get("content_hash")
-    if isinstance(expected_hash, str) and expected_hash.strip():
-        if expected_hash.strip() != manifest_hash:
-            raise ValueError(
-                f"dataset content_hash mismatch: expected {expected_hash}, got {manifest_hash}"
-            )
-
-    dataset_manifest = EvaluationDatasetManifest(
+    service_manifest = await service.get_dataset_manifest(
         tenant_id=resolved_tenant,
         dataset_id=dataset_id,
         dataset_version=dataset_version,
-        content_hash=manifest_hash,
-        case_count=len(persisted),
     )
-    return persisted, dataset_manifest
+    expected_hash = manifest.get("content_hash")
+    if isinstance(expected_hash, str) and expected_hash.strip():
+        if expected_hash.strip() != service_manifest.content_hash:
+            raise ValueError(
+                "dataset content_hash mismatch: expected "
+                f"{expected_hash}, got {service_manifest.content_hash}"
+            )
+
+    local_hash = compute_dataset_manifest_hash(
+        sorted(truth.content_hash for truth in persisted)
+    )
+    if local_hash != service_manifest.content_hash:
+        raise ValueError(
+            "fixture loader manifest hash diverged from EvaluationTruthService: "
+            f"{local_hash} != {service_manifest.content_hash}"
+        )
+
+    return persisted, service_manifest
 
 
 __all__ = [

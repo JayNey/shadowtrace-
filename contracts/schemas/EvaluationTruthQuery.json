@@ -69,6 +69,12 @@
       ],
       "default": null
     },
+    "latest_revision_only": {
+      "default": true,
+      "description": "When true (default), return only the highest revision per case_id. Set false to include superseded historical revisions.",
+      "title": "Latest Revision Only",
+      "type": "boolean"
+    },
     "page": {
       "default": 1,
       "minimum": 1,
