@@ -9,11 +9,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.evaluation_truth import SliceType
+
+if TYPE_CHECKING:
+    from app.models.evaluation_quality import EvaluationQualityReport
 
 EVALUATION_RUN_SCHEMA_VERSION = "1.0"
 
@@ -237,3 +240,14 @@ __all__ = [
     "GateVerdict",
     "ScorerOutcome",
 ]
+
+
+def _rebuild_with_quality_report() -> None:
+    from app.models.evaluation_quality import EvaluationQualityReport
+
+    EvaluationRunArtifact.model_rebuild(
+        _types_namespace={"EvaluationQualityReport": EvaluationQualityReport}
+    )
+
+
+_rebuild_with_quality_report()

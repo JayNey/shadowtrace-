@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -174,13 +173,13 @@ def build_evaluation_case_truth(
         ),
     }
     content_hash = compute_content_hash(payload)
-    truth_id = f"truth-{uuid.uuid4().hex[:12]}"
     idempotency_key = build_idempotency_key(
         tenant_id=payload["tenant_id"],
         dataset_id=payload["dataset_id"],
         case_id=payload["case_id"],
         revision=payload["revision"],
     )
+    truth_id = f"truth-{hashlib.sha256(idempotency_key.encode()).hexdigest()[:12]}"
     payload.update(
         {
             "truth_id": truth_id,

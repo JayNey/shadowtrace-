@@ -8,7 +8,7 @@
     "required_scorer_error_count": 0,
     "unevaluable_count": 1
   },
-  "artifact_hash": "0a6b8eae0d898d614b39e3d335b099c8bd85a6cdc61f99fe11846bd4aa4ca6eb",
+  "artifact_hash": "5b6b99b223dd9cd5e6b5e464936180a90ea39f5c3aba46e4c8871389ce041e5c",
   "case_results": [
     {
       "case_id": "malicious_process_exfil",
@@ -58,8 +58,8 @@
         }
       ],
       "slice_type": "threat",
-      "truth_content_hash": "2daecaa23cfc1f2b8e7617f4e41729fded19ebd28fd6808d401441181e62ee08",
-      "truth_id": "truth-bdca7a1fa165",
+      "truth_content_hash": "837f2f480e5df638626dbf1f266551b52f7266aedb59801ad9f3e445557eecaf",
+      "truth_id": "truth-b1e4071607a4",
       "truth_revision": 1,
       "unevaluable_reason": null
     },
@@ -88,7 +88,7 @@
       ],
       "slice_type": "unevaluable",
       "truth_content_hash": "9ac160e25610544e2f8d9aec6821a6293bb4097d6df3fc10e73886cab752708f",
-      "truth_id": "truth-96ac5d7cec13",
+      "truth_id": "truth-9eaefc6fef38",
       "truth_revision": 1,
       "unevaluable_reason": "insufficient_observations"
     },
@@ -138,13 +138,13 @@
       ],
       "slice_type": "benign",
       "truth_content_hash": "6cd3c19ca303ad06a0102a46e25491b80041bec6cd81fa68bc01920758dc4f67",
-      "truth_id": "truth-6fc5ad295e32",
+      "truth_id": "truth-e080e5874a50",
       "truth_revision": 1,
       "unevaluable_reason": null
     }
   ],
   "code_sha": "evaluation-baseline-v1",
-  "completed_at": "2026-07-31T09:33:43.760710Z",
+  "completed_at": "2026-07-31T10:22:57.890891Z",
   "config": {
     "extra": {},
     "release_refs": {
@@ -166,7 +166,7 @@
     ],
     "seed": 42
   },
-  "dataset_content_hash": "3df98ef9bfe51441c4172e6687cf7e03693812b0b867745056677d7ae6029d47",
+  "dataset_content_hash": "319e108b7326084beb1974ae26b8fd023139c945309fd854e80663af68bebc42",
   "dataset_id": "shadowtrace_demo_v1",
   "dataset_version": "2026.07.31",
   "errors": [],
@@ -179,7 +179,7 @@
   },
   "quality_report": {
     "code_sha": "evaluation-baseline-v1",
-    "dataset_content_hash": "3df98ef9bfe51441c4172e6687cf7e03693812b0b867745056677d7ae6029d47",
+    "dataset_content_hash": "319e108b7326084beb1974ae26b8fd023139c945309fd854e80663af68bebc42",
     "dataset_id": "shadowtrace_demo_v1",
     "dataset_version": "2026.07.31",
     "grouping_scorer_summaries": [
@@ -315,9 +315,9 @@
     },
     "schema_version": "1.0"
   },
-  "run_id": "eval-4344b85a-b80e-480c-b225-65983d9ce74c",
+  "run_id": "eval-811cdd47-ae23-420f-9f39-e7746a986539",
   "schema_version": "1.0",
-  "started_at": "2026-07-31T09:33:43.753716Z",
+  "started_at": "2026-07-31T10:22:57.883004Z",
   "status": "completed",
   "tenant_id": "tenant-evaluation-demo"
 }

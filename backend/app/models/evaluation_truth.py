@@ -20,6 +20,7 @@ from app.models.enums import CaseLabel, FinalVerdict
 
 EVALUATION_TRUTH_SCHEMA_VERSION = "1.0"
 SLICE_EXPECTATION_SCHEMA_VERSION = "1.0"
+SLICE_EXPECTATION_SCHEMA_VERSION_1_1 = "1.1"
 
 
 class SliceType(StrEnum):

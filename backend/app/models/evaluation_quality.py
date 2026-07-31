@@ -101,14 +101,3 @@ __all__ = [
     "QualityMetricStatus",
     "QualityMetricValue",
 ]
-
-
-def _rebuild_evaluation_run_artifact() -> None:
-    from app.models.evaluation_run import EvaluationRunArtifact
-
-    EvaluationRunArtifact.model_rebuild(
-        _types_namespace={"EvaluationQualityReport": EvaluationQualityReport}
-    )
-
-
-_rebuild_evaluation_run_artifact()

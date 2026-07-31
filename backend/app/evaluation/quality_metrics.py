@@ -17,7 +17,6 @@ from app.models.evaluation_run import (
     CaseObservation,
     EvaluationCaseResult,
     EvaluationReleaseRefs,
-    EvaluationScorerResult,
     ScorerOutcome,
 )
 from app.models.evaluation_truth import SliceType
@@ -227,7 +226,7 @@ def build_quality_report(
             numerator=predicted_tp,
             denominator=precision_denominator,
             missing_truth_count=0,
-            error_count=threat_errors + benign_errors,
+            error_count=threat_errors,
             insufficient_sample=precision_denominator < 1,
         ),
         _metric_value(

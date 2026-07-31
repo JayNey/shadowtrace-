@@ -21,8 +21,7 @@ from app.evaluation.quality_metrics import build_quality_report
 from app.evaluation.runner import run_fixture_evaluation
 from app.evaluation.scorers.base import ScorerRegistration
 from app.evaluation.scorers.grouping_scorers import SeverityAlignmentScorer
-from app.evaluation.scorers.registry import ScorerRegistry, default_scorer_registry
-from app.evaluation.scorers.slice_scorers import ThreatSliceScorer
+from app.evaluation.scorers.registry import default_scorer_registry
 from app.models.evaluation_quality import QualityMetricStatus
 from app.models.evaluation_run import (
     CaseObservation,
@@ -297,3 +296,261 @@ def test_build_quality_report_includes_grouping_summary() -> None:
     assert report.grouping_scorer_summaries
     assert report.grouping_scorer_summaries[0].scorer_id == "severity_alignment"
     assert report.grouping_scorer_summaries[0].not_applicable_count == 1
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_threat_case_uses_schema_version_1_1(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    truths, _ = loaded_dataset
+    threat = next(t for t in truths if t.case_id == "malicious_process_exfil")
+    assert threat.slice_expectation.schema_version == "1.1"
+
+
+@pytest.mark.evaluation
+def test_threat_precision_fail_closed_only_on_threat_scorer_errors() -> None:
+    benign_case = EvaluationCaseResult(
+        case_id="benign-1",
+        truth_id="truth-b",
+        truth_revision=1,
+        truth_content_hash="b" * 64,
+        slice_type=SliceType.BENIGN,
+        observation=CaseObservation(
+            case_id="benign-1",
+            slice_type=SliceType.BENIGN,
+            observed_case_label="false_positive",
+            observed_final_verdict="false_positive",
+            observation_available=True,
+        ),
+        scorer_results=[
+            EvaluationScorerResult(
+                scorer_id="benign_label",
+                outcome=ScorerOutcome.ERROR,
+                reason_code="scorer_exception",
+            )
+        ],
+        case_status=EvaluationRunStatus.FAILED,
+    )
+    threat_case = EvaluationCaseResult(
+        case_id="threat-1",
+        truth_id="truth-t",
+        truth_revision=1,
+        truth_content_hash="c" * 64,
+        slice_type=SliceType.THREAT,
+        observation=CaseObservation(
+            case_id="threat-1",
+            slice_type=SliceType.THREAT,
+            observed_case_label="true_positive",
+            observed_final_verdict="confirmed_threat",
+            observation_available=True,
+        ),
+        scorer_results=[
+            EvaluationScorerResult(scorer_id="threat_label", outcome=ScorerOutcome.PASS),
+        ],
+        case_status=EvaluationRunStatus.COMPLETED,
+    )
+    report = build_quality_report(
+        dataset_id="shadowtrace_demo_v1",
+        dataset_version="2026.07.31",
+        dataset_content_hash="d" * 64,
+        code_sha="deadbeef",
+        release_refs=EvaluationReleaseRefs(),
+        case_results=[benign_case, threat_case],
+    )
+    precision = next(m for m in report.metrics if m.metric_id == "threat_precision")
+    assert precision.status == QualityMetricStatus.COMPUTED
+    assert precision.value == 1.0
+
+
+@pytest.mark.evaluation
+def test_threat_recall_insufficient_sample_without_threat_cases() -> None:
+    benign_case = EvaluationCaseResult(
+        case_id="benign-only",
+        truth_id="truth-b",
+        truth_revision=1,
+        truth_content_hash="b" * 64,
+        slice_type=SliceType.BENIGN,
+        observation=CaseObservation(case_id="benign-only", slice_type=SliceType.BENIGN),
+        scorer_results=[
+            EvaluationScorerResult(scorer_id="benign_label", outcome=ScorerOutcome.PASS),
+        ],
+        case_status=EvaluationRunStatus.COMPLETED,
+    )
+    report = build_quality_report(
+        dataset_id="shadowtrace_demo_v1",
+        dataset_version="2026.07.31",
+        dataset_content_hash="d" * 64,
+        code_sha="deadbeef",
+        release_refs=EvaluationReleaseRefs(),
+        case_results=[benign_case],
+    )
+    recall = next(m for m in report.metrics if m.metric_id == "threat_recall")
+    assert recall.status == QualityMetricStatus.INSUFFICIENT_SAMPLE
+    assert recall.value is None
+
+
+@pytest.mark.evaluation
+def test_attack_technique_coverage_fails_on_missing_technique() -> None:
+    from app.evaluation.scorers.base import ScorerContext
+    from app.evaluation.scorers.grouping_scorers import AttackTechniqueCoverageScorer
+    from app.models.evaluation_truth import LabelProvenance
+    from app.services.evaluation_truth_service import build_evaluation_case_truth
+
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-evaluation-demo",
+        dataset_id="shadowtrace_demo_v1",
+        dataset_version="2026.07.31",
+        case_id="case-attck",
+        slice_expectation=ThreatSliceExpectation(
+            expected_attack_techniques=["T1059", "T1048"],
+        ),
+        label_provenance=LabelProvenance(
+            adjudicator="tester",
+            adjudicated_at=datetime(2026, 7, 31, tzinfo=UTC),
+            source_kind="unit_test",
+        ),
+    )
+    scorer = AttackTechniqueCoverageScorer()
+    ctx = ScorerContext(seed=42, dataset_id="shadowtrace_demo_v1", dataset_version="2026.07.31")
+    result = scorer.score(
+        truth,
+        CaseObservation(
+            case_id=truth.case_id,
+            slice_type=SliceType.THREAT,
+            observed_attack_techniques=["T1059"],
+            observation_available=True,
+        ),
+        ctx,
+    )
+    assert result.outcome == ScorerOutcome.FAIL
+    assert result.reason_code == "technique_missing"
+
+
+@pytest.mark.evaluation
+def test_incident_grouping_fails_on_mismatch() -> None:
+    from app.evaluation.scorers.base import ScorerContext
+    from app.evaluation.scorers.grouping_scorers import IncidentGroupingConsistencyScorer
+    from app.models.evaluation_truth import LabelProvenance
+    from app.services.evaluation_truth_service import build_evaluation_case_truth
+
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-evaluation-demo",
+        dataset_id="shadowtrace_demo_v1",
+        dataset_version="2026.07.31",
+        case_id="case-incident",
+        slice_expectation=ThreatSliceExpectation(expected_incident_group_id="incident-a"),
+        label_provenance=LabelProvenance(
+            adjudicator="tester",
+            adjudicated_at=datetime(2026, 7, 31, tzinfo=UTC),
+            source_kind="unit_test",
+        ),
+    )
+    scorer = IncidentGroupingConsistencyScorer()
+    ctx = ScorerContext(seed=42, dataset_id="shadowtrace_demo_v1", dataset_version="2026.07.31")
+    result = scorer.score(
+        truth,
+        CaseObservation(
+            case_id=truth.case_id,
+            slice_type=SliceType.THREAT,
+            observed_incident_group_id="incident-b",
+            observation_available=True,
+        ),
+        ctx,
+    )
+    assert result.outcome == ScorerOutcome.FAIL
+    assert result.reason_code == "incident_group_mismatch"
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_demo_run_grouping_summaries_include_pass_counts(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    _, manifest = loaded_dataset
+    artifact = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="deadbeef",
+    )
+    report = artifact.quality_report
+    assert report is not None
+    summaries = {item.scorer_id: item for item in report.grouping_scorer_summaries}
+    assert summaries["severity_alignment"].pass_count == 1
+    assert summaries["attack_technique_coverage"].pass_count == 1
+    assert summaries["incident_grouping_consistency"].pass_count == 1
+
+
+@pytest.mark.evaluation
+def test_evaluation_run_artifact_validates_with_quality_report() -> None:
+    from app.models.evaluation_run import EvaluationRunArtifact
+
+    payload = {
+        "run_id": "eval-test",
+        "tenant_id": "tenant-evaluation-demo",
+        "dataset_id": "shadowtrace_demo_v1",
+        "dataset_version": "2026.07.31",
+        "dataset_content_hash": "a" * 64,
+        "code_sha": "deadbeef1",
+        "config": {
+            "seed": 42,
+            "replay_mode": "mock_deterministic",
+            "replay_fidelity": "echo_truth_stub",
+            "release_refs": {"config_profile": "mock_p0"},
+            "scorer_ids": [],
+            "extra": {},
+        },
+        "started_at": "2026-07-31T08:00:00+00:00",
+        "completed_at": "2026-07-31T08:00:01+00:00",
+        "status": "completed",
+        "case_results": [],
+        "aggregates": {
+            "case_count": 0,
+            "pass_count": 0,
+            "fail_count": 0,
+            "unevaluable_count": 0,
+            "error_count": 0,
+            "pass_rate": 1.0,
+            "required_scorer_error_count": 0,
+        },
+        "quality_report": {
+            "dataset_id": "shadowtrace_demo_v1",
+            "dataset_version": "2026.07.31",
+            "dataset_content_hash": "a" * 64,
+            "code_sha": "deadbeef1",
+            "sample_counts": {"total": 0},
+            "metrics": [],
+            "grouping_scorer_summaries": [],
+        },
+    }
+    artifact = EvaluationRunArtifact.model_validate(payload)
+    assert artifact.quality_report is not None
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_committed_baseline_matches_demo_run(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    import json
+
+    from app.evaluation.diff import diff_against_baseline
+    from app.models.evaluation_run import EvaluationRunArtifact
+
+    _, manifest = loaded_dataset
+    baseline_path = DATASET_DIR / "baseline_artifact.json"
+    baseline = EvaluationRunArtifact.model_validate(
+        json.loads(baseline_path.read_text(encoding="utf-8"))
+    )
+    candidate = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="evaluation-baseline-v1",
+        threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+    )
+    assert diff_against_baseline(baseline, candidate) == []
