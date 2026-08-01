@@ -22,6 +22,7 @@ from app.agents.report_section_builder import (
     SECTION_KEYS,
     ReportSectionBuilder,
 )
+from app.core.errors import LLMError
 from app.core.llm.base import InMemoryLLMCallAuditRecorder, LLMResponse
 from app.core.llm.mock_client import MockLLMClient
 from app.models.action import Action
@@ -54,8 +55,10 @@ from app.models.enums import (
     Severity,
     WritebackReadiness,
 )
-from app.models.evidence import Evidence
+from app.models.evidence import Evidence, EvidenceGap
 from app.models.ids import new_evidence_id, report_id_for_event
+from app.agents.report_llm_failure import llm_failure_metadata
+from app.services.agent_trace_service import TraceProjection
 
 
 class _FakeWorkingMemory:
@@ -147,6 +150,15 @@ class _FakeEventBus:
 class _FailingLLM:
     async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
         raise RuntimeError("llm unavailable")
+
+
+class _StructuredLLMErrorClient:
+    async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        raise LLMError(
+            "provider returned invalid json",
+            error_code="llm_invalid_json",
+            details={"http_status": 502},
+        )
 
 
 class _PartialLLM:
@@ -823,3 +835,252 @@ def test_llm_overview_preserves_human_escalation_note() -> None:
     assert recommendations.content.startswith("LLM-generated remediation tips.")
     assert "人工升级" in recommendations.content
     assert "replan_count=3" in recommendations.content
+
+
+def test_llm_failure_metadata_redacts_and_codes() -> None:
+    meta = llm_failure_metadata(
+        LLMError(
+            "Authorization: Bearer secret-token-12345",
+            error_code="llm_auth_error",
+            details={"http_status": 401, "prompt": "do not leak"},
+        )
+    )
+    assert meta["error_code"] == "llm_auth_error"
+    assert meta["http_status"] == 401
+    assert "secret-token-12345" not in meta["error_message"]
+    assert "prompt" not in meta["details"]
+
+
+def test_llm_failure_metadata_empty_message_uses_error_code() -> None:
+    meta = llm_failure_metadata(LLMError("", error_code="llm_timeout"))
+    assert meta["error_code"] == "llm_timeout"
+    assert meta["error_message"] == "llm timeout"
+
+
+def test_builder_zero_evidence_lists_gaps_and_limitations() -> None:
+    builder = ReportSectionBuilder()
+    event_id = "evt-report-zero-evidence"
+    gaps = [
+        EvidenceGap(
+            event_id=event_id,
+            missing_source=EvidenceSource.IDENTITY,
+            reason="tool_timeout",
+            detail={"tool": "lookup_user"},
+        )
+    ]
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            gaps=gaps,
+            overall_confidence=0.0,
+            collection_status=CollectionStatus.FAILED,
+        ),
+        risk_assessment=RiskAssessment(
+            risk_score=70,
+            severity=Severity.HIGH,
+            confidence=0.35,
+            risk_factors=[],
+            possible_false_positive=False,
+            scoring_mode=ScoringMode.RULE_ONLY,
+            evidence_limited=True,
+            severity_floor_applied=True,
+            source_risk_baseline=76,
+        ),
+        triage_result=_main_triage(),
+        source_snapshot={
+            "title": "Suspicious outbound transfer",
+            "alert_type": "data_exfiltration",
+            "severity": "high",
+        },
+    )
+    overview = next(section for section in sections if section.key == "overview")
+    evidence_chain = next(section for section in sections if section.key == "evidence_chain")
+    storyline = next(section for section in sections if section.key == "attack_storyline")
+    risk_section = next(section for section in sections if section.key == "risk_scoring")
+
+    assert "调查限制" in overview.content
+    assert "gap: identity | reason=tool_timeout" in evidence_chain.content
+    assert PLACEHOLDER_LOW_RISK_NO_EVIDENCE not in evidence_chain.content
+    assert "attack_storyline_limitation" in storyline.content
+    assert "title=Suspicious outbound transfer" in storyline.content
+    assert "score_divergence" in risk_section.content
+    assert "source_baseline=76" in risk_section.content
+
+
+def test_builder_includes_degraded_triage_and_entity_rejection() -> None:
+    builder = ReportSectionBuilder()
+    event_id = "evt-report-degraded-triage"
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        degraded=True,
+        degradation_reasons=["llm_timeout"],
+        entity_rejection_summary={
+            "rejection_counts": {"phrase_without_host_context": 2},
+            "total_rejected": 2,
+        },
+    )
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            overall_confidence=0.0,
+            collection_status=CollectionStatus.FAILED,
+        ),
+        risk_assessment=RiskAssessment(
+            risk_score=55,
+            severity=Severity.MEDIUM,
+            confidence=0.4,
+            risk_factors=[],
+            possible_false_positive=False,
+            scoring_mode=ScoringMode.RULE_ONLY,
+            evidence_limited=True,
+        ),
+        triage_result=triage,
+    )
+    overview = next(section for section in sections if section.key == "overview")
+    assert "triage_degraded: true" in overview.content
+    assert "triage_degradation_reason: llm_timeout" in overview.content
+    assert "entity_rejection_total: 2" in overview.content
+    assert "phrase_without_host_context=2" in overview.content
+
+
+def test_builder_evidence_chain_includes_evidence_id() -> None:
+    builder = ReportSectionBuilder()
+    event_id = "evt-report-evidence-id"
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=_main_evidence(event_id),
+        risk_assessment=_high_risk(),
+        triage_result=_main_triage(),
+    )
+    evidence_chain = next(section for section in sections if section.key == "evidence_chain")
+    storyline = next(section for section in sections if section.key == "attack_storyline")
+    assert "evidence_id=" in evidence_chain.content
+    assert "evidence_id=" in storyline.content
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_emits_structured_observability(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    event_id = f"evt-report-llm-obs-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    agent = ReportAgent(
+        llm_client=_StructuredLLMErrorClient(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    with caplog.at_level("WARNING"):
+        report = await agent.execute(
+            ReportAgentInput(
+                event_id=event_id,
+                evidence_output=_main_evidence(event_id),
+                risk_assessment=_high_risk(),
+            )
+        )
+
+    assert report.generated_by == GENERATED_BY_TEMPLATE
+    assert report.error_detail
+    assert report.warnings == ["report_llm_fallback:llm_invalid_json"]
+    assert any(
+        "error_code=llm_invalid_json" in record.message for record in caplog.records
+    )
+
+    basis = TraceProjection.decision_basis(report.model_dump(mode="json"))
+    assert basis["warnings"] == ["report_llm_fallback:llm_invalid_json"]
+    assert "llm_invalid_json" in basis["warnings"][0]
+    assert "invalid json" in (report.error_detail or "")
+
+
+class _RecordingTraceService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def log_trace(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_records_trace_error_detail(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-report-trace-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    trace = _RecordingTraceService()
+    agent = ReportAgent(
+        llm_client=_StructuredLLMErrorClient(),
+        working_memory=wm,
+        event_service=event_service,
+        trace_service=trace,
+    )
+    await agent.execute(
+        ReportAgentInput(
+            event_id=event_id,
+            evidence_output=_main_evidence(event_id),
+            risk_assessment=_high_risk(),
+        )
+    )
+    assert trace.calls
+    assert trace.calls[0]["error_detail"] == "provider returned invalid json"
+
+
+@pytest.mark.asyncio
+async def test_template_zero_evidence_via_agent_execute(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    """ISSUE-104: template path with zero evidence must surface gaps and limitations."""
+    from app.agents.report_section_builder import INVESTIGATION_LIMITATION_HEADER
+
+    event_id = f"evt-report-zero-agent-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    await wm.write(
+        event_id,
+        "source_snapshot",
+        {"title": "Suspicious outbound transfer", "alert_type": "data_exfiltration"},
+    )
+    gaps = [
+        EvidenceGap(
+            event_id=event_id,
+            missing_source=EvidenceSource.IDENTITY,
+            reason="tool_timeout",
+        )
+    ]
+    agent = ReportAgent(
+        llm_client=None,
+        working_memory=wm,
+        event_service=event_service,
+    )
+    report = await agent.execute(
+        ReportAgentInput(
+            event_id=event_id,
+            evidence_output=EvidenceOutput(
+                evidence_list=[],
+                gaps=gaps,
+                overall_confidence=0.0,
+                collection_status=CollectionStatus.FAILED,
+            ),
+            risk_assessment=RiskAssessment(
+                risk_score=70,
+                severity=Severity.HIGH,
+                confidence=0.35,
+                risk_factors=[],
+                possible_false_positive=False,
+                scoring_mode=ScoringMode.RULE_ONLY,
+                evidence_limited=True,
+            ),
+        )
+    )
+    assert report.generated_by == GENERATED_BY_TEMPLATE
+    assert len(report.sections) == 15
+    overview = next(section for section in report.sections if section.key == "overview")
+    evidence_chain = next(section for section in report.sections if section.key == "evidence_chain")
+    assert INVESTIGATION_LIMITATION_HEADER.split("：")[0] in overview.content
+    assert "gap: identity | reason=tool_timeout" in evidence_chain.content
+    assert "Suspicious outbound transfer" in overview.content

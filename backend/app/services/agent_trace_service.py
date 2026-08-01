@@ -304,12 +304,21 @@ class TraceProjection:
                 confidence = float(v)
                 break
 
-        raw_warnings = _extract_scalar(data, _DECISION_WARNING_FIELDS)
+        explicit_warnings = data.get("warnings")
         warnings: list[str] = []
-        if isinstance(raw_warnings, list):
-            warnings = [str(w)[:500] for w in raw_warnings[:20]]
-        elif raw_warnings is not None:
-            warnings = [str(raw_warnings)[:500]]
+        if isinstance(explicit_warnings, list):
+            warnings = [str(w)[:500] for w in explicit_warnings[:20] if w is not None]
+        elif explicit_warnings is not None:
+            warnings = [str(explicit_warnings)[:500]]
+        else:
+            raw_warnings = _extract_scalar(
+                data,
+                _DECISION_WARNING_FIELDS - frozenset({"warnings", "error_detail"}),
+            )
+            if isinstance(raw_warnings, list):
+                warnings = [str(w)[:500] for w in raw_warnings[:20]]
+            elif raw_warnings is not None:
+                warnings = [str(raw_warnings)[:500]]
 
         entity_audit: dict[str, Any] = {}
         for key in _DECISION_ENTITY_FIELDS:

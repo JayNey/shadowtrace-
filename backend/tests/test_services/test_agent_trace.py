@@ -165,6 +165,17 @@ def test_decision_basis_does_not_fallback_to_legacy_summary() -> None:
     assert basis["structured_conclusion"] == ""
 
 
+def test_decision_basis_prefers_warnings_over_error_detail() -> None:
+    basis = TraceProjection.decision_basis(
+        {
+            "report_id": "rep-1",
+            "warnings": ["report_llm_fallback:llm_invalid_json"],
+            "error_detail": "provider returned invalid json",
+        }
+    )
+    assert basis["warnings"] == ["report_llm_fallback:llm_invalid_json"]
+
+
 def test_projection_redacts_chain_of_thought_keys() -> None:
     projected = TraceProjection.project(
         {

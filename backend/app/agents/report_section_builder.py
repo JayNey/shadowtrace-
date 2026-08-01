@@ -14,11 +14,16 @@ from app.models.agent_io import (
     VerificationResult,
 )
 from app.models.enums import ActionCategory, FinalVerdict, Severity
+from app.models.evidence import EvidenceGap
 from app.models.report import ReportSection
 
 PLACEHOLDER_NO_ACTIONS = "暂无处置动作"
 PLACEHOLDER_NO_VERIFICATION = "暂无验证结果"
 PLACEHOLDER_LOW_RISK_NO_EVIDENCE = "低危快结案：未执行证据采集"
+INVESTIGATION_LIMITATION_HEADER = (
+    "调查限制：证据采集未完成或结果为空；以下内容引用来源摘要与缺口记录，非推断性攻击还原。"
+)
+SOURCE_SUMMARY_LABEL = "来源摘要（非证据）"
 
 SECTION_SPECS: tuple[tuple[str, str], ...] = (
     ("overview", "事件概述"),
@@ -55,6 +60,53 @@ def _bullet(lines: list[str], empty: str) -> str:
     return "\n".join(f"- {line}" for line in cleaned)
 
 
+def _source_summary_lines(source_snapshot: dict[str, Any] | None) -> list[str]:
+    if not isinstance(source_snapshot, dict):
+        return []
+    lines: list[str] = []
+    for key in ("title", "alert_type", "description", "severity"):
+        value = source_snapshot.get(key)
+        if value not in (None, ""):
+            lines.append(f"{key}={_truncate_field(value)}")
+    normalized = source_snapshot.get("normalized")
+    if isinstance(normalized, dict):
+        for key in ("title", "description", "alert_type"):
+            value = normalized.get(key)
+            if value not in (None, ""):
+                lines.append(f"normalized.{key}={_truncate_field(value)}")
+    return lines
+
+
+def _truncate_field(value: Any, *, max_chars: int = 240) -> str:
+    text = str(value).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
+def _format_evidence_gaps(gaps: list[EvidenceGap]) -> list[str]:
+    lines: list[str] = []
+    for gap in gaps:
+        detail = ""
+        if gap.detail:
+            detail = f" | detail={_truncate_field(gap.detail)}"
+        lines.append(f"gap: {gap.missing_source.value} | reason={gap.reason}{detail}")
+    return lines
+
+
+def _use_low_risk_no_evidence_placeholder(
+    *,
+    risk_assessment: RiskAssessment,
+    evidence_output: EvidenceOutput,
+) -> bool:
+    return (
+        risk_assessment.severity is Severity.LOW
+        and not risk_assessment.evidence_limited
+        and not evidence_output.gaps
+        and not evidence_output.evidence_list
+    )
+
+
 class ReportSectionBuilder:
     """Build the locked 15-section skeleton from EventContext facts."""
 
@@ -75,6 +127,8 @@ class ReportSectionBuilder:
         escalated: bool = False,
         replan_count: int = 0,
         impact_assessments: list[ImpactAssessment] | list[dict[str, Any]] | None = None,
+        source_snapshot: dict[str, Any] | None = None,
+        triage_degraded: dict[str, Any] | None = None,
     ) -> list[ReportSection]:
         # Prefer triage entities; otherwise derive labels from evidence raw/related.
         account_lines, asset_lines, process_lines, file_lines, external_lines = self._entity_lines(
@@ -92,6 +146,8 @@ class ReportSectionBuilder:
             fp_adjudication=fp_adjudication,
             escalated=escalated,
             replan_count=replan_count,
+            source_snapshot=source_snapshot,
+            triage_degraded=triage_degraded,
         )
         severity_level = (
             f"severity={risk_assessment.severity.value}\n"
@@ -105,8 +161,16 @@ class ReportSectionBuilder:
             f"final_verdict={final_verdict.value}"
         )
         risk_scoring = self._risk_scoring(risk_assessment)
-        evidence_chain = self._evidence_chain(evidence_output)
-        storyline = self._attack_storyline(evidence_output)
+        evidence_chain = self._evidence_chain(
+            evidence_output,
+            risk_assessment=risk_assessment,
+            source_snapshot=source_snapshot,
+        )
+        storyline = self._attack_storyline(
+            evidence_output,
+            source_snapshot=source_snapshot,
+            risk_assessment=risk_assessment,
+        )
         attack_mapping = self._attack_mapping(evidence_output, rag_output)
         executed = self._executed_actions(response_actions)
         verification = self._verification_results(verification_result)
@@ -287,6 +351,8 @@ class ReportSectionBuilder:
         fp_adjudication: dict[str, Any] | None = None,
         escalated: bool = False,
         replan_count: int = 0,
+        source_snapshot: dict[str, Any] | None = None,
+        triage_degraded: dict[str, Any] | None = None,
     ) -> str:
         event_type = triage_result.event_type.value if triage_result else "unknown"
         reasoning = (triage_result.reasoning if triage_result else "") or ""
@@ -298,7 +364,25 @@ class ReportSectionBuilder:
             f"final_verdict: {final_verdict.value}",
             f"evidence_count: {len(evidence_output.evidence_list)}",
             f"collection_status: {evidence_output.collection_status.value}",
+            f"evidence_limited: {risk_assessment.evidence_limited}",
         ]
+        if triage_result is not None and triage_result.degraded:
+            lines.append("triage_degraded: true")
+            for reason in triage_result.degradation_reasons:
+                lines.append(f"triage_degradation_reason: {reason}")
+        elif isinstance(triage_degraded, dict) and triage_degraded.get("degraded"):
+            lines.append("triage_degraded: true")
+            for reason in triage_degraded.get("degradation_reasons") or []:
+                lines.append(f"triage_degradation_reason: {reason}")
+        if triage_result is not None and triage_result.entity_rejection_summary:
+            summary = triage_result.entity_rejection_summary
+            total_rejected = summary.get("total_rejected")
+            if total_rejected is not None:
+                lines.append(f"entity_rejection_total: {total_rejected}")
+            rejection_counts = summary.get("rejection_counts")
+            if isinstance(rejection_counts, dict) and rejection_counts:
+                formatted = ", ".join(f"{key}={value}" for key, value in rejection_counts.items())
+                lines.append(f"entity_rejection_counts: {formatted}")
         lines.extend(
             self._fp_basis_lines(
                 false_positive_match=false_positive_match,
@@ -313,8 +397,21 @@ class ReportSectionBuilder:
             )
         if reasoning:
             lines.append(f"triage_reasoning: {reasoning}")
-        if risk_assessment.severity is Severity.LOW and not evidence_output.evidence_list:
-            lines.append(PLACEHOLDER_LOW_RISK_NO_EVIDENCE)
+        if not evidence_output.evidence_list:
+            lines.append(INVESTIGATION_LIMITATION_HEADER)
+            source_lines = _source_summary_lines(source_snapshot)
+            if source_lines:
+                lines.append(f"{SOURCE_SUMMARY_LABEL}:")
+                lines.extend(f"- {line}" for line in source_lines)
+            gap_lines = _format_evidence_gaps(evidence_output.gaps)
+            if gap_lines:
+                lines.append("evidence_gaps:")
+                lines.extend(f"- {line}" for line in gap_lines)
+            elif _use_low_risk_no_evidence_placeholder(
+                risk_assessment=risk_assessment,
+                evidence_output=evidence_output,
+            ):
+                lines.append(PLACEHOLDER_LOW_RISK_NO_EVIDENCE)
         return "\n".join(lines)
 
     def _fp_basis_lines(
@@ -371,6 +468,25 @@ class ReportSectionBuilder:
             f"source_risk_baseline={risk_assessment.source_risk_baseline}",
             "six_dimension_breakdown:",
         ]
+        if risk_assessment.evidence_limited:
+            baseline = risk_assessment.source_risk_baseline
+            if baseline is not None and baseline != risk_assessment.risk_score:
+                lines.append(
+                    "score_divergence: "
+                    f"final_score={risk_assessment.risk_score} "
+                    f"source_baseline={baseline} "
+                    "(evidence_limited floor/cap applied)"
+                )
+            elif baseline is not None:
+                lines.append(
+                    "score_alignment: "
+                    f"final_score={risk_assessment.risk_score} "
+                    f"source_baseline={baseline}"
+                )
+            lines.append(
+                "evidence_limited_note: threat signal retained while evidence "
+                "collection failed or returned empty; confidence capped."
+            )
         for factor in risk_assessment.risk_factors:
             lines.append(
                 f"- {factor.factor_name}: raw={factor.raw_score:.1f} "
@@ -381,10 +497,30 @@ class ReportSectionBuilder:
             lines.append("- note: fewer than six factors present in assessment")
         return "\n".join(lines)
 
-    def _evidence_chain(self, evidence_output: EvidenceOutput) -> str:
+    def _evidence_chain(
+        self,
+        evidence_output: EvidenceOutput,
+        *,
+        risk_assessment: RiskAssessment,
+        source_snapshot: dict[str, Any] | None = None,
+    ) -> str:
         if not evidence_output.evidence_list:
-            return PLACEHOLDER_LOW_RISK_NO_EVIDENCE
-        lines: list[str] = []
+            lines: list[str] = [INVESTIGATION_LIMITATION_HEADER]
+            source_lines = _source_summary_lines(source_snapshot)
+            if source_lines:
+                lines.append(f"{SOURCE_SUMMARY_LABEL}:")
+                lines.extend(f"- {line}" for line in source_lines)
+            gap_lines = _format_evidence_gaps(evidence_output.gaps)
+            if gap_lines:
+                lines.append("evidence_gaps:")
+                lines.extend(f"- {line}" for line in gap_lines)
+            elif _use_low_risk_no_evidence_placeholder(
+                risk_assessment=risk_assessment,
+                evidence_output=evidence_output,
+            ):
+                lines.append(PLACEHOLDER_LOW_RISK_NO_EVIDENCE)
+            return "\n".join(lines)
+        lines = []
         # Stable sort: missing timestamps first, then chronological.
         ordered = sorted(
             evidence_output.evidence_list,
@@ -395,20 +531,48 @@ class ReportSectionBuilder:
         )
         for item in ordered:
             lines.append(
-                f"{_fmt_ts(item.timestamp)} | {item.source.value} | "
-                f"{item.evidence_type} | conf={item.confidence:.2f} | "
-                f"{item.description}"
+                f"{_fmt_ts(item.timestamp)} | evidence_id={item.evidence_id} | "
+                f"{item.source.value} | {item.evidence_type} | "
+                f"conf={item.confidence:.2f} | {item.description}"
             )
         if evidence_output.conflicts:
             lines.append(f"conflicts={len(evidence_output.conflicts)}")
-        if evidence_output.gaps:
-            lines.append(f"gaps={len(evidence_output.gaps)}")
+        gap_lines = _format_evidence_gaps(evidence_output.gaps)
+        if gap_lines:
+            lines.append("evidence_gaps:")
+            lines.extend(f"- {line}" for line in gap_lines)
         return "\n".join(lines)
 
-    def _attack_storyline(self, evidence_output: EvidenceOutput) -> str:
+    def _attack_storyline(
+        self,
+        evidence_output: EvidenceOutput,
+        *,
+        source_snapshot: dict[str, Any] | None = None,
+        risk_assessment: RiskAssessment | None = None,
+    ) -> str:
         """Fallback storyline from evidence timeline (StorylineService is post-report)."""
         if not evidence_output.evidence_list:
-            return PLACEHOLDER_LOW_RISK_NO_EVIDENCE
+            lines = [
+                INVESTIGATION_LIMITATION_HEADER,
+                "attack_storyline_limitation: 无 evidence_id 可引用，不推断攻击阶段。",
+            ]
+            source_lines = _source_summary_lines(source_snapshot)
+            if source_lines:
+                lines.append(f"{SOURCE_SUMMARY_LABEL}:")
+                lines.extend(f"- {line}" for line in source_lines)
+            gap_lines = _format_evidence_gaps(evidence_output.gaps)
+            if gap_lines:
+                lines.append("evidence_gaps:")
+                lines.extend(f"- {line}" for line in gap_lines)
+            elif (
+                risk_assessment is not None
+                and _use_low_risk_no_evidence_placeholder(
+                    risk_assessment=risk_assessment,
+                    evidence_output=evidence_output,
+                )
+            ):
+                lines.append(PLACEHOLDER_LOW_RISK_NO_EVIDENCE)
+            return "\n".join(lines)
         # Stable sort: missing timestamps first, then chronological.
         ordered = sorted(
             evidence_output.evidence_list,
@@ -420,7 +584,10 @@ class ReportSectionBuilder:
         lines = ["证据时间线（StorylineService 后置，此处使用证据兜底）："]
         for idx, item in enumerate(ordered, start=1):
             tech = f" [{item.mitre_technique}]" if item.mitre_technique else ""
-            lines.append(f"{idx}. {_fmt_ts(item.timestamp)} — {item.description}{tech}")
+            lines.append(
+                f"{idx}. {_fmt_ts(item.timestamp)} | evidence_id={item.evidence_id} — "
+                f"{item.description}{tech}"
+            )
         return "\n".join(lines)
 
     def _attack_mapping(

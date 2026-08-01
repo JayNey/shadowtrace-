@@ -41,3 +41,59 @@ class InvestigationReport(BaseModel):
     generated_by: str | None = None
     generated_at: datetime | None = None
     updated_at: datetime | None = None
+    warnings: list[str] = Field(default_factory=list)
+    error_detail: str | None = None
+
+
+_APPENDIX_OBSERVABILITY_WARNINGS_KEY = "report_warnings"
+_APPENDIX_OBSERVABILITY_ERROR_DETAIL_KEY = "report_error_detail"
+
+
+def stamp_report_observability_in_sections(
+    sections: list[ReportSection],
+    *,
+    warnings: list[str],
+    error_detail: str | None,
+) -> list[ReportSection]:
+    """Persist fallback observability in appendix_index.data (no schema migration)."""
+    if not warnings and not error_detail:
+        return sections
+    stamped: list[ReportSection] = []
+    for section in sections:
+        if section.key != "appendix_index":
+            stamped.append(section)
+            continue
+        data = dict(section.data)
+        if warnings:
+            data[_APPENDIX_OBSERVABILITY_WARNINGS_KEY] = list(warnings)
+        if error_detail:
+            data[_APPENDIX_OBSERVABILITY_ERROR_DETAIL_KEY] = error_detail
+        stamped.append(
+            ReportSection(
+                key=section.key,
+                title=section.title,
+                content=section.content,
+                data=data,
+            )
+        )
+    return stamped
+
+
+def observability_from_sections(
+    sections: list[ReportSection],
+) -> tuple[list[str], str | None]:
+    """Restore fallback observability fields stored in appendix_index.data."""
+    for section in sections:
+        if section.key != "appendix_index":
+            continue
+        data = section.data or {}
+        raw_warnings = data.get(_APPENDIX_OBSERVABILITY_WARNINGS_KEY)
+        warnings = (
+            [str(item) for item in raw_warnings]
+            if isinstance(raw_warnings, list)
+            else []
+        )
+        raw_detail = data.get(_APPENDIX_OBSERVABILITY_ERROR_DETAIL_KEY)
+        error_detail = str(raw_detail) if raw_detail not in (None, "") else None
+        return warnings, error_detail
+    return [], None

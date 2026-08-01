@@ -37,7 +37,7 @@ from app.models.enums import (
     SourceObjectKind,
 )
 from app.models.ids import canonical_source_identity, new_action_id, new_event_id
-from app.models.report import InvestigationReport
+from app.models.report import InvestigationReport, observability_from_sections, stamp_report_observability_in_sections
 from app.models.security_event import SecurityEvent
 from app.models.source import SourceReference
 from app.models.tool_meta import TERMINAL_DISPOSITION_TOOL
@@ -880,7 +880,12 @@ class EventService:
     async def upsert_report(self, report: InvestigationReport) -> InvestigationReport:
         """Idempotent upsert of InvestigationReport by stable ``report_id`` (ISSUE-036)."""
         now = datetime.now(UTC)
-        sections_payload = [section.model_dump(mode="json") for section in report.sections]
+        stamped_sections = stamp_report_observability_in_sections(
+            report.sections,
+            warnings=list(report.warnings),
+            error_detail=report.error_detail,
+        )
+        sections_payload = [section.model_dump(mode="json") for section in stamped_sections]
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(
@@ -932,7 +937,7 @@ class EventService:
                     event_id=row.event_id,
                     title=row.title,
                     summary=row.summary,
-                    sections=report.sections,
+                    sections=stamped_sections,
                     final_verdict=FinalVerdict(row.final_verdict),
                     risk_score=int(row.risk_score),
                     severity=Severity(row.severity),
@@ -940,6 +945,8 @@ class EventService:
                     generated_by=row.generated_by,
                     generated_at=row.generated_at,
                     updated_at=row.updated_at,
+                    warnings=list(report.warnings),
+                    error_detail=report.error_detail,
                 )
 
     async def get_report(
@@ -967,6 +974,7 @@ class EventService:
             from app.models.report import ReportSection
 
             sections = [ReportSection.model_validate(item) for item in (row.sections or [])]
+            warnings, error_detail = observability_from_sections(sections)
             return InvestigationReport(
                 report_id=row.report_id,
                 event_id=row.event_id,
@@ -980,6 +988,8 @@ class EventService:
                 generated_by=row.generated_by,
                 generated_at=row.generated_at,
                 updated_at=row.updated_at,
+                warnings=warnings,
+                error_detail=error_detail,
             )
 
     async def upsert_generate_report_action(

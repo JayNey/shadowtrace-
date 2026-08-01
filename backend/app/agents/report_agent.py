@@ -20,6 +20,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.agents.base import BaseAgent
 from app.agents.prompts.report_prompt import build_report_messages
+from app.agents.report_llm_failure import llm_failure_metadata
 from app.agents.report_section_builder import (
     SECTION_KEYS,
     SECTION_SPECS,
@@ -83,12 +84,35 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         self.llm_timeout_seconds = float(llm_timeout_seconds)
         self.last_content_sha256: str | None = None
         self.last_report_markdown: str | None = None
+        self._trace_fallback_detail: str | None = None
         self._jinja = Environment(
             loader=FileSystemLoader(str(_TEMPLATE_DIR)),
             autoescape=select_autoescape(enabled_extensions=()),
             trim_blocks=True,
             lstrip_blocks=True,
         )
+
+    async def _record_trace(
+        self,
+        *,
+        input: ReportAgentInput,
+        output: InvestigationReport | None,
+        status: str,
+        started_at: datetime,
+        completed_at: datetime | None,
+        error_detail: str | None = None,
+    ) -> None:
+        """Include template-fallback detail in agent_trace when LLM failed but report succeeded."""
+        merged_detail = error_detail or self._trace_fallback_detail
+        await super()._record_trace(
+            input=input,
+            output=output,
+            status=status,
+            started_at=started_at,
+            completed_at=completed_at,
+            error_detail=merged_detail,
+        )
+        self._trace_fallback_detail = None
 
     async def _run(self, input: ReportAgentInput) -> InvestigationReport:
         triage = await self._load_triage(input.event_id)
@@ -107,6 +131,13 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         if not isinstance(impact_assessments, list):
             impact_assessments = None
 
+        source_snapshot = await self._read_optional(input.event_id, "source_snapshot")
+        if not isinstance(source_snapshot, dict):
+            source_snapshot = None
+        triage_degraded = await self._read_optional(input.event_id, "triage_degraded")
+        if not isinstance(triage_degraded, dict):
+            triage_degraded = None
+
         draft_sections = self.section_builder.build(
             event_id=input.event_id,
             evidence_output=input.evidence_output,
@@ -121,6 +152,8 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             escalated=input.escalated,
             replan_count=input.replan_count,
             impact_assessments=impact_assessments,
+            source_snapshot=source_snapshot,
+            triage_degraded=triage_degraded,
         )
         title = self.section_builder.default_title(triage, input.event_id)
         summary = self.section_builder.default_summary(
@@ -129,6 +162,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             triage_result=triage,
         )
         generated_by = GENERATED_BY_TEMPLATE
+        llm_fallback: dict[str, Any] | None = None
 
         if self.llm_client is not None:
             try:
@@ -144,10 +178,15 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 draft_sections = self._merge_sections(draft_sections, llm_sections)
                 generated_by = GENERATED_BY_LLM
             except Exception as exc:
+                llm_fallback = llm_failure_metadata(exc)
+                self._trace_fallback_detail = str(llm_fallback["error_message"])
                 logger.warning(
-                    "ReportAgent LLM path failed; using Jinja2 template event=%s err=%s",
+                    "ReportAgent LLM path failed; using template fallback "
+                    "event=%s error_code=%s http_status=%s detail=%s",
                     input.event_id,
-                    exc,
+                    llm_fallback["error_code"],
+                    llm_fallback.get("http_status"),
+                    llm_fallback["error_message"],
                 )
                 generated_by = GENERATED_BY_TEMPLATE
 
@@ -167,6 +206,13 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         )
 
         now = datetime.now(UTC)
+        warnings: list[str] = []
+        error_detail: str | None = None
+        if llm_fallback is not None:
+            error_code = str(llm_fallback["error_code"])
+            warnings.append(f"report_llm_fallback:{error_code}")
+            error_detail = str(llm_fallback["error_message"])
+
         report = InvestigationReport(
             report_id=report_id_for_event(input.event_id),
             event_id=input.event_id,
@@ -180,6 +226,8 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             generated_by=generated_by,
             generated_at=now,
             updated_at=now,
+            warnings=warnings,
+            error_detail=error_detail,
         )
 
         await self._persist_report(report)

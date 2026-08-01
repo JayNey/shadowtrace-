@@ -1489,6 +1489,34 @@ async def test_upsert_report_idempotent_by_report_id(
 
 
 @pytest.mark.asyncio
+async def test_upsert_report_persists_fallback_observability(
+    event_service: EventService,
+) -> None:
+    """ISSUE-104: warnings/error_detail survive DB round-trip via appendix_index.data."""
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-report-obs-{sfx}"),
+            title="report-observability",
+            source_type="mock_xdr",
+        )
+    )
+    assert created.event_id
+    report = _sample_report(created.event_id)
+    report = report.model_copy(
+        update={
+            "warnings": ["report_llm_fallback:llm_timeout"],
+            "error_detail": "provider timed out",
+        }
+    )
+    await event_service.upsert_report(report)
+    loaded = await event_service.get_report(event_id=created.event_id)
+    assert loaded is not None
+    assert loaded.warnings == ["report_llm_fallback:llm_timeout"]
+    assert loaded.error_detail == "provider timed out"
+
+
+@pytest.mark.asyncio
 async def test_upsert_response_plan_actions_idempotent_by_fingerprint(
     event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
