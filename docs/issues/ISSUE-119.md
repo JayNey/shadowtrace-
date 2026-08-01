@@ -25,7 +25,7 @@ Observation identity 至少包含：
 3. **该 instance 已有 ACTIVE scope 且 connector 在 upstream set 中**：绑定 registered `detection_scope_id`。
 4. **该 instance 已有 ACTIVE scope 但 connector 不在 upstream set 中**：fail-closed（`ValidationError`），写入 projection failure + DQE，ingest 本身不回滚；poll/push summary 标记 `degraded=true`。
 
-部署 ISSUE-120 后，应逐步为每个 integration instance 注册并激活 scope；在过渡期内，未注册 instance 仍可通过 fallback 产生 observation。
+部署 ISSUE-120 后，应逐步为每个 integration instance 注册并激活 scope；在过渡期内，未注册 instance 仍可通过 fallback 产生 observation。fallback 期间写入的 observation **不会**在后续 register scope 后自动重绑 `detection_scope_id`，需 re-project 或运维迁移。
 
 ## 字段
 

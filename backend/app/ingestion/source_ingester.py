@@ -34,13 +34,13 @@ from app.models.source import (
     SourceLog,
     SourceReference,
 )
+from app.services.behavior_observation_projection import BehaviorObservationProjection
 from app.services.event_service import (
     EventService,
     IngestableSource,
     should_apply_source_update,
     stable_source_record_id,
 )
-from app.services.behavior_observation_projection import BehaviorObservationProjection
 from app.services.evidence_projection import EvidenceProjection
 
 logger = logging.getLogger(__name__)
@@ -642,16 +642,18 @@ class SourceIngester:
         connector_id: str | None = None,
         source_tenant_id: str = "local",
         watermark: dict[str, Any] | None = None,
-    ) -> int:
-        """Project adapter-normalized telemetry through the shared evidence store."""
-        return await self._evidence_projection.ingest_records(
+    ) -> tuple[int, bool]:
+        """Project telemetry; return inserted row count and behavior-projection degraded flag."""
+        behavior_failures: list[dict[str, Any]] = []
+        inserted = await self._evidence_projection.ingest_records(
             records_by_source,
             source_product=source_type,
             source_tenant_id=source_tenant_id,
             connector_id=connector_id or f"{source_type}-evidence",
             watermark=watermark,
-            on_persisted=self._behavior_on_persisted(),
+            on_persisted=self._behavior_on_persisted(behavior_failures),
         )
+        return inserted, bool(behavior_failures)
 
     async def _project_adapter_evidence(
         self,

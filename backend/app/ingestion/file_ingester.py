@@ -185,12 +185,21 @@ class FileIngester:
         if not records_by_source:
             return
         try:
-            await self._source_ingester.ingest_telemetry(
+            _inserted, behavior_degraded = await self._source_ingester.ingest_telemetry(
                 records_by_source,
                 source_type="file",
                 connector_id="file-local",
                 watermark=summary.watermark_after,
             )
+            if behavior_degraded:
+                summary.degraded = True
+                summary.errors.append(
+                    {
+                        "stage": "behavior_observation_projection",
+                        "error_category": "projection_failed",
+                        "detail": {"source": "file_telemetry"},
+                    }
+                )
         except Exception as exc:  # noqa: BLE001 — event ingest remains usable
             summary.degraded = True
             summary.errors.append(

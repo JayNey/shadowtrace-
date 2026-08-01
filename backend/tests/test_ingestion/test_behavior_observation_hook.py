@@ -18,12 +18,12 @@ from app.models.behavior_observation import (
     BehaviorObservationProjectionStatus,
     BehaviorObservationQuery,
 )
-from app.models.enums import SourceDisposition, SourceObjectKind
-from app.models.source import SourceConnector, SourceLog, SourceReference
 from app.models.detection_scope import (
     DetectionScopeIdentity,
     UpstreamConnectorMember,
 )
+from app.models.enums import SourceDisposition, SourceObjectKind
+from app.models.source import SourceConnector, SourceLog, SourceReference
 from app.services.behavior_observation_projection import BehaviorObservationProjection
 from app.services.behavior_observation_service import BehaviorObservationService
 from app.services.detection_scope_service import DetectionScopeService
@@ -349,3 +349,121 @@ async def test_hook_records_failure_without_rolling_back_source(
         BehaviorObservationQuery(source_tenant_id=tenant_id)
     )
     assert observations.total == 0
+
+
+@pytest.mark.asyncio
+async def test_ingest_telemetry_reports_behavior_projection_degraded(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+) -> None:
+    suffix = _suffix()
+    ingester = SourceIngester(event_service, session_factory)
+    assert ingester._behavior_observation is not None
+
+    async def _projection_failed(_record_id: str) -> bool:
+        return False
+
+    with patch.object(
+        ingester._behavior_observation,
+        "on_source_record_persisted",
+        side_effect=_projection_failed,
+    ):
+        inserted, degraded = await ingester.ingest_telemetry(
+            {
+                "log": [
+                    {
+                        "channel": "endpoint",
+                        "logged_at": "2026-08-01T00:00:00+00:00",
+                        "src_ip": "10.0.0.1",
+                        "detection_score": 12,
+                    }
+                ],
+            },
+            source_type="mock_xdr",
+            connector_id=f"conn-telemetry-{suffix}",
+            source_tenant_id=f"tenant-telemetry-{suffix}",
+        )
+    assert inserted >= 1
+    assert degraded is True
+
+
+@pytest.mark.asyncio
+async def test_hook_marks_non_retryable_scope_errors_dead_letter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = _suffix()
+    tenant_id = f"tenant-{suffix}"
+    scoped_connector = f"conn-scoped-{suffix}"
+    missing_connector = f"conn-missing-{suffix}"
+    instance_id = f"inst-{suffix}"
+    async with session_factory() as session:
+        async with session.begin():
+            for connector_id in (scoped_connector, missing_connector):
+                session.add(
+                    orm.SourceConnector(
+                        connector_id=connector_id,
+                        source_product="mock_xdr",
+                        display_name=f"Test {connector_id}",
+                        status="online",
+                        schema_version="1",
+                        connector_metadata={
+                            "source_tenant_id": tenant_id,
+                            "integration_instance_id": instance_id,
+                            "connector_set_version": 1,
+                        },
+                    )
+                )
+    scope_service = DetectionScopeService(session_factory)
+    identity = DetectionScopeIdentity(
+        source_tenant_id=tenant_id,
+        source_product="mock_xdr",
+        integration_instance_id=instance_id,
+    )
+    revision = await scope_service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=scoped_connector, source_product="mock_xdr"),
+        ],
+    )
+    await scope_service.activate_revision(revision.scope_revision_id)
+
+    record_id = f"src-dead-{suffix}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SourceObject(
+                    source_record_id=record_id,
+                    source_product="mock_xdr",
+                    source_tenant_id=tenant_id,
+                    connector_id=missing_connector,
+                    source_kind=SourceObjectKind.LOG.value,
+                    source_object_id=f"log-{suffix}",
+                    source_object_type="edr",
+                    source_status_raw="indexed",
+                    source_disposition=SourceDisposition.UNKNOWN.value,
+                    schema_version="1",
+                    ingested_at=datetime(2026, 8, 1, tzinfo=UTC),
+                    raw_payload_hash=f"hash-{suffix}",
+                    normalized={"detection_score": 10, "logged_at": "2026-08-01T00:00:00+00:00"},
+                    raw_payload={"cmdline": "keep"},
+                    current_source_status_raw="indexed",
+                    current_source_disposition=SourceDisposition.UNKNOWN.value,
+                    current_state_version=1,
+                    source_sync_state="synced",
+                )
+            )
+
+    projection = BehaviorObservationProjection(session_factory)
+    assert await projection.on_source_record_persisted(record_id) is False
+
+    async with session_factory() as session:
+        failure = await session.scalar(
+            select(orm.BehaviorObservationProjectionFailure).where(
+                orm.BehaviorObservationProjectionFailure.source_record_id == record_id
+            )
+        )
+    assert failure is not None
+    assert failure.status == BehaviorObservationProjectionStatus.DEAD_LETTER.value
+    assert failure.error_category == "projection_non_retryable"
+    assert failure.attempt == 5
