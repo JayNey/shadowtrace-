@@ -10,6 +10,7 @@ import pytest
 from app.core.celery_delivery import (
     REDELIVERY_TERMINAL_EVENT_STATUSES,
     celery_task_owner_id,
+    evaluate_redelivered_investigation_skip,
     normalize_public_task_state,
     should_skip_redelivered_investigation,
 )
@@ -74,6 +75,9 @@ async def test_should_skip_redelivered_investigation_for_terminal_states(
         AsyncMock(return_value=_EventService()),
     )
     assert await should_skip_redelivered_investigation(event.event_id) is True
+    skip, reason = await evaluate_redelivered_investigation_skip(event.event_id)
+    assert skip is True
+    assert reason == "terminal_event"
 
 
 @pytest.mark.asyncio
@@ -91,6 +95,9 @@ async def test_should_not_skip_redelivered_investigation_for_new_event(
         AsyncMock(return_value=_EventService()),
     )
     assert await should_skip_redelivered_investigation("evt-new") is False
+    skip, reason = await evaluate_redelivered_investigation_skip("evt-new")
+    assert skip is False
+    assert reason is None
 
 
 @pytest.mark.asyncio
@@ -106,3 +113,6 @@ async def test_should_skip_redelivered_investigation_when_lookup_degraded(
 
     monkeypatch.setattr("app.api.v1.deps.get_event_service", _fail_service)
     assert await should_skip_redelivered_investigation("evt-degraded") is True
+    skip, reason = await evaluate_redelivered_investigation_skip("evt-degraded")
+    assert skip is True
+    assert reason == "lookup_degraded"

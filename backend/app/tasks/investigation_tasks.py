@@ -13,8 +13,8 @@ from kombu.exceptions import OperationalError
 from app.core.celery_app import celery_app
 from app.core.celery_delivery import (
     celery_task_owner_id,
+    evaluate_redelivered_investigation_skip,
     normalize_public_task_state,
-    should_skip_redelivered_investigation,
 )
 from app.core.errors import DependencyUnavailableError, InvestigationInProgressError
 from app.core.redis_client import RedisClient
@@ -163,12 +163,18 @@ async def _run_investigation_body(
     redelivered: bool,
 ) -> dict[str, str]:
     if redelivered:
-        if await should_skip_redelivered_investigation(event_id):
+        skip, skip_reason = await evaluate_redelivered_investigation_skip(event_id)
+        if skip:
             logger.info(
-                "run_investigation redelivery skipped — event already terminal event=%s",
+                "run_investigation redelivery skipped event=%s reason=%s",
                 event_id,
+                skip_reason,
             )
-            return {"status": "skipped", "event_id": event_id, "reason": "terminal_event"}
+            return {
+                "status": "skipped",
+                "event_id": event_id,
+                "reason": skip_reason or "lookup_degraded",
+            }
     return await execute_investigation(
         event_id,
         include_response_execution=include_response_execution,

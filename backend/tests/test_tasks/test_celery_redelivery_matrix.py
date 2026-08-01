@@ -320,6 +320,38 @@ def test_redelivery_skips_when_event_terminal(
     assert calls["n"] == 0
 
 
+def test_redelivery_skips_with_lookup_degraded_reason(
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+
+    async def _fake_execute(event_id: str, **_kwargs: Any) -> dict[str, str]:
+        calls["n"] += 1
+        return {"status": "completed", "event_id": event_id}
+
+    async def _fail_service() -> None:
+        from app.core.errors import DependencyUnavailableError
+
+        raise DependencyUnavailableError(
+            message="postgres unavailable",
+            error_code="dependency_unavailable",
+            details={"dependency": "postgres"},
+        )
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_service", _fail_service)
+    monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
+
+    result = _run_with_redelivered_request(
+        task_id="task-degraded-redelivery",
+        event_id="evt-degraded-redelivery",
+    )
+
+    assert result["status"] == "skipped"
+    assert result.get("reason") == "lookup_degraded"
+    assert calls["n"] == 0
+
+
 @pytest.mark.parametrize(
     "status",
     [

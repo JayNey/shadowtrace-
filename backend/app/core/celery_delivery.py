@@ -9,11 +9,14 @@ task compete fairly with the original delivery via ``EventLease`` fencing.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from app.core.errors import DependencyUnavailableError
 from app.models.enums import EventStatus
 
 logger = logging.getLogger(__name__)
+
+RedeliverySkipReason = Literal["terminal_event", "lookup_degraded"]
 
 # Celery states that require manual/event lookup rather than trusting task result.
 _UNKNOWN_LOOKUP_STATES: frozenset[str] = frozenset({"RETRY", "REVOKED"})
@@ -54,15 +57,10 @@ def normalize_public_task_state(celery_state: str) -> str:
     return state
 
 
-async def should_skip_redelivered_investigation(event_id: str) -> bool:
-    """Return True when broker redelivery must not re-run investigation.
-
-    Covers crash-after-complete-before-ack: the first delivery finished and
-    released the lease, but the worker died before Celery acked the task.
-
-    When event lookup is unavailable, returns True (fail-safe skip) so a
-    redelivery does not blindly re-run SuperAgent.
-    """
+async def evaluate_redelivered_investigation_skip(
+    event_id: str,
+) -> tuple[bool, RedeliverySkipReason | None]:
+    """Return whether broker redelivery must skip, and a stable skip reason."""
     from app.api.v1.deps import get_event_service
 
     try:
@@ -73,22 +71,32 @@ async def should_skip_redelivered_investigation(event_id: str) -> bool:
             "redelivery skip lookup degraded for event=%s — skipping re-run (fail-safe)",
             event_id,
         )
-        return True
+        return True, "lookup_degraded"
     except Exception:
         logger.warning(
             "redelivery skip lookup failed for event=%s — skipping re-run (fail-safe)",
             event_id,
             exc_info=True,
         )
-        return True
+        return True, "lookup_degraded"
     if event is None:
-        return False
-    return event.status in REDELIVERY_TERMINAL_EVENT_STATUSES
+        return False, None
+    if event.status in REDELIVERY_TERMINAL_EVENT_STATUSES:
+        return True, "terminal_event"
+    return False, None
+
+
+async def should_skip_redelivered_investigation(event_id: str) -> bool:
+    """Return True when broker redelivery must not re-run investigation."""
+    skip, _reason = await evaluate_redelivered_investigation_skip(event_id)
+    return skip
 
 
 __all__ = [
     "REDELIVERY_TERMINAL_EVENT_STATUSES",
+    "RedeliverySkipReason",
     "celery_task_owner_id",
+    "evaluate_redelivered_investigation_skip",
     "normalize_public_task_state",
     "should_skip_redelivered_investigation",
 ]

@@ -173,6 +173,7 @@ worker-nightly-pytest:
 		tests/test_core/test_celery_health.py \
 		tests/test_core/test_celery_delivery.py \
 		tests/test_tasks/test_celery_redelivery_matrix.py \
+		tests/test_api/test_celery_investigation.py \
 		tests/test_tasks/test_investigation_tasks.py -q
 
 worker-nightly-smoke:
