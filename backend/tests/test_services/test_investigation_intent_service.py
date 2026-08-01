@@ -114,9 +114,7 @@ async def test_create_pending_intent_in_session(
             assert intent_id is not None
     async with session_factory() as session:
         row = await session.scalar(
-            select(orm.InvestigationIntent).where(
-                orm.InvestigationIntent.intent_id == intent_id
-            )
+            select(orm.InvestigationIntent).where(orm.InvestigationIntent.intent_id == intent_id)
         )
         assert row is not None
         assert row.status == InvestigationIntentStatus.PENDING.value
@@ -691,10 +689,10 @@ async def test_materialize_is_idempotent_when_intent_exists(
     redis_client,
 ) -> None:
     """Provisional rows with an existing intent must not consume materialize batch slots."""
-    from app.services.context_service import EventContextStore
-    from app.services.degraded_flag_service import DegradedFlagService
     from app.models.enums import EventType, SourceObjectKind
     from app.models.source import SourceReference
+    from app.services.context_service import EventContextStore
+    from app.services.degraded_flag_service import DegradedFlagService
     from app.services.event_service import EventService, IngestableSource
 
     store = EventContextStore(redis_client, session_factory)

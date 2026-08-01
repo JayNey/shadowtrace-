@@ -23,9 +23,7 @@ CONFIDENCE_CAP_TABLE: dict[str, dict[str, float]] = {
     },
 }
 # Backward-compatible alias for tests/docs referencing Phase A constant name.
-EVIDENCE_LIMITED_CONFIDENCE_CAP = CONFIDENCE_CAP_TABLE[CONFIDENCE_CAP_VERSION][
-    "evidence_limited"
-]
+EVIDENCE_LIMITED_CONFIDENCE_CAP = CONFIDENCE_CAP_TABLE[CONFIDENCE_CAP_VERSION]["evidence_limited"]
 SOURCE_BASELINE_FLOOR_RATIO = 0.85
 _HIGH_SOURCE_MIN_SCORE = 70
 _CRITICAL_SOURCE_MIN_SCORE = 90

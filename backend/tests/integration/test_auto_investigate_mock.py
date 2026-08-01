@@ -13,7 +13,13 @@ pytest_plugins = ["tests.test_ingestion.conftest"]
 
 from app.core.config import Settings
 from app.db import models as orm
-from app.models.enums import EventStatus, EventType, InvestigationIntentStatus, Severity, SourceObjectKind
+from app.models.enums import (
+    EventStatus,
+    EventType,
+    InvestigationIntentStatus,
+    Severity,
+    SourceObjectKind,
+)
 from app.models.source import SourceReference
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
 from app.services.context_service import EventContextStore
@@ -60,7 +66,9 @@ async def test_disabled_auto_investigate_creates_no_intent(
         degraded_flags=degraded,
         investigation_intent=intent_service,
     )
-    result = await events.ingest_source_object(_incident_source(object_id=f"inc-auto-off-{uuid4().hex[:8]}"))
+    result = await events.ingest_source_object(
+        _incident_source(object_id=f"inc-auto-off-{uuid4().hex[:8]}")
+    )
     async with session_factory() as session:
         rows = (
             await session.scalars(
@@ -92,7 +100,9 @@ async def test_enabled_incident_ingest_creates_pending_intent(
         degraded_flags=degraded,
         investigation_intent=intent_service,
     )
-    result = await events.ingest_source_object(_incident_source(object_id=f"inc-auto-on-{uuid4().hex[:8]}"))
+    result = await events.ingest_source_object(
+        _incident_source(object_id=f"inc-auto-on-{uuid4().hex[:8]}")
+    )
     assert result.created is True
     async with session_factory() as session:
         row = await session.scalar(
@@ -313,9 +323,7 @@ async def test_enabled_incident_reaches_terminal_via_dispatch(
         lambda: None,
     )
 
-    result = await events.ingest_source_object(
-        _incident_source(object_id=f"inc-auto-e2e-{uuid4().hex[:8]}")
-    )
+    await events.ingest_source_object(_incident_source(object_id=f"inc-auto-e2e-{uuid4().hex[:8]}"))
     claimed = await intent_service._claim_batch(limit=5)
     assert claimed
     target = await intent_service._commit_enqueued_publish_target(claimed[0])

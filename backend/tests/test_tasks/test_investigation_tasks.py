@@ -333,7 +333,7 @@ def test_run_investigation_unhandled_exception_marks_intent_dead(
             args=[event_id],
             kwargs={"intent_id": intent_id},
             task_id="task-dead",
-        ).result
+        ).get()
 
     async def _verify() -> None:
         async with session_factory() as session:

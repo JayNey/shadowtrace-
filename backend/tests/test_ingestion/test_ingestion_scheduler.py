@@ -283,9 +283,7 @@ async def test_run_once_skips_when_advisory_lock_held(
         try:
             result = await scheduler.run_once()
         finally:
-            await session.execute(
-                text("SELECT pg_advisory_unlock(:key)").bindparams(key=lock_key)
-            )
+            await session.execute(text("SELECT pg_advisory_unlock(:key)").bindparams(key=lock_key))
 
     assert result.status == "skipped"
     assert result.reason == "lock_not_acquired"
@@ -322,9 +320,7 @@ async def test_run_once_releases_lock_after_poll_failure(
             text("SELECT pg_try_advisory_lock(:key)").bindparams(key=lock_key)
         )
         assert acquired is True
-        await session.execute(
-            text("SELECT pg_advisory_unlock(:key)").bindparams(key=lock_key)
-        )
+        await session.execute(text("SELECT pg_advisory_unlock(:key)").bindparams(key=lock_key))
 
 
 @pytest.mark.asyncio

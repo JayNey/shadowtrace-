@@ -115,8 +115,7 @@ class _DegradedLLM:
 
     async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
         factors = {
-            name: {"score": 95, "reason": "degraded llm inflation attempt"}
-            for name in FACTOR_NAMES
+            name: {"score": 95, "reason": "degraded llm inflation attempt"} for name in FACTOR_NAMES
         }
         content = json.dumps({"factors": factors, "raw_confidence": 0.99})
         return LLMResponse(
@@ -139,10 +138,7 @@ class _InflatingValidLLM:
     """Returns admissible LLM scores high enough to exceed floor without applying it."""
 
     async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
-        factors = {
-            name: {"score": 100, "reason": "valid llm inflation"}
-            for name in FACTOR_NAMES
-        }
+        factors = {name: {"score": 100, "reason": "valid llm inflation"} for name in FACTOR_NAMES}
         content = json.dumps({"factors": factors, "raw_confidence": 0.99})
         return LLMResponse(content=content, parsed=None, model_name="inflating-model")
 

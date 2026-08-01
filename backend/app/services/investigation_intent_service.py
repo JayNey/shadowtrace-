@@ -59,7 +59,7 @@ def new_intent_id() -> str:
 
 def deterministic_investigation_task_id(intent_id: str, revision: int) -> str:
     """Stable Celery task id derived from intent identity (#612)."""
-    return hashlib.sha256(f"{intent_id}:{revision}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{intent_id}:{revision}".encode()).hexdigest()
 
 
 class _EnqueuedPublishTarget(NamedTuple):
@@ -248,7 +248,8 @@ class InvestigationIntentService:
                         row.broker_task_id = broker_task_id
                         return IntentDeliveryAdmission.ACCEPTED
                     logger.warning(
-                        "investigation intent already started intent=%s existing_task=%s new_task=%s",
+                        "investigation intent already started intent=%s "
+                        "existing_task=%s new_task=%s",
                         intent_id,
                         row.broker_task_id,
                         broker_task_id,
@@ -583,12 +584,13 @@ class InvestigationIntentService:
         if target is None:
             return False
 
+        from kombu.exceptions import OperationalError
+
         from app.tasks.investigation_tasks import (
             delete_task_metadata,
             publish_investigation_for_intent,
             register_task_metadata,
         )
-        from kombu.exceptions import OperationalError
 
         try:
             await register_task_metadata(target.task_id, target.event_id)

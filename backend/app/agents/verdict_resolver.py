@@ -76,10 +76,7 @@ class VerdictResolver:
 
 def _blocks_auto_fp_close(risk_assessment: RiskAssessment) -> bool:
     """High-source + evidence-limited events must not auto close-as-FP (#675)."""
-    return bool(
-        risk_assessment.evidence_limited
-        and risk_assessment.high_source_evidence_limited
-    )
+    return bool(risk_assessment.evidence_limited and risk_assessment.high_source_evidence_limited)
 
 
 __all__ = ["FP_HIGH_SCORE", "FP_MEDIUM_SCORE", "VerdictResolver"]

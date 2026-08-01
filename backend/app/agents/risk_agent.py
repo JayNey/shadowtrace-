@@ -99,9 +99,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         raw_confidence = float(input.evidence_output.overall_confidence)
         scoring_mode = ScoringMode.RULE_ONLY
         llm_admissibility = (
-            LlmAdmissibility.NOT_USED
-            if self.llm_client is None
-            else LlmAdmissibility.INVALID
+            LlmAdmissibility.NOT_USED if self.llm_client is None else LlmAdmissibility.INVALID
         )
 
         if self.llm_client is not None:
@@ -111,10 +109,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                     storyline,
                     source_snapshot=source_snapshot,
                 )
-                if (
-                    llm_admissibility is LlmAdmissibility.VALID
-                    and llm_scores is not None
-                ):
+                if llm_admissibility is LlmAdmissibility.VALID and llm_scores is not None:
                     scoring_mode = ScoringMode.LLM_AND_RULE
                     raw_confidence = max(raw_confidence, llm_confidence)
                 else:

@@ -63,9 +63,7 @@ async def session_factory(
 
 @pytest_asyncio.fixture
 def embed_service() -> EmbeddingService:
-    return EmbeddingService(
-        Settings(EMBEDDING_MODE="mock", EMBEDDING_MAX_BATCH_SIZE=128)
-    )
+    return EmbeddingService(Settings(EMBEDDING_MODE="mock", EMBEDDING_MAX_BATCH_SIZE=128))
 
 
 @pytest_asyncio.fixture

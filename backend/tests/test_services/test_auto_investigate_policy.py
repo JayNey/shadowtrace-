@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
-import pytest
-
 from app.core.config import Settings
 from app.db import models as orm
 from app.models.enums import EventStatus, Severity
