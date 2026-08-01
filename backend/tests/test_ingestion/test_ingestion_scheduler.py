@@ -160,13 +160,45 @@ async def test_run_once_accepts_new_incident(
     assert result.summary.accepted == 1
     assert result.summary.duplicate == 0
 
+    incident_id = f"INC-SCHED-{suffix}"
     async with session_factory() as session:
-        count = await session.scalar(
-            select(func.count()).select_from(orm.SecurityEvent).where(
-                orm.SecurityEvent.status == EventStatus.NEW.value
+        event_count = await session.scalar(
+            select(func.count())
+            .select_from(orm.SecurityEvent)
+            .where(
+                orm.SecurityEvent.creation_source_ref["connector_id"].as_string() == connector_id,
+                orm.SecurityEvent.creation_source_ref["source_object_id"].as_string()
+                == incident_id,
+                orm.SecurityEvent.status == EventStatus.NEW.value,
             )
         )
-        assert count is not None and count >= 1
+    assert event_count == 1
+
+
+@pytest.mark.asyncio
+async def test_run_once_completed_with_degraded_summary_when_adapter_offline(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_service: EventService,
+) -> None:
+    suffix = _suffix()
+    adapter = FakePagedAdapter(
+        f"adapter-offline-{suffix}",
+        {},
+        health=ConnectorStatus.OFFLINE,
+    )
+    scheduler = _scheduler(
+        session_factory=session_factory,
+        event_service=event_service,
+        settings=_scheduler_settings(),
+    )
+
+    with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
+        result = await scheduler.run_once()
+
+    assert result.status == "completed"
+    assert result.summary is not None
+    assert result.summary.degraded is True
+    assert result.summary.accepted == 0
 
 
 @pytest.mark.asyncio
@@ -426,6 +458,12 @@ async def test_run_once_records_redis_stats(
     accepted = await raw.get("shadowtrace:ingestion:stats:accepted")
     assert accepted is not None
     assert int(accepted) >= 1
+
+
+def test_poll_sources_task_has_soft_time_limit() -> None:
+    from app.tasks.ingestion_tasks import poll_sources
+
+    assert poll_sources.soft_time_limit == 120
 
 
 def test_poll_sources_task_registered() -> None:

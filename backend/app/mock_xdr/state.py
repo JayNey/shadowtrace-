@@ -25,6 +25,9 @@ from app.models.enums import (
 from app.models.source import SourceConnector
 from app.models.workflow import validate_job_status_transition
 
+MOCK_XDR_DEFAULT_READ_TOKEN = "mock-read-token"
+MOCK_XDR_DEFAULT_WRITE_TOKEN = "mock-write-token"
+
 # Mock-local SourceDisposition edges (ISSUE-010 step 4).
 SOURCE_DISPOSITION_TRANSITIONS: dict[SourceDisposition, set[SourceDisposition]] = {
     SourceDisposition.PENDING: {
@@ -240,8 +243,8 @@ class MockXDRState:
     active_terminal_heads: dict[tuple[str, int], str] = field(default_factory=dict)
     writeback_seq: int = 0
     # Auth tokens (read vs write clients)
-    read_token: str = "mock-read-token"
-    write_token: str = "mock-write-token"
+    read_token: str = MOCK_XDR_DEFAULT_READ_TOKEN
+    write_token: str = MOCK_XDR_DEFAULT_WRITE_TOKEN
     # Captured inbound payloads for analysis-leak assertions
     captured_requests: list[dict[str, Any]] = field(default_factory=list)
 

@@ -87,9 +87,10 @@ DISPOSITION_BASE_URL=http://mock-xdr:8100
 # 1. 启动 stack + scheduler
 make up SCHEDULER=1
 
-# 2. 向 mock-xdr seed 新场景（另开终端）
+# 2. 仅向 mock-xdr seed 新场景（不手工 poll；由 scheduler 摄取）
 docker compose -f infra/docker-compose.yml exec backend \
-  python3 scripts/seed_mock_xdr_and_ingest.py --scenario insider_data_exfiltration
+  python3 scripts/seed_mock_xdr_and_ingest.py \
+  --scenario insider_data_exfiltration --seed-only
 
 # 3. 观察 scheduler-worker 日志（≤2×interval 内应出现 ingest accepted）
 docker compose -f infra/docker-compose.yml logs -f scheduler-worker
@@ -105,6 +106,8 @@ make ingestion-scheduler-test
 ```
 
 **注意**：仅设置 `INGESTION_SCHEDULER_ENABLED=true` 而不启动 `--profile scheduler` **不会**启动 Beat/ingestion worker 容器；必须同时使用 profile（`make up SCHEDULER=1`）。
+
+Redis 计数键 `shadowtrace:ingestion:stats:*` 为运维累计指标（无 TTL）。`status=completed` 且 `summary.degraded=true` 表示 connector 降级但未抛异常，需查看 scheduler-worker 日志。
 
 启用 OpenSearch / Neo4j 后，需在 `.env` 中设置对应开关：
 ```ini

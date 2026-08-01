@@ -41,6 +41,7 @@ async def _run_poll_sources_async() -> dict[str, Any]:
 @celery_app.task(  # type: ignore[untyped-decorator]
     name=POLL_SOURCES_TASK,
     acks_late=True,
+    soft_time_limit=120,
     queue=INGESTION_QUEUE,
 )
 def poll_sources() -> dict[str, Any]:

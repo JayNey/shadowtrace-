@@ -29,7 +29,7 @@ ISSUE-016、ISSUE-010（Mock XDR）、ISSUE-056（Celery，可选 Beat profile�
 统一命名：
 1. Celery task：`shadowtrace.poll_sources`
 2. Settings：`INGESTION_SCHEDULER_ENABLED`（default `false`）、`INGESTION_POLL_INTERVAL_S`（default `60`）
-3. 锁：PostgreSQL advisory lock key `ingestion_poll`（与现有 timeout scanner 模式一致，避免多实例重复 poll）
+3. 锁：PostgreSQL advisory lock key `ingestion_poll`（实现为 SHA256 派生 stable int64；与 timeout scanner 模式一致）
 
 实现步骤：
 1. **`IngestionScheduler.run_once()`**：读取 settings → 若 `source_mode != mock_xdr` 则 no-op 并 log（**禁止** live/file 模式静默启用）。

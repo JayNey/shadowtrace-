@@ -18,14 +18,13 @@ from app.adapters.mock_xdr import MockXDRSourceAdapter
 from app.core.config import Settings, get_settings
 from app.core.redis_client import RedisClient
 from app.ingestion.source_ingester import IngestionSummary, SourceIngester
+from app.mock_xdr.state import MOCK_XDR_DEFAULT_READ_TOKEN, MOCK_XDR_DEFAULT_WRITE_TOKEN
 from app.models.enums import SourceObjectKind
 from app.services.event_service import EventService
 
 logger = logging.getLogger(__name__)
 
 INGESTION_POLL_LOCK_NAME = "ingestion_poll"
-_DEFAULT_READ_TOKEN = "mock-read-token"
-_DEFAULT_WRITE_TOKEN = "mock-write-token"
 _ALL_SOURCE_KINDS = (
     SourceObjectKind.INCIDENT,
     SourceObjectKind.ALERT,
@@ -106,13 +105,21 @@ class IngestionScheduler:
                     batch_size=_DEFAULT_BATCH_SIZE,
                 )
                 await self._record_stats(summary)
-                logger.info(
-                    "ingestion poll completed accepted=%d duplicate=%d rejected=%d degraded=%s",
-                    summary.accepted,
-                    summary.duplicate,
-                    summary.rejected,
-                    summary.degraded,
-                )
+                if summary.degraded:
+                    logger.warning(
+                        "ingestion poll completed with degraded connectors "
+                        "(accepted=%d duplicate=%d rejected=%d)",
+                        summary.accepted,
+                        summary.duplicate,
+                        summary.rejected,
+                    )
+                else:
+                    logger.info(
+                        "ingestion poll completed accepted=%d duplicate=%d rejected=%d",
+                        summary.accepted,
+                        summary.duplicate,
+                        summary.rejected,
+                    )
                 return IngestionRunResult(status="completed", summary=summary)
             except Exception as exc:  # noqa: BLE001 — return structured error, keep watermark
                 logger.exception("ingestion poll failed: %s", exc)
@@ -134,8 +141,8 @@ class IngestionScheduler:
         base_url = (settings.disposition_base_url or "http://mock-xdr:8100").strip()
         return MockXDRSourceAdapter(
             base_url=base_url,
-            read_token=_DEFAULT_READ_TOKEN,
-            write_token=_DEFAULT_WRITE_TOKEN,
+            read_token=MOCK_XDR_DEFAULT_READ_TOKEN,
+            write_token=MOCK_XDR_DEFAULT_WRITE_TOKEN,
             max_retries=0,
         )
 

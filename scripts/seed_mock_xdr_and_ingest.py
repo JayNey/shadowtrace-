@@ -50,8 +50,7 @@ _ALL_SOURCE_KINDS = [
     SourceObjectKind.LOG,
 ]
 
-_DEFAULT_READ_TOKEN = "mock-read-token"
-_DEFAULT_WRITE_TOKEN = "mock-write-token"
+from app.mock_xdr.state import MOCK_XDR_DEFAULT_READ_TOKEN, MOCK_XDR_DEFAULT_WRITE_TOKEN
 
 
 async def _seed_mock_xdr(*, mock_xdr_url: str, scenario_id: str, seed: int) -> dict:
@@ -74,8 +73,8 @@ async def _poll_ingest(*, mock_xdr_url: str) -> dict:
         ingester = SourceIngester(events, factory, source_mode="mock_xdr")
         adapter = MockXDRSourceAdapter(
             base_url=mock_xdr_url.rstrip("/"),
-            read_token=_DEFAULT_READ_TOKEN,
-            write_token=_DEFAULT_WRITE_TOKEN,
+            read_token=MOCK_XDR_DEFAULT_READ_TOKEN,
+            write_token=MOCK_XDR_DEFAULT_WRITE_TOKEN,
             max_retries=0,
         )
         summary = await ingester.poll(adapter, _ALL_SOURCE_KINDS, batch_size=50)
@@ -85,7 +84,7 @@ async def _poll_ingest(*, mock_xdr_url: str) -> dict:
         await dispose_session_provider()
 
 
-async def _run(*, scenario_id: str, mock_xdr_url: str, seed: int) -> int:
+async def _run(*, scenario_id: str, mock_xdr_url: str, seed: int, seed_only: bool) -> int:
     if scenario_id not in SCENARIO_BUILDERS:
         raise SystemExit(f"unknown scenario: {scenario_id!r}")
 
@@ -99,6 +98,10 @@ async def _run(*, scenario_id: str, mock_xdr_url: str, seed: int) -> int:
         seed_result.get("scenario_id"),
         seed_result.get("object_counts"),
     )
+
+    if seed_only:
+        print(json.dumps(seed_result, ensure_ascii=False, indent=2))
+        return 0
 
     ingest_summary = await _poll_ingest(mock_xdr_url=mock_xdr_url)
     print(json.dumps(ingest_summary, ensure_ascii=False, indent=2))
@@ -122,9 +125,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Mock XDR base URL (default: docker service)",
     )
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--seed-only",
+        action="store_true",
+        help="Only seed mock-xdr control plane; skip SourceAdapter poll (ISSUE-107 scheduler smoke)",
+    )
     args = parser.parse_args(argv)
     return asyncio.run(
-        _run(scenario_id=args.scenario, mock_xdr_url=args.mock_xdr_url, seed=args.seed)
+        _run(
+            scenario_id=args.scenario,
+            mock_xdr_url=args.mock_xdr_url,
+            seed=args.seed,
+            seed_only=args.seed_only,
+        )
     )
 
 
