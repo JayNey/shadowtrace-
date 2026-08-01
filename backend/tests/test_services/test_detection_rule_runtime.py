@@ -943,3 +943,114 @@ async def test_execute_shadow_all_active_packages_without_package_id(
     )
     assert result.rules_evaluated == 2
     assert len(result.candidates) == 2
+
+
+@pytest.mark.asyncio
+async def test_shadow_execute_includes_observation_in_lateness_band(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    # cutoff within lateness band after 1h window_end (15:00 -> upper 15:10)
+    cutoff = datetime(2026, 8, 1, 15, 10, 0, tzinfo=UTC)
+    await _insert_observation(
+        session_factory,
+        suffix=f"{suffix}-late",
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        observed_at=datetime(2026, 8, 1, 15, 5, 0, tzinfo=UTC),
+    )
+    rule = DetectionRuleDefinition(
+        rule_id="rule-match",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_MATCH,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="medium",
+        match_criteria={"action": "create_process"},
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert len(result.candidates) == 1
+    assert result.candidates[0].provenance.window_end is not None
+
+
+@pytest.mark.asyncio
+async def test_shadow_execute_isolates_unexpected_operator_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    rule_ok = DetectionRuleDefinition(
+        rule_id="rule-ok",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_MATCH,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="medium",
+        match_criteria={"action": "create_process"},
+    )
+    rule_bad = rule_ok.model_copy(update={"rule_id": "rule-bad"})
+    service = DetectionRuleService(session_factory)
+    package = await service.register_package(
+        source_tenant_id=tenant_id,
+        package_version=1,
+        rules=[rule_ok, rule_bad],
+        author="tester",
+    )
+    await service.validate_package(source_tenant_id=tenant_id, package_id=package.package_id)
+    await service.activate_shadow(source_tenant_id=tenant_id, package_id=package.package_id)
+
+    await _insert_observation(
+        session_factory,
+        suffix=f"{suffix}-0",
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        observed_at=cutoff - timedelta(minutes=40),
+    )
+
+    from app.detection.operators.event_match import EventMatchOperator
+
+    original_evaluate = EventMatchOperator.evaluate
+
+    def _flaky_evaluate(
+        self: EventMatchOperator,
+        rule: DetectionRuleDefinition,
+        context: object,
+    ) -> list[object]:
+        if rule.rule_id == "rule-bad":
+            raise RuntimeError("simulated operator failure")
+        return original_evaluate(self, rule, context)
+
+    monkeypatch.setattr(EventMatchOperator, "evaluate", _flaky_evaluate)
+
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package.package_id,
+    )
+    assert result.rules_evaluated == 2
+    assert len(result.errors) == 1
+    assert result.errors[0].error_category == "internal_error"
+    assert len(result.candidates) == 1

@@ -91,6 +91,21 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
                 details={"field_name": field_name},
             )
 
+    if operator_value in {
+        RuleOperatorKind.EVENT_MATCH.value,
+        RuleOperatorKind.EVENT_COUNT.value,
+    }:
+        if rule.missing_data_policy is MissingDataPolicy.TREAT_AS_ZERO:
+            raise ValidationError(
+                "treat_as_zero missing_data_policy is not supported for observation operators",
+                details={"rule_id": rule.rule_id, "operator": operator_value},
+            )
+        if "observation_count" in rule.required_fields:
+            raise ValidationError(
+                "observation_count required_field is not valid for observation operators",
+                details={"rule_id": rule.rule_id, "operator": operator_value},
+            )
+
     if operator_value == RuleOperatorKind.EVENT_MATCH.value and not rule.match_criteria:
         raise ValidationError(
             "event_match requires non-empty match_criteria",

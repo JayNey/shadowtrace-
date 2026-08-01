@@ -50,6 +50,8 @@ class EventCountOperator:
                     matched_value=count,
                     observation_ids=observation_ids,
                     snapshot_ids=[],
+                    window_start=context.window_start,
+                    window_end=context.window_end,
                 )
             )
         return matches

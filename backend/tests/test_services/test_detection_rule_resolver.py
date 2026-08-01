@@ -435,6 +435,33 @@ def test_event_count_fail_on_missing_required_field() -> None:
         )
 
 
+def test_compile_rejects_treat_as_zero_for_observation_operators() -> None:
+    rule = _rule(operator=RuleOperatorKind.EVENT_COUNT, threshold=1, match_criteria={})
+    rule = rule.model_copy(update={"missing_data_policy": MissingDataPolicy.TREAT_AS_ZERO})
+    with pytest.raises(ValidationError, match="treat_as_zero"):
+        compile_rule_package(
+            source_tenant_id="tenant-a",
+            package_version=1,
+            runtime_state=DetectionRuleRuntimeState.DRAFT,
+            rules=[rule],
+            provenance=DetectionRulePackageProvenance(author="tester"),
+        )
+
+
+def test_compile_rejects_observation_count_required_field_on_event_match() -> None:
+    rule = _rule(operator=RuleOperatorKind.EVENT_MATCH).model_copy(
+        update={"required_fields": ["observation_count"]},
+    )
+    with pytest.raises(ValidationError, match="observation_count required_field"):
+        compile_rule_package(
+            source_tenant_id="tenant-a",
+            package_version=1,
+            runtime_state=DetectionRuleRuntimeState.DRAFT,
+            rules=[rule],
+            provenance=DetectionRulePackageProvenance(author="tester"),
+        )
+
+
 def test_event_count_cost_limit_fail_closed() -> None:
     base = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
     observations = [

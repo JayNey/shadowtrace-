@@ -67,6 +67,8 @@ GitHub 权威：
 1. `candidate_detection_id` / `idempotency_key` 由 `(tenant, scope, package, rule, cutoff, group_key, rule_version)` 决定，不含 provenance。
 2. `content_hash` 含完整 evidence body；迟到数据重跑时同 idempotency_key 下更新 matched_value / provenance（in-place recompute）。
 3. 同 tenant 允许多个 `shadow_active` package 并存；`execute_shadow` 无 `package_id` 时全部执行（Phase A 行为，#629 前不做互斥）。
+4. `validate_package` 校验每条规则的 `detection_scope_id` 在该 tenant 下为 ACTIVE scope。
+5. observation 算子（event_match/event_count）禁止 `missing_data_policy=treat_as_zero` 及 `required_fields` 含 `observation_count`。
 
 ## 测试与验证
 

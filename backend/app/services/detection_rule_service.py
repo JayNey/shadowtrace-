@@ -19,6 +19,7 @@ from app.models.detection_rule import (
     DetectionRulePackageQuery,
     DetectionRuleRuntimeState,
 )
+from app.models.detection_scope import DetectionScopeLifecycleState
 from app.services.detection_rule_resolver import (
     allowed_runtime_transition,
     compile_rule_package,
@@ -41,6 +42,39 @@ def row_to_detection_rule_package(row: orm.DetectionRulePackage) -> DetectionRul
         supersedes_package_id=row.supersedes_package_id,
         created_at=row.created_at,
     )
+
+
+async def _validate_active_scopes_for_rules(
+    session: AsyncSession,
+    *,
+    source_tenant_id: str,
+    rules: list[DetectionRuleDefinition],
+) -> None:
+    seen_scope_ids: set[str] = set()
+    for rule in rules:
+        if rule.detection_scope_id in seen_scope_ids:
+            continue
+        seen_scope_ids.add(rule.detection_scope_id)
+        row = await session.scalar(
+            select(orm.DetectionScopeRevision)
+            .where(
+                and_(
+                    orm.DetectionScopeRevision.detection_scope_id == rule.detection_scope_id,
+                    orm.DetectionScopeRevision.source_tenant_id == source_tenant_id,
+                    orm.DetectionScopeRevision.lifecycle_state
+                    == DetectionScopeLifecycleState.ACTIVE.value,
+                )
+            )
+            .limit(1)
+        )
+        if row is None:
+            raise ValidationError(
+                "detection scope not active for tenant",
+                details={
+                    "detection_scope_id": rule.detection_scope_id,
+                    "source_tenant_id": source_tenant_id,
+                },
+            )
 
 
 class DetectionRuleService:
@@ -177,14 +211,20 @@ class DetectionRuleService:
                     )
 
                 if target_state is DetectionRuleRuntimeState.VALIDATED:
+                    rules = [
+                        DetectionRuleDefinition.model_validate(item)
+                        for item in (row.rules or [])
+                    ]
+                    await _validate_active_scopes_for_rules(
+                        session,
+                        source_tenant_id=row.source_tenant_id,
+                        rules=rules,
+                    )
                     compile_rule_package(
                         source_tenant_id=row.source_tenant_id,
                         package_version=int(row.package_version),
                         runtime_state=target_state,
-                        rules=[
-                            DetectionRuleDefinition.model_validate(item)
-                            for item in (row.rules or [])
-                        ],
+                        rules=rules,
                         provenance=DetectionRulePackageProvenance.model_validate(row.provenance),
                         supersedes_package_id=row.supersedes_package_id,
                         package_id=row.package_id,

@@ -26,7 +26,9 @@ from app.models.detection_rule import (
     RuleOperatorKind,
 )
 from app.models.feature_snapshot import FEATURE_CONTRACT_VERSION, FeatureWindowKind
+from app.models.detection_scope import DetectionScopeIdentity, UpstreamConnectorMember
 from app.services.detection_rule_service import DetectionRuleService
+from app.services.detection_scope_service import DetectionScopeService
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -77,6 +79,29 @@ def _rule_definition(*, scope_id: str) -> DetectionRuleDefinition:
     )
 
 
+async def _seed_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    suffix: str,
+    tenant_id: str,
+) -> str:
+    service = DetectionScopeService(session_factory)
+    identity = DetectionScopeIdentity(
+        source_tenant_id=tenant_id,
+        source_product="mock_xdr",
+        integration_instance_id=f"inst-{suffix}",
+    )
+    revision = await service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=f"conn-{suffix}", source_product="mock_xdr"),
+        ],
+    )
+    activated = await service.activate_revision(revision.scope_revision_id)
+    return activated.detection_scope_id
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def clean_detection_rule_tables(
     session_factory: async_sessionmaker[AsyncSession],
@@ -86,12 +111,14 @@ async def clean_detection_rule_tables(
             await session.execute(delete(orm.DetectionRuleRuntimeError))
             await session.execute(delete(orm.CandidateDetection))
             await session.execute(delete(orm.DetectionRulePackage))
+            await session.execute(delete(orm.DetectionScopeRevision))
     yield
     async with session_factory() as session:
         async with session.begin():
             await session.execute(delete(orm.DetectionRuleRuntimeError))
             await session.execute(delete(orm.CandidateDetection))
             await session.execute(delete(orm.DetectionRulePackage))
+            await session.execute(delete(orm.DetectionScopeRevision))
 
 
 @pytest.mark.asyncio
@@ -169,7 +196,7 @@ async def test_lifecycle_transition_preserves_content_hash(
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
-    scope_id = f"dscope-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
     service = _rule_service(session_factory)
     package = await service.register_package(
         source_tenant_id=tenant_id,
@@ -196,7 +223,7 @@ async def test_lifecycle_transitions(
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
-    scope_id = f"dscope-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
     service = _rule_service(session_factory)
     package = await service.register_package(
         source_tenant_id=tenant_id,
@@ -269,7 +296,7 @@ async def test_query_packages_filters_by_runtime_state(
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
-    scope_id = f"dscope-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
     service = _rule_service(session_factory)
     package = await service.register_package(
         source_tenant_id=tenant_id,
@@ -288,6 +315,26 @@ async def test_query_packages_filters_by_runtime_state(
     )
     assert result.total == 1
     assert result.items[0].package_id == package.package_id
+
+
+@pytest.mark.asyncio
+async def test_validate_package_rejects_unknown_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    service = _rule_service(session_factory)
+    package = await service.register_package(
+        source_tenant_id=tenant_id,
+        package_version=1,
+        rules=[_rule_definition(scope_id=f"dscope-missing-{suffix}")],
+        author="tester",
+    )
+    with pytest.raises(ValidationError, match="detection scope not active"):
+        await service.validate_package(
+            source_tenant_id=tenant_id,
+            package_id=package.package_id,
+        )
 
 
 @pytest.mark.asyncio

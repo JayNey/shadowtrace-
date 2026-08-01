@@ -27,6 +27,8 @@ class OperatorExecutionContext:
     cutoff_at: datetime
     observations: list[BehaviorObservation]
     snapshots: list[FeatureSnapshot]
+    window_start: datetime | None = None
+    window_end: datetime | None = None
 
 
 def group_key_from_observation(
@@ -123,6 +125,8 @@ def should_process_observation(
     for field_name in rule.required_fields:
         if observation_missing_required_field(observation, field_name):
             if rule.missing_data_policy is MissingDataPolicy.SKIP:
+                return False
+            if rule.missing_data_policy is MissingDataPolicy.TREAT_AS_ZERO:
                 return False
             apply_missing_data_policy(
                 policy=rule.missing_data_policy,

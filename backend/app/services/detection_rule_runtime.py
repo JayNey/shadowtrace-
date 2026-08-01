@@ -152,9 +152,9 @@ class DetectionRuleRuntimeService:
         candidate: CandidateDetection,
     ) -> CandidateDetection:
         existing = await session.scalar(
-            select(orm.CandidateDetection).where(
-                orm.CandidateDetection.idempotency_key == candidate.idempotency_key
-            )
+            select(orm.CandidateDetection)
+            .where(orm.CandidateDetection.idempotency_key == candidate.idempotency_key)
+            .with_for_update()
         )
         if existing is not None:
             if existing.content_hash != candidate.content_hash:
@@ -197,9 +197,9 @@ class DetectionRuleRuntimeService:
                 await session.flush()
         except IntegrityError:
             existing = await session.scalar(
-                select(orm.CandidateDetection).where(
-                    orm.CandidateDetection.idempotency_key == candidate.idempotency_key
-                )
+                select(orm.CandidateDetection)
+                .where(orm.CandidateDetection.idempotency_key == candidate.idempotency_key)
+                .with_for_update()
             )
             if existing is None:
                 raise
@@ -332,6 +332,8 @@ class DetectionRuleRuntimeService:
                 cutoff_at=cutoff_at,
                 observations=observations,
                 snapshots=snapshots,
+                window_start=window_start,
+                window_end=window_end,
             ),
         )
 
@@ -355,6 +357,40 @@ class DetectionRuleRuntimeService:
                 )
             )
         return candidates, scanned, None
+
+    async def _persist_rule_runtime_error(
+        self,
+        session: AsyncSession,
+        *,
+        source_tenant_id: str,
+        package: DetectionRulePackage,
+        rule: DetectionRuleDefinition,
+        cutoff_at: datetime,
+        error_category: str,
+        exc: Exception,
+    ) -> DetectionRuleRuntimeError:
+        detail: dict[str, object] = {}
+        if isinstance(exc, ValidationError):
+            detail = getattr(exc, "details", {}) or {}
+        else:
+            detail = {"exception_type": type(exc).__name__}
+        runtime_error = DetectionRuleRuntimeError(
+            error_id=build_runtime_error_id(
+                source_tenant_id=source_tenant_id,
+                package_id=package.package_id,
+                rule_id=rule.rule_id,
+                error_category=error_category,
+                cutoff_at=cutoff_at,
+            ),
+            source_tenant_id=source_tenant_id,
+            package_id=package.package_id,
+            rule_id=rule.rule_id,
+            error_category=error_category,
+            error_message=str(exc),
+            detail=detail,
+            created_at=datetime.now(UTC),
+        )
+        return await self.persist_runtime_error_in_session(session, runtime_error)
 
     async def execute_shadow(
         self,
@@ -421,24 +457,37 @@ class DetectionRuleRuntimeService:
                                 )
                                 candidates.append(persisted)
                         except ValidationError as exc:
-                            runtime_error = DetectionRuleRuntimeError(
-                                error_id=build_runtime_error_id(
+                            errors.append(
+                                await self._persist_rule_runtime_error(
+                                    session,
                                     source_tenant_id=source_tenant_id,
-                                    package_id=package.package_id,
-                                    rule_id=rule.rule_id,
-                                    error_category="validation_error",
+                                    package=package,
+                                    rule=rule,
                                     cutoff_at=cutoff_at,
-                                ),
-                                source_tenant_id=source_tenant_id,
-                                package_id=package.package_id,
-                                rule_id=rule.rule_id,
-                                error_category="validation_error",
-                                error_message=str(exc),
-                                detail=getattr(exc, "details", {}) or {},
-                                created_at=datetime.now(UTC),
+                                    error_category="validation_error",
+                                    exc=exc,
+                                )
                             )
-                            await self.persist_runtime_error_in_session(session, runtime_error)
-                            errors.append(runtime_error)
+                        except Exception as exc:
+                            logger.exception(
+                                "detection rule evaluation failed",
+                                extra={
+                                    "package_id": package.package_id,
+                                    "rule_id": rule.rule_id,
+                                    "source_tenant_id": source_tenant_id,
+                                },
+                            )
+                            errors.append(
+                                await self._persist_rule_runtime_error(
+                                    session,
+                                    source_tenant_id=source_tenant_id,
+                                    package=package,
+                                    rule=rule,
+                                    cutoff_at=cutoff_at,
+                                    error_category="internal_error",
+                                    exc=exc,
+                                )
+                            )
 
                 return DetectionRuleRuntimeResult(
                     candidates=candidates,
