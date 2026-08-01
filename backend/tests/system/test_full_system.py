@@ -178,10 +178,10 @@ async def test_high_risk_full_response_chain(
 def test_rule_fallback_risk_bounds_reject_misconfigured_min() -> None:
     """Changing rule_fallback_risk_min to 999 must fall outside observed rule scores."""
     spec = SCENARIO_EXPECTATIONS["host_compromise"]
-    # ISSUE-099: source-enriched rule-only scores land near the mid-50s, not ~20.
-    observed_rule_score = 51
-    bad_min = 999
     good_min, good_max = risk_bounds_for(spec, rule_only=True)
+    # Mid-band sample inside ISSUE-099 rule-only range (45-60 for host_compromise).
+    observed_rule_score = (good_min + good_max) // 2
+    bad_min = 999
     assert good_min <= observed_rule_score <= good_max
     assert not (bad_min <= observed_rule_score <= good_max)
 

@@ -84,17 +84,16 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
     "account_anomaly_fp": ScenarioExpectation(
         scenario_id="account_anomaly_fp",
         event_type=EventType.ACCOUNT_ANOMALY,
-        # ISSUE-114: pre-evidence FP is advisory; golden/rule paths may land threat.
+        # Demo pack is an ops-change FP in narrative; golden/rule paths lack post-evidence
+        # close_as_fp (ISSUE-114), so automated verdict is threat or advisory FP only.
         verdict=FinalVerdict.CONFIRMED_THREAT,
         acceptable_verdicts=(
             FinalVerdict.CONFIRMED_THREAT,
             FinalVerdict.POSSIBLE_FALSE_POSITIVE,
-            FinalVerdict.FALSE_POSITIVE,
-            FinalVerdict.NONE,
         ),
-        # ISSUE-099 source enrichment raises rule-only / golden scores above old FP band.
-        risk_min=60,
-        risk_max=80,
+        # Regression golden baseline: confirmed_threat @ 71 (ISSUE-099 enrichment).
+        risk_min=65,
+        risk_max=75,
         rule_fallback_risk_min=30,
         rule_fallback_risk_max=45,
         rule_fallback=True,
@@ -108,11 +107,11 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
         verdict=FinalVerdict.CONFIRMED_THREAT,
         acceptable_verdicts=(
             FinalVerdict.CONFIRMED_THREAT,
-            FinalVerdict.NONE,
             FinalVerdict.POSSIBLE_FALSE_POSITIVE,
         ),
-        risk_min=60,
-        risk_max=80,
+        # Regression golden baseline: confirmed_threat @ 70.
+        risk_min=65,
+        risk_max=75,
         rule_fallback_risk_min=40,
         rule_fallback_risk_max=60,
         rule_fallback=True,
@@ -188,11 +187,11 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
         verdict=FinalVerdict.CONFIRMED_THREAT,
         acceptable_verdicts=(
             FinalVerdict.CONFIRMED_THREAT,
-            FinalVerdict.NONE,
             FinalVerdict.POSSIBLE_FALSE_POSITIVE,
         ),
-        risk_min=60,
-        risk_max=80,
+        # Regression golden baseline: confirmed_threat @ 71.
+        risk_min=65,
+        risk_max=75,
         rule_fallback_risk_min=45,
         rule_fallback_risk_max=60,
         rule_fallback=True,
