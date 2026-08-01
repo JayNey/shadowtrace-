@@ -3519,6 +3519,44 @@
             "type": "integer",
             "title": "Pending Writeback Count",
             "default": 0
+          },
+          "analysis_only_complete": {
+            "type": "boolean",
+            "title": "Analysis Only Complete",
+            "default": false
+          },
+          "response_execution_deferred": {
+            "type": "boolean",
+            "title": "Response Execution Deferred",
+            "default": false
+          },
+          "execution_substate": {
+            "$ref": "#/components/schemas/ExecutionSubstate",
+            "default": "none"
+          },
+          "response_phase_state": {
+            "$ref": "#/components/schemas/ResponsePhaseState",
+            "default": "not_started"
+          },
+          "next_recommended_action": {
+            "$ref": "#/components/schemas/NextRecommendedAction",
+            "default": "none"
+          },
+          "full_loop_available": {
+            "type": "boolean",
+            "title": "Full Loop Available",
+            "default": true
+          },
+          "phase_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase Message"
           }
         },
         "type": "object",
@@ -4135,6 +4173,18 @@
         ],
         "title": "ExecutionOwner"
       },
+      "ExecutionSubstate": {
+        "type": "string",
+        "enum": [
+          "none",
+          "waiting_approval",
+          "waiting_execution",
+          "waiting_writeback",
+          "manual_resolution"
+        ],
+        "title": "ExecutionSubstate",
+        "description": "Resumable checkpoint substate; never replaces EventStatus."
+      },
       "FileEntity": {
         "properties": {
           "entity_id": {
@@ -4677,6 +4727,40 @@
           },
           "status": {
             "$ref": "#/components/schemas/EventStatus"
+          },
+          "include_response_execution": {
+            "type": "boolean",
+            "title": "Include Response Execution",
+            "default": false
+          },
+          "continue_response_execution": {
+            "type": "boolean",
+            "title": "Continue Response Execution",
+            "default": false
+          },
+          "response_phase_state": {
+            "$ref": "#/components/schemas/ResponsePhaseState",
+            "default": "not_started"
+          },
+          "next_recommended_action": {
+            "$ref": "#/components/schemas/NextRecommendedAction",
+            "default": "none"
+          },
+          "full_loop_available": {
+            "type": "boolean",
+            "title": "Full Loop Available",
+            "default": true
+          },
+          "phase_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phase Message"
           }
         },
         "type": "object",
@@ -4947,6 +5031,17 @@
           "reason"
         ],
         "title": "MemoryReviewRejectRequest"
+      },
+      "NextRecommendedAction": {
+        "type": "string",
+        "enum": [
+          "none",
+          "start_response_execution",
+          "approve_actions",
+          "close"
+        ],
+        "title": "NextRecommendedAction",
+        "description": "Operator next step hint; never implies hidden auto-execution (ISSUE-103)."
       },
       "ProcessEntity": {
         "properties": {
@@ -5263,6 +5358,20 @@
           "comment"
         ],
         "title": "ResolveWritebackRequest"
+      },
+      "ResponsePhaseState": {
+        "type": "string",
+        "enum": [
+          "not_started",
+          "analysis_in_progress",
+          "analysis_complete_deferred",
+          "response_planning",
+          "awaiting_approval",
+          "executing",
+          "complete"
+        ],
+        "title": "ResponsePhaseState",
+        "description": "Derived UX phase for analysis vs response (ISSUE-103)."
       },
       "SearchResponse": {
         "properties": {

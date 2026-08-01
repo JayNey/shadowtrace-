@@ -607,6 +607,7 @@ describe("EventDetailPage", () => {
     });
 
     renderPage("/events/evt-70#actions");
+    await user.click(await screen.findByRole("tab", { name: /安全处置/ }));
     expect(await screen.findByText("待效果验证后激活")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: /外部写回/ }));
     expect(await screen.findByTestId("simulated-receipt-warning")).toBeInTheDocument();
@@ -617,6 +618,7 @@ describe("EventDetailPage", () => {
   });
 
   it("shows POST_VERIFY label after deferred action enters execution", async () => {
+    const user = userEvent.setup();
     mockListActions.mockResolvedValue({
       data: {
         total: 1,
@@ -642,7 +644,27 @@ describe("EventDetailPage", () => {
     });
 
     renderPage("/events/evt-70#actions");
+    await user.click(await screen.findByRole("tab", { name: /安全处置/ }));
     expect(await screen.findByText("POST_VERIFY")).toBeInTheDocument();
     expect(screen.queryByText("待效果验证后激活")).not.toBeInTheDocument();
+  });
+
+  it("shows analysis-only deferred banner when response_phase_state is analysis_complete_deferred", async () => {
+    mockGetEvent.mockResolvedValue({
+      data: {
+        ...makeDetail({ status: "reporting" }),
+        response_phase_state: "analysis_complete_deferred",
+        next_recommended_action: "start_response_execution",
+        full_loop_available: true,
+        phase_message: "分析已完成，未生成/执行处置方案。",
+      },
+    });
+
+    renderPage("/events/evt-70");
+    const banner = await screen.findByTestId("analysis-phase-banner");
+    expect(banner).toBeInTheDocument();
+    expect(screen.getByText("分析已完成，处置方案未生成")).toBeInTheDocument();
+    expect(screen.getByText("分析已完成，未生成/执行处置方案。")).toBeInTheDocument();
+    expect(screen.getByTestId("start-response-execution-cta")).toBeInTheDocument();
   });
 });

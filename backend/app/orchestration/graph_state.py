@@ -71,3 +71,5 @@ class InvestigationState(TypedDict, total=False):
     # resumes via approval_engine / resume_investigation. Workflow unit tests
     # pass defer_response_execution=False via _base_state().
     defer_response_execution: bool
+    # ISSUE-103: resume ResponseAgent from REPORTING after deferred analysis.
+    continue_response_execution: bool

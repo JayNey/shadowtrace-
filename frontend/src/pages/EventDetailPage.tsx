@@ -1,5 +1,6 @@
 import {
   Alert,
+  App,
   Button,
   Card,
   Col,
@@ -14,13 +15,14 @@ import {
   Typography,
 } from "antd";
 import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import type { ColumnsType } from "antd/es/table";
 import { triageContextFromSnapshot } from "../utils/evidenceContext";
 import ReportViewer from "../components/report/ReportViewer";
 import { coerceInvestigationReport } from "../types/report";
 import EventOverviewCard from "../components/event/EventOverviewCard";
+import InvestigationPhaseBanner from "../components/event/InvestigationPhaseBanner";
 import EntityList from "../components/event/EntityList";
 import EvidenceList from "../components/event/EvidenceList";
 import RiskScorePanel from "../components/event/RiskScorePanel";
@@ -30,6 +32,8 @@ import StorylineTimeline from "../components/storyline/StorylineTimeline";
 import EventAuditPanel from "../components/audit/EventAuditPanel";
 import EventChatPanel from "../components/chat/EventChatPanel";
 import { isEventChatEnabled } from "../config/features";
+import { triggerInvestigation } from "../services/eventApi";
+import { ApiError } from "../services/apiClient";
 import { useEventDetail, type EventWriteback } from "../hooks/useEventDetail";
 import type { Action } from "../types/action";
 import type {
@@ -128,10 +132,23 @@ function isDeferredPostVerifyAction(action: Action): boolean {
   );
 }
 
+const ACTION_NAME_LABELS: Record<string, string> = {
+  generate_report: "自动生成分析报告",
+};
+
+function actionDisplayName(action: Action): string {
+  return ACTION_NAME_LABELS[action.action_name] ?? action.action_name;
+}
+
 function ActionsPanel({ actions }: { actions: Action[] }) {
   const columns: ColumnsType<Action> = [
     { title: "action_id", dataIndex: "action_id", width: 170 },
-    { title: "动作", dataIndex: "action_name", width: 170 },
+    {
+      title: "动作",
+      dataIndex: "action_name",
+      width: 190,
+      render: (_name: string, action) => actionDisplayName(action),
+    },
     { title: "工具", dataIndex: "tool_name", width: 210 },
     {
       title: "执行阶段",
@@ -150,14 +167,35 @@ function ActionsPanel({ actions }: { actions: Action[] }) {
     { title: "状态", dataIndex: "status", render: (value) => <Tag>{value}</Tag> },
     { title: "目标", dataIndex: "target", render: (value) => value || "暂无数据" },
   ];
-  return (
+
+  const systemActions = actions.filter((a) => a.action_category === "system");
+  const securityActions = actions.filter((a) => a.action_category !== "system");
+
+  const renderTable = (rows: Action[]) => (
     <Table
       rowKey="action_id"
-      dataSource={actions}
+      dataSource={rows}
       columns={columns}
       pagination={{ pageSize: 10, hideOnSinglePage: true }}
       locale={{ emptyText: "暂无数据" }}
       scroll={{ x: 1100 }}
+    />
+  );
+
+  return (
+    <Tabs
+      items={[
+        {
+          key: "system",
+          label: `系统动作（${systemActions.length}）`,
+          children: renderTable(systemActions),
+        },
+        {
+          key: "security",
+          label: `安全处置（${securityActions.length}）`,
+          children: renderTable(securityActions),
+        },
+      ]}
     />
   );
 }
@@ -395,6 +433,8 @@ export default function EventDetailPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const location = useLocation();
   const navigate = useNavigate();
+  const { message } = App.useApp();
+  const [startingResponse, setStartingResponse] = useState(false);
   const {
     event,
     traces,
@@ -439,6 +479,22 @@ export default function EventDetailPage() {
   const triageContext =
     evidenceDetail?.triage_context ?? triageContextFromSnapshot(context) ?? null;
   const writebackSummary = context?.writeback_summary;
+
+  const handleStartResponseExecution = async () => {
+    if (!eventId) return;
+    setStartingResponse(true);
+    try {
+      await triggerInvestigation(eventId, { includeResponseExecution: true });
+      message.success("已启动处置方案生成与审批流程");
+      await refresh("all");
+    } catch (err: unknown) {
+      if (err instanceof ApiError && err.error_code === "full_loop_unavailable") {
+        message.error("当前部署不支持完整处置链路");
+      }
+    } finally {
+      setStartingResponse(false);
+    }
+  };
 
   const sourceContent = (
     <Row gutter={[16, 16]}>
@@ -596,6 +652,11 @@ export default function EventDetailPage() {
         </Button>
       </Space>
       <EventOverviewCard detail={event} />
+      <InvestigationPhaseBanner
+        detail={event}
+        onStartResponse={() => void handleStartResponseExecution()}
+        startingResponse={startingResponse}
+      />
       <AgentStatusPanel
         eventId={eventId}
         eventStatus={event.event.status}

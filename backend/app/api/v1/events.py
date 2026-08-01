@@ -47,7 +47,7 @@ from app.core.auth import (
     require_roles,
 )
 from app.core.config import get_settings
-from app.core.errors import DependencyUnavailableError, InvestigationInProgressError
+from app.core.errors import DependencyUnavailableError, InvestigationInProgressError, ValidationError
 from app.db import models as orm
 from app.models.action import Action as ActionModel
 from app.models.disposition import SourceObjectLocator
@@ -58,6 +58,8 @@ from app.models.enums import (
     EventStatus,
     EventType,
     FinalVerdict,
+    NextRecommendedAction,
+    ResponsePhaseState,
     Severity,
     SourceObjectKind,
     WritebackReadiness,
@@ -65,6 +67,12 @@ from app.models.enums import (
 )
 from app.models.workflow import TransitionContext
 from app.services.decision_trace_service import DecisionTraceService
+from app.services.investigation_guidance import (
+    can_continue_response_execution,
+    derive_investigation_guidance,
+    record_investigation_workflow_path,
+    workflow_path_from_request,
+)
 
 if TYPE_CHECKING:
     from app.services.event_service import EventService
@@ -587,7 +595,65 @@ async def get_event(
         writeback_readiness=readiness,
         writeback_overall_status=wb_status,
         pending_writeback_count=pending_count,
+        **_guidance_fields(event, get_settings()),
     )
+
+
+def _guidance_fields(event: Any, settings: Any) -> dict[str, Any]:
+    guidance = derive_investigation_guidance(
+        status=event.status,
+        disposition_policy=event.disposition_policy,
+        context_snapshot=event.event_context_snapshot,
+        orchestration_mode=settings.orchestration_mode,
+    )
+    return {
+        "analysis_only_complete": guidance.analysis_only_complete,
+        "response_execution_deferred": guidance.response_execution_deferred,
+        "execution_substate": guidance.execution_substate,
+        "response_phase_state": guidance.response_phase_state,
+        "next_recommended_action": guidance.next_recommended_action,
+        "full_loop_available": guidance.full_loop_available,
+        "phase_message": guidance.phase_message,
+    }
+
+
+def _investigate_response_fields(
+    *,
+    event: Any,
+    settings: Any,
+    include_response: bool,
+    continue_response: bool,
+) -> dict[str, Any]:
+    guidance = derive_investigation_guidance(
+        status=event.status,
+        disposition_policy=event.disposition_policy,
+        context_snapshot=event.event_context_snapshot,
+        orchestration_mode=settings.orchestration_mode,
+    )
+    if continue_response:
+        phase = ResponsePhaseState.RESPONSE_PLANNING
+        next_action = NextRecommendedAction.NONE
+        message = "正在启动处置方案生成与审批流程。"
+    elif include_response and event.status is EventStatus.NEW:
+        phase = ResponsePhaseState.ANALYSIS_IN_PROGRESS
+        next_action = NextRecommendedAction.NONE
+        message = "已发起完整调查（含处置方案）。"
+    elif not include_response and event.status is EventStatus.NEW:
+        phase = ResponsePhaseState.ANALYSIS_IN_PROGRESS
+        next_action = NextRecommendedAction.NONE
+        message = "已发起仅分析调查；完成后可在详情页继续生成处置方案。"
+    else:
+        phase = guidance.response_phase_state
+        next_action = guidance.next_recommended_action
+        message = guidance.phase_message
+    return {
+        "include_response_execution": include_response,
+        "continue_response_execution": continue_response,
+        "response_phase_state": phase,
+        "next_recommended_action": next_action,
+        "full_loop_available": guidance.full_loop_available,
+        "phase_message": message,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -612,7 +678,33 @@ async def investigate_event(
     if event is None:
         raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
 
-    if event.status != EventStatus.NEW:
+    settings = get_settings()
+    mode = (settings.orchestration_mode or "graph").strip().lower()
+    task_mode = (settings.task_mode or "background").strip().lower()
+    include_response = bool(body.include_response_execution) if body else False
+
+    deferred_resume_allowed = can_continue_response_execution(
+        status=event.status,
+        disposition_policy=event.disposition_policy,
+        context_snapshot=event.event_context_snapshot,
+        orchestration_mode=settings.orchestration_mode,
+    )
+    continue_response = include_response and deferred_resume_allowed
+    if include_response and not continue_response and event.status is not EventStatus.NEW:
+        raise InvalidStateTransitionError(
+            "include_response_execution requires NEW or deferred REPORTING resume",
+            current=event.status,
+            target=EventStatus.PLANNING_RESPONSE,
+            details={"event_id": event_id},
+        )
+    if continue_response:
+        if not include_response:
+            raise ValidationError(
+                "deferred response continuation requires include_response_execution=true",
+                error_code="validation_error",
+                details={"event_id": event_id},
+            )
+    elif event.status is not EventStatus.NEW:
         raise InvalidStateTransitionError(
             f"event must be in NEW status to start investigation, current: {event.status.value}",
             current=event.status,
@@ -620,11 +712,38 @@ async def investigate_event(
             details={"event_id": event_id},
         )
 
-    # Enqueue orchestration as a background task (mode-dependent).
-    settings = get_settings()
-    mode = (settings.orchestration_mode or "graph").strip().lower()
-    task_mode = (settings.task_mode or "background").strip().lower()
-    include_response = bool(body.include_response_execution) if body else False
+    if mode == "analysis_only" and include_response:
+        raise ValidationError(
+            "include_response_execution is unavailable when ORCHESTRATION_MODE=analysis_only",
+            error_code="full_loop_unavailable",
+            details={"orchestration_mode": mode},
+        )
+    if continue_response and mode == "analysis_only":
+        raise ValidationError(
+            "response continuation is unavailable when ORCHESTRATION_MODE=analysis_only",
+            error_code="full_loop_unavailable",
+            details={"orchestration_mode": mode},
+        )
+
+    workflow_path = workflow_path_from_request(
+        include_response_execution=include_response,
+        continue_response_execution=continue_response,
+    )
+
+    async def _record_workflow_path() -> None:
+        try:
+            await record_investigation_workflow_path(
+                _get_session_factory(),
+                event_id,
+                workflow_path=workflow_path,
+                include_response_execution=include_response,
+            )
+        except Exception:
+            logger.warning(
+                "failed to record investigation workflow_path event=%s",
+                event_id,
+                exc_info=True,
+            )
 
     if mode == "analysis_only":
 
@@ -639,6 +758,7 @@ async def investigate_event(
                 projection = EvidenceProjection(_get_session_factory())
                 with bind_evidence_projection(projection):
                     await pipeline.run(event_id)
+                await _record_workflow_path()
             except Exception as exc:
                 logger.error(
                     "Background pipeline failed for event=%s: %s",
@@ -663,6 +783,7 @@ async def investigate_event(
         task_id = await dispatch_investigation(
             event_id,
             include_response_execution=include_response,
+            continue_response_execution=continue_response,
         )
     else:
         lease = get_event_lease()
@@ -696,8 +817,10 @@ async def investigate_event(
                         event_id,
                         owner_id=owner_id,
                         lease_acquired=True,
-                        include_response_execution=include_response,
+                        include_response_execution=include_response and not continue_response,
+                        continue_response_execution=continue_response,
                     )
+                await _record_workflow_path()
             except InvestigationInProgressError:
                 logger.warning(
                     "SuperAgent lost lease for event=%s before start",
@@ -730,6 +853,12 @@ async def investigate_event(
         event_id=event_id,
         task_id=task_id,
         status=event.status,
+        **_investigate_response_fields(
+            event=event,
+            settings=settings,
+            include_response=include_response,
+            continue_response=continue_response,
+        ),
     )
 
 

@@ -158,4 +158,9 @@ async def health(
         "tool_provider": tool_provider,
         "simulation_enabled": settings.simulation_enabled,
         "version": settings.app_version,
+        "investigation": {
+            "orchestration_mode": settings.orchestration_mode,
+            "full_loop_available": settings.orchestration_mode.strip().lower()
+            != "analysis_only",
+        },
     }

@@ -264,6 +264,27 @@ class ExecutionSubstate(StrEnum):
     MANUAL_RESOLUTION = "manual_resolution"
 
 
+class ResponsePhaseState(StrEnum):
+    """Derived UX phase for analysis vs response (ISSUE-103)."""
+
+    NOT_STARTED = "not_started"
+    ANALYSIS_IN_PROGRESS = "analysis_in_progress"
+    ANALYSIS_COMPLETE_DEFERRED = "analysis_complete_deferred"
+    RESPONSE_PLANNING = "response_planning"
+    AWAITING_APPROVAL = "awaiting_approval"
+    EXECUTING = "executing"
+    COMPLETE = "complete"
+
+
+class NextRecommendedAction(StrEnum):
+    """Operator next step hint; never implies hidden auto-execution (ISSUE-103)."""
+
+    NONE = "none"
+    START_RESPONSE_EXECUTION = "start_response_execution"
+    APPROVE_ACTIONS = "approve_actions"
+    CLOSE = "close"
+
+
 class DispositionIntentKind(StrEnum):
     """Internal envelope classification; not a vendor enum."""
 
@@ -378,6 +399,8 @@ DECLARED_ENUMS: dict[str, type[Enum]] = {
     "TargetWritebackStatus": TargetWritebackStatus,
     "ExecutionOwner": ExecutionOwner,
     "ExecutionSubstate": ExecutionSubstate,
+    "ResponsePhaseState": ResponsePhaseState,
+    "NextRecommendedAction": NextRecommendedAction,
     "DispositionIntentKind": DispositionIntentKind,
     "ConnectorStatus": ConnectorStatus,
     "CapabilityState": CapabilityState,

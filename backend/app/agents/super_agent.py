@@ -272,6 +272,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         lease_acquired: bool = False,
         publish_lifecycle: bool = True,
         include_response_execution: bool = False,
+        continue_response_execution: bool = False,
     ) -> None:
         """Run the full investigation graph for *event_id*.
 
@@ -287,6 +288,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         ``include_response_execution`` (ISSUE-077 / ISSUE-566): when False
         (default HTTP investigate), analysis completes at report and defers
         ResponseAgent. When True, continue into response / approval.
+
+        ``continue_response_execution`` (ISSUE-103): resume ResponseAgent from
+        REPORTING using persisted analysis artifacts (no triage replay).
         """
         if self.planner_agent is None:
             raise RuntimeError("SuperAgent requires a PlannerAgent")
@@ -327,7 +331,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             event_context = await self._load_event_context(event_id)
 
             # 3. Freeze source snapshot for this investigation run
-            await self._freeze_source_snapshot(event_context)
+            if not continue_response_execution:
+                await self._freeze_source_snapshot(event_context)
 
             # 4. Build and run graph
             if self._investigation_graph is not None:
@@ -335,14 +340,25 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     raise RuntimeError(
                         "SuperAgent requires context_store when investigation_graph is wired"
                     )
-                from app.orchestration.workflow_graph import build_initial_investigation_state
-
-                initial = await build_initial_investigation_state(
-                    event_id,
-                    context_store=self.context_store,
-                    defer_response_execution=not include_response_execution,
+                from app.orchestration.workflow_graph import (
+                    build_initial_investigation_state,
+                    build_response_continuation_state,
                 )
-                config = {"configurable": {"thread_id": event_id}}
+
+                if continue_response_execution:
+                    initial = await build_response_continuation_state(
+                        event_id,
+                        context_store=self.context_store,
+                    )
+                    thread_id = f"{event_id}:response-continuation"
+                else:
+                    initial = await build_initial_investigation_state(
+                        event_id,
+                        context_store=self.context_store,
+                        defer_response_execution=not include_response_execution,
+                    )
+                    thread_id = event_id
+                config = {"configurable": {"thread_id": thread_id}}
                 await self._investigation_graph.ainvoke(initial, config)
             else:
                 graph = self._build_graph()
@@ -370,7 +386,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             else:
                 ec = final_state.get("event_context", event_context)
             await self._persist_event_context(ec)
-            await self._persist_analysis_only_complete(event_id)
+            if not include_response_execution and not continue_response_execution:
+                await self._persist_analysis_only_complete(event_id)
             if ec.event is not None and ec.event.status is EventStatus.CLOSED:
                 await self._schedule_memory_after_close(event_id, ec)
 

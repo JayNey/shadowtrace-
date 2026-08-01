@@ -11,10 +11,12 @@ import type { EventListItem, EventListResponse } from "../../src/types/event";
 
 const mockListEvents = vi.fn();
 const mockTriggerInvestigation = vi.fn();
+const mockGetHealth = vi.fn();
 
 vi.mock("../../src/services/eventApi", () => ({
   listEvents: (...args: unknown[]) => mockListEvents(...args),
   triggerInvestigation: (...args: unknown[]) => mockTriggerInvestigation(...args),
+  getHealth: (...args: unknown[]) => mockGetHealth(...args),
 }));
 
 // Capture socket handler so tests can emit synthetic events.
@@ -109,6 +111,9 @@ describe("EventListPage", () => {
     vi.clearAllMocks();
     vi.useFakeTimers({ shouldAdvanceTime: true });
     mockListEvents.mockResolvedValue({ data: listResponse([makeItem()]) });
+    mockGetHealth.mockResolvedValue({
+      data: { investigation: { orchestration_mode: "graph", full_loop_available: true } },
+    });
     mockTriggerInvestigation.mockResolvedValue({
       data: { event_id: "evt-1", status: "triaging" },
     });
@@ -300,13 +305,17 @@ describe("EventListPage", () => {
     renderPage();
     expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
 
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     const btn = screen.getByTestId("trigger-investigation-evt-1");
-    await userEvent.setup({ advanceTimers: vi.advanceTimersByTime }).click(btn);
+    await user.click(btn);
+    expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
+    await user.click(screen.getByText("开始调查"));
 
     await waitFor(() =>
-      expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1"),
+      expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
+        includeResponseExecution: false,
+      }),
     );
-    // Row should now show triaging status
     await waitFor(() => {
       expect(screen.getByText("研判中")).toBeInTheDocument();
     });
@@ -325,9 +334,13 @@ describe("EventListPage", () => {
 
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
+    await user.click(screen.getByText("开始调查"));
 
     await waitFor(() =>
-      expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1"),
+      expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
+        includeResponseExecution: false,
+      }),
     );
     // Warning hint should appear
     await waitFor(() => {

@@ -140,13 +140,30 @@ def test_closed_has_no_outbound_edges() -> None:
         (EventStatus.CONTAINED, EventStatus.REPORTING),
         (EventStatus.FAILED, EventStatus.REPORTING),
         (EventStatus.REPORTING, EventStatus.CLOSED),
+        (
+            EventStatus.REPORTING,
+            EventStatus.PLANNING_RESPONSE,
+        ),
     ],
 )
 def test_legal_edges_pass(current: EventStatus, target: EventStatus) -> None:
     ctx = None
     if target is EventStatus.CLOSED:
         ctx = _closed_ctx(disposition_policy=DispositionPolicy.NOT_REQUIRED)
+    if (
+        current is EventStatus.REPORTING
+        and target is EventStatus.PLANNING_RESPONSE
+    ):
+        ctx = TransitionContext(continue_response_execution=True)
     validate_transition(current, target, ctx)
+
+
+def test_reporting_to_planning_response_requires_continuation_flag() -> None:
+    with pytest.raises(InvalidStateTransitionError):
+        validate_transition(
+            EventStatus.REPORTING,
+            EventStatus.PLANNING_RESPONSE,
+        )
 
 
 @pytest.mark.parametrize("status", list(EventStatus))

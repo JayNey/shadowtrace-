@@ -11,6 +11,9 @@ import type {
   ConnectorsResponse,
   DispositionListResponse,
   ExecutionJobResponse,
+  InvestigationHealthConfig,
+  NextRecommendedAction,
+  ResponsePhaseState,
   SearchParams,
   SearchResponse,
   SourceRecordResponse,
@@ -48,10 +51,28 @@ export function getEventEvidence(eventId: string) {
   return apiClient.get<EventEvidenceResponse>(`/events/${eventId}/evidence`);
 }
 
-export function triggerInvestigation(eventId: string) {
-  return apiClient.post<{ event_id: string; status: string }>(
-    `/events/${eventId}/investigate`,
-  );
+export function triggerInvestigation(
+  eventId: string,
+  options?: { includeResponseExecution?: boolean },
+) {
+  return apiClient.post<{
+    event_id: string;
+    status: string;
+    include_response_execution?: boolean;
+    continue_response_execution?: boolean;
+    response_phase_state?: ResponsePhaseState;
+    next_recommended_action?: NextRecommendedAction;
+    full_loop_available?: boolean;
+    phase_message?: string | null;
+  }>(`/events/${eventId}/investigate`, {
+    include_response_execution: options?.includeResponseExecution ?? false,
+  });
+}
+
+export function getHealth() {
+  return apiClient.get<{
+    investigation?: InvestigationHealthConfig;
+  }>("/health");
 }
 
 export function closeEvent(eventId: string) {

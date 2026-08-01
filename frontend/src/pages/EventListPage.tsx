@@ -16,6 +16,8 @@ import {
   Card,
   Col,
   Form,
+  Modal,
+  Radio,
   Row,
   Select,
   Space,
@@ -25,7 +27,7 @@ import {
 } from "antd";
 import { ReloadOutlined, FilterOutlined } from "@ant-design/icons";
 import type { EventListItem, EventListParams, EventStatus, EventType, Severity } from "../types/event";
-import { listEvents, triggerInvestigation } from "../services/eventApi";
+import { listEvents, triggerInvestigation, getHealth } from "../services/eventApi";
 import { socketClient } from "../services/socketClient";
 import { ApiError } from "../services/apiClient";
 import EventTable from "../components/event/EventTable";
@@ -77,6 +79,12 @@ export default function EventListPage() {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [triggeringIds, setTriggeringIds] = useState<Set<string>>(new Set());
+  const [fullLoopAvailable, setFullLoopAvailable] = useState(true);
+  const [investigateModalOpen, setInvestigateModalOpen] = useState(false);
+  const [pendingInvestigateEventId, setPendingInvestigateEventId] = useState<string | null>(
+    null,
+  );
+  const [includeResponseExecution, setIncludeResponseExecution] = useState(false);
 
   // Keep latest items in a ref so the socket handler (registered once) can
   // mutate without stale-closure issues.
@@ -221,31 +229,44 @@ export default function EventListPage() {
   }, [setSearchParams]);
 
   // ---- Trigger investigation -----------------------------------------
-  const handleTrigger = useCallback(
-    async (eventId: string) => {
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await getHealth();
+        setFullLoopAvailable(res.data.investigation?.full_loop_available ?? true);
+      } catch {
+        setFullLoopAvailable(true);
+      }
+    })();
+  }, []);
+
+  const runInvestigation = useCallback(
+    async (eventId: string, withResponse: boolean) => {
       setTriggeringIds((prev) => new Set(prev).add(eventId));
       try {
-        const res = await triggerInvestigation(eventId);
+        const res = await triggerInvestigation(eventId, {
+          includeResponseExecution: withResponse,
+        });
         const newStatus = (res.data?.status as EventStatus) ?? "triaging";
         setItems((prev) =>
           prev.map((it) =>
             it.event_id === eventId ? { ...it, status: newStatus } : it,
           ),
         );
-        message.success(`事件 ${eventId} 已触发研判，进入 ${newStatus}`);
+        message.success(
+          withResponse
+            ? `事件 ${eventId} 已触发完整调查（含处置方案）`
+            : `事件 ${eventId} 已触发仅分析调查`,
+        );
       } catch (err: unknown) {
         if (
           err instanceof ApiError &&
           (err.error_code === "investigation_in_progress" ||
             err.error_code === "conflict")
         ) {
-          // 409 — backend uses investigation_in_progress (events.py);
-          // keep conflict as a defensive alias.
-          message.warning(
-            `事件 ${eventId} 已在研判流程中，请勿重复触发。`,
-          );
-        } else {
-          // other errors handled by interceptor; show inline status rollback
+          message.warning(`事件 ${eventId} 已在研判流程中，请勿重复触发。`);
+        } else if (err instanceof ApiError && err.error_code === "full_loop_unavailable") {
+          message.error("当前部署为 analysis_only 模式，无法发起完整调查。");
         }
       } finally {
         setTriggeringIds((prev) => {
@@ -257,6 +278,23 @@ export default function EventListPage() {
     },
     [message],
   );
+
+  const handleTrigger = useCallback(
+    (eventId: string) => {
+      setPendingInvestigateEventId(eventId);
+      setIncludeResponseExecution(false);
+      setInvestigateModalOpen(true);
+    },
+    [],
+  );
+
+  const handleConfirmInvestigate = useCallback(async () => {
+    const eventId = pendingInvestigateEventId;
+    if (!eventId) return;
+    setInvestigateModalOpen(false);
+    setPendingInvestigateEventId(null);
+    await runInvestigation(eventId, includeResponseExecution);
+  }, [pendingInvestigateEventId, includeResponseExecution, runInvestigation]);
 
   const handleRowClick = useCallback(
     (eventId: string) => {
@@ -352,6 +390,42 @@ export default function EventListPage() {
           onRowClick={handleRowClick}
         />
       </Card>
+
+      <Modal
+        title="选择调查模式"
+        open={investigateModalOpen}
+        onCancel={() => {
+          setInvestigateModalOpen(false);
+          setPendingInvestigateEventId(null);
+        }}
+        onOk={() => void handleConfirmInvestigate()}
+        okText="开始调查"
+        cancelText="取消"
+        data-testid="investigate-mode-modal"
+      >
+        <Typography.Paragraph type="secondary">
+          默认「仅分析」会生成报告并在 REPORTING 停止；「分析并生成处置方案」会继续进入
+          ResponseAgent 与审批流程。
+        </Typography.Paragraph>
+        <Radio.Group
+          value={includeResponseExecution ? "full" : "analysis_only"}
+          onChange={(e) => setIncludeResponseExecution(e.target.value === "full")}
+        >
+          <Space direction="vertical">
+            <Radio value="analysis_only" data-testid="investigate-mode-analysis-only">
+              仅分析（默认）
+            </Radio>
+            <Radio
+              value="full"
+              disabled={!fullLoopAvailable}
+              data-testid="investigate-mode-full-loop"
+            >
+              分析并生成处置方案
+              {!fullLoopAvailable ? "（当前 ORCHESTRATION_MODE=analysis_only 不可用）" : ""}
+            </Radio>
+          </Space>
+        </Radio.Group>
+      </Modal>
     </div>
   );
 }

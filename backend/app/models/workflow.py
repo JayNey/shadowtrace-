@@ -176,7 +176,9 @@ STATE_TRANSITIONS: dict[EventStatus, set[EventStatus]] = {
     ),
     EventStatus.CONTAINED: _with_failed({EventStatus.REPORTING}),
     EventStatus.FAILED: {EventStatus.REPORTING},  # no self-loop to FAILED
-    EventStatus.REPORTING: _with_failed({EventStatus.CLOSED}),
+    EventStatus.REPORTING: _with_failed(
+        {EventStatus.CLOSED, EventStatus.PLANNING_RESPONSE}
+    ),
     EventStatus.CLOSED: set(),  # terminal — no outbound edges
 }
 
@@ -529,6 +531,8 @@ class TransitionContext(BaseModel):
     # to human review.  Written to security_event.escalated by the state
     # machine's pre-transition side effects for CONTAINED / FAILED.
     escalated: bool = False
+    # ISSUE-103: resume ResponseAgent after deferred analysis-only investigate.
+    continue_response_execution: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -615,6 +619,14 @@ def validate_transition(
 
     if target is EventStatus.CLOSED:
         validate_closed_gate(ctx)
+
+    if current is EventStatus.REPORTING and target is EventStatus.PLANNING_RESPONSE:
+        if not ctx.continue_response_execution:
+            raise InvalidStateTransitionError(
+                "REPORTING→PLANNING_RESPONSE requires continue_response_execution",
+                current=current,
+                target=target,
+            )
 
     # When entering a disposition-side-effect status with false_positive, check rules.
     if ctx.final_verdict is not None:

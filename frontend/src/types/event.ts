@@ -567,12 +567,46 @@ export interface SecurityEvent {
   row_version: number;
 }
 
+export type ResponsePhaseState =
+  | "not_started"
+  | "analysis_in_progress"
+  | "analysis_complete_deferred"
+  | "response_planning"
+  | "awaiting_approval"
+  | "executing"
+  | "complete";
+
+export type NextRecommendedAction =
+  | "none"
+  | "start_response_execution"
+  | "approve_actions"
+  | "close";
+
+export type ExecutionSubstate =
+  | "none"
+  | "waiting_approval"
+  | "waiting_execution"
+  | "waiting_writeback"
+  | "manual_resolution";
+
 export interface EventDetailResponse {
   event: SecurityEvent;
   writeback_required: boolean;
   writeback_readiness: WritebackReadiness;
   writeback_overall_status: WritebackStatus | null;
   pending_writeback_count: number;
+  analysis_only_complete?: boolean;
+  response_execution_deferred?: boolean;
+  execution_substate?: ExecutionSubstate;
+  response_phase_state?: ResponsePhaseState;
+  next_recommended_action?: NextRecommendedAction;
+  full_loop_available?: boolean;
+  phase_message?: string | null;
+}
+
+export interface InvestigationHealthConfig {
+  orchestration_mode: string;
+  full_loop_available: boolean;
 }
 
 export interface InvestigationResult {
