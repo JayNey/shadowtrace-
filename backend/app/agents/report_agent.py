@@ -22,9 +22,11 @@ from app.agents.base import BaseAgent
 from app.agents.prompts.report_prompt import build_report_messages
 from app.agents.report_llm_failure import llm_failure_metadata
 from app.agents.report_section_builder import (
+    INVESTIGATION_LIMITATION_HEADER,
     SECTION_KEYS,
     SECTION_SPECS,
     SECTION_TITLES,
+    SOURCE_SUMMARY_LABEL,
     ReportSectionBuilder,
 )
 from app.core.errors import LLMError
@@ -44,6 +46,39 @@ logger = logging.getLogger(__name__)
 GENERATED_BY_LLM = "llm"
 GENERATED_BY_TEMPLATE = "template"
 LLM_TIMEOUT_SECONDS = 30.0
+
+# Template lines that LLM merge must preserve (ISSUE-104 investigation limits).
+_OVERVIEW_MERGE_PREFIXES = (
+    "fp_",
+    "human_escalation:",
+    "triage_degraded:",
+    "triage_degradation_reason:",
+    "entity_rejection_",
+    "- title=",
+    "- alert_type=",
+    "- description=",
+    "- severity=",
+    "- normalized.",
+)
+_OVERVIEW_MERGE_CONTAINS = (
+    INVESTIGATION_LIMITATION_HEADER,
+    SOURCE_SUMMARY_LABEL,
+    "evidence_gaps:",
+    "gap:",
+    "evidence_limited:",
+)
+_EVIDENCE_LIMITED_MERGE_PREFIXES = (
+    "调查限制",
+    SOURCE_SUMMARY_LABEL,
+    "evidence_gaps:",
+    "gap:",
+    "attack_storyline_limitation",
+    "- title=",
+    "- alert_type=",
+    "- description=",
+    "- severity=",
+    "- normalized.",
+)
 _TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 
 
@@ -179,14 +214,18 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 generated_by = GENERATED_BY_LLM
             except Exception as exc:
                 llm_fallback = llm_failure_metadata(exc)
-                self._trace_fallback_detail = str(llm_fallback["error_message"])
+                error_code = str(llm_fallback["error_code"])
+                error_message = str(llm_fallback["error_message"])
+                self._trace_fallback_detail = f"{error_code}: {error_message}"
+                safe_details = llm_fallback.get("details") or {}
                 logger.warning(
                     "ReportAgent LLM path failed; using template fallback "
-                    "event=%s error_code=%s http_status=%s detail=%s",
+                    "event=%s error_code=%s http_status=%s detail=%s detail_keys=%s",
                     input.event_id,
-                    llm_fallback["error_code"],
+                    error_code,
                     llm_fallback.get("http_status"),
-                    llm_fallback["error_message"],
+                    error_message,
+                    sorted(safe_details.keys()) if safe_details else [],
                 )
                 generated_by = GENERATED_BY_TEMPLATE
 
@@ -329,7 +368,22 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 missing = self._missing_required_lines(
                     section.content,
                     content,
-                    prefixes=("fp_", "human_escalation:"),
+                    prefixes=_OVERVIEW_MERGE_PREFIXES,
+                    contains=_OVERVIEW_MERGE_CONTAINS,
+                )
+                if missing:
+                    content = "\n".join([content, *missing])
+            elif section.key in {"evidence_chain", "attack_storyline"} and section.key in overrides:
+                missing = self._missing_required_lines(
+                    section.content,
+                    content,
+                    prefixes=_EVIDENCE_LIMITED_MERGE_PREFIXES,
+                    contains=(
+                        INVESTIGATION_LIMITATION_HEADER,
+                        SOURCE_SUMMARY_LABEL,
+                        "gap:",
+                        "attack_storyline_limitation",
+                    ),
                 )
                 if missing:
                     content = "\n".join([content, *missing])
@@ -554,6 +608,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             if isinstance(persisted, InvestigationReport):
                 report.version = persisted.version
                 report.updated_at = persisted.updated_at or report.updated_at
+                report.sections = persisted.sections
         except Exception:
             logger.warning(
                 "failed to upsert report event=%s report_id=%s",

@@ -1027,7 +1027,7 @@ async def test_llm_failure_records_trace_error_detail(
         )
     )
     assert trace.calls
-    assert trace.calls[0]["error_detail"] == "provider returned invalid json"
+    assert trace.calls[0]["error_detail"] == "llm_invalid_json: provider returned invalid json"
 
 
 @pytest.mark.asyncio
@@ -1084,3 +1084,87 @@ async def test_template_zero_evidence_via_agent_execute(
     assert INVESTIGATION_LIMITATION_HEADER.split("：")[0] in overview.content
     assert "gap: identity | reason=tool_timeout" in evidence_chain.content
     assert "Suspicious outbound transfer" in overview.content
+
+
+def test_stamp_clears_stale_appendix_observability_when_warnings_empty() -> None:
+    from app.models.report import (
+        ReportSection,
+        observability_from_sections,
+        stamp_report_observability_in_sections,
+    )
+
+    sections = [
+        ReportSection(
+            key="appendix_index",
+            title="附录索引",
+            content="event_id=evt-stale-obs",
+            data={
+                "report_warnings": ["report_llm_fallback:llm_timeout"],
+                "report_error_detail": "provider timed out",
+            },
+        )
+    ]
+    cleared = stamp_report_observability_in_sections(
+        sections,
+        warnings=[],
+        error_detail=None,
+    )
+    warnings, detail = observability_from_sections(cleared)
+    assert warnings == []
+    assert detail is None
+
+
+def test_llm_merge_preserves_investigation_limitation_lines() -> None:
+    from app.agents.report_section_builder import INVESTIGATION_LIMITATION_HEADER
+
+    builder = ReportSectionBuilder()
+    event_id = "evt-merge-limit"
+    gaps = [
+        EvidenceGap(
+            event_id=event_id,
+            missing_source=EvidenceSource.IDENTITY,
+            reason="tool_timeout",
+        )
+    ]
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            gaps=gaps,
+            overall_confidence=0.0,
+            collection_status=CollectionStatus.FAILED,
+        ),
+        risk_assessment=RiskAssessment(
+            risk_score=70,
+            severity=Severity.HIGH,
+            confidence=0.35,
+            risk_factors=[],
+            possible_false_positive=False,
+            scoring_mode=ScoringMode.RULE_ONLY,
+            evidence_limited=True,
+        ),
+        triage_result=_main_triage(),
+        source_snapshot={"title": "Suspicious outbound transfer"},
+    )
+    merged = ReportAgent(llm_client=None)._merge_sections(
+        sections,
+        {
+            "overview": "LLM short summary only.",
+            "evidence_chain": "LLM evidence narrative.",
+            "attack_storyline": "LLM storyline only.",
+        },
+    )
+    overview = next(section for section in merged if section.key == "overview")
+    evidence_chain = next(section for section in merged if section.key == "evidence_chain")
+    storyline = next(section for section in merged if section.key == "attack_storyline")
+    assert INVESTIGATION_LIMITATION_HEADER.split("：")[0] in overview.content
+    assert "gap: identity | reason=tool_timeout" in evidence_chain.content
+    assert "Suspicious outbound transfer" in overview.content
+    assert "attack_storyline_limitation" in storyline.content or "调查限制" in storyline.content
+
+
+def test_llm_failure_metadata_timeout_code() -> None:
+    import asyncio
+
+    meta = llm_failure_metadata(asyncio.TimeoutError())
+    assert meta["error_code"] == "llm_timeout"

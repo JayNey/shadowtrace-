@@ -20,6 +20,8 @@ export interface InvestigationReport {
   generated_by: string | null;
   generated_at: string | null;
   updated_at: string | null;
+  warnings?: string[];
+  error_detail?: string | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -62,5 +64,9 @@ export function coerceInvestigationReport(value: unknown): InvestigationReport |
     generated_by: typeof value.generated_by === "string" ? value.generated_by : null,
     generated_at: typeof value.generated_at === "string" ? value.generated_at : null,
     updated_at: typeof value.updated_at === "string" ? value.updated_at : null,
+    warnings: Array.isArray(value.warnings)
+      ? value.warnings.filter((item): item is string => typeof item === "string")
+      : [],
+    error_detail: typeof value.error_detail === "string" ? value.error_detail : null,
   };
 }

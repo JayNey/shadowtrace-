@@ -1517,6 +1517,44 @@ async def test_upsert_report_persists_fallback_observability(
 
 
 @pytest.mark.asyncio
+async def test_upsert_report_clears_stale_appendix_observability(
+    event_service: EventService,
+) -> None:
+    """ISSUE-104: empty warnings must not leave stale appendix observability keys."""
+    from app.models.report import ReportSection, stamp_report_observability_in_sections
+
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-report-clear-{sfx}"),
+            title="report-observability-clear",
+            source_type="mock_xdr",
+        )
+    )
+    assert created.event_id
+    report = _sample_report(created.event_id)
+    stamped = stamp_report_observability_in_sections(
+        report.sections,
+        warnings=["report_llm_fallback:llm_timeout"],
+        error_detail="provider timed out",
+    )
+    report = report.model_copy(
+        update={
+            "sections": stamped,
+            "warnings": ["report_llm_fallback:llm_timeout"],
+            "error_detail": "provider timed out",
+        }
+    )
+    await event_service.upsert_report(report)
+    cleared = report.model_copy(update={"warnings": [], "error_detail": None})
+    await event_service.upsert_report(cleared)
+    loaded = await event_service.get_report(event_id=created.event_id)
+    assert loaded is not None
+    assert loaded.warnings == []
+    assert loaded.error_detail is None
+
+
+@pytest.mark.asyncio
 async def test_upsert_response_plan_actions_idempotent_by_fingerprint(
     event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],

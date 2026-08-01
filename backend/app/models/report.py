@@ -55,15 +55,15 @@ def stamp_report_observability_in_sections(
     warnings: list[str],
     error_detail: str | None,
 ) -> list[ReportSection]:
-    """Persist fallback observability in appendix_index.data (no schema migration)."""
-    if not warnings and not error_detail:
-        return sections
+    """Dual-write observability to top-level fields and appendix_index.data (no DB migration)."""
     stamped: list[ReportSection] = []
     for section in sections:
         if section.key != "appendix_index":
             stamped.append(section)
             continue
         data = dict(section.data)
+        data.pop(_APPENDIX_OBSERVABILITY_WARNINGS_KEY, None)
+        data.pop(_APPENDIX_OBSERVABILITY_ERROR_DETAIL_KEY, None)
         if warnings:
             data[_APPENDIX_OBSERVABILITY_WARNINGS_KEY] = list(warnings)
         if error_detail:
