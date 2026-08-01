@@ -37,6 +37,8 @@ def test_reporting_analysis_only_deferred_no_start_response_cta() -> None:
     assert guidance.next_recommended_action is NextRecommendedAction.NONE
     assert guidance.analysis_only_complete is True
     assert guidance.phase_message is not None
+    assert "无法从 REPORTING" in guidance.phase_message
+    assert "新事件" in guidance.phase_message
 
 
 def test_reporting_not_required_suggests_close() -> None:

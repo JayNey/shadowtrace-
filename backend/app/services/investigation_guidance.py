@@ -102,9 +102,8 @@ def derive_investigation_guidance(
             else NextRecommendedAction.NONE
         )
         message = (
-            "分析已完成，未生成/执行处置方案。"
-            "当前为仅分析路径；如需生成安全处置方案，请在事件 NEW 状态选择"
-            "「分析并生成处置方案」发起调查。"
+            "本事件已完成仅分析，无法从 REPORTING 补发处置方案。"
+            "对新事件请在发起调查前选择「分析并生成处置方案」。"
         )
         if not loop_available:
             message += "（当前部署 ORCHESTRATION_MODE=analysis_only，完整处置链路不可用。）"

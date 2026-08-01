@@ -18,7 +18,7 @@ export default function InvestigationPhaseBanner({ detail }: Props) {
       message="分析已完成，处置方案未生成"
       description={
         detail.phase_message ??
-        "当前为仅分析路径。安全处置动作尚未生成；如需生成处置方案并进入审批，请在事件 NEW 状态选择「分析并生成处置方案」发起调查。"
+        "本事件已完成仅分析，无法从 REPORTING 补发处置方案。对新事件请在发起调查前选择「分析并生成处置方案」。"
       }
       data-testid="analysis-phase-banner"
     />
