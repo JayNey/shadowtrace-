@@ -1002,6 +1002,87 @@ async def test_publish_claimed_intent_success(
 
 
 @pytest.mark.asyncio
+async def test_publish_commits_enqueued_before_broker_publish(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=30,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-precommit-{uuid4().hex[:8]}"
+    event_id = f"evt-precommit-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.CLAIMED.value,
+                    revision=1,
+                    attempt=0,
+                    claim_owner="test",
+                )
+            )
+
+    observed: list[str] = []
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    real_commit = service._commit_enqueued_publish_target
+
+    async def _tracked_commit(intent_id: str):
+        target = await real_commit(intent_id)
+        if target is not None:
+            observed.append("enqueued")
+        return target
+
+    monkeypatch.setattr(service, "_commit_enqueued_publish_target", _tracked_commit)
+
+    def _apply_async(**_kwargs: object) -> None:
+        observed.append("publish")
+        return None
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _apply_async,
+    )
+    published = await service._publish_claimed_intent(intent_id)
+    assert published is True
+    assert observed == ["enqueued", "publish"]
+
+
+@pytest.mark.asyncio
 async def test_reconcile_stale_schedules_dispatch(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,

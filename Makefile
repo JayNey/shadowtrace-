@@ -190,7 +190,8 @@ auto-investigate-test:
 		tests/test_services/test_investigation_intent_service.py \
 		tests/test_services/test_investigation_intent_crash_windows.py \
 		tests/integration/test_auto_investigate_mock.py \
-		tests/test_api/test_investigation_intents_api.py -q
+		tests/test_api/test_investigation_intents_api.py \
+		tests/test_tasks/test_investigation_tasks.py -q
 
 # --- ISSUE-107 Mock XDR ingestion scheduler quality gate -------------------- #
 ingestion-scheduler-test:

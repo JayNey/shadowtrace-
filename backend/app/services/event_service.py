@@ -382,7 +382,7 @@ class EventService:
             publish_event=bundle.created or bundle.promoted,
         )
         if bundle.intent_ids and self._investigation_intent is not None:
-            self._investigation_intent.schedule_dispatch(bundle.intent_ids)
+            self._investigation_intent.schedule_dispatch()
         for merged_event_id in bundle.merged_event_ids:
             await self._store.delete_cached_context(merged_event_id)
         return IngestResult(
@@ -407,7 +407,7 @@ class EventService:
             publish_event=bundle.created or bundle.promoted,
         )
         if bundle.intent_ids and self._investigation_intent is not None:
-            self._investigation_intent.schedule_dispatch(bundle.intent_ids)
+            self._investigation_intent.schedule_dispatch()
         for merged_event_id in bundle.merged_event_ids:
             await self._store.delete_cached_context(merged_event_id)
         return _security_event_from_row(bundle.event)

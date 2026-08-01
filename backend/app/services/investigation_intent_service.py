@@ -6,7 +6,7 @@ import hashlib
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import Sequence
+from typing import NamedTuple
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -60,6 +60,12 @@ def new_intent_id() -> str:
 def deterministic_investigation_task_id(intent_id: str, revision: int) -> str:
     """Stable Celery task id derived from intent identity (#612)."""
     return hashlib.sha256(f"{intent_id}:{revision}".encode("utf-8")).hexdigest()
+
+
+class _EnqueuedPublishTarget(NamedTuple):
+    event_id: str
+    task_id: str
+    intent_id: str
 
 
 class InvestigationIntentService:
@@ -144,7 +150,7 @@ class InvestigationIntentService:
             return None
         return intent_id
 
-    def schedule_dispatch(self, intent_ids: Sequence[str] | None = None) -> None:
+    def schedule_dispatch(self) -> None:
         """Best-effort async dispatch trigger; must never raise to ingest callers."""
         if not self._policy.enabled:
             return
@@ -154,8 +160,7 @@ class InvestigationIntentService:
             dispatch_pending_investigation_intents.delay()
         except Exception:
             logger.warning(
-                "failed to enqueue investigation intent dispatch pending=%s",
-                len(intent_ids) if intent_ids else 0,
+                "failed to enqueue investigation intent dispatch",
                 exc_info=True,
             )
 
@@ -344,7 +349,7 @@ class InvestigationIntentService:
                     ):
                         reconciled += 1
         if reconciled:
-            self.schedule_dispatch([])
+            self.schedule_dispatch()
         provisional_created = await self._materialize_provisional_intents(
             limit=int(self._settings.auto_investigate_materialize_batch_size)
         )
@@ -500,14 +505,18 @@ class InvestigationIntentService:
                 writer="InvestigationIntentService",
             )
 
-    async def _publish_claimed_intent(self, intent_id: str, *, strict: bool = False) -> bool:
+    async def _commit_enqueued_publish_target(
+        self,
+        intent_id: str,
+    ) -> _EnqueuedPublishTarget | None:
+        """Persist ENQUEUED before broker publish so workers never see pre-commit rows."""
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(orm.InvestigationIntent, intent_id)
                 if row is None:
-                    return False
+                    return None
                 if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.CLAIMED:
-                    return False
+                    return None
                 event = await session.get(orm.SecurityEvent, row.event_id)
                 if event is None:
                     await self._set_status_in_session(
@@ -515,76 +524,15 @@ class InvestigationIntentService:
                         InvestigationIntentStatus.SKIPPED,
                         skip_reason="event_missing",
                     )
-                    return False
+                    return None
                 if event.status != EventStatus.NEW.value:
                     await self._set_status_in_session(
                         row,
                         InvestigationIntentStatus.SKIPPED,
                         skip_reason="event_not_new",
                     )
-                    return False
+                    return None
                 task_id = deterministic_investigation_task_id(row.intent_id, int(row.revision))
-                from app.tasks.investigation_tasks import (
-                    delete_task_metadata,
-                    publish_investigation_for_intent,
-                    register_task_metadata,
-                )
-                from kombu.exceptions import OperationalError
-
-                try:
-                    await register_task_metadata(task_id, row.event_id)
-                    publish_investigation_for_intent(
-                        event_id=row.event_id,
-                        task_id=task_id,
-                        intent_id=row.intent_id,
-                    )
-                except DependencyUnavailableError as exc:
-                    await delete_task_metadata(task_id)
-                    logger.warning(
-                        "task metadata store unavailable intent=%s event=%s",
-                        row.intent_id,
-                        row.event_id,
-                        exc_info=True,
-                    )
-                    await self._handle_publish_transient_failure(row, exc)
-                    if strict:
-                        raise
-                    return False
-                except (OperationalError, OSError, ConnectionError) as exc:
-                    await delete_task_metadata(task_id)
-                    logger.warning(
-                        "broker publish failed intent=%s event=%s err=%s",
-                        row.intent_id,
-                        row.event_id,
-                        exc,
-                        exc_info=True,
-                    )
-                    await self._handle_publish_transient_failure(row, exc)
-                    if strict:
-                        raise DependencyUnavailableError(
-                            message="celery broker unavailable",
-                            error_code="dependency_unavailable",
-                            details={
-                                "dependency": "celery_broker",
-                                "event_id": row.event_id,
-                                "intent_id": row.intent_id,
-                            },
-                        ) from exc
-                    return False
-                except Exception as exc:
-                    await delete_task_metadata(task_id)
-                    logger.error(
-                        "unexpected publish failure intent=%s event=%s",
-                        row.intent_id,
-                        row.event_id,
-                        exc_info=True,
-                    )
-                    await self._set_status_in_session(
-                        row,
-                        InvestigationIntentStatus.DEAD,
-                        last_error=str(exc),
-                    )
-                    return False
                 validate_intent_transition(
                     InvestigationIntentStatus.CLAIMED,
                     InvestigationIntentStatus.ENQUEUED,
@@ -594,7 +542,105 @@ class InvestigationIntentService:
                 row.claim_owner = None
                 row.claim_expires_at = None
                 row.last_error = None
-                return True
+                return _EnqueuedPublishTarget(row.event_id, task_id, row.intent_id)
+
+    async def _revert_enqueued_after_publish_failure(
+        self,
+        intent_id: str,
+        exc: Exception,
+    ) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(orm.InvestigationIntent, intent_id)
+                if row is None:
+                    return
+                if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.ENQUEUED:
+                    return
+                await self._handle_publish_transient_failure(row, exc)
+                row.broker_task_id = None
+
+    async def _revert_enqueued_after_unexpected_failure(
+        self,
+        intent_id: str,
+        exc: Exception,
+    ) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(orm.InvestigationIntent, intent_id)
+                if row is None:
+                    return
+                if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.ENQUEUED:
+                    return
+                await self._set_status_in_session(
+                    row,
+                    InvestigationIntentStatus.DEAD,
+                    last_error=str(exc),
+                )
+                row.broker_task_id = None
+
+    async def _publish_claimed_intent(self, intent_id: str, *, strict: bool = False) -> bool:
+        target = await self._commit_enqueued_publish_target(intent_id)
+        if target is None:
+            return False
+
+        from app.tasks.investigation_tasks import (
+            delete_task_metadata,
+            publish_investigation_for_intent,
+            register_task_metadata,
+        )
+        from kombu.exceptions import OperationalError
+
+        try:
+            await register_task_metadata(target.task_id, target.event_id)
+            publish_investigation_for_intent(
+                event_id=target.event_id,
+                task_id=target.task_id,
+                intent_id=target.intent_id,
+            )
+        except DependencyUnavailableError as exc:
+            await delete_task_metadata(target.task_id)
+            logger.warning(
+                "task metadata store unavailable intent=%s event=%s",
+                target.intent_id,
+                target.event_id,
+                exc_info=True,
+            )
+            await self._revert_enqueued_after_publish_failure(target.intent_id, exc)
+            if strict:
+                raise
+            return False
+        except (OperationalError, OSError, ConnectionError) as exc:
+            await delete_task_metadata(target.task_id)
+            logger.warning(
+                "broker publish failed intent=%s event=%s err=%s",
+                target.intent_id,
+                target.event_id,
+                exc,
+                exc_info=True,
+            )
+            await self._revert_enqueued_after_publish_failure(target.intent_id, exc)
+            if strict:
+                raise DependencyUnavailableError(
+                    message="celery broker unavailable",
+                    error_code="dependency_unavailable",
+                    details={
+                        "dependency": "celery_broker",
+                        "event_id": target.event_id,
+                        "intent_id": target.intent_id,
+                    },
+                ) from exc
+            return False
+        except Exception as exc:
+            await delete_task_metadata(target.task_id)
+            logger.error(
+                "unexpected publish failure intent=%s event=%s",
+                target.intent_id,
+                target.event_id,
+                exc_info=True,
+            )
+            await self._revert_enqueued_after_unexpected_failure(target.intent_id, exc)
+            return False
+        return True
 
     async def _transition(
         self,
@@ -695,6 +741,8 @@ class InvestigationIntentService:
                         raw = event.creation_source_ref.get("source_product")
                         if isinstance(raw, str):
                             source_product = raw
+                    # Window path: link may still be provisional in DB; policy uses
+                    # PRIMARY role so aged NEW events become eligible (#612).
                     intent_id = await self.maybe_create_pending_in_session(
                         session,
                         event,
@@ -705,7 +753,7 @@ class InvestigationIntentService:
                     if intent_id is not None:
                         created += 1
         if created:
-            self.schedule_dispatch([])
+            self.schedule_dispatch()
         return created
 
 

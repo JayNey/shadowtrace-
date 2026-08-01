@@ -284,3 +284,55 @@ async def test_promoted_incident_creates_pending_intent(
         )
     assert row is not None
     assert row.status == InvestigationIntentStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_enabled_incident_reaches_terminal_via_dispatch(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ingest → claim/publish → worker completes → intent terminal (#612)."""
+    store = EventContextStore(redis_client, session_factory)
+    degraded = DegradedFlagService(store, session_factory)
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    intent_service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        degraded_flags=degraded,
+        settings=settings,
+    )
+    events = EventService(
+        session_factory,
+        store,
+        degraded_flags=degraded,
+        investigation_intent=intent_service,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
+        lambda: None,
+    )
+
+    result = await events.ingest_source_object(
+        _incident_source(object_id=f"inc-auto-e2e-{uuid4().hex[:8]}")
+    )
+    claimed = await intent_service._claim_batch(limit=5)
+    assert claimed
+    target = await intent_service._commit_enqueued_publish_target(claimed[0])
+    assert target is not None
+    admission = await intent_service.mark_started(target.intent_id, broker_task_id=target.task_id)
+    assert admission.value == "accepted"
+    async with session_factory() as session:
+        async with session.begin():
+            event = await session.get(orm.SecurityEvent, target.event_id)
+            assert event is not None
+            event.status = EventStatus.TRIAGING.value
+            await session.flush()
+    await intent_service.mark_terminal(target.intent_id)
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, target.intent_id)
+        event = await session.get(orm.SecurityEvent, target.event_id)
+    assert row is not None
+    assert row.status == InvestigationIntentStatus.TERMINAL.value
+    assert event is not None
+    assert event.status == EventStatus.TRIAGING.value
