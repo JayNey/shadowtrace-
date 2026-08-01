@@ -523,6 +523,20 @@ class EventService:
                     event_id,
                     exc_info=True,
                 )
+        else:
+            try:
+                aoc = await self._store.get(event_id, "analysis_only_complete")
+                if aoc is not None:
+                    snapshot = dict(event.event_context_snapshot)
+                    if snapshot.get("analysis_only_complete") != bool(aoc):
+                        snapshot["analysis_only_complete"] = bool(aoc)
+                        event = event.model_copy(update={"event_context_snapshot": snapshot})
+            except Exception:
+                logger.debug(
+                    "overlay analysis_only_complete failed event_id=%s",
+                    event_id,
+                    exc_info=True,
+                )
         return event
 
     async def get_evidence_query_scope(self, event_id: str) -> EvidenceQueryScope:

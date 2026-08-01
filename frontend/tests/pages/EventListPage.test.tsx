@@ -348,6 +348,42 @@ describe("EventListPage", () => {
     });
   });
 
+  it("triggers full-loop investigation when selected", async () => {
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
+    await user.click(screen.getByTestId("investigate-mode-full-loop"));
+    await user.click(screen.getByText("开始调查"));
+
+    await waitFor(() =>
+      expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
+        includeResponseExecution: true,
+      }),
+    );
+  });
+
+  it("disables full-loop option when deployment is analysis_only", async () => {
+    mockGetHealth.mockResolvedValue({
+      data: {
+        investigation: {
+          orchestration_mode: "analysis_only",
+          full_loop_available: false,
+        },
+      },
+    });
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
+    const fullLoop = screen.getByTestId("investigate-mode-full-loop");
+    expect(fullLoop).toBeDisabled();
+  });
+
   it("disables trigger button when event already in-progress", async () => {
     const item = makeItem({ status: "triaging" });
     mockListEvents.mockResolvedValue({ data: listResponse([item]) });

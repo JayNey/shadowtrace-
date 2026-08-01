@@ -370,7 +370,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             else:
                 ec = final_state.get("event_context", event_context)
             await self._persist_event_context(ec)
-            await self._persist_analysis_only_complete(event_id)
+            if not include_response_execution:
+                await self._persist_analysis_only_complete(event_id)
             if ec.event is not None and ec.event.status is EventStatus.CLOSED:
                 await self._schedule_memory_after_close(event_id, ec)
 

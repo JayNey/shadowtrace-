@@ -329,6 +329,7 @@ def _build_super_agent(
     lease: _InMemoryEventLease | None = None,
     event_service: _MockEventService | None = None,
     event_bus: Any | None = None,
+    context_store: Any | None = None,
     react_enabled: bool = False,
 ) -> SuperAgent:
     """Build a SuperAgent with stub agents for isolated testing."""
@@ -342,6 +343,7 @@ def _build_super_agent(
         lease=lease,  # type: ignore[arg-type]
         event_service=event_service,  # type: ignore[arg-type]
         event_bus=event_bus,
+        context_store=context_store,
         react_enabled=react_enabled,
     )
 
@@ -681,6 +683,45 @@ class TestEventLeaseInterface:
         owner = generate_owner_id()
         assert owner.startswith("worker-")
         assert len(owner) == len("worker-") + 8  # 8 hex chars
+
+
+class _RecordingContextStore:
+    def __init__(self) -> None:
+        self.sets: list[tuple[str, str, object]] = []
+
+    async def set(self, event_id: str, key: str, value: object) -> None:
+        self.sets.append((event_id, key, value))
+
+
+class TestAnalysisOnlyCompleteFlag:
+    """ISSUE-103: analysis_only_complete must reflect the chosen workflow path."""
+
+    async def test_analysis_only_investigate_persists_flag(self) -> None:
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        store = _RecordingContextStore()
+        agent = _build_super_agent(
+            event_service=_MockEventService(events),
+            context_store=store,
+        )
+        await agent.investigate(_EVENT_ID)
+        assert any(
+            key == "analysis_only_complete" and value is True
+            for _event_id, key, value in store.sets
+        )
+
+    async def test_full_loop_investigate_skips_flag(self) -> None:
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        store = _RecordingContextStore()
+        agent = _build_super_agent(
+            event_service=_MockEventService(events),
+            context_store=store,
+        )
+        await agent.investigate(_EVENT_ID, include_response_execution=True)
+        assert not any(key == "analysis_only_complete" for _event_id, key, _value in store.sets)
 
 
 class TestGraphWithoutLease:
