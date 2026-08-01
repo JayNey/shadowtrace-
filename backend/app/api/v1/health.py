@@ -154,7 +154,7 @@ async def health(
     overall = "ok"
     if not hard_deps_ok or not embedding_ok:
         overall = "degraded"
-    elif celery_worker_status == "degraded":
+    elif celery_worker_status in {"degraded", "error"}:
         overall = "degraded"
 
     # 503 only for hard dependency / embedding failures — not missing workers alone (#622).

@@ -6,7 +6,7 @@ import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -220,3 +220,60 @@ async def test_investigate_celery_broker_unavailable_returns_503(
     app.dependency_overrides.clear()
     assert resp.status_code == 503, resp.text
     assert resp.json()["error_code"] == "task_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_investigate_celery_zero_workers_still_returns_202(
+    fake_redis_store: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dispatch must not inspect worker liveness before publish (#622)."""
+    event_id = "evt-zero-workers"
+
+    async def _fake_get_event(_event_id: str) -> SecurityEvent:
+        return SecurityEvent(
+            event_id=event_id,
+            event_type=EventType.OTHER,
+            title="celery",
+            status=EventStatus.NEW,
+            severity=Severity.LOW,
+            creation_source_ref=SourceReference(
+                source_kind=SourceObjectKind.INCIDENT,
+                source_product="manual",
+                source_tenant_id="tenant-test",
+                connector_id="conn-test",
+                source_object_id="manual-1",
+                ingested_at=datetime.now(UTC),
+            ),
+            disposition_policy=DispositionPolicy.NOT_REQUIRED,
+        )
+
+    class _EventService:
+        async def get_event(self, eid: str) -> SecurityEvent | None:
+            return await _fake_get_event(eid)
+
+    from app.api.v1.deps import get_event_service
+
+    app.dependency_overrides[get_event_service] = lambda: _EventService()
+
+    def _fake_apply_async(*_args: Any, **kwargs: Any) -> MagicMock:
+        return MagicMock(id=kwargs["task_id"])
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _fake_apply_async,
+    )
+
+    with patch("app.core.celery_health.probe_celery_workers") as probe_mock:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            resp = await client.post(f"/api/v1/events/{event_id}/investigate", headers=_hdr())
+
+    app.dependency_overrides.clear()
+    probe_mock.assert_not_called()
+    assert resp.status_code == 202, resp.text
+    body = resp.json()
+    assert body["event_id"] == event_id
+    assert body["task_id"] != event_id

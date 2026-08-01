@@ -54,6 +54,8 @@ cd backend
 # 本地真实 worker smoke（需 Docker）
 make up WORKER=1
 bash scripts/celery_worker_smoke.sh
+# 可选：对已 bootstrap 的 event 验证 run_investigation 全链路
+# SMOKE_EVENT_ID=evt-xxx bash scripts/celery_worker_smoke.sh
 make worker-smoke-test
 ```
 

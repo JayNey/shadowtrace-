@@ -28,6 +28,22 @@ async def client() -> AsyncIterator[AsyncClient]:
         yield ac
 
 
+@pytest.fixture(autouse=True)
+def _mock_celery_health() -> Iterator[None]:
+    """Avoid live broker/worker probes in ISSUE-001 health tests."""
+    default_payload: dict[str, Any] = {
+        "task_mode": "background",
+        "broker": "ok",
+        "worker": {"status": "not_applicable", "workers": 0, "worker_ids": []},
+    }
+    with patch(
+        "app.api.v1.health.build_celery_health",
+        new_callable=AsyncMock,
+        return_value=default_payload,
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     settings = Settings(
@@ -77,6 +93,8 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     assert "api_key" not in str(body["embedding_provider"]).lower()
     assert body["simulation_enabled"] is True
     assert body["version"] == "0.1.0"
+    assert set(body["celery"].keys()) >= {"task_mode", "broker", "worker"}
+    assert body["investigation"]["task_mode"] == "background"
 
     for key in ("source_adapter", "disposition_adapter", "tool_provider"):
         component = body[key]

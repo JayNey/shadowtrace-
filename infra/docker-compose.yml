@@ -211,6 +211,7 @@ services:
         "-A", "app.core.celery_app",
         "worker",
         "-Q", "investigation",
+        "-n", "investigation@%h",
         "-c", "2",
         "--prefetch-multiplier=1",
       ]
@@ -218,7 +219,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "python -m celery -A app.core.celery_app inspect ping -t 3 | grep -q OK",
+          "python -m celery -A app.core.celery_app inspect ping -d investigation@$(hostname) -t 3 | grep -q OK",
         ]
       interval: 15s
       timeout: 5s

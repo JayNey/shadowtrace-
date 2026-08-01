@@ -56,6 +56,17 @@ def test_probe_celery_workers_degraded_when_no_replies() -> None:
     assert result["workers"] == 0
 
 
+def test_probe_celery_workers_degraded_when_empty_replies() -> None:
+    from app.core.celery_app import celery_app
+
+    inspector = MagicMock()
+    inspector.ping.return_value = {}
+    with patch.object(celery_app.control, "inspect", return_value=inspector):
+        result = probe_celery_workers(timeout=1.0)
+    assert result["status"] == "degraded"
+    assert result["workers"] == 0
+
+
 @pytest.mark.asyncio
 async def test_build_celery_health_skips_worker_probe_in_background_mode() -> None:
     with patch(
