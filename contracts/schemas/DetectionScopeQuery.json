@@ -1,0 +1,97 @@
+{
+  "$defs": {
+    "DetectionScopeLifecycleState": {
+      "description": "Revision lifecycle — activation/retirement are server-owned transitions.",
+      "enum": [
+        "draft",
+        "active",
+        "retired"
+      ],
+      "title": "DetectionScopeLifecycleState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Read path for canonical scope revisions (tenant-scoped).",
+  "properties": {
+    "source_tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Tenant Id",
+      "type": "string"
+    },
+    "source_product": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Product"
+    },
+    "integration_instance_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Integration Instance Id"
+    },
+    "detection_scope_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detection Scope Id"
+    },
+    "lifecycle_state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DetectionScopeLifecycleState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "latest_revision_only": {
+      "default": true,
+      "title": "Latest Revision Only",
+      "type": "boolean"
+    },
+    "page": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Page",
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 50,
+      "maximum": 200,
+      "minimum": 1,
+      "title": "Page Size",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "source_tenant_id"
+  ],
+  "title": "DetectionScopeQuery",
+  "type": "object"
+}

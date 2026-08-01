@@ -1,0 +1,254 @@
+{
+  "$defs": {
+    "ConnectorScopeRole": {
+      "description": "Connector participation in detection scope identity.",
+      "enum": [
+        "upstream_source",
+        "derived_detection"
+      ],
+      "title": "ConnectorScopeRole",
+      "type": "string"
+    },
+    "DetectionScopeConnectorSet": {
+      "additionalProperties": false,
+      "description": "Versioned, canonical upstream connector membership for one scope revision.",
+      "properties": {
+        "connector_set_version": {
+          "minimum": 1,
+          "title": "Connector Set Version",
+          "type": "integer"
+        },
+        "upstream_connectors": {
+          "items": {
+            "$ref": "#/$defs/UpstreamConnectorMember"
+          },
+          "minItems": 1,
+          "title": "Upstream Connectors",
+          "type": "array"
+        }
+      },
+      "required": [
+        "connector_set_version",
+        "upstream_connectors"
+      ],
+      "title": "DetectionScopeConnectorSet",
+      "type": "object"
+    },
+    "DetectionScopeIdentity": {
+      "additionalProperties": false,
+      "description": "Stable upstream integration boundary — independent of connector membership edits.",
+      "properties": {
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "source_product": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Source Product",
+          "type": "string"
+        },
+        "integration_instance_id": {
+          "description": "Server-owned upstream integration instance identifier.",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Integration Instance Id",
+          "type": "string"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        }
+      },
+      "required": [
+        "source_tenant_id",
+        "source_product",
+        "integration_instance_id"
+      ],
+      "title": "DetectionScopeIdentity",
+      "type": "object"
+    },
+    "DetectionScopeLifecycleState": {
+      "description": "Revision lifecycle — activation/retirement are server-owned transitions.",
+      "enum": [
+        "draft",
+        "active",
+        "retired"
+      ],
+      "title": "DetectionScopeLifecycleState",
+      "type": "string"
+    },
+    "UpstreamConnectorMember": {
+      "additionalProperties": false,
+      "description": "One upstream source connector in a versioned scope connector set.",
+      "properties": {
+        "connector_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Connector Id",
+          "type": "string"
+        },
+        "source_product": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Source Product",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/ConnectorScopeRole",
+          "default": "upstream_source"
+        }
+      },
+      "required": [
+        "connector_id",
+        "source_product"
+      ],
+      "title": "UpstreamConnectorMember",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Immutable, append-only scope revision with traceable lifecycle.",
+  "properties": {
+    "scope_revision_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Scope Revision Id",
+      "type": "string"
+    },
+    "detection_scope_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Detection Scope Id",
+      "type": "string"
+    },
+    "identity": {
+      "$ref": "#/$defs/DetectionScopeIdentity"
+    },
+    "connector_set": {
+      "$ref": "#/$defs/DetectionScopeConnectorSet"
+    },
+    "lifecycle_state": {
+      "$ref": "#/$defs/DetectionScopeLifecycleState",
+      "default": "draft"
+    },
+    "revision": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "supersedes_scope_revision_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Supersedes Scope Revision Id"
+    },
+    "content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "identity_hash": {
+      "description": "SHA-256 of upstream integration identity only (tenant/product/instance/env/region). Distinct from detection_scope_id, which also includes connector_set_version.",
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Identity Hash",
+      "type": "string"
+    },
+    "idempotency_key": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "activated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Activated At"
+    },
+    "retired_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Retired At"
+    },
+    "created_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created At"
+    }
+  },
+  "required": [
+    "scope_revision_id",
+    "detection_scope_id",
+    "identity",
+    "connector_set",
+    "content_hash",
+    "identity_hash",
+    "idempotency_key"
+  ],
+  "title": "DetectionScopeRevision",
+  "type": "object"
+}

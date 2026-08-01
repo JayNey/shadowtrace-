@@ -55,6 +55,16 @@ from app.models.agent_io import (
 from app.models.context import EventContext
 from app.models.decision_record import DecisionRecord, DecisionRecordCandidate
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
+from app.models.detection_scope import (
+    DerivedDetectionConnectorBinding,
+    DetectionScopeConnectorSet,
+    DetectionScopeIdentity,
+    DetectionScopeLifecycleState,
+    DetectionScopeListResult,
+    DetectionScopeQuery,
+    DetectionScopeRevision,
+    UpstreamConnectorMember,
+)
 from app.models.evaluation_truth import (
     BenignSliceExpectation,
     EvaluationCaseTruth,
@@ -241,6 +251,14 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     # decision record (ISSUE-131)
     "DecisionRecord": DecisionRecord,
     "DecisionRecordCandidate": DecisionRecordCandidate,
+    # detection scope (ISSUE-120 Phase 0)
+    "DetectionScopeRevision": DetectionScopeRevision,
+    "DetectionScopeIdentity": DetectionScopeIdentity,
+    "DetectionScopeConnectorSet": DetectionScopeConnectorSet,
+    "DetectionScopeQuery": DetectionScopeQuery,
+    "DetectionScopeListResult": DetectionScopeListResult,
+    "UpstreamConnectorMember": UpstreamConnectorMember,
+    "DerivedDetectionConnectorBinding": DerivedDetectionConnectorBinding,
     # evaluation truth (ISSUE-113)
     "EvaluationCaseTruth": EvaluationCaseTruth,
     "EvaluationDatasetManifest": EvaluationDatasetManifest,

@@ -1,0 +1,64 @@
+{
+  "$defs": {
+    "ConnectorScopeRole": {
+      "description": "Connector participation in detection scope identity.",
+      "enum": [
+        "upstream_source",
+        "derived_detection"
+      ],
+      "title": "ConnectorScopeRole",
+      "type": "string"
+    },
+    "UpstreamConnectorMember": {
+      "additionalProperties": false,
+      "description": "One upstream source connector in a versioned scope connector set.",
+      "properties": {
+        "connector_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Connector Id",
+          "type": "string"
+        },
+        "source_product": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Source Product",
+          "type": "string"
+        },
+        "role": {
+          "$ref": "#/$defs/ConnectorScopeRole",
+          "default": "upstream_source"
+        }
+      },
+      "required": [
+        "connector_id",
+        "source_product"
+      ],
+      "title": "UpstreamConnectorMember",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned, canonical upstream connector membership for one scope revision.",
+  "properties": {
+    "connector_set_version": {
+      "minimum": 1,
+      "title": "Connector Set Version",
+      "type": "integer"
+    },
+    "upstream_connectors": {
+      "items": {
+        "$ref": "#/$defs/UpstreamConnectorMember"
+      },
+      "minItems": 1,
+      "title": "Upstream Connectors",
+      "type": "array"
+    }
+  },
+  "required": [
+    "connector_set_version",
+    "upstream_connectors"
+  ],
+  "title": "DetectionScopeConnectorSet",
+  "type": "object"
+}

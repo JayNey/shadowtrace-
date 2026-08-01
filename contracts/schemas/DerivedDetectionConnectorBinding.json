@@ -1,0 +1,39 @@
+{
+  "$defs": {
+    "ConnectorScopeRole": {
+      "description": "Connector participation in detection scope identity.",
+      "enum": [
+        "upstream_source",
+        "derived_detection"
+      ],
+      "title": "ConnectorScopeRole",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Derived detection connector that references but does not define scope identity.",
+  "properties": {
+    "connector_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Connector Id",
+      "type": "string"
+    },
+    "detection_scope_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Detection Scope Id",
+      "type": "string"
+    },
+    "role": {
+      "$ref": "#/$defs/ConnectorScopeRole",
+      "default": "derived_detection"
+    }
+  },
+  "required": [
+    "connector_id",
+    "detection_scope_id"
+  ],
+  "title": "DerivedDetectionConnectorBinding",
+  "type": "object"
+}

@@ -570,6 +570,55 @@ class EvaluationCaseTruth(Base):
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
 
 
+class DetectionScopeRevision(Base):
+    """Canonical detection scope revision (ISSUE-120 Phase 0)."""
+
+    __tablename__ = "detection_scope_revision"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_detection_scope_revision_idempotency_key"),
+        Index(
+            "ix_detection_scope_revision_tenant_product_instance",
+            "source_tenant_id",
+            "source_product",
+            "integration_instance_id",
+        ),
+        Index(
+            "ix_detection_scope_revision_scope_id_rev",
+            "detection_scope_id",
+            "revision",
+        ),
+        Index(
+            "ix_detection_scope_revision_scope_lifecycle",
+            "detection_scope_id",
+            "lifecycle_state",
+        ),
+    )
+
+    scope_revision_id: Mapped[str] = mapped_column(String, primary_key=True)
+    detection_scope_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_product: Mapped[str] = mapped_column(String, nullable=False)
+    integration_instance_id: Mapped[str] = mapped_column(String, nullable=False)
+    environment: Mapped[str | None] = mapped_column(String, nullable=True)
+    region: Mapped[str | None] = mapped_column(String, nullable=True)
+    connector_set: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    connector_set_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    supersedes_scope_revision_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("detection_scope_revision.scope_revision_id"),
+        nullable=True,
+    )
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    identity_hash: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    activated_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
 class EventAuditLog(Base):
     __tablename__ = "event_audit_log"
 
