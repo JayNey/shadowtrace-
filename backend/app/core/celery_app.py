@@ -73,6 +73,7 @@ celery_app.conf.update(
         "shadowtrace.poll_sources": {"queue": "ingestion"},
     },
     task_acks_late=True,
+    task_reject_on_worker_lost=True,
     task_soft_time_limit=600,
     worker_prefetch_multiplier=1,
     broker_transport_options={

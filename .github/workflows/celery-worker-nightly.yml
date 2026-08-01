@@ -1,0 +1,100 @@
+name: celery-worker-nightly
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: celery-worker-nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  redelivery-matrix:
+    name: redelivery-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shadowtrace
+          POSTGRES_PASSWORD: shadowtrace
+          POSTGRES_DB: shadowtrace
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowtrace -d shadowtrace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
+      REDIS_URL: redis://localhost:6379/0
+      TASK_MODE: celery
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend (frozen dev)
+        working-directory: backend
+        run: uv sync --frozen --extra dev
+
+      - name: ISSUE-117 Phase B redelivery matrix (unit/integration)
+        run: >
+          uv run --frozen pytest
+          tests/test_core/test_celery_delivery.py
+          tests/test_core/test_celery_health.py
+          tests/test_tasks/test_celery_redelivery_matrix.py
+          tests/test_tasks/test_investigation_tasks.py -q
+
+  docker-worker-smoke:
+    name: docker-worker-smoke
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: shadowtrace-worker-nightly-${{ github.run_id }}
+      POSTGRES_PORT: "5432"
+      REDIS_PORT: "6379"
+      BACKEND_PORT: "8000"
+      FRONTEND_PORT: "5173"
+      MOCK_XDR_PORT: "8100"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start stack with Celery worker profile
+        run: |
+          set -euo pipefail
+          make up WORKER=1
+
+      - name: Run celery worker smoke script
+        run: bash scripts/celery_worker_smoke.sh
+
+      - name: Tear down stack
+        if: always()
+        run: |
+          docker compose \
+            --project-name "${COMPOSE_PROJECT_NAME}" \
+            -f "${GITHUB_WORKSPACE}/infra/docker-compose.yml" \
+            down --volumes --remove-orphans || true

@@ -430,7 +430,13 @@ class ExecutionJobResponse(BaseModel):
 
 class TaskResponse(BaseModel):
     task_id: str
-    state: str
+    state: str = Field(
+        ...,
+        description=(
+            "Celery task state. RETRY/REVOKED are surfaced as UNKNOWN — "
+            "poll event investigation status via event_id."
+        ),
+    )
     event_id: str | None = None
 
 

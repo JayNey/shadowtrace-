@@ -103,6 +103,32 @@ async def test_get_task_returns_celery_state_without_resolve_mock(
 
 
 @pytest.mark.asyncio
+async def test_get_task_maps_retry_to_unknown(
+    fake_redis_store: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    task_id = "task-api-retry-unknown"
+    await register_task_metadata(task_id, "evt-retry-unknown")
+
+    class _FakeResult:
+        state = "RETRY"
+        info = None
+        args = ("evt-retry-unknown",)
+
+    with patch("celery.result.AsyncResult", return_value=_FakeResult()):
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            resp = await client.get(f"/api/v1/tasks/{task_id}", headers=_hdr())
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["state"] == "UNKNOWN"
+    assert body["event_id"] == "evt-retry-unknown"
+
+
+@pytest.mark.asyncio
 async def test_get_task_unknown_id_returns_404(fake_redis_store: dict[str, str]) -> None:
     async with AsyncClient(
         transport=ASGITransport(app=app),

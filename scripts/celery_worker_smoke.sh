@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ISSUE-117 / #622 Phase A — manual Celery worker + broker smoke.
+# ISSUE-117 / #622 — Celery worker + broker smoke (Phase A) and redelivery gate hook (Phase B).
 # Requires: make up WORKER=1 (backend TASK_MODE=celery, worker profile healthy)
 set -euo pipefail
 

@@ -11,6 +11,11 @@ from celery.exceptions import SoftTimeLimitExceeded
 from kombu.exceptions import OperationalError
 
 from app.core.celery_app import celery_app
+from app.core.celery_delivery import (
+    celery_task_owner_id,
+    normalize_public_task_state,
+    should_skip_redelivered_investigation,
+)
 from app.core.errors import DependencyUnavailableError, InvestigationInProgressError
 from app.core.redis_client import RedisClient
 
@@ -84,6 +89,7 @@ async def execute_investigation(
     event_id: str,
     *,
     include_response_execution: bool = False,
+    owner_id: str | None = None,
 ) -> dict[str, str]:
     """Run SuperAgent investigation (called from Celery worker via ``asyncio.run``)."""
     from app.api.v1.deps import _get_session_factory, get_super_agent
@@ -95,6 +101,7 @@ async def execute_investigation(
         with bind_evidence_projection(projection):
             await agent.investigate(
                 event_id,
+                owner_id=owner_id,
                 include_response_execution=include_response_execution,
             )
         return {"status": "completed", "event_id": event_id}
@@ -141,7 +148,28 @@ async def resolve_task_state(task_id: str) -> tuple[str, str | None]:
         event_id = result.info.get("event_id")
     if event_id is None and result.args:
         event_id = str(result.args[0])
-    return result.state, event_id
+    return normalize_public_task_state(result.state), event_id
+
+
+async def _run_investigation_body(
+    event_id: str,
+    *,
+    include_response_execution: bool,
+    owner_id: str,
+    redelivered: bool,
+) -> dict[str, str]:
+    if redelivered:
+        if await should_skip_redelivered_investigation(event_id):
+            logger.info(
+                "run_investigation redelivery skipped — event already terminal event=%s",
+                event_id,
+            )
+            return {"status": "skipped", "event_id": event_id, "reason": "terminal_event"}
+    return await execute_investigation(
+        event_id,
+        include_response_execution=include_response_execution,
+        owner_id=owner_id,
+    )
 
 
 @celery_app.task(  # type: ignore[untyped-decorator]
@@ -159,11 +187,22 @@ def run_investigation(
     include_response_execution: bool = False,
 ) -> dict[str, str]:
     """Execute SuperAgent investigation for *event_id* (idempotent when lease held)."""
+    owner_id = celery_task_owner_id(str(self.request.id))
+    redelivered = bool(getattr(self.request, "delivery_info", {}).get("redelivered"))
+    if redelivered:
+        logger.info(
+            "run_investigation redelivery for event=%s task=%s owner=%s",
+            event_id,
+            self.request.id,
+            owner_id,
+        )
     try:
         return asyncio.run(
-            execute_investigation(
+            _run_investigation_body(
                 event_id,
                 include_response_execution=bool(include_response_execution),
+                owner_id=owner_id,
+                redelivered=redelivered,
             )
         )
     except SoftTimeLimitExceeded:

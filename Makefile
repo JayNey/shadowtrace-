@@ -34,7 +34,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test ingestion-scheduler-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
+.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -158,10 +158,28 @@ worker-smoke-test:
 	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
 		$(PYTHON) -m pytest \
 		tests/test_core/test_celery_health.py \
+		tests/test_core/test_celery_delivery.py \
 		tests/test_api/test_celery_worker_health.py \
 		tests/test_tasks/test_worker_tasks.py \
+		tests/test_tasks/test_celery_redelivery_matrix.py \
 		tests/test_api/test_celery_investigation.py \
 		tests/test_tasks/test_investigation_tasks.py -q
+
+# --- ISSUE-117 Phase B nightly matrix (pytest; Docker smoke optional) ----------- #
+worker-nightly-pytest:
+	cd "$(CURDIR)/backend"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		$(PYTHON) -m pytest \
+		tests/test_core/test_celery_health.py \
+		tests/test_core/test_celery_delivery.py \
+		tests/test_tasks/test_celery_redelivery_matrix.py \
+		tests/test_tasks/test_investigation_tasks.py -q
+
+worker-nightly-smoke:
+	bash "$(CURDIR)/scripts/celery_worker_smoke.sh"
+
+worker-nightly-matrix: worker-nightly-pytest
+	@echo "Phase B pytest matrix passed. Run 'make worker-nightly-smoke' when Docker worker stack is up."
 
 # --- ISSUE-107 Mock XDR ingestion scheduler quality gate -------------------- #
 ingestion-scheduler-test:

@@ -203,7 +203,7 @@ async def test_resolve_task_state_reads_registered_event_id(
     task_id = await tasks.dispatch_investigation("evt-status")
     state, event_id = await tasks.resolve_task_state(task_id)
     assert event_id == "evt-status"
-    assert state in {"SUCCESS", "PENDING", "STARTED", "FAILURE"}
+    assert state in {"SUCCESS", "PENDING", "STARTED", "FAILURE", "UNKNOWN"}
 
 
 @pytest.mark.asyncio
