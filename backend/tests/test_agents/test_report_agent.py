@@ -29,6 +29,7 @@ from app.models.action import Action
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceOutput,
+    LlmAdmissibility,
     ReportAgentInput,
     ResponsePlan,
     ResponsePlanGeneratedBy,
@@ -717,10 +718,14 @@ def test_builder_includes_evidence_limited_risk_semantics() -> None:
             confidence=0.35,
             risk_factors=[],
             possible_false_positive=False,
-            scoring_mode=ScoringMode.RULE_ONLY,
+            scoring_mode=ScoringMode.LLM_AND_RULE,
             evidence_limited=True,
             severity_floor_applied=True,
             source_risk_baseline=76,
+            source_scale_unnormalized=False,
+            high_source_evidence_limited=True,
+            llm_admissibility=LlmAdmissibility.DEGRADED,
+            confidence_cap_version="issue102_v1",
         ),
         triage_result=_main_triage(),
     )
@@ -728,7 +733,12 @@ def test_builder_includes_evidence_limited_risk_semantics() -> None:
     severity_section = next(section for section in sections if section.key == "severity_level")
     assert "evidence_limited=True" in risk_section.content
     assert "source_risk_baseline=76" in risk_section.content
+    assert "source_scale_unnormalized=False" in risk_section.content
+    assert "high_source_evidence_limited=True" in risk_section.content
+    assert "llm_admissibility=degraded" in risk_section.content
+    assert "confidence_cap_version=issue102_v1" in risk_section.content
     assert "evidence_limited=True" in severity_section.content
+    assert "high_source_evidence_limited=True" in severity_section.content
 
 
 def test_builder_includes_human_escalation_note() -> None:
