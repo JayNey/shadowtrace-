@@ -146,19 +146,17 @@ async def test_planner_and_response_receive_event_bus(monkeypatch: pytest.Monkey
             self.event_bus = kwargs.get("event_bus")
 
     monkeypatch.setattr(deps, "_get_event_bus", lambda: bus)
-    monkeypatch.setattr(
-        deps,
-        "get_settings",
-        lambda: MagicMock(
-            llm_provider="mock",
-            embedding_provider="mock",
-            orchestration_mode="graph",
-            react_enabled=False,
-        ),
+    settings = Settings(
+        APP_ENV="development",
+        LLM_MODE="mock",
+        EMBEDDING_MODE="mock",
+        ORCHESTRATION_MODE="graph",
+        REACT_ENABLED=False,
     )
+    monkeypatch.setattr(deps, "get_settings", lambda: settings)
 
     fake_stack = {
-        "settings": MagicMock(react_enabled=False),
+        "settings": settings,
         "wm": MagicMock(for_writer=MagicMock(return_value=MagicMock())),
         "llm_client": MagicMock(),
         "budget_service": MagicMock(),
