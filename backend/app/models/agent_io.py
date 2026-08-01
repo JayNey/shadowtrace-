@@ -57,6 +57,15 @@ class ScoringMode(StrEnum):
     RULE_ONLY = "rule_only"
 
 
+class LlmAdmissibility(StrEnum):
+    """Whether RiskAgent may merge LLM dimension scores (ISSUE-102 Phase B / #675)."""
+
+    NOT_USED = "not_used"
+    VALID = "valid"
+    DEGRADED = "degraded"
+    INVALID = "invalid"
+
+
 class ResponsePlanGeneratedBy(StrEnum):
     LLM = "llm"
     TEMPLATE = "template"
@@ -341,6 +350,9 @@ class RiskAssessment(BaseModel):
     evidence_limited: bool = False
     severity_floor_applied: bool = False
     source_risk_baseline: int | None = Field(default=None, ge=0, le=100)
+    high_source_evidence_limited: bool = False
+    llm_admissibility: LlmAdmissibility | None = None
+    confidence_cap_version: str | None = None
 
 
 # --------------------------------------------------------------------------- #

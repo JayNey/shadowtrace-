@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -9,13 +10,17 @@ from uuid import uuid4
 import pytest
 
 from app.agents.confidence_calibration import calibrate_confidence
+from app.agents.prompts.risk_prompt import FACTOR_NAMES
 from app.agents.risk_agent import RiskAgent
+from app.agents.risk_llm_admissibility import classify_llm_risk_response
 from app.agents.risk_scoring_engine import (
+    CONFIDENCE_CAP_VERSION,
     EVIDENCE_LIMITED_CONFIDENCE_CAP,
     FACTOR_WEIGHTS,
     SOURCE_BASELINE_FLOOR_RATIO,
     RiskScoringEngine,
     apply_evidence_limited_adjustments,
+    apply_versioned_confidence_cap,
     extract_source_baseline,
     is_evidence_limited,
     severity_from_score,
@@ -25,6 +30,7 @@ from app.core.llm.mock_client import MockLLMClient
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceOutput,
+    LlmAdmissibility,
     RiskAgentInput,
     ScoringMode,
     TriageResult,
@@ -100,6 +106,31 @@ class _FakeEventService:
 class _FailingLLM:
     async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
         raise RuntimeError("llm unavailable")
+
+
+class _DegradedLLM:
+    """Returns structurally valid but degraded LLM scores (must not merge)."""
+
+    async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        factors = {
+            name: {"score": 95, "reason": "degraded llm inflation attempt"}
+            for name in FACTOR_NAMES
+        }
+        content = json.dumps({"factors": factors, "raw_confidence": 0.99})
+        return LLMResponse(
+            content=content,
+            parsed=None,
+            model_name="degraded-model",
+            degraded_reason="fallback_model_used",
+        )
+
+
+class _MalformedLLM:
+    """Returns structurally invalid risk JSON (missing required factors)."""
+
+    async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        content = json.dumps({"factors": {"asset_impact": {"score": 95}}, "raw_confidence": 0.99})
+        return LLMResponse(content=content, parsed=None, model_name="malformed-model")
 
 
 def _evd(
@@ -562,6 +593,7 @@ def test_apply_evidence_limited_floor_formula() -> None:
     expected_floor = int(round(76 * SOURCE_BASELINE_FLOOR_RATIO))
     assert adjustment.evidence_limited is True
     assert adjustment.source_risk_baseline == 76
+    assert adjustment.high_source_evidence_limited is True
     assert adjustment.risk_score >= max(expected_floor, 70)
     assert adjustment.severity is Severity.HIGH
     assert adjustment.severity_floor_applied is True
@@ -579,6 +611,7 @@ def test_apply_evidence_limited_skips_fp_low_severity() -> None:
         },
     )
     assert adjustment.evidence_limited is True
+    assert adjustment.high_source_evidence_limited is False
     assert adjustment.risk_score == 22
     assert adjustment.severity_floor_applied is False
     assert adjustment.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
@@ -675,6 +708,7 @@ async def test_malicious_process_zero_evidence_applies_severity_floor(
         )
     )
     assert output.evidence_limited is True
+    assert output.high_source_evidence_limited is True
     assert output.source_risk_baseline == 76
     assert output.severity_floor_applied is True
     assert output.risk_score >= 70
@@ -715,6 +749,7 @@ async def test_account_anomaly_fp_zero_evidence_not_floored_to_high(
         )
     )
     assert output.evidence_limited is True
+    assert output.high_source_evidence_limited is False
     assert output.severity_floor_applied is False
     assert output.severity is not Severity.HIGH
     assert output.risk_score < 40
@@ -768,3 +803,135 @@ async def test_llm_failure_zero_evidence_still_applies_floor(
     assert output.evidence_limited is True
     assert output.risk_score >= 70
     assert output.severity is Severity.HIGH
+
+
+def test_classify_llm_risk_response_marks_degraded() -> None:
+    response = LLMResponse(
+        content="{}",
+        model_name="m",
+        degraded_reason="fallback_model_used",
+    )
+    assert classify_llm_risk_response(response) is LlmAdmissibility.DEGRADED
+
+
+def test_apply_versioned_confidence_cap_only_lowers() -> None:
+    capped, version = apply_versioned_confidence_cap(0.9, evidence_limited=True)
+    assert capped == EVIDENCE_LIMITED_CONFIDENCE_CAP
+    assert version == CONFIDENCE_CAP_VERSION
+    unchanged, version2 = apply_versioned_confidence_cap(0.2, evidence_limited=True)
+    assert unchanged == 0.2
+    assert version2 == CONFIDENCE_CAP_VERSION
+    no_cap, version3 = apply_versioned_confidence_cap(0.9, evidence_limited=False)
+    assert no_cap == 0.9
+    assert version3 is None
+
+
+def test_extract_source_baseline_unknown_vendor_scale() -> None:
+    baseline, severity = extract_source_baseline(
+        {
+            "severity": "high",
+            "normalized": {
+                "vendor_risk_score": 76,
+                "scale": "vendor_x_unnormalized",
+            },
+        }
+    )
+    assert baseline is None
+    assert severity is Severity.HIGH
+
+
+@pytest.mark.asyncio
+async def test_degraded_llm_matches_rule_only_contract(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-degraded-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = _malicious_process_source_snapshot()
+    rule_only_agent = RiskAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    degraded_agent = RiskAgent(
+        llm_client=_DegradedLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    agent_input = RiskAgentInput(
+        event_id=event_id,
+        triage_result=_malicious_process_triage(),
+        evidence_output=_zero_evidence_output(),
+    )
+    rule_output = await rule_only_agent.execute(agent_input)
+    degraded_output = await degraded_agent.execute(agent_input)
+
+    assert degraded_output.scoring_mode is ScoringMode.RULE_ONLY
+    assert degraded_output.llm_admissibility is LlmAdmissibility.DEGRADED
+    assert rule_output.risk_score == degraded_output.risk_score
+    assert rule_output.confidence == degraded_output.confidence
+    assert rule_output.evidence_limited == degraded_output.evidence_limited
+    assert degraded_output.confidence_cap_version == CONFIDENCE_CAP_VERSION
+
+
+@pytest.mark.asyncio
+async def test_invalid_llm_matches_rule_only_contract(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-invalid-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = _malicious_process_source_snapshot()
+    rule_only_agent = RiskAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    invalid_agent = RiskAgent(
+        llm_client=_MalformedLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    agent_input = RiskAgentInput(
+        event_id=event_id,
+        triage_result=_malicious_process_triage(),
+        evidence_output=_zero_evidence_output(),
+    )
+    rule_output = await rule_only_agent.execute(agent_input)
+    invalid_output = await invalid_agent.execute(agent_input)
+
+    assert invalid_output.scoring_mode is ScoringMode.RULE_ONLY
+    assert invalid_output.llm_admissibility is LlmAdmissibility.INVALID
+    assert rule_output.risk_score == invalid_output.risk_score
+    assert rule_output.confidence == invalid_output.confidence
+    assert rule_output.evidence_limited == invalid_output.evidence_limited
+    assert invalid_output.high_source_evidence_limited is True
+
+
+@pytest.mark.asyncio
+async def test_evidence_limited_high_source_blocks_auto_fp_close(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-fp-block-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = _malicious_process_source_snapshot()
+    wm.values[(event_id, "fp_adjudication")] = {
+        "recommendation": "close_as_fp",
+        "matched_window_id": "cw-test",
+        "max_score": 0.9,
+    }
+    agent = RiskAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    output = await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_malicious_process_triage(),
+            evidence_output=_zero_evidence_output(),
+        )
+    )
+    assert output.evidence_limited is True
+    assert output.high_source_evidence_limited is True
+    assert output.severity_floor_applied is True
+    assert agent.last_verdict is FinalVerdict.NONE
+    assert FinalVerdict.FALSE_POSITIVE not in event_service.verdicts

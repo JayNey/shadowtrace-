@@ -15,8 +15,17 @@ from app.models.agent_io import (
 from app.models.enums import EvidenceSource, Severity
 from app.models.evidence import Evidence
 
-# ISSUE-102: evidence-sparse scoring guardrails (fixed, testable formulas).
-EVIDENCE_LIMITED_CONFIDENCE_CAP = 0.35
+# ISSUE-102 Phase A/B: evidence-sparse scoring guardrails (fixed, testable formulas).
+CONFIDENCE_CAP_VERSION = "issue102_v1"
+CONFIDENCE_CAP_TABLE: dict[str, dict[str, float]] = {
+    CONFIDENCE_CAP_VERSION: {
+        "evidence_limited": 0.35,
+    },
+}
+# Backward-compatible alias for tests/docs referencing Phase A constant name.
+EVIDENCE_LIMITED_CONFIDENCE_CAP = CONFIDENCE_CAP_TABLE[CONFIDENCE_CAP_VERSION][
+    "evidence_limited"
+]
 SOURCE_BASELINE_FLOOR_RATIO = 0.85
 _HIGH_SOURCE_MIN_SCORE = 70
 _CRITICAL_SOURCE_MIN_SCORE = 90
@@ -210,6 +219,37 @@ def apply_severity_floor(
     return adjusted_score, adjusted_severity, floor_applied
 
 
+def resolve_confidence_cap(
+    *,
+    evidence_limited: bool,
+    version: str = CONFIDENCE_CAP_VERSION,
+) -> float | None:
+    """Return the active confidence ceiling for *version*, or None when uncapped."""
+    if not evidence_limited:
+        return None
+    table = CONFIDENCE_CAP_TABLE.get(version)
+    if table is None:
+        return None
+    cap = table.get("evidence_limited")
+    if cap is None:
+        return None
+    return max(0.0, min(1.0, float(cap)))
+
+
+def apply_versioned_confidence_cap(
+    confidence: float,
+    *,
+    evidence_limited: bool,
+    version: str = CONFIDENCE_CAP_VERSION,
+) -> tuple[float, str | None]:
+    """Apply versioned cap after merge; cap only lowers, never raises confidence."""
+    cap = resolve_confidence_cap(evidence_limited=evidence_limited, version=version)
+    if cap is None:
+        return confidence, None
+    capped = min(confidence, cap)
+    return capped, version
+
+
 @dataclass(frozen=True)
 class EvidenceLimitedAdjustment:
     risk_score: int
@@ -218,6 +258,8 @@ class EvidenceLimitedAdjustment:
     evidence_limited: bool
     severity_floor_applied: bool
     source_risk_baseline: int | None
+    high_source_evidence_limited: bool = False
+    confidence_cap_version: str | None = None
 
 
 def apply_evidence_limited_adjustments(
@@ -230,6 +272,7 @@ def apply_evidence_limited_adjustments(
     """Apply ISSUE-102 floor/cap when threat signal is strong but evidence is missing."""
     source_baseline, source_severity = extract_source_baseline(source_snapshot)
     evidence_limited = is_evidence_limited(evidence_output)
+    high_source = _source_eligible_for_severity_floor(source_severity)
     if not evidence_limited:
         return EvidenceLimitedAdjustment(
             risk_score=risk_score,
@@ -238,6 +281,8 @@ def apply_evidence_limited_adjustments(
             evidence_limited=False,
             severity_floor_applied=False,
             source_risk_baseline=source_baseline,
+            high_source_evidence_limited=False,
+            confidence_cap_version=None,
         )
 
     adjusted_score = risk_score
@@ -258,7 +303,10 @@ def apply_evidence_limited_adjustments(
     )
     floor_applied = floor_applied or severity_floor_applied
 
-    capped_confidence = min(confidence, EVIDENCE_LIMITED_CONFIDENCE_CAP)
+    capped_confidence, cap_version = apply_versioned_confidence_cap(
+        confidence,
+        evidence_limited=True,
+    )
 
     return EvidenceLimitedAdjustment(
         risk_score=adjusted_score,
@@ -267,6 +315,8 @@ def apply_evidence_limited_adjustments(
         evidence_limited=True,
         severity_floor_applied=floor_applied,
         source_risk_baseline=source_baseline,
+        high_source_evidence_limited=high_source,
+        confidence_cap_version=cap_version,
     )
 
 
@@ -289,9 +339,11 @@ def augment_factors_for_evidence_limited(
         if adjustment.severity_floor_applied
         else ""
     )
+    cap_value = resolve_confidence_cap(evidence_limited=True) or EVIDENCE_LIMITED_CONFIDENCE_CAP
+    cap_version = adjustment.confidence_cap_version or CONFIDENCE_CAP_VERSION
     suffix = (
         "; evidence_limited=true: zero evidence under failed/degraded collection, "
-        f"confidence capped at {EVIDENCE_LIMITED_CONFIDENCE_CAP:.2f}; "
+        f"confidence capped at {cap_value:.2f} ({cap_version}); "
         f"source_baseline={baseline_text}{floor_note}"
     )
 

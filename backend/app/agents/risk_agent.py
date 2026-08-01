@@ -9,6 +9,7 @@ from typing import Any
 from app.agents.base import BaseAgent
 from app.agents.confidence_calibration import DEFAULT_TEMPERATURE, calibrate_confidence
 from app.agents.prompts.risk_prompt import FACTOR_NAMES, build_risk_messages
+from app.agents.risk_llm_admissibility import classify_llm_risk_response
 from app.agents.risk_scoring_engine import (
     FACTOR_WEIGHTS,
     RiskScoringEngine,
@@ -19,6 +20,7 @@ from app.agents.risk_scoring_engine import (
 from app.agents.verdict_resolver import VerdictResolver
 from app.core.errors import LLMError
 from app.models.agent_io import (
+    LlmAdmissibility,
     RiskAgentInput,
     RiskAssessment,
     RiskFactor,
@@ -96,17 +98,28 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         llm_scores: dict[str, tuple[float, str]] | None = None
         raw_confidence = float(input.evidence_output.overall_confidence)
         scoring_mode = ScoringMode.RULE_ONLY
+        llm_admissibility = (
+            LlmAdmissibility.NOT_USED
+            if self.llm_client is None
+            else LlmAdmissibility.INVALID
+        )
 
         if self.llm_client is not None:
             try:
-                llm_scores, llm_confidence = await self._score_with_llm(
+                llm_scores, llm_confidence, llm_admissibility = await self._score_with_llm(
                     input,
                     storyline,
                     source_snapshot=source_snapshot,
                 )
-                if llm_scores:
+                if (
+                    llm_admissibility is LlmAdmissibility.VALID
+                    and llm_scores is not None
+                ):
                     scoring_mode = ScoringMode.LLM_AND_RULE
                     raw_confidence = max(raw_confidence, llm_confidence)
+                else:
+                    llm_scores = None
+                    scoring_mode = ScoringMode.RULE_ONLY
             except Exception as exc:
                 logger.warning(
                     "RiskAgent LLM path failed; falling back to rule_only event=%s err=%s",
@@ -114,6 +127,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                     exc,
                 )
                 llm_scores = None
+                llm_admissibility = LlmAdmissibility.INVALID
                 scoring_mode = ScoringMode.RULE_ONLY
 
         factors = self._merge_factors(rule_scores, llm_scores, scoring_mode)
@@ -161,6 +175,9 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             evidence_limited=adjustment.evidence_limited,
             severity_floor_applied=adjustment.severity_floor_applied,
             source_risk_baseline=adjustment.source_risk_baseline,
+            high_source_evidence_limited=adjustment.high_source_evidence_limited,
+            llm_admissibility=llm_admissibility,
+            confidence_cap_version=adjustment.confidence_cap_version,
         )
 
         await self._write_context(input.event_id, assessment)
@@ -184,7 +201,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         storyline: dict[str, Any] | None,
         *,
         source_snapshot: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, tuple[float, str]], float]:
+    ) -> tuple[dict[str, tuple[float, str]] | None, float, LlmAdmissibility]:
         assert self.llm_client is not None
         rag_summary = None
         if input.rag_output is not None:
@@ -261,8 +278,15 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         except (TypeError, ValueError):
             conf = 0.75
         conf = max(0.0, min(1.0, conf))
-        # LLM may echo evidence_limited; deterministic rule path owns the flag.
-        return scores, conf
+        admissibility = classify_llm_risk_response(response)
+        if admissibility is not LlmAdmissibility.VALID:
+            logger.info(
+                "RiskAgent LLM output inadmissible event=%s admissibility=%s",
+                input.event_id,
+                admissibility.value,
+            )
+            return None, conf, admissibility
+        return scores, conf, admissibility
 
     def _merge_factors(
         self,

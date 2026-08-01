@@ -736,6 +736,17 @@
       "title": "ImpactAssessment",
       "type": "object"
     },
+    "LlmAdmissibility": {
+      "description": "Whether RiskAgent may merge LLM dimension scores (ISSUE-102 Phase B / #675).",
+      "enum": [
+        "not_used",
+        "valid",
+        "degraded",
+        "invalid"
+      ],
+      "title": "LlmAdmissibility",
+      "type": "string"
+    },
     "ResponsePlan": {
       "additionalProperties": false,
       "description": "Generated disposition plan.\n\n``actions`` is a generation-time snapshot only. Approval / execution /\nverification stages must re-load each Action by ``action_id``; they must\nnot rely on the embedded ``status`` field here.",
@@ -831,6 +842,34 @@
           ],
           "default": null,
           "title": "Source Risk Baseline"
+        },
+        "high_source_evidence_limited": {
+          "default": false,
+          "title": "High Source Evidence Limited",
+          "type": "boolean"
+        },
+        "llm_admissibility": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LlmAdmissibility"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "confidence_cap_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence Cap Version"
         }
       },
       "required": [

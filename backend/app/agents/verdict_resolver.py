@@ -16,9 +16,10 @@ FP_MEDIUM_SCORE = FP_LOW_THRESHOLD
 class VerdictResolver:
     """Resolve ``FinalVerdict`` with fixed priority (must not be overridden).
 
-    Priority (ISSUE-035 / ISSUE-047 / ISSUE-114):
+    Priority (ISSUE-035 / ISSUE-047 / ISSUE-114 / #675):
     1. ``fp_adjudication.recommendation == close_as_fp`` → false_positive
-       (post-evidence typed decision; never overridden by risk_score >= 70)
+       (post-evidence typed decision; never overridden by risk_score >= 70),
+       **except** high-source + evidence-limited events (``#675`` guard)
     2. Pre-evidence vector / RAG FP signal → possible_false_positive (advisory only)
     3. risk_score >= 70 → confirmed_threat
     4. else → none
@@ -36,6 +37,8 @@ class VerdictResolver:
     ) -> FinalVerdict:
         adjudication = fp_adjudication or {}
         if str(adjudication.get("recommendation") or "").strip().lower() == "close_as_fp":
+            if _blocks_auto_fp_close(risk_assessment):
+                return FinalVerdict.NONE
             return FinalVerdict.FALSE_POSITIVE
 
         fp = false_positive_match or {}
@@ -67,6 +70,14 @@ class VerdictResolver:
             except (TypeError, ValueError, AttributeError):
                 pass
         return max(candidates) if candidates else 0.0
+
+
+def _blocks_auto_fp_close(risk_assessment: RiskAssessment) -> bool:
+    """High-source + evidence-limited events must not auto close-as-FP (#675)."""
+    return bool(
+        risk_assessment.evidence_limited
+        and risk_assessment.high_source_evidence_limited
+    )
 
 
 __all__ = ["FP_HIGH_SCORE", "FP_MEDIUM_SCORE", "VerdictResolver"]

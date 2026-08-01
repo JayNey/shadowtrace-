@@ -157,6 +157,7 @@ class ReportSectionBuilder:
             f"scoring_mode={risk_assessment.scoring_mode.value}\n"
             f"evidence_limited={risk_assessment.evidence_limited}\n"
             f"severity_floor_applied={risk_assessment.severity_floor_applied}\n"
+            f"high_source_evidence_limited={risk_assessment.high_source_evidence_limited}\n"
             f"source_risk_baseline={risk_assessment.source_risk_baseline}\n"
             f"final_verdict={final_verdict.value}"
         )
@@ -459,13 +460,21 @@ class ReportSectionBuilder:
         return lines
 
     def _risk_scoring(self, risk_assessment: RiskAssessment) -> str:
+        llm_adm = (
+            risk_assessment.llm_admissibility.value
+            if risk_assessment.llm_admissibility is not None
+            else None
+        )
         lines = [
             f"total_score={risk_assessment.risk_score}",
             f"severity={risk_assessment.severity.value}",
             f"scoring_mode={risk_assessment.scoring_mode.value}",
             f"evidence_limited={risk_assessment.evidence_limited}",
             f"severity_floor_applied={risk_assessment.severity_floor_applied}",
+            f"high_source_evidence_limited={risk_assessment.high_source_evidence_limited}",
             f"source_risk_baseline={risk_assessment.source_risk_baseline}",
+            f"llm_admissibility={llm_adm}",
+            f"confidence_cap_version={risk_assessment.confidence_cap_version}",
             "six_dimension_breakdown:",
         ]
         if risk_assessment.evidence_limited:
@@ -483,9 +492,14 @@ class ReportSectionBuilder:
                     f"final_score={risk_assessment.risk_score} "
                     f"source_baseline={baseline}"
                 )
+            cap_note = (
+                f"confidence_cap_version={risk_assessment.confidence_cap_version}"
+                if risk_assessment.confidence_cap_version
+                else "confidence_cap_version=none"
+            )
             lines.append(
                 "evidence_limited_note: threat signal retained while evidence "
-                "collection failed or returned empty; confidence capped."
+                f"collection failed or returned empty; {cap_note}."
             )
         for factor in risk_assessment.risk_factors:
             lines.append(

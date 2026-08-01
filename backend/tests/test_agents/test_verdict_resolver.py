@@ -18,6 +18,7 @@ def _assessment(score: int, *, possible_fp: bool = False) -> RiskAssessment:
 
 
 def test_post_evidence_close_as_fp_not_overridden_by_high_risk() -> None:
+    """Post-evidence close_as_fp wins at high risk unless #675 high-source guard applies."""
     resolver = VerdictResolver()
     verdict = resolver.resolve(
         _assessment(95),
@@ -59,7 +60,7 @@ def test_medium_fp_with_high_risk_is_possible_false_positive() -> None:
 def test_verdict_is_sole_logical_entry() -> None:
     """Resolver is the only place encoding verdict priority rules."""
     resolver = VerdictResolver()
-    # Explicit post-evidence close_as_fp wins even with confirmed-threat-level score.
+    # Explicit post-evidence close_as_fp wins at confirmed-threat score when guard does not apply.
     assert (
         resolver.resolve(
             _assessment(100),
@@ -67,3 +68,41 @@ def test_verdict_is_sole_logical_entry() -> None:
         )
         is FinalVerdict.FALSE_POSITIVE
     )
+
+
+def test_evidence_limited_high_source_blocks_auto_fp_close() -> None:
+    resolver = VerdictResolver()
+    assessment = RiskAssessment(
+        risk_score=75,
+        severity=Severity.HIGH,
+        confidence=0.3,
+        scoring_mode=ScoringMode.RULE_ONLY,
+        evidence_limited=True,
+        severity_floor_applied=False,
+        high_source_evidence_limited=True,
+        source_risk_baseline=76,
+    )
+    verdict = resolver.resolve(
+        assessment,
+        fp_adjudication={"recommendation": "close_as_fp", "matched_window_id": "cw-test"},
+    )
+    assert verdict is FinalVerdict.NONE
+
+
+def test_evidence_limited_low_source_allows_auto_fp_close() -> None:
+    resolver = VerdictResolver()
+    assessment = RiskAssessment(
+        risk_score=22,
+        severity=Severity.LOW,
+        confidence=0.25,
+        scoring_mode=ScoringMode.RULE_ONLY,
+        evidence_limited=True,
+        severity_floor_applied=False,
+        high_source_evidence_limited=False,
+        source_risk_baseline=18,
+    )
+    verdict = resolver.resolve(
+        assessment,
+        fp_adjudication={"recommendation": "close_as_fp", "matched_window_id": "cw-test"},
+    )
+    assert verdict is FinalVerdict.FALSE_POSITIVE
