@@ -67,7 +67,6 @@ from app.models.detection_scope import (
     DerivedDetectionConnectorBinding,
     DetectionScopeConnectorSet,
     DetectionScopeIdentity,
-    DetectionScopeLifecycleState as DetectionScopeLifecycleState,
     DetectionScopeListResult,
     DetectionScopeQuery,
     DetectionScopeRevision,

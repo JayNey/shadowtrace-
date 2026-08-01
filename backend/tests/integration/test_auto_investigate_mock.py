@@ -9,8 +9,6 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytest_plugins = ["tests.test_ingestion.conftest"]
-
 from app.core.config import Settings
 from app.db import models as orm
 from app.models.enums import (

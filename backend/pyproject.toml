@@ -97,11 +97,6 @@ select = ["E", "F", "I", "UP", "B"]
 "app/models/__init__.py" = ["I001"]  # evaluation_run before evaluation_quality (circular import)
 "tests/conftest.py" = ["E402"]
 "tests/integration/integration_fixtures.py" = ["E402"]
-"tests/integration/test_auto_investigate_mock.py" = ["E402"]
-"tests/test_api/test_investigation_intents_api.py" = ["E402"]
-"tests/test_services/test_investigation_intent_crash_windows.py" = ["E402"]
-"tests/test_services/test_investigation_intent_service.py" = ["E402"]
-"tests/test_tasks/test_investigation_tasks.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.11"

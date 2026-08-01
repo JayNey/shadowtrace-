@@ -10,8 +10,6 @@ import pytest
 from kombu.exceptions import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytest_plugins = ["tests.test_ingestion.conftest"]
-
 from app.core.celery_app import celery_app
 from app.core.errors import DependencyUnavailableError, InvestigationInProgressError
 from app.tasks import investigation_tasks as tasks

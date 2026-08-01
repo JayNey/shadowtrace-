@@ -11,8 +11,6 @@ from httpx import ASGITransport, AsyncClient
 from kombu.exceptions import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-pytest_plugins = ["tests.test_ingestion.conftest"]
-
 from app.api.v1.deps import reset_deps
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
