@@ -406,6 +406,17 @@ def dedupe_latest_snapshot_revisions(snapshots: list[FeatureSnapshot]) -> list[F
     return sorted(latest.values(), key=lambda item: (item.cutoff_at, item.revision))
 
 
+def dedupe_latest_snapshots_by_entity(snapshots: list[FeatureSnapshot]) -> list[FeatureSnapshot]:
+    """Keep highest revision per entity — for rule runtime snapshot scans at fixed cutoff."""
+    latest: dict[tuple[str, str], FeatureSnapshot] = {}
+    for snap in snapshots:
+        key = (snap.entity_type, snap.entity_id)
+        current = latest.get(key)
+        if current is None or snap.revision > current.revision:
+            latest[key] = snap
+    return sorted(latest.values(), key=lambda item: (item.entity_type, item.entity_id, item.revision))
+
+
 def _build_seasonality_profile(snapshots: list[FeatureSnapshot]) -> SeasonalityProfile:
     hour_of_week: dict[str, int] = {}
     ready_count = 0

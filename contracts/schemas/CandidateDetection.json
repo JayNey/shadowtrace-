@@ -137,6 +137,7 @@
       "type": "string"
     },
     "shadow_only": {
+      "const": true,
       "default": true,
       "title": "Shadow Only",
       "type": "boolean"

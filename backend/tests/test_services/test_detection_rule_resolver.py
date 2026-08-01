@@ -128,6 +128,20 @@ def test_compile_rule_package_rejects_unknown_operator() -> None:
         )
 
 
+def test_compile_rejects_unknown_match_criteria_key() -> None:
+    rule = _rule(operator=RuleOperatorKind.EVENT_MATCH).model_copy(
+        update={"match_criteria": {"action": "create_process", "foo": "bar"}}
+    )
+    with pytest.raises(ValidationError, match="unsupported match_criteria key"):
+        compile_rule_package(
+            source_tenant_id="tenant-a",
+            package_version=1,
+            runtime_state=DetectionRuleRuntimeState.DRAFT,
+            rules=[rule],
+            provenance=DetectionRulePackageProvenance(author="tester"),
+        )
+
+
 def test_compile_rule_package_is_deterministic() -> None:
     rule = _rule(operator=RuleOperatorKind.EVENT_COUNT, threshold=3)
     provenance = DetectionRulePackageProvenance(author="tester")
@@ -147,6 +161,33 @@ def test_compile_rule_package_is_deterministic() -> None:
     )
     assert first.content_hash == second.content_hash
     assert first.package_id == second.package_id
+
+
+def test_candidate_detection_shadow_only_rejects_false() -> None:
+    from app.models.detection_rule import CandidateDetection
+
+    with pytest.raises(ValueError):
+        CandidateDetection.model_validate(
+            {
+                "candidate_detection_id": "dcand-test",
+                "source_tenant_id": "tenant-a",
+                "detection_scope_id": "dscope-test",
+                "package_id": "drpkg-test",
+                "package_version": 1,
+                "rule_id": "rule-test",
+                "rule_version": 1,
+                "operator": "event_match",
+                "group_key": {"entity_type": "ip", "entity_id": "10.0.0.10"},
+                "cutoff_at": datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC).isoformat(),
+                "window_kind": "1h",
+                "matched_value": 1.0,
+                "severity": "medium",
+                "shadow_only": False,
+                "provenance": {"observation_ids": ["o1"]},
+                "content_hash": "a" * 64,
+                "idempotency_key": "idem-test",
+            }
+        )
 
 
 def test_runtime_transitions_fail_closed() -> None:
@@ -310,6 +351,46 @@ def test_candidate_identity_stable_when_evidence_differs() -> None:
     )
     assert first.candidate_detection_id == second.candidate_detection_id
     assert first.content_hash != second.content_hash
+
+
+def test_dedupe_latest_snapshots_by_entity_keeps_highest_revision() -> None:
+    from app.services.feature_snapshot_resolver import dedupe_latest_snapshots_by_entity
+
+    base = datetime(2026, 8, 1, 15, 0, 0, tzinfo=UTC)
+    rev1 = FeatureSnapshot(
+        snapshot_id="fsnap-rev1",
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        window_start=base - timedelta(hours=1),
+        window_end=base,
+        cutoff_at=base,
+        source_watermark=base,
+        status=FeatureSnapshotStatus.READY,
+        features={"observation_count": 2},
+        provenance=FeatureSnapshotProvenance(observation_count=2),
+        content_hash="a" * 64,
+        cache_key="a" * 64,
+        idempotency_key="idem-rev1",
+        revision=1,
+    )
+    rev2 = rev1.model_copy(
+        update={
+            "snapshot_id": "fsnap-rev2",
+            "revision": 2,
+            "features": {"observation_count": 4},
+            "provenance": FeatureSnapshotProvenance(observation_count=4),
+            "content_hash": "b" * 64,
+            "cache_key": "b" * 64,
+            "idempotency_key": "idem-rev2",
+        }
+    )
+    deduped = dedupe_latest_snapshots_by_entity([rev1, rev2])
+    assert len(deduped) == 1
+    assert deduped[0].snapshot_id == "fsnap-rev2"
+    assert deduped[0].features["observation_count"] == 4
 
 
 def test_compile_rule_package_excludes_runtime_state_from_hash() -> None:

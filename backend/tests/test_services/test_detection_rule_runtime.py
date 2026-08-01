@@ -746,3 +746,200 @@ async def test_value_count_invalid_feature_produces_typed_error(
     assert len(result.errors) == 1
     assert result.errors[0].error_category == "validation_error"
     assert "non-numeric" in result.errors[0].error_message
+
+
+@pytest.mark.asyncio
+async def test_runtime_error_idempotent_on_repeated_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    for index in range(5):
+        await _insert_observation(
+            session_factory,
+            suffix=f"{suffix}-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=cutoff - timedelta(minutes=60 - index * 5),
+        )
+    rule = DetectionRuleDefinition(
+        rule_id="rule-count",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_COUNT,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="medium",
+        match_criteria={},
+        max_observation_scan=3,
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    first = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    second = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert len(first.errors) == 1
+    assert len(second.errors) == 1
+    assert first.errors[0].error_id == second.errors[0].error_id
+
+    async with session_factory() as session:
+        rows = list(
+            await session.scalars(
+                select(orm.DetectionRuleRuntimeError).where(
+                    orm.DetectionRuleRuntimeError.package_id == package_id
+                )
+            )
+        )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_value_count_uses_latest_snapshot_revision_after_late_recompute(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    for index, minutes in enumerate((60, 45, 30)):
+        await _insert_observation(
+            session_factory,
+            suffix=f"{suffix}-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=cutoff - timedelta(minutes=minutes),
+        )
+    snapshot_service = FeatureSnapshotService(session_factory)
+    first_snapshot = await snapshot_service.materialize(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+    )
+    assert first_snapshot.status is FeatureSnapshotStatus.READY
+    assert first_snapshot.features["observation_count"] == 3
+
+    await _insert_observation(
+        session_factory,
+        suffix=f"{suffix}-late",
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        observed_at=cutoff - timedelta(minutes=35),
+    )
+    latest_snapshot = await snapshot_service.materialize_or_recompute(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+    )
+    assert latest_snapshot.revision > first_snapshot.revision
+    assert latest_snapshot.features["observation_count"] == 4
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-value",
+        rule_version=1,
+        operator=RuleOperatorKind.VALUE_COUNT,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=3.0,
+        severity="high",
+        match_criteria={"entity_type": "ip", "entity_id": "10.0.0.10"},
+        value_field="observation_count",
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert len(result.candidates) == 1
+    candidate = result.candidates[0]
+    assert candidate.matched_value == 4.0
+    assert candidate.provenance.snapshot_ids == [latest_snapshot.snapshot_id]
+
+
+@pytest.mark.asyncio
+async def test_execute_shadow_all_active_packages_without_package_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    await _insert_observation(
+        session_factory,
+        suffix=f"{suffix}-0",
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        observed_at=cutoff - timedelta(minutes=30),
+    )
+    rule_a = DetectionRuleDefinition(
+        rule_id="rule-a",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_MATCH,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="medium",
+        match_criteria={"action": "create_process"},
+    )
+    rule_b = DetectionRuleDefinition(
+        rule_id="rule-b",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_MATCH,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="high",
+        match_criteria={"action": "create_process"},
+    )
+    service = DetectionRuleService(session_factory)
+    for index, rule in enumerate((rule_a, rule_b), start=1):
+        package = await service.register_package(
+            source_tenant_id=tenant_id,
+            package_version=index,
+            rules=[rule],
+            author="tester",
+        )
+        await service.validate_package(source_tenant_id=tenant_id, package_id=package.package_id)
+        await service.activate_shadow(source_tenant_id=tenant_id, package_id=package.package_id)
+
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+    )
+    assert result.rules_evaluated == 2
+    assert len(result.candidates) == 2

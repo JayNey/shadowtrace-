@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -133,19 +133,12 @@ class CandidateDetection(BaseModel):
     window_kind: str = Field(..., min_length=1, max_length=16)
     matched_value: float = Field(..., ge=0)
     severity: str = Field(..., min_length=1, max_length=32)
-    shadow_only: bool = Field(default=True)
+    shadow_only: Literal[True] = True
     provenance: CandidateDetectionProvenance
     content_hash: str = Field(..., min_length=64, max_length=64)
     idempotency_key: str = Field(..., min_length=1, max_length=512)
     schema_version: str = Field(default=CANDIDATE_DETECTION_SCHEMA_VERSION, min_length=1)
     created_at: datetime | None = None
-
-    @field_validator("shadow_only")
-    @classmethod
-    def _shadow_only_must_be_true(cls, value: bool) -> bool:
-        if not value:
-            raise ValueError("candidate detections must remain shadow_only in ISSUE-121 runtime")
-        return value
 
 
 class DetectionRuleRuntimeError(BaseModel):

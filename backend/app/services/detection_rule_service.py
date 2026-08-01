@@ -134,9 +134,16 @@ class DetectionRuleService:
         *,
         source_tenant_id: str,
         package_id: str,
+        for_update: bool = False,
     ) -> orm.DetectionRulePackage:
-        row = await session.get(orm.DetectionRulePackage, package_id)
-        if row is None or row.source_tenant_id != source_tenant_id:
+        stmt = select(orm.DetectionRulePackage).where(
+            orm.DetectionRulePackage.package_id == package_id,
+            orm.DetectionRulePackage.source_tenant_id == source_tenant_id,
+        )
+        if for_update:
+            stmt = stmt.with_for_update()
+        row = await session.scalar(stmt)
+        if row is None:
             raise ResourceNotFoundError(
                 "detection rule package not found",
                 details={"package_id": package_id, "source_tenant_id": source_tenant_id},
@@ -156,6 +163,7 @@ class DetectionRuleService:
                     session,
                     source_tenant_id=source_tenant_id,
                     package_id=package_id,
+                    for_update=True,
                 )
                 current = DetectionRuleRuntimeState(row.runtime_state)
                 if not allowed_runtime_transition(current, target_state):

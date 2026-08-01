@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import secrets
 from datetime import UTC, datetime
 from typing import Any
 
@@ -31,6 +30,7 @@ _ALLOWED_REQUIRED_FIELDS = frozenset(
     {"action", "category", "entity_type", "entity_id", "detection_score", "observation_count"}
 )
 _ALLOWED_VALUE_FIELDS = frozenset({"observation_count", "avg_detection_score", "max_detection_score"})
+_ALLOWED_MATCH_CRITERIA_KEYS = frozenset({"action", "category", "entity_type", "entity_id"})
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -96,6 +96,13 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
             "event_match requires non-empty match_criteria",
             details={"rule_id": rule.rule_id},
         )
+
+    for key in rule.match_criteria:
+        if key not in _ALLOWED_MATCH_CRITERIA_KEYS:
+            raise ValidationError(
+                f"unsupported match_criteria key: {key}",
+                details={"rule_id": rule.rule_id, "key": key},
+            )
 
     if operator_value == RuleOperatorKind.VALUE_COUNT.value:
         if not rule.value_field:
@@ -179,8 +186,8 @@ def build_package_idempotency_key(
     return f"{source_tenant_id}:drpkg:v{package_version}:{content_hash}"
 
 
-def build_candidate_detection_id(*, content_hash: str) -> str:
-    digest = hashlib.sha256(f"{content_hash}|candidate".encode()).hexdigest()[:12]
+def build_candidate_detection_id(*, identity_hash: str) -> str:
+    digest = hashlib.sha256(f"{identity_hash}|candidate".encode()).hexdigest()[:12]
     return f"dcand-{digest}"
 
 
@@ -255,7 +262,7 @@ def build_candidate_detection(
     }
     content_hash = hashlib.sha256(_canonical_bytes(body)).hexdigest()
     return CandidateDetection(
-        candidate_detection_id=build_candidate_detection_id(content_hash=identity_hash),
+        candidate_detection_id=build_candidate_detection_id(identity_hash=identity_hash),
         source_tenant_id=source_tenant_id,
         detection_scope_id=detection_scope_id,
         package_id=package.package_id,
@@ -282,10 +289,21 @@ def build_candidate_detection(
     )
 
 
-def build_runtime_error_id(*, source_tenant_id: str, package_id: str, rule_id: str | None) -> str:
-    material = f"{source_tenant_id}|{package_id}|{rule_id or '_package_'}"
-    digest = hashlib.sha256(material.encode()).hexdigest()[:10]
-    return f"drerr-{digest}-{secrets.token_hex(3)}"
+def build_runtime_error_id(
+    *,
+    source_tenant_id: str,
+    package_id: str,
+    rule_id: str | None,
+    error_category: str,
+    cutoff_at: datetime,
+) -> str:
+    cutoff_iso = ensure_utc(cutoff_at).isoformat()
+    material = (
+        f"{source_tenant_id}|{package_id}|{rule_id or '_package_'}|"
+        f"{error_category}|{cutoff_iso}"
+    )
+    digest = hashlib.sha256(material.encode()).hexdigest()[:12]
+    return f"drerr-{digest}"
 
 
 def allowed_runtime_transition(

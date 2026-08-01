@@ -36,6 +36,7 @@ from app.services.detection_rule_resolver import (
 from app.services.detection_rule_service import row_to_detection_rule_package
 from app.services.feature_snapshot_resolver import (
     compute_window_bounds,
+    dedupe_latest_snapshots_by_entity,
     effective_observation_upper_bound,
     row_to_feature_snapshot,
 )
@@ -142,7 +143,8 @@ class DetectionRuleRuntimeService:
                 "snapshot scan cost limit exceeded",
                 details={"max_scan": max_scan, "found": len(rows)},
             )
-        return [row_to_feature_snapshot(row) for row in rows]
+        snapshots = [row_to_feature_snapshot(row) for row in rows]
+        return dedupe_latest_snapshots_by_entity(snapshots)
 
     async def persist_candidate_in_session(
         self,
@@ -221,6 +223,22 @@ class DetectionRuleRuntimeService:
         session: AsyncSession,
         error: DetectionRuleRuntimeError,
     ) -> DetectionRuleRuntimeError:
+        existing = await session.get(orm.DetectionRuleRuntimeError, error.error_id)
+        if existing is not None:
+            existing.error_message = error.error_message
+            existing.detail = error.detail
+            await session.flush()
+            return DetectionRuleRuntimeError(
+                error_id=existing.error_id,
+                source_tenant_id=existing.source_tenant_id,
+                package_id=existing.package_id,
+                rule_id=existing.rule_id,
+                error_category=existing.error_category,
+                error_message=existing.error_message,
+                detail=dict(existing.detail or {}),
+                created_at=existing.created_at,
+            )
+
         row = orm.DetectionRuleRuntimeError(
             error_id=error.error_id,
             source_tenant_id=error.source_tenant_id,
@@ -230,8 +248,27 @@ class DetectionRuleRuntimeService:
             error_message=error.error_message,
             detail=error.detail,
         )
-        session.add(row)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                session.add(row)
+                await session.flush()
+        except IntegrityError:
+            existing = await session.get(orm.DetectionRuleRuntimeError, error.error_id)
+            if existing is None:
+                raise
+            existing.error_message = error.error_message
+            existing.detail = error.detail
+            await session.flush()
+            return DetectionRuleRuntimeError(
+                error_id=existing.error_id,
+                source_tenant_id=existing.source_tenant_id,
+                package_id=existing.package_id,
+                rule_id=existing.rule_id,
+                error_category=existing.error_category,
+                error_message=existing.error_message,
+                detail=dict(existing.detail or {}),
+                created_at=existing.created_at,
+            )
         return error
 
     async def _evaluate_rule(
@@ -389,6 +426,8 @@ class DetectionRuleRuntimeService:
                                     source_tenant_id=source_tenant_id,
                                     package_id=package.package_id,
                                     rule_id=rule.rule_id,
+                                    error_category="validation_error",
+                                    cutoff_at=cutoff_at,
                                 ),
                                 source_tenant_id=source_tenant_id,
                                 package_id=package.package_id,
