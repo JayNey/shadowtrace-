@@ -40,7 +40,11 @@ async def test_execute_investigation_skips_when_lease_already_held(
     )
 
     result = await tasks.execute_investigation("evt-skip")
-    assert result == {"status": "skipped", "event_id": "evt-skip"}
+    assert result == {
+        "status": "skipped",
+        "event_id": "evt-skip",
+        "reason": "investigation_in_progress",
+    }
 
 
 @pytest.mark.asyncio

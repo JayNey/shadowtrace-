@@ -68,6 +68,8 @@ jobs:
           tests/test_tasks/test_celery_redelivery_matrix.py
           tests/test_tasks/test_investigation_tasks.py -q
 
+  # Schedule (cron) runs pytest-only redelivery matrix. Real Docker worker smoke
+  # requires compose + worker profile and is manual via workflow_dispatch only.
   docker-worker-smoke:
     name: docker-worker-smoke
     if: github.event_name == 'workflow_dispatch'

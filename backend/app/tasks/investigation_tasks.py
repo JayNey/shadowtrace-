@@ -110,7 +110,11 @@ async def execute_investigation(
             "run_investigation skipped for event=%s — lease already held",
             event_id,
         )
-        return {"status": "skipped", "event_id": event_id}
+        return {
+            "status": "skipped",
+            "event_id": event_id,
+            "reason": "investigation_in_progress",
+        }
 
 
 async def dispatch_investigation(

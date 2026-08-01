@@ -72,7 +72,7 @@ make worker-nightly-smoke
 make worker-nightly-matrix
 ```
 
-## Phase B（实现完成，待合并）
+## Phase B
 
 1. ``task_reject_on_worker_lost=true``（配合 ``task_acks_late``）。
 2. Redelivery matrix 单元测试：``tests/test_tasks/test_celery_redelivery_matrix.py``。

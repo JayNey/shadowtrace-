@@ -8,18 +8,28 @@ task compete fairly with the original delivery via ``EventLease`` fencing.
 
 from __future__ import annotations
 
+import logging
+
+from app.core.errors import DependencyUnavailableError
 from app.models.enums import EventStatus
+
+logger = logging.getLogger(__name__)
 
 # Celery states that require manual/event lookup rather than trusting task result.
 _UNKNOWN_LOOKUP_STATES: frozenset[str] = frozenset({"RETRY", "REVOKED"})
 
-# Event statuses that must not re-run investigation on broker redelivery (ISSUE-117 Phase B).
+# Event statuses that must not re-run investigation on broker redelivery.
+# Covers analysis-only completion (REPORTING) and post-response phases when
+# ``include_response_execution=true`` (WAITING_APPROVAL / EXECUTING_RESPONSE / VERIFYING).
 REDELIVERY_TERMINAL_EVENT_STATUSES: frozenset[EventStatus] = frozenset(
     {
         EventStatus.CLOSED,
         EventStatus.FAILED,
         EventStatus.REPORTING,
         EventStatus.CONTAINED,
+        EventStatus.WAITING_APPROVAL,
+        EventStatus.EXECUTING_RESPONSE,
+        EventStatus.VERIFYING,
     }
 )
 
@@ -49,11 +59,28 @@ async def should_skip_redelivered_investigation(event_id: str) -> bool:
 
     Covers crash-after-complete-before-ack: the first delivery finished and
     released the lease, but the worker died before Celery acked the task.
+
+    When event lookup is unavailable, returns True (fail-safe skip) so a
+    redelivery does not blindly re-run SuperAgent.
     """
     from app.api.v1.deps import get_event_service
 
-    event_service = await get_event_service()
-    event = await event_service.get_event(event_id)
+    try:
+        event_service = await get_event_service()
+        event = await event_service.get_event(event_id)
+    except DependencyUnavailableError:
+        logger.warning(
+            "redelivery skip lookup degraded for event=%s — skipping re-run (fail-safe)",
+            event_id,
+        )
+        return True
+    except Exception:
+        logger.warning(
+            "redelivery skip lookup failed for event=%s — skipping re-run (fail-safe)",
+            event_id,
+            exc_info=True,
+        )
+        return True
     if event is None:
         return False
     return event.status in REDELIVERY_TERMINAL_EVENT_STATUSES

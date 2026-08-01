@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -11,13 +12,17 @@ from app.core.celery_app import celery_app
 from app.core.celery_delivery import celery_task_owner_id, normalize_public_task_state
 from app.core.errors import InvestigationInProgressError
 from app.core.redis_client import RedisClient
-from app.models.enums import EventStatus, EventType, Severity, SourceObjectKind
-from app.models.enums import DispositionPolicy
+from app.models.enums import (
+    DispositionPolicy,
+    EventStatus,
+    EventType,
+    Severity,
+    SourceObjectKind,
+)
 from app.models.security_event import SecurityEvent
 from app.models.source import SourceReference
 from app.orchestration.lease import EventLease, generate_owner_id
 from app.tasks import investigation_tasks as tasks
-from datetime import UTC, datetime
 
 
 def test_celery_app_rejects_lost_worker_tasks() -> None:
@@ -146,7 +151,11 @@ async def test_redelivery_skips_when_lease_still_held(
     )
 
     result = await tasks.execute_investigation(event_id, owner_id=owner_id)
-    assert result == {"status": "skipped", "event_id": event_id}
+    assert result == {
+        "status": "skipped",
+        "event_id": event_id,
+        "reason": "investigation_in_progress",
+    }
 
     stale_owner = generate_owner_id()
     assert stale_owner != owner_id
@@ -217,6 +226,52 @@ def test_after_success_first_delivery_runs_once(
     assert calls["n"] == 1
 
 
+def _run_with_redelivered_request(
+    *,
+    task_id: str,
+    event_id: str,
+) -> dict[str, str]:
+    """Push a Celery request context with ``delivery_info.redelivered=True``."""
+    from celery.app.task import Context
+
+    ctx = Context(id=task_id, delivery_info={"redelivered": True}, retries=0)
+    tasks.run_investigation.request_stack.push(ctx)
+    try:
+        return tasks.run_investigation.run(event_id)
+    finally:
+        tasks.run_investigation.request_stack.pop()
+
+
+def test_run_investigation_honors_delivery_info_redelivered_flag(
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise ``request.delivery_info['redelivered']`` without patching the body helper."""
+    captured: dict[str, Any] = {}
+
+    async def _fake_body(
+        event_id: str,
+        *,
+        include_response_execution: bool,
+        owner_id: str,
+        redelivered: bool,
+    ) -> dict[str, str]:
+        captured["redelivered"] = redelivered
+        captured["owner_id"] = owner_id
+        return {"status": "completed", "event_id": event_id}
+
+    monkeypatch.setattr(tasks, "_run_investigation_body", _fake_body)
+
+    result = _run_with_redelivered_request(
+        task_id="task-redelivery-flag",
+        event_id="evt-redelivery-flag",
+    )
+
+    assert result["status"] == "completed"
+    assert captured["redelivered"] is True
+    assert captured["owner_id"] == celery_task_owner_id("task-redelivery-flag")
+
+
 def test_redelivery_skips_when_event_terminal(
     celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
@@ -255,28 +310,67 @@ def test_redelivery_skips_when_event_terminal(
     monkeypatch.setattr("app.api.v1.deps.get_event_service", _fake_get_event_service)
     monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
 
-    original_body = tasks._run_investigation_body
-
-    async def _redelivered_body(
-        event_id: str,
-        *,
-        include_response_execution: bool,
-        owner_id: str,
-        redelivered: bool,
-    ) -> dict[str, str]:
-        return await original_body(
-            event_id,
-            include_response_execution=include_response_execution,
-            owner_id=owner_id,
-            redelivered=True,
-        )
-
-    monkeypatch.setattr(tasks, "_run_investigation_body", _redelivered_body)
-
-    result = tasks.run_investigation.apply(
-        args=["evt-terminal-redelivery"],
+    result = _run_with_redelivered_request(
         task_id="task-terminal-redelivery",
-    ).result
+        event_id="evt-terminal-redelivery",
+    )
+
+    assert result["status"] == "skipped"
+    assert result.get("reason") == "terminal_event"
+    assert calls["n"] == 0
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        EventStatus.WAITING_APPROVAL,
+        EventStatus.EXECUTING_RESPONSE,
+        EventStatus.VERIFYING,
+    ],
+)
+def test_redelivery_skips_for_post_response_terminal_states(
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+    status: EventStatus,
+) -> None:
+    calls = {"n": 0}
+
+    async def _fake_execute(event_id: str, **_kwargs: Any) -> dict[str, str]:
+        calls["n"] += 1
+        return {"status": "completed", "event_id": event_id}
+
+    event = SecurityEvent(
+        event_id=f"evt-{status.value}",
+        event_type=EventType.OTHER,
+        title="terminal",
+        status=status,
+        severity=Severity.LOW,
+        creation_source_ref=SourceReference(
+            source_kind=SourceObjectKind.INCIDENT,
+            source_product="manual",
+            source_tenant_id="tenant-test",
+            connector_id="conn-test",
+            source_object_id="manual-1",
+            ingested_at=datetime.now(UTC),
+        ),
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+    )
+
+    class _EventService:
+        async def get_event(self, _event_id: str) -> SecurityEvent:
+            return event
+
+    async def _fake_get_event_service() -> _EventService:
+        return _EventService()
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_service", _fake_get_event_service)
+    monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
+
+    result = _run_with_redelivered_request(
+        task_id=f"task-{status.value}",
+        event_id=event.event_id,
+    )
+
     assert result["status"] == "skipped"
     assert result.get("reason") == "terminal_event"
     assert calls["n"] == 0
