@@ -213,10 +213,17 @@ class DetectionBaselineService:
                 )
                 return await self.persist_in_session(session, baseline)
 
-    async def get_baseline(self, baseline_id: str) -> DetectionFeatureBaseline | None:
+    async def get_baseline(
+        self,
+        *,
+        source_tenant_id: str,
+        baseline_id: str,
+    ) -> DetectionFeatureBaseline | None:
         async with self._session_factory() as session:
             row = await session.get(orm.DetectionFeatureBaseline, baseline_id)
-            return row_to_detection_baseline(row) if row is not None else None
+            if row is None or row.source_tenant_id != source_tenant_id:
+                return None
+            return row_to_detection_baseline(row)
 
     async def query_baselines(
         self,

@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.errors import ResourceNotFoundError, ValidationError
+from app.core.errors import ValidationError
 from app.db import models as orm
 from app.models.feature_snapshot import (
     FeatureSnapshot,
@@ -29,6 +30,30 @@ from app.services.feature_snapshot_resolver import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_LATENESS = timedelta(minutes=15)
+
+
+def _materialization_advisory_lock_key(
+    *,
+    source_tenant_id: str,
+    detection_scope_id: str,
+    entity_type: str,
+    entity_id: str,
+    window_kind: FeatureWindowKind,
+    window_end: datetime,
+    cutoff_at: datetime,
+) -> int:
+    material = "|".join(
+        [
+            source_tenant_id,
+            detection_scope_id,
+            entity_type,
+            entity_id,
+            window_kind.value,
+            ensure_utc(window_end).isoformat(),
+            ensure_utc(cutoff_at).isoformat(),
+        ]
+    ).encode()
+    return int.from_bytes(hashlib.sha256(material).digest()[:8], byteorder="big", signed=True)
 
 
 class FeatureSnapshotService:
@@ -173,6 +198,20 @@ class FeatureSnapshotService:
         )
         async with self._session_factory() as session:
             async with session.begin():
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {
+                        "lock_key": _materialization_advisory_lock_key(
+                            source_tenant_id=source_tenant_id,
+                            detection_scope_id=detection_scope_id,
+                            entity_type=entity_type,
+                            entity_id=entity_id,
+                            window_kind=window_kind,
+                            window_end=window_end,
+                            cutoff_at=cutoff_at,
+                        ),
+                    },
+                )
                 prior = await self._latest_revision_for_key(
                     session,
                     source_tenant_id=source_tenant_id,
@@ -223,10 +262,17 @@ class FeatureSnapshotService:
                 )
                 return await self.persist_in_session(session, snapshot)
 
-    async def get_snapshot(self, snapshot_id: str) -> FeatureSnapshot | None:
+    async def get_snapshot(
+        self,
+        *,
+        source_tenant_id: str,
+        snapshot_id: str,
+    ) -> FeatureSnapshot | None:
         async with self._session_factory() as session:
             row = await session.get(orm.FeatureSnapshot, snapshot_id)
-            return row_to_feature_snapshot(row) if row is not None else None
+            if row is None or row.source_tenant_id != source_tenant_id:
+                return None
+            return row_to_feature_snapshot(row)
 
     async def query_snapshots(self, query: FeatureSnapshotQuery) -> FeatureSnapshotListResult:
         filters = [orm.FeatureSnapshot.source_tenant_id == query.source_tenant_id]

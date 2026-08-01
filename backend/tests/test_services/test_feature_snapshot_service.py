@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -27,6 +28,7 @@ from app.models.behavior_observation import (
 from app.models.detection_scope import DetectionScopeIdentity, UpstreamConnectorMember
 from app.models.feature_snapshot import (
     DetectionBaselineStatus,
+    DetectionFeatureBaselineQuery,
     FeatureSnapshotQuery,
     FeatureSnapshotStatus,
     FeatureWindowKind,
@@ -572,3 +574,179 @@ async def test_baseline_insufficient_history_when_few_snapshots(
     )
     assert baseline.status is DetectionBaselineStatus.INSUFFICIENT_HISTORY
     assert baseline.stats == {}
+
+
+@pytest.mark.asyncio
+async def test_baseline_insufficient_to_ready_bumps_revision_not_duplicate_slot(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    snapshot_service = _snapshot_service(session_factory)
+    baseline_service = _baseline_service(session_factory)
+    baseline_cutoff = datetime(2026, 8, 3, 15, 30, 0, tzinfo=UTC)
+    day_one_cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    for index, minutes in enumerate((60, 45, 30)):
+        await _insert_observation(
+            session_factory,
+            suffix=f"{suffix}-d1-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=day_one_cutoff - timedelta(minutes=minutes),
+        )
+    await snapshot_service.materialize(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=day_one_cutoff,
+    )
+    first = await baseline_service.materialize_baseline(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=baseline_cutoff,
+    )
+    assert first.status is DetectionBaselineStatus.INSUFFICIENT_HISTORY
+    assert first.revision == 1
+
+    day_two_cutoff = datetime(2026, 8, 2, 15, 30, 0, tzinfo=UTC)
+    for index, minutes in enumerate((60, 45, 30)):
+        await _insert_observation(
+            session_factory,
+            suffix=f"{suffix}-d2-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=day_two_cutoff - timedelta(minutes=minutes),
+        )
+    await snapshot_service.materialize(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=day_two_cutoff,
+    )
+
+    second = await baseline_service.materialize_baseline(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=baseline_cutoff,
+    )
+    assert second.revision == 2
+    assert second.supersedes_baseline_id == first.baseline_id
+    assert second.status is DetectionBaselineStatus.READY
+
+    result = await baseline_service.query_baselines(
+        DetectionFeatureBaselineQuery(source_tenant_id=tenant_id)
+    )
+    baseline_cutoff_rows = [item for item in result.items if item.cutoff_at == baseline_cutoff]
+    assert len(baseline_cutoff_rows) == 2
+    assert {item.revision for item in baseline_cutoff_rows} == {1, 2}
+
+
+@pytest.mark.asyncio
+async def test_get_snapshot_rejects_cross_tenant(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    for index, minutes in enumerate((60, 45, 30)):
+        await _insert_observation(
+            session_factory,
+            suffix=f"{suffix}-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=cutoff - timedelta(minutes=minutes),
+        )
+    service = _snapshot_service(session_factory)
+    snapshot = await service.materialize(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+    )
+    assert (
+        await service.get_snapshot(
+            source_tenant_id=tenant_id,
+            snapshot_id=snapshot.snapshot_id,
+        )
+        is not None
+    )
+    assert (
+        await service.get_snapshot(
+            source_tenant_id="other-tenant",
+            snapshot_id=snapshot.snapshot_id,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_recompute_only_one_extra_revision(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 10, 0, tzinfo=UTC)
+    for index, minutes in enumerate((60, 45, 30)):
+        await _insert_observation(
+            session_factory,
+            suffix=f"{suffix}-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=cutoff - timedelta(minutes=minutes),
+        )
+    service = _snapshot_service(session_factory)
+    first = await service.materialize_or_recompute(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="ip",
+        entity_id="10.0.0.10",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+    )
+    await _insert_observation(
+        session_factory,
+        suffix=f"{suffix}-late",
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        observed_at=datetime(2026, 8, 1, 15, 5, 0, tzinfo=UTC),
+    )
+
+    async def _recompute() -> None:
+        await service.materialize_or_recompute(
+            source_tenant_id=tenant_id,
+            detection_scope_id=scope_id,
+            entity_type="ip",
+            entity_id="10.0.0.10",
+            window_kind=FeatureWindowKind.ONE_HOUR,
+            cutoff_at=cutoff,
+        )
+
+    await asyncio.gather(_recompute(), _recompute())
+
+    async with session_factory() as session:
+        rows = list(
+            await session.scalars(
+                select(orm.FeatureSnapshot).where(
+                    orm.FeatureSnapshot.source_tenant_id == tenant_id,
+                    orm.FeatureSnapshot.cutoff_at == cutoff,
+                )
+            )
+        )
+    revisions = sorted(int(row.revision) for row in rows)
+    assert revisions == [1, 2]
+    assert revisions[-1] == first.revision + 1

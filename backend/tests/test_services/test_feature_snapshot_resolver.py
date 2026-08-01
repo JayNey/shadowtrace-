@@ -17,8 +17,8 @@ from app.services.feature_snapshot_resolver import (
     align_window_end,
     build_detection_feature_baseline,
     build_feature_snapshot,
-    compute_snapshot_content_hash,
     compute_window_bounds,
+    dedupe_latest_snapshot_revisions,
     derive_peer_group_id,
     effective_observation_upper_bound,
     ensure_utc,
@@ -337,3 +337,78 @@ def test_twenty_four_hour_window_bounds_cross_utc_midnight() -> None:
 def test_naive_datetime_treated_as_utc() -> None:
     naive = datetime(2026, 8, 1, 15, 37, 12)
     assert ensure_utc(naive).tzinfo is UTC
+
+
+def test_dedupe_latest_snapshot_revisions_keeps_highest_revision() -> None:
+    base = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    observations = [
+        _observation(obs_id="o1", observed_at=base - timedelta(minutes=50)),
+        _observation(obs_id="o2", observed_at=base - timedelta(minutes=40)),
+        _observation(obs_id="o3", observed_at=base - timedelta(minutes=30)),
+    ]
+    rev1 = build_feature_snapshot(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="ip",
+        entity_id="10.0.0.1",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=base,
+        observations=observations,
+        revision=1,
+    )
+    rev2 = build_feature_snapshot(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="ip",
+        entity_id="10.0.0.1",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=base,
+        observations=observations,
+        revision=2,
+        supersedes_snapshot_id=rev1.snapshot_id,
+    )
+    deduped = dedupe_latest_snapshot_revisions([rev1, rev2])
+    assert len(deduped) == 1
+    assert deduped[0].revision == 2
+
+
+def test_baseline_dedupes_superseded_snapshot_revisions() -> None:
+    base = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    observations = [
+        _observation(obs_id="o1", observed_at=base - timedelta(minutes=60)),
+        _observation(obs_id="o2", observed_at=base - timedelta(minutes=45)),
+        _observation(obs_id="o3", observed_at=base - timedelta(minutes=30)),
+    ]
+    rev1 = build_feature_snapshot(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="ip",
+        entity_id="10.0.0.1",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=base,
+        observations=observations,
+        revision=1,
+    )
+    rev2 = build_feature_snapshot(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="ip",
+        entity_id="10.0.0.1",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=base,
+        observations=observations,
+        revision=2,
+        supersedes_snapshot_id=rev1.snapshot_id,
+    )
+    baseline = build_detection_feature_baseline(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="ip",
+        entity_id="10.0.0.1",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=base,
+        snapshots=[rev1, rev2],
+    )
+    assert rev1.snapshot_id not in baseline.snapshot_revision_refs
+    assert rev2.snapshot_id in baseline.snapshot_revision_refs
+    assert baseline.stats.get("snapshot_count", 0) <= 1

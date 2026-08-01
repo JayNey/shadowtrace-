@@ -340,6 +340,7 @@ def build_feature_snapshot(
 
 
 def derive_peer_group_id(*, entity_type: str, primary_category: str | None) -> str:
+    """MVP peer label: entity_type + dominant category bucket (not cross-entity cohort yet)."""
     material = f"{entity_type}|{primary_category or '_none_'}"
     digest = hashlib.sha256(material.encode()).hexdigest()[:10]
     return f"peer-{digest}"
@@ -381,13 +382,11 @@ def build_baseline_idempotency_key(
     window_kind: FeatureWindowKind,
     cutoff_at: datetime,
     revision: int,
-    peer_group_id: str | None = None,
 ) -> str:
     cutoff_iso = ensure_utc(cutoff_at).isoformat()
-    peer = peer_group_id or "_none_"
     return (
         f"{detection_scope_id}:{entity_type}:{entity_id}:{window_kind.value}:"
-        f"{cutoff_iso}:{peer}:rev{revision}"
+        f"{cutoff_iso}:rev{revision}"
     )
 
 
@@ -396,15 +395,28 @@ def build_baseline_id(*, content_hash: str, revision: int) -> str:
     return f"fbase-{digest}"
 
 
+def dedupe_latest_snapshot_revisions(snapshots: list[FeatureSnapshot]) -> list[FeatureSnapshot]:
+    """Keep highest revision per (window_end, cutoff_at) — superseded rows excluded."""
+    latest: dict[tuple[datetime, datetime], FeatureSnapshot] = {}
+    for snap in snapshots:
+        key = (ensure_utc(snap.window_end), ensure_utc(snap.cutoff_at))
+        current = latest.get(key)
+        if current is None or snap.revision > current.revision:
+            latest[key] = snap
+    return sorted(latest.values(), key=lambda item: (item.cutoff_at, item.revision))
+
+
 def _build_seasonality_profile(snapshots: list[FeatureSnapshot]) -> SeasonalityProfile:
     hour_of_week: dict[str, int] = {}
+    ready_count = 0
     for snap in snapshots:
         if snap.status is not FeatureSnapshotStatus.READY:
             continue
+        ready_count += 1
         observed = ensure_utc(snap.window_end)
         key = str(observed.weekday() * 24 + observed.hour)
         hour_of_week[key] = hour_of_week.get(key, 0) + 1
-    return SeasonalityProfile(hour_of_week=hour_of_week, sample_snapshot_count=len(snapshots))
+    return SeasonalityProfile(hour_of_week=hour_of_week, sample_snapshot_count=ready_count)
 
 
 def build_detection_feature_baseline(
@@ -423,9 +435,10 @@ def build_detection_feature_baseline(
 ) -> DetectionFeatureBaseline:
     """Aggregate baseline from snapshots at or before cutoff — no post-cutoff leakage."""
     cutoff = ensure_utc(cutoff_at)
+    deduped = dedupe_latest_snapshot_revisions(snapshots)
     eligible = [
         snap
-        for snap in snapshots
+        for snap in deduped
         if snap.status is FeatureSnapshotStatus.READY and ensure_utc(snap.cutoff_at) <= cutoff
     ]
     eligible.sort(key=lambda item: (item.cutoff_at, item.snapshot_id))
@@ -493,7 +506,6 @@ def build_detection_feature_baseline(
         window_kind=window_kind,
         cutoff_at=cutoff,
         revision=revision,
-        peer_group_id=peer_group_id,
     )
     return DetectionFeatureBaseline(
         baseline_id=resolved_id,
