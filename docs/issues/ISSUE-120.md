@@ -17,6 +17,7 @@ GitHub 权威：
 3. scope revision 为 append-only；activation/retirement 由 server 驱动，rule/model/agent 不得自行拼 scope。
 4. 同一 integration instance 同时最多一个 ACTIVE scope revision（connector set 升级时激活新版并退役旧版）。
 5. `identity_hash` 仅 hash integration identity；与含 `connector_set_version` 的 `detection_scope_id` 语义分离。
+6. **Operational contract**：同一 `(integration instance, connector_set_version)` 的 upstream 成员集合不可变；成员变更必须 bump `connector_set_version`，否则 `register_revision` 拒绝。
 
 文件范围（Phase 0）：
 1. `backend/app/models/detection_scope.py`

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -22,6 +23,8 @@ from app.models.detection_scope import (
 )
 from app.services.detection_scope_resolver import (
     build_detection_scope_revision,
+    compute_connector_set_hash,
+    compute_scope_content_hash,
     normalize_upstream_connector_set,
 )
 
@@ -63,6 +66,63 @@ def _integration_boundary_filters(row: orm.DetectionScopeRevision) -> tuple:
     )
 
 
+def _identity_boundary_filters(identity: DetectionScopeIdentity) -> tuple:
+    return (
+        orm.DetectionScopeRevision.source_tenant_id == identity.source_tenant_id,
+        orm.DetectionScopeRevision.source_product == identity.source_product,
+        orm.DetectionScopeRevision.integration_instance_id == identity.integration_instance_id,
+    )
+
+
+def _integration_advisory_lock_key(row: orm.DetectionScopeRevision) -> int:
+    material = (
+        f"{row.source_tenant_id}|{row.source_product}|{row.integration_instance_id}"
+    ).encode()
+    return int.from_bytes(hashlib.sha256(material).digest()[:8], byteorder="big", signed=True)
+
+
+def _identity_from_row(row: orm.DetectionScopeRevision) -> DetectionScopeIdentity:
+    return DetectionScopeIdentity(
+        source_tenant_id=row.source_tenant_id,
+        source_product=row.source_product,
+        integration_instance_id=row.integration_instance_id,
+        environment=row.environment,
+        region=row.region,
+    )
+
+
+def _content_hash_for_row(
+    row: orm.DetectionScopeRevision,
+    *,
+    lifecycle_state: DetectionScopeLifecycleState,
+) -> str:
+    identity = _identity_from_row(row)
+    body = {
+        "detection_scope_id": row.detection_scope_id,
+        "identity": identity.model_dump(mode="json"),
+        "connector_set": row.connector_set,
+        "lifecycle_state": lifecycle_state.value,
+        "revision": int(row.revision),
+        "schema_version": row.schema_version,
+    }
+    return compute_scope_content_hash(body)
+
+
+def _apply_lifecycle_state(
+    row: orm.DetectionScopeRevision,
+    *,
+    lifecycle_state: DetectionScopeLifecycleState,
+    now: datetime,
+) -> None:
+    row.lifecycle_state = lifecycle_state.value
+    row.content_hash = _content_hash_for_row(row, lifecycle_state=lifecycle_state)
+    if lifecycle_state is DetectionScopeLifecycleState.ACTIVE:
+        row.activated_at = now
+        row.retired_at = None
+    elif lifecycle_state is DetectionScopeLifecycleState.RETIRED:
+        row.retired_at = now
+
+
 class DetectionScopeService:
     """Append-only scope revision store with activation/retirement lifecycle."""
 
@@ -98,6 +158,37 @@ class DetectionScopeService:
             raise ValidationError(
                 "supersedes revision integration_instance_id mismatch",
                 details={"supersedes_scope_revision_id": supersedes_scope_revision_id},
+            )
+
+    async def _validate_connector_set_version_consistency(
+        self,
+        session: AsyncSession,
+        *,
+        identity: DetectionScopeIdentity,
+        connector_set_version: int,
+        connector_set_hash: str,
+    ) -> None:
+        existing_row = await session.scalar(
+            select(orm.DetectionScopeRevision)
+            .where(
+                and_(
+                    *_identity_boundary_filters(identity),
+                    orm.DetectionScopeRevision.connector_set_version == connector_set_version,
+                )
+            )
+            .limit(1)
+        )
+        if existing_row is None:
+            return
+        existing_set = DetectionScopeConnectorSet.model_validate(existing_row.connector_set)
+        existing_hash = compute_connector_set_hash(existing_set)
+        if existing_hash != connector_set_hash:
+            raise ValidationError(
+                "connector membership drift at same connector_set_version; bump version",
+                details={
+                    "connector_set_version": connector_set_version,
+                    "integration_instance_id": identity.integration_instance_id,
+                },
             )
 
     async def register_revision(
@@ -140,12 +231,19 @@ class DetectionScopeService:
             activated_at=None,
             retired_at=None,
         )
+        connector_set_hash = compute_connector_set_hash(normalized)
         async with self._session_factory() as session:
             async with session.begin():
                 await self._validate_supersedes(
                     session,
                     identity=identity,
                     supersedes_scope_revision_id=supersedes_scope_revision_id,
+                )
+                await self._validate_connector_set_version_consistency(
+                    session,
+                    identity=identity,
+                    connector_set_version=normalized.connector_set_version,
+                    connector_set_hash=connector_set_hash,
                 )
                 session.add(row)
                 try:
@@ -181,6 +279,11 @@ class DetectionScopeService:
                     await session.refresh(row)
                     return _row_to_revision(row)
 
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": _integration_advisory_lock_key(row)},
+                )
+
                 active_rows = await session.scalars(
                     select(orm.DetectionScopeRevision)
                     .where(
@@ -194,11 +297,16 @@ class DetectionScopeService:
                     .with_for_update()
                 )
                 for active in active_rows:
-                    active.lifecycle_state = DetectionScopeLifecycleState.RETIRED.value
-                    active.retired_at = now
-                row.lifecycle_state = DetectionScopeLifecycleState.ACTIVE.value
-                row.activated_at = now
-                row.retired_at = None
+                    _apply_lifecycle_state(
+                        active,
+                        lifecycle_state=DetectionScopeLifecycleState.RETIRED,
+                        now=now,
+                    )
+                _apply_lifecycle_state(
+                    row,
+                    lifecycle_state=DetectionScopeLifecycleState.ACTIVE,
+                    now=now,
+                )
                 await session.flush()
                 await session.refresh(row)
                 return _row_to_revision(row)
@@ -217,8 +325,14 @@ class DetectionScopeService:
                         "detection scope revision not found",
                         details={"scope_revision_id": scope_revision_id},
                     )
-                row.lifecycle_state = DetectionScopeLifecycleState.RETIRED.value
-                row.retired_at = now
+                if row.lifecycle_state == DetectionScopeLifecycleState.RETIRED.value:
+                    await session.refresh(row)
+                    return _row_to_revision(row)
+                _apply_lifecycle_state(
+                    row,
+                    lifecycle_state=DetectionScopeLifecycleState.RETIRED,
+                    now=now,
+                )
                 await session.flush()
                 await session.refresh(row)
                 return _row_to_revision(row)

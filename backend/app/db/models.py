@@ -592,6 +592,20 @@ class DetectionScopeRevision(Base):
             "detection_scope_id",
             "lifecycle_state",
         ),
+        Index(
+            "uq_detection_scope_revision_one_active_per_scope",
+            "detection_scope_id",
+            unique=True,
+            postgresql_where=text("lifecycle_state = 'active'"),
+        ),
+        Index(
+            "uq_detection_scope_revision_one_active_per_instance",
+            "source_tenant_id",
+            "source_product",
+            "integration_instance_id",
+            unique=True,
+            postgresql_where=text("lifecycle_state = 'active'"),
+        ),
     )
 
     scope_revision_id: Mapped[str] = mapped_column(String, primary_key=True)

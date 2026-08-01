@@ -83,9 +83,20 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("lifecycle_state = 'active'"),
     )
+    op.create_index(
+        "uq_detection_scope_revision_one_active_per_instance",
+        "detection_scope_revision",
+        ["source_tenant_id", "source_product", "integration_instance_id"],
+        unique=True,
+        postgresql_where=sa.text("lifecycle_state = 'active'"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(
+        "uq_detection_scope_revision_one_active_per_instance",
+        table_name="detection_scope_revision",
+    )
     op.drop_index(
         "uq_detection_scope_revision_one_active_per_scope",
         table_name="detection_scope_revision",

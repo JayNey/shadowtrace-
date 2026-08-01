@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -23,6 +24,7 @@ from app.models.detection_scope import (
     DetectionScopeQuery,
     UpstreamConnectorMember,
 )
+from app.services.detection_scope_resolver import compute_scope_content_hash
 from app.services.detection_scope_service import DetectionScopeService
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -78,6 +80,175 @@ def _identity(suffix: str) -> DetectionScopeIdentity:
         environment="prod",
         region="cn-east",
     )
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_connector_membership_drift_at_same_version(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    service = _service(session_factory)
+    identity = _identity(suffix)
+    await service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id="conn-log", source_product="mock_xdr"),
+        ],
+    )
+    with pytest.raises(ValidationError, match="connector membership drift"):
+        await service.register_revision(
+            identity=identity,
+            connector_set_version=1,
+            upstream_connectors=[
+                UpstreamConnectorMember(connector_id="conn-log", source_product="mock_xdr"),
+                UpstreamConnectorMember(connector_id="conn-edr", source_product="mock_xdr"),
+            ],
+            revision=2,
+        )
+
+
+@pytest.mark.asyncio
+async def test_content_hash_matches_lifecycle_after_activate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    service = _service(session_factory)
+    identity = _identity(suffix)
+    revision = await service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id="conn-log", source_product="mock_xdr"),
+        ],
+    )
+    activated = await service.activate_revision(revision.scope_revision_id)
+    assert activated.lifecycle_state is DetectionScopeLifecycleState.ACTIVE
+    expected_hash = compute_scope_content_hash(
+        {
+            "detection_scope_id": activated.detection_scope_id,
+            "identity": identity.model_dump(mode="json"),
+            "connector_set": activated.connector_set.model_dump(mode="json"),
+            "lifecycle_state": DetectionScopeLifecycleState.ACTIVE.value,
+            "revision": activated.revision,
+            "schema_version": activated.schema_version,
+        }
+    )
+    assert activated.content_hash == expected_hash
+
+
+@pytest.mark.asyncio
+async def test_concurrent_activate_only_one_active_per_instance(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    service = _service(session_factory)
+    identity = _identity(suffix)
+    first = await service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id="conn-log", source_product="mock_xdr"),
+        ],
+    )
+    second = await service.register_revision(
+        identity=identity,
+        connector_set_version=2,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id="conn-log", source_product="mock_xdr"),
+            UpstreamConnectorMember(connector_id="conn-edr", source_product="mock_xdr"),
+        ],
+        revision=2,
+        supersedes_scope_revision_id=first.scope_revision_id,
+    )
+    results = await asyncio.gather(
+        service.activate_revision(first.scope_revision_id),
+        service.activate_revision(second.scope_revision_id),
+        return_exceptions=True,
+    )
+    assert not any(isinstance(item, Exception) for item in results)
+    active_for_instance = await service.get_active_revision_for_instance(
+        source_tenant_id=identity.source_tenant_id,
+        source_product=identity.source_product,
+        integration_instance_id=identity.integration_instance_id,
+    )
+    assert active_for_instance is not None
+    async with session_factory() as session:
+        active_rows = await session.scalars(
+            select(orm.DetectionScopeRevision).where(
+                orm.DetectionScopeRevision.source_tenant_id == identity.source_tenant_id,
+                orm.DetectionScopeRevision.source_product == identity.source_product,
+                orm.DetectionScopeRevision.integration_instance_id
+                == identity.integration_instance_id,
+                orm.DetectionScopeRevision.lifecycle_state
+                == DetectionScopeLifecycleState.ACTIVE.value,
+            )
+        )
+        assert len(list(active_rows)) == 1
+
+
+@pytest.mark.asyncio
+async def test_source_product_isolation_in_query(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    service = _service(session_factory)
+    tenant_id = f"tenant-prod-{suffix}"
+    instance_id = f"inst-{suffix}"
+    mock_scope = await service.register_revision(
+        identity=DetectionScopeIdentity(
+            source_tenant_id=tenant_id,
+            source_product="mock_xdr",
+            integration_instance_id=instance_id,
+        ),
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id="conn-a", source_product="mock_xdr"),
+        ],
+    )
+    await service.register_revision(
+        identity=DetectionScopeIdentity(
+            source_tenant_id=tenant_id,
+            source_product="other_product",
+            integration_instance_id=instance_id,
+        ),
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id="conn-b", source_product="other_product"),
+        ],
+    )
+    result = await service.query_revisions(
+        DetectionScopeQuery(
+            source_tenant_id=tenant_id,
+            source_product="mock_xdr",
+        )
+    )
+    assert all(item.identity.source_product == "mock_xdr" for item in result.items)
+    assert any(item.scope_revision_id == mock_scope.scope_revision_id for item in result.items)
+
+
+@pytest.mark.asyncio
+async def test_get_active_revision_for_instance_empty_after_retire_all(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    service = _service(session_factory)
+    identity = _identity(suffix)
+    revision = await service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id="conn-log", source_product="mock_xdr"),
+        ],
+    )
+    activated = await service.activate_revision(revision.scope_revision_id)
+    await service.retire_revision(activated.scope_revision_id)
+    active = await service.get_active_revision_for_instance(
+        source_tenant_id=identity.source_tenant_id,
+        source_product=identity.source_product,
+        integration_instance_id=identity.integration_instance_id,
+    )
+    assert active is None
 
 
 @pytest.mark.asyncio
@@ -246,7 +417,7 @@ async def test_register_rejects_invalid_supersedes(
 
 
 @pytest.mark.asyncio
-async def test_activate_same_scope_id_retires_prior_revision(
+async def test_activate_same_scope_id_requires_version_bump_for_membership_change(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
@@ -264,7 +435,7 @@ async def test_activate_same_scope_id_retires_prior_revision(
 
     second = await service.register_revision(
         identity=identity,
-        connector_set_version=1,
+        connector_set_version=2,
         upstream_connectors=[
             UpstreamConnectorMember(connector_id="conn-log", source_product="mock_xdr"),
             UpstreamConnectorMember(connector_id="conn-edr", source_product="mock_xdr"),
@@ -333,10 +504,6 @@ async def test_query_latest_revision_only_across_pages(
             upstream_connectors=[
                 UpstreamConnectorMember(
                     connector_id=f"conn-{index}-a",
-                    source_product="mock_xdr",
-                ),
-                UpstreamConnectorMember(
-                    connector_id=f"conn-{index}-b",
                     source_product="mock_xdr",
                 ),
             ],

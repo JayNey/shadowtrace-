@@ -17,6 +17,7 @@ from app.services.detection_scope_resolver import (
     build_detection_scope_revision,
     compute_connector_set_hash,
     compute_scope_content_hash,
+    compute_scope_identity_hash,
     normalize_upstream_connector_set,
 )
 
@@ -63,6 +64,46 @@ def test_detection_scope_id_isolated_across_tenants() -> None:
     assert left != right
 
 
+def test_detection_scope_id_differs_by_environment_or_region() -> None:
+    base = build_detection_scope_id(
+        _identity(environment="prod", region="cn-east"),
+        connector_set_version=1,
+    )
+    other_env = build_detection_scope_id(
+        _identity(environment="staging", region="cn-east"),
+        connector_set_version=1,
+    )
+    other_region = build_detection_scope_id(
+        _identity(environment="prod", region="cn-west"),
+        connector_set_version=1,
+    )
+    assert base != other_env
+    assert base != other_region
+
+
+def test_identity_hash_independent_of_connector_set_version() -> None:
+    identity = _identity()
+    hash_v1 = compute_scope_identity_hash(identity)
+    revision_v1 = build_detection_scope_revision(
+        identity=identity,
+        connector_set=normalize_upstream_connector_set(
+            connector_set_version=1,
+            upstream_connectors=[_upstream("conn-log")],
+        ),
+    )
+    revision_v2 = build_detection_scope_revision(
+        identity=identity,
+        connector_set=normalize_upstream_connector_set(
+            connector_set_version=2,
+            upstream_connectors=[_upstream("conn-log"), _upstream("conn-edr")],
+        ),
+        revision=2,
+    )
+    assert revision_v1.identity_hash == hash_v1
+    assert revision_v2.identity_hash == hash_v1
+    assert revision_v1.detection_scope_id != revision_v2.detection_scope_id
+
+
 def test_upstream_connector_set_is_canonical_sorted() -> None:
     normalized = normalize_upstream_connector_set(
         connector_set_version=1,
@@ -89,7 +130,10 @@ def test_upstream_connector_set_rejects_duplicates() -> None:
 def test_derived_connector_rejected_from_upstream_set() -> None:
     from pydantic import ValidationError as PydanticValidationError
 
-    with pytest.raises(PydanticValidationError, match="upstream connector set members must have role=upstream_source"):
+    with pytest.raises(
+        PydanticValidationError,
+        match="upstream connector set members must have role=upstream_source",
+    ):
         UpstreamConnectorMember(
             connector_id="derived-1",
             source_product="mock_xdr",
