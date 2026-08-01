@@ -39,7 +39,8 @@ make smoke-bootstrap
 | 命令 | 说明 |
 |------|------|
 | `make up` | 启动核心服务（--build 构建镜像） |
-| `make up WORKER=1` | 启动核心服务 + Celery worker（需同时设 `TASK_MODE=celery`） |
+| `make up WORKER=1` | 启动核心服务 + Celery investigation worker（需同时设 `TASK_MODE=celery`） |
+| `make up SCHEDULER=1` | 启动核心服务 + Mock XDR 摄取调度器（Beat + ingestion worker，见下文） |
 | `make bootstrap` | 迁移 + mock-xdr 种子 + SourceAdapter 摄取 + 自动触发研判 |
 | `make bootstrap LOAD_KB=true` | 同上 + 加载知识库（约 30-60 秒） |
 | `make smoke-bootstrap` | bootstrap 后冒烟：health + ≥3 事件 + 前端反代 |
@@ -61,7 +62,49 @@ docker compose -f infra/docker-compose.yml --profile optional up -d neo4j
 # Celery worker（异步研判执行）
 # 注意：需同时将 backend 的 TASK_MODE 改为 celery（默认 background）
 docker compose -f infra/docker-compose.yml --profile worker up -d worker
+
+# Mock XDR 持续摄取调度器（ISSUE-107）— 默认关闭，需显式启用 profile
+# Beat 与 investigation worker 分离；不会在 investigation worker 上使用 -B
+make up SCHEDULER=1
+# 或：
+docker compose -f infra/docker-compose.yml --profile scheduler up -d
 ```
+
+启用 scheduler profile 后，Compose 会启动 `scheduler-beat` 与 `scheduler-worker`，并设置：
+
+```ini
+INGESTION_SCHEDULER_ENABLED=true
+INGESTION_POLL_INTERVAL_S=60   # 可调；测试可设为 1–2
+SOURCE_MODE=mock_xdr
+DISPOSITION_BASE_URL=http://mock-xdr:8100
+```
+
+调度器按 interval 触发 Celery task `shadowtrace.poll_sources`，复用 `SourceIngester.poll()` 增量摄取 Mock XDR 新对象（`status=new`），**不会**自动触发 investigate（见 ISSUE-108）。
+
+验证：
+
+```bash
+# 1. 启动 stack + scheduler
+make up SCHEDULER=1
+
+# 2. 向 mock-xdr seed 新场景（另开终端）
+docker compose -f infra/docker-compose.yml exec backend \
+  python3 scripts/seed_mock_xdr_and_ingest.py --scenario insider_data_exfiltration
+
+# 3. 观察 scheduler-worker 日志（≤2×interval 内应出现 ingest accepted）
+docker compose -f infra/docker-compose.yml logs -f scheduler-worker
+
+# 4. 确认 API 可见新事件
+curl -s http://localhost:8000/api/v1/events | python3 -m json.tool
+```
+
+本地单测：
+
+```bash
+make ingestion-scheduler-test
+```
+
+**注意**：仅设置 `INGESTION_SCHEDULER_ENABLED=true` 而不启动 `--profile scheduler` **不会**启动 Beat/ingestion worker 容器；必须同时使用 profile（`make up SCHEDULER=1`）。
 
 启用 OpenSearch / Neo4j 后，需在 `.env` 中设置对应开关：
 ```ini

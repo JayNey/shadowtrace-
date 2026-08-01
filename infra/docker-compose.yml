@@ -6,6 +6,7 @@
 #
 # Optional profiles:
 #   --profile worker     Celery investigation worker
+#   --profile scheduler  Celery Beat + ingestion worker (ISSUE-107)
 #   --profile optional   OpenSearch + Neo4j
 # Live mode: copy infra/.env.live.example → ../.env.live (compose auto-loads when present)
 #
@@ -220,6 +221,104 @@ services:
         [
           "CMD-SHELL",
           "python -m celery -A app.core.celery_app inspect ping -d investigation@$(hostname) -t 3 | grep -q OK",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-xdr:
+        condition: service_healthy
+
+  # --------------------------------------------------------------------------
+  # Ingestion scheduler — Celery Beat + dedicated ingestion worker (ISSUE-107)
+  #   docker compose --profile scheduler up -d
+  #   make up SCHEDULER=1
+  # Requires INGESTION_SCHEDULER_ENABLED=true (set below); does NOT use -B on
+  # the investigation worker profile.
+  # --------------------------------------------------------------------------
+  scheduler-beat:
+    profiles: ["scheduler"]
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    env_file:
+      - ../.env.example
+      - path: ../.env.live
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace
+      REDIS_URL: redis://redis:6379/0
+      SOURCE_MODE: mock_xdr
+      DISPOSITION_MODE: mock_xdr
+      DISPOSITION_BASE_URL: http://mock-xdr:8100
+      SIMULATION_ENABLED: "true"
+      INGESTION_SCHEDULER_ENABLED: "true"
+      INGESTION_POLL_INTERVAL_S: ${INGESTION_POLL_INTERVAL_S:-60}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+      OTEL_SERVICE_NAME: shadowtrace-scheduler-beat
+    command:
+      [
+        "python", "-m", "celery",
+        "-A", "app.core.celery_app",
+        "beat",
+        "--loglevel", "info",
+      ]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mock-xdr:
+        condition: service_healthy
+
+  scheduler-worker:
+    profiles: ["scheduler"]
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    env_file:
+      - ../.env.example
+      - path: ../.env.live
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace
+      REDIS_URL: redis://redis:6379/0
+      SOURCE_MODE: mock_xdr
+      DISPOSITION_MODE: mock_xdr
+      TOOL_MODE: mock
+      LLM_MODE: mock
+      SIMULATION_ENABLED: "true"
+      ALLOW_LIVE_SIDE_EFFECTS: "false"
+      ALLOW_XDR_WRITEBACK: "false"
+      DISPOSITION_BASE_URL: http://mock-xdr:8100
+      INGESTION_SCHEDULER_ENABLED: "true"
+      INGESTION_POLL_INTERVAL_S: ${INGESTION_POLL_INTERVAL_S:-60}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      OTEL_ENABLED: ${OTEL_ENABLED:-false}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}
+      OTEL_SERVICE_NAME: shadowtrace-scheduler-worker
+    command:
+      [
+        "python", "-m", "celery",
+        "-A", "app.core.celery_app",
+        "worker",
+        "-Q", "ingestion",
+        "-n", "ingestion-scheduler@%h",
+        "-c", "1",
+        "--prefetch-multiplier=1",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -m celery -A app.core.celery_app inspect ping -d ingestion-scheduler@$(hostname) -t 3 | grep -q OK",
         ]
       interval: 15s
       timeout: 5s

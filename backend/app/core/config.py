@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     celery_broker_url: str = Field(default="", alias="CELERY_BROKER_URL")
     approval_timeout_minutes: int = Field(default=30, alias="APPROVAL_TIMEOUT_MINUTES")
 
+    ingestion_scheduler_enabled: bool = Field(default=False, alias="INGESTION_SCHEDULER_ENABLED")
+    ingestion_poll_interval_s: int = Field(default=60, alias="INGESTION_POLL_INTERVAL_S", ge=1)
+
     neo4j_enabled: bool = Field(default=False, alias="NEO4J_ENABLED")
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")

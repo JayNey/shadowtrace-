@@ -21,6 +21,9 @@ COMPOSE := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 # Optional: set WORKER=1 to include the Celery investigation worker (sets TASK_MODE=celery).
 WORKER ?=
 WORKER_PROFILE = $(if $(WORKER),--profile worker,)
+# Optional: set SCHEDULER=1 to include Celery Beat + ingestion worker (ISSUE-107).
+SCHEDULER ?=
+SCHEDULER_PROFILE = $(if $(SCHEDULER),--profile scheduler,)
 export TASK_MODE := $(if $(WORKER),celery,$(if $(TASK_MODE),$(TASK_MODE),background))
 
 INTEGRATION_PROJECT_NAME ?= $(COMPOSE_PROJECT_NAME)-integration
@@ -31,10 +34,10 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
+.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test ingestion-scheduler-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
 
 up:
-	$(COMPOSE) $(WORKER_PROFILE) up -d --build
+	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
 
 down:
 	$(COMPOSE) down
@@ -159,6 +162,12 @@ worker-smoke-test:
 		tests/test_tasks/test_worker_tasks.py \
 		tests/test_api/test_celery_investigation.py \
 		tests/test_tasks/test_investigation_tasks.py -q
+
+# --- ISSUE-107 Mock XDR ingestion scheduler quality gate -------------------- #
+ingestion-scheduler-test:
+	cd "$(CURDIR)/backend"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		$(PYTHON) -m pytest tests/test_ingestion/test_ingestion_scheduler.py -q
 
 # --- ISSUE-086 full-system quality gate ----------------------------------- #
 test-system:

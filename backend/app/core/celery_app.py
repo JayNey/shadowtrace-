@@ -48,6 +48,22 @@ worker_process_shutdown.connect(shutdown_worker_session_provider, weak=False)
 
 celery_app = Celery("shadowtrace")
 
+_settings = get_settings()
+
+
+def _build_beat_schedule() -> dict[str, dict[str, object]]:
+    if not _settings.ingestion_scheduler_enabled:
+        return {}
+    interval = float(_settings.ingestion_poll_interval_s)
+    return {
+        "shadowtrace-poll-sources": {
+            "task": "shadowtrace.poll_sources",
+            "schedule": interval,
+            "options": {"queue": "ingestion"},
+        },
+    }
+
+
 celery_app.conf.update(
     broker_url=_resolve_broker_url(),
     result_backend=_resolve_broker_url(),
@@ -55,6 +71,7 @@ celery_app.conf.update(
     task_routes={
         "shadowtrace.run_investigation": {"queue": "investigation"},
         "shadowtrace.worker_ping": {"queue": "investigation"},
+        "shadowtrace.poll_sources": {"queue": "ingestion"},
     },
     task_acks_late=True,
     task_soft_time_limit=600,
@@ -62,9 +79,11 @@ celery_app.conf.update(
     broker_transport_options={
         "visibility_timeout": 900,
     },
+    beat_schedule=_build_beat_schedule(),
     imports=(
         "app.tasks.investigation_tasks",
         "app.tasks.worker_tasks",
+        "app.tasks.ingestion_tasks",
     ),
 )
 
