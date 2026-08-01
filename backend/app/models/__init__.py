@@ -73,6 +73,16 @@ from app.models.detection_scope import (
     DetectionScopeRevision,
     UpstreamConnectorMember,
 )
+from app.models.feature_snapshot import (
+    DetectionFeatureBaseline,
+    DetectionFeatureBaselineListResult,
+    DetectionFeatureBaselineQuery,
+    FeatureSnapshot,
+    FeatureSnapshotListResult,
+    FeatureSnapshotProvenance,
+    FeatureSnapshotQuery,
+    SeasonalityProfile,
+)
 from app.models.evaluation_truth import (
     BenignSliceExpectation,
     EvaluationCaseTruth,
@@ -274,6 +284,15 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "BehaviorObservationProvenance": BehaviorObservationProvenance,
     "BehaviorObservationQuery": BehaviorObservationQuery,
     "BehaviorObservationListResult": BehaviorObservationListResult,
+    # feature snapshot (ISSUE-120 Phase A/B)
+    "FeatureSnapshot": FeatureSnapshot,
+    "FeatureSnapshotProvenance": FeatureSnapshotProvenance,
+    "FeatureSnapshotQuery": FeatureSnapshotQuery,
+    "FeatureSnapshotListResult": FeatureSnapshotListResult,
+    "DetectionFeatureBaseline": DetectionFeatureBaseline,
+    "DetectionFeatureBaselineQuery": DetectionFeatureBaselineQuery,
+    "DetectionFeatureBaselineListResult": DetectionFeatureBaselineListResult,
+    "SeasonalityProfile": SeasonalityProfile,
     # evaluation truth (ISSUE-113)
     "EvaluationCaseTruth": EvaluationCaseTruth,
     "EvaluationDatasetManifest": EvaluationDatasetManifest,

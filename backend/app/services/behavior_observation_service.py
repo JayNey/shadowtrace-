@@ -60,6 +60,11 @@ def _row_to_observation(row: orm.BehaviorObservation) -> BehaviorObservation:
     )
 
 
+def row_to_behavior_observation(row: orm.BehaviorObservation) -> BehaviorObservation:
+    """Public ORM→contract mapper for cross-service reads (ISSUE-119 / #624)."""
+    return _row_to_observation(row)
+
+
 class BehaviorObservationService:
     """Append-only behavior observation store with idempotent upsert semantics."""
 

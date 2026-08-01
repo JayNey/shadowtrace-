@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "description": "Phase B hour-of-week activity shape derived from historical snapshots.",
+  "properties": {
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "hour_of_week": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "title": "Hour Of Week",
+      "type": "object"
+    },
+    "sample_snapshot_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Sample Snapshot Count",
+      "type": "integer"
+    }
+  },
+  "title": "SeasonalityProfile",
+  "type": "object"
+}

@@ -1,0 +1,245 @@
+{
+  "$defs": {
+    "DetectionBaselineStatus": {
+      "description": "Baseline readiness over historical snapshots (as-of cutoff).",
+      "enum": [
+        "ready",
+        "insufficient_history",
+        "insufficient_coverage"
+      ],
+      "title": "DetectionBaselineStatus",
+      "type": "string"
+    },
+    "DetectionFeatureBaseline": {
+      "additionalProperties": false,
+      "description": "Rolling baseline stats from snapshots at or before cutoff (no post-cutoff leakage).",
+      "properties": {
+        "baseline_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Baseline Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "entity_type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "entity_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "peer_group_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Peer Group Id"
+        },
+        "feature_contract_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Feature Contract Version",
+          "type": "string"
+        },
+        "window_kind": {
+          "$ref": "#/$defs/FeatureWindowKind"
+        },
+        "cutoff_at": {
+          "format": "date-time",
+          "title": "Cutoff At",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/DetectionBaselineStatus"
+        },
+        "stats": {
+          "additionalProperties": true,
+          "title": "Stats",
+          "type": "object"
+        },
+        "seasonality_profile": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SeasonalityProfile"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "snapshot_revision_refs": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Snapshot Revision Refs",
+          "type": "array"
+        },
+        "revision": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "supersedes_baseline_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supersedes Baseline Id"
+        },
+        "content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "cache_key": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Cache Key",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        }
+      },
+      "required": [
+        "baseline_id",
+        "source_tenant_id",
+        "detection_scope_id",
+        "entity_type",
+        "entity_id",
+        "window_kind",
+        "cutoff_at",
+        "status",
+        "content_hash",
+        "cache_key",
+        "idempotency_key"
+      ],
+      "title": "DetectionFeatureBaseline",
+      "type": "object"
+    },
+    "FeatureWindowKind": {
+      "description": "Supported event-time aggregation windows.",
+      "enum": [
+        "1h",
+        "24h",
+        "7d",
+        "30d"
+      ],
+      "title": "FeatureWindowKind",
+      "type": "string"
+    },
+    "SeasonalityProfile": {
+      "additionalProperties": false,
+      "description": "Phase B hour-of-week activity shape derived from historical snapshots.",
+      "properties": {
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "hour_of_week": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Hour Of Week",
+          "type": "object"
+        },
+        "sample_snapshot_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Sample Snapshot Count",
+          "type": "integer"
+        }
+      },
+      "title": "SeasonalityProfile",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "total": {
+      "minimum": 0,
+      "title": "Total",
+      "type": "integer"
+    },
+    "page": {
+      "minimum": 1,
+      "title": "Page",
+      "type": "integer"
+    },
+    "page_size": {
+      "minimum": 1,
+      "title": "Page Size",
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/DetectionFeatureBaseline"
+      },
+      "title": "Items",
+      "type": "array"
+    }
+  },
+  "required": [
+    "total",
+    "page",
+    "page_size"
+  ],
+  "title": "DetectionFeatureBaselineListResult",
+  "type": "object"
+}

@@ -50,9 +50,47 @@ GitHub 权威：
 5. `register_revision` 不可直写 ACTIVE；`supersedes_scope_revision_id` 校验同 tenant/instance。
 6. `query_revisions(latest_revision_only=True)` 分页 total 正确。
 
-## Phase A（不在本分支范围）
+## Phase A（FeatureSnapshot / DetectionFeatureBaseline）
 
-依赖 Phase 0 + #624 observations。FeatureSnapshot/Baseline、event-time window、watermark/cutoff、cold-start — 见 #625 Phase A 段落。
+依赖 Phase 0 + #624 observations。
+
+目标：
+1. 从 `BehaviorObservation` 物化 event-time `FeatureSnapshot` 与 `DetectionFeatureBaseline`。
+2. key：`detection_scope_id`、`entity_type/id`、`feature_contract_version`、`window_kind`、`window_end/cutoff`、`source_watermark`。
+3. Phase A 窗口：1h/24h；Phase B 扩展 7d/30d、peer groups、seasonality。
+4. cutoff 为 as-of watermark；基线不得读取 cutoff 后 snapshot，防 leakage。
+5. cold-start 显式 `insufficient_history` / `insufficient_coverage`，零值不伪装正常。
+6. immutable revision + content_hash；`cache_key == content_hash`。
+
+### Event-time 窗口与 lateness（Phase A/B）
+
+- 所有窗口对齐 **UTC**；调用方负责将本地/DST 时间转为 UTC。
+- 观测纳入上界：若 `cutoff_at <= window_end + allowed_lateness` 则上界为 `cutoff_at`（允许 lateness 带内迟到 event-time）；否则上界为 `window_end`（窗口已关闭，禁止 `(window_end, cutoff]` 泄漏）。
+- `materialize()` 与 `materialize_or_recompute()` 等价（后者为规范入口）；late data 自动 bump revision。
+
+文件范围（Phase A/B）：
+1. `backend/app/models/feature_snapshot.py`
+2. `backend/app/services/feature_snapshot_resolver.py`
+3. `backend/app/services/feature_snapshot_service.py`
+4. `backend/app/services/detection_baseline_service.py`
+5. `backend/app/db/models.py` + `backend/migrations/versions/0015_feature_snapshot.py`
+6. `contracts/schemas/FeatureSnapshot*.json`、`DetectionFeatureBaseline*.json`
+7. `backend/tests/test_services/test_feature_snapshot_resolver.py`
+8. `backend/tests/test_services/test_feature_snapshot_service.py`
+
+统一命名：
+1. `FeatureSnapshot` / `DetectionFeatureBaseline`（避免与 ISSUE-114 `ChangeWindowBaseline` 冲突）
+2. `FeatureWindowKind`: `1h` | `24h` | `7d` | `30d`
+3. `FeatureSnapshotStatus`: `ready` | `insufficient_history` | `insufficient_coverage`
+4. `DetectionBaselineStatus`: 同上
+5. `snapshot_id` (`fsnap-*`) / `baseline_id` (`fbase-*`)
+
+验收标准（Phase A/B）：
+1. 同 cutoff/watermark/version 重算 hash 一致；late data 产生新 revision。
+2. 跨 tenant/detection_scope 无污染。
+3. cold start 显式；post-cutoff 观测不参与 snapshot/baseline。
+4. UTC 窗口对齐；allowed lateness 边界可测。
+5. Phase B：7d/30d 窗口、peer_group_id、seasonality_profile 可物化。
 
 ## 测试与验证
 
@@ -60,6 +98,8 @@ GitHub 权威：
 cd backend
 .venv/bin/pytest tests/test_services/test_detection_scope_resolver.py -q
 .venv/bin/pytest tests/test_services/test_detection_scope_service.py -q   # 需 Postgres
+.venv/bin/pytest tests/test_services/test_feature_snapshot_resolver.py -q
+.venv/bin/pytest tests/test_services/test_feature_snapshot_service.py -q   # 需 Postgres
 .venv/bin/pytest tests/test_models/test_schema_export.py -q
 ```
 

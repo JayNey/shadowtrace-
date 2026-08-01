@@ -765,6 +765,104 @@ class BehaviorObservationProjectionFailure(Base):
     )
 
 
+class FeatureSnapshot(Base):
+    """Event-time feature materialization over behavior observations (ISSUE-120 Phase A/B)."""
+
+    __tablename__ = "feature_snapshot"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_feature_snapshot_idempotency_key"),
+        Index(
+            "ix_feature_snapshot_tenant_scope_entity_cutoff",
+            "source_tenant_id",
+            "detection_scope_id",
+            "entity_type",
+            "entity_id",
+            "window_kind",
+            "cutoff_at",
+        ),
+        Index(
+            "ix_feature_snapshot_cache_key",
+            "source_tenant_id",
+            "cache_key",
+        ),
+    )
+
+    snapshot_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    detection_scope_id: Mapped[str] = mapped_column(String, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String, nullable=False)
+    feature_contract_version: Mapped[str] = mapped_column(String, nullable=False)
+    window_kind: Mapped[str] = mapped_column(String, nullable=False)
+    window_start: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    window_end: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    cutoff_at: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    allowed_lateness_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_watermark: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    features: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    supersedes_snapshot_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("feature_snapshot.snapshot_id"),
+        nullable=True,
+    )
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    cache_key: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class DetectionFeatureBaseline(Base):
+    """Rolling baseline stats from snapshots at or before cutoff (ISSUE-120 Phase B)."""
+
+    __tablename__ = "detection_feature_baseline"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_detection_feature_baseline_idempotency_key"),
+        Index(
+            "ix_detection_baseline_tenant_scope_entity_cutoff",
+            "source_tenant_id",
+            "detection_scope_id",
+            "entity_type",
+            "entity_id",
+            "window_kind",
+            "cutoff_at",
+        ),
+        Index(
+            "ix_detection_baseline_peer_group",
+            "source_tenant_id",
+            "peer_group_id",
+        ),
+    )
+
+    baseline_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    detection_scope_id: Mapped[str] = mapped_column(String, nullable=False)
+    entity_type: Mapped[str] = mapped_column(String, nullable=False)
+    entity_id: Mapped[str] = mapped_column(String, nullable=False)
+    peer_group_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    feature_contract_version: Mapped[str] = mapped_column(String, nullable=False)
+    window_kind: Mapped[str] = mapped_column(String, nullable=False)
+    cutoff_at: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    stats: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    seasonality_profile: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    snapshot_revision_refs: Mapped[list[Any]] = mapped_column(JSONB, default=list, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    supersedes_baseline_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("detection_feature_baseline.baseline_id"),
+        nullable=True,
+    )
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    cache_key: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
 class DataQualityError(Base):
     """Ingestion/normalization quality issues; event_id nullable (pre-event errors)."""
 

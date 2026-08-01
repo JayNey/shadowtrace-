@@ -1,0 +1,267 @@
+{
+  "$defs": {
+    "FeatureSnapshot": {
+      "additionalProperties": false,
+      "description": "Immutable event-time feature vector for one entity/window/cutoff revision.",
+      "properties": {
+        "snapshot_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Snapshot Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "entity_type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "entity_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "feature_contract_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Feature Contract Version",
+          "type": "string"
+        },
+        "window_kind": {
+          "$ref": "#/$defs/FeatureWindowKind"
+        },
+        "window_start": {
+          "format": "date-time",
+          "title": "Window Start",
+          "type": "string"
+        },
+        "window_end": {
+          "format": "date-time",
+          "title": "Window End",
+          "type": "string"
+        },
+        "cutoff_at": {
+          "description": "As-of event-time watermark — observations with observed_at > cutoff are excluded.",
+          "format": "date-time",
+          "title": "Cutoff At",
+          "type": "string"
+        },
+        "allowed_lateness_seconds": {
+          "default": 900,
+          "minimum": 0,
+          "title": "Allowed Lateness Seconds",
+          "type": "integer"
+        },
+        "source_watermark": {
+          "description": "Effective processed event-time high-water mark for this materialization.",
+          "format": "date-time",
+          "title": "Source Watermark",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/FeatureSnapshotStatus"
+        },
+        "features": {
+          "additionalProperties": true,
+          "title": "Features",
+          "type": "object"
+        },
+        "provenance": {
+          "$ref": "#/$defs/FeatureSnapshotProvenance"
+        },
+        "revision": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "supersedes_snapshot_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supersedes Snapshot Id"
+        },
+        "content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "cache_key": {
+          "description": "Durable cache key — identical to content_hash.",
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Cache Key",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "source_tenant_id",
+        "detection_scope_id",
+        "entity_type",
+        "entity_id",
+        "window_kind",
+        "window_start",
+        "window_end",
+        "cutoff_at",
+        "source_watermark",
+        "status",
+        "provenance",
+        "content_hash",
+        "cache_key",
+        "idempotency_key"
+      ],
+      "title": "FeatureSnapshot",
+      "type": "object"
+    },
+    "FeatureSnapshotProvenance": {
+      "additionalProperties": false,
+      "description": "Observation anchors included in the snapshot body.",
+      "properties": {
+        "observation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Observation Ids",
+          "type": "array"
+        },
+        "observation_count": {
+          "minimum": 0,
+          "title": "Observation Count",
+          "type": "integer"
+        },
+        "first_observed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Observed At"
+        },
+        "last_observed_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Observed At"
+        }
+      },
+      "required": [
+        "observation_count"
+      ],
+      "title": "FeatureSnapshotProvenance",
+      "type": "object"
+    },
+    "FeatureSnapshotStatus": {
+      "description": "Materialization outcome — never infer readiness from zero-filled features.",
+      "enum": [
+        "ready",
+        "insufficient_history",
+        "insufficient_coverage"
+      ],
+      "title": "FeatureSnapshotStatus",
+      "type": "string"
+    },
+    "FeatureWindowKind": {
+      "description": "Supported event-time aggregation windows.",
+      "enum": [
+        "1h",
+        "24h",
+        "7d",
+        "30d"
+      ],
+      "title": "FeatureWindowKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "total": {
+      "minimum": 0,
+      "title": "Total",
+      "type": "integer"
+    },
+    "page": {
+      "minimum": 1,
+      "title": "Page",
+      "type": "integer"
+    },
+    "page_size": {
+      "minimum": 1,
+      "title": "Page Size",
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/FeatureSnapshot"
+      },
+      "title": "Items",
+      "type": "array"
+    }
+  },
+  "required": [
+    "total",
+    "page",
+    "page_size"
+  ],
+  "title": "FeatureSnapshotListResult",
+  "type": "object"
+}

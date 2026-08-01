@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "FeatureWindowKind": {
+      "description": "Supported event-time aggregation windows.",
+      "enum": [
+        "1h",
+        "24h",
+        "7d",
+        "30d"
+      ],
+      "title": "FeatureWindowKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Tenant-scoped snapshot reads.",
+  "properties": {
+    "source_tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Tenant Id",
+      "type": "string"
+    },
+    "detection_scope_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Detection Scope Id"
+    },
+    "entity_type": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Entity Type"
+    },
+    "entity_id": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Entity Id"
+    },
+    "window_kind": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FeatureWindowKind"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "page": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Page",
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 50,
+      "maximum": 200,
+      "minimum": 1,
+      "title": "Page Size",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "source_tenant_id"
+  ],
+  "title": "FeatureSnapshotQuery",
+  "type": "object"
+}
