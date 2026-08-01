@@ -24,14 +24,25 @@ def build_risk_messages(
     evidence_output: EvidenceOutput,
     rag_summary: dict[str, Any] | None = None,
     storyline_summary: str | None = None,
+    source_snapshot: dict[str, Any] | None = None,
 ) -> list[LLMMessage]:
     """Build JSON-mode messages that request per-dimension scores only (no CoT)."""
     system = (
         "You are ShadowTrace RiskAgent. Score residual cyber risk for one security "
         "event across six fixed dimensions. Reply with JSON only. Do not include "
         "hidden chain-of-thought. For each dimension provide score (0-100) and a "
-        "short evidence-based reason (one sentence)."
+        "short evidence-based reason (one sentence). "
+        "Important: missing or failed evidence collection does NOT mean low threat—"
+        "preserve source alert severity when evidence is sparse and set "
+        "evidence_limited=true with factor explanations."
     )
+    source_context: dict[str, Any] = {}
+    if isinstance(source_snapshot, dict):
+        normalized = source_snapshot.get("normalized")
+        if isinstance(normalized, dict):
+            source_context["normalized"] = normalized
+        if source_snapshot.get("severity"):
+            source_context["severity"] = source_snapshot.get("severity")
     payload = {
         "triage": {
             "event_type": triage_result.event_type.value,
@@ -39,6 +50,7 @@ def build_risk_messages(
             "ioc_list": list(triage_result.ioc_list),
             "reasoning": triage_result.reasoning,
         },
+        "source_snapshot": source_context,
         "evidence": {
             "overall_confidence": evidence_output.overall_confidence,
             "collection_status": evidence_output.collection_status.value,
@@ -65,6 +77,7 @@ def build_risk_messages(
                 "<factor_name>": {"score": "0-100", "reason": "short string"},
             },
             "raw_confidence": "0-1",
+            "evidence_limited": "boolean — true when collection failed/degraded with zero evidence",
         },
     }
     user = (
@@ -75,7 +88,7 @@ def build_risk_messages(
         '"attack_stage":{"score":85,"reason":"..."},'
         '"data_sensitivity":{"score":70,"reason":"..."},'
         '"threat_intel":{"score":80,"reason":"..."}},'
-        '"raw_confidence":0.82}\n'
+        '"raw_confidence":0.82,"evidence_limited":false}\n'
         f"Context:\n{json.dumps(payload, ensure_ascii=False)}"
     )
     return [

@@ -338,6 +338,9 @@ class RiskAssessment(BaseModel):
     risk_factors: list[RiskFactor] = Field(default_factory=list)
     possible_false_positive: bool = False
     scoring_mode: ScoringMode
+    evidence_limited: bool = False
+    severity_floor_applied: bool = False
+    source_risk_baseline: int | None = Field(default=None, ge=0, le=100)
 
 
 # --------------------------------------------------------------------------- #

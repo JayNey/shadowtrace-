@@ -10,7 +10,16 @@ import pytest
 
 from app.agents.confidence_calibration import calibrate_confidence
 from app.agents.risk_agent import RiskAgent
-from app.agents.risk_scoring_engine import FACTOR_WEIGHTS, RiskScoringEngine, severity_from_score
+from app.agents.risk_scoring_engine import (
+    EVIDENCE_LIMITED_CONFIDENCE_CAP,
+    FACTOR_WEIGHTS,
+    SOURCE_BASELINE_FLOOR_RATIO,
+    RiskScoringEngine,
+    apply_evidence_limited_adjustments,
+    extract_source_baseline,
+    is_evidence_limited,
+    severity_from_score,
+)
 from app.core.llm.base import InMemoryLLMCallAuditRecorder, LLMResponse
 from app.core.llm.mock_client import MockLLMClient
 from app.models.agent_io import (
@@ -493,3 +502,269 @@ async def test_risk_db_sync_failure_propagates(wm: _FakeWorkingMemory) -> None:
     stored = await wm.read(event_id, "risk_assessment")
     assert stored is not None
     assert stored["risk_score"] >= 70
+
+
+def _zero_evidence_output(*, status: CollectionStatus = CollectionStatus.FAILED) -> EvidenceOutput:
+    return EvidenceOutput(
+        evidence_list=[],
+        success_sources=[],
+        failed_sources=["endpoint", "network_flow"],
+        overall_confidence=0.0,
+        collection_status=status,
+    )
+
+
+def _malicious_process_triage() -> TriageResult:
+    return TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(
+            hosts=[HostEntity(entity_id="h1", hostname="DEV-WKS-012", ip="10.0.0.12")],
+        ),
+        reasoning="malicious process spawned",
+    )
+
+
+def _malicious_process_source_snapshot() -> dict[str, Any]:
+    return {
+        "severity": "high",
+        "alert_type": "malicious_process",
+        "normalized": {"event_type": "malicious_process", "risk_score": 76},
+    }
+
+
+def test_extract_source_baseline_from_snapshot() -> None:
+    baseline, severity = extract_source_baseline(_malicious_process_source_snapshot())
+    assert baseline == 76
+    assert severity is Severity.HIGH
+
+
+def test_is_evidence_limited_requires_failed_or_degraded_and_empty() -> None:
+    empty_failed = _zero_evidence_output(status=CollectionStatus.FAILED)
+    assert is_evidence_limited(empty_failed) is True
+    completed = EvidenceOutput(
+        evidence_list=[],
+        overall_confidence=0.0,
+        collection_status=CollectionStatus.COMPLETED,
+    )
+    assert is_evidence_limited(completed) is False
+    assert is_evidence_limited(_fp_evidence("evt-fp")) is False
+
+
+def test_apply_evidence_limited_floor_formula() -> None:
+    adjustment = apply_evidence_limited_adjustments(
+        risk_score=45,
+        confidence=0.55,
+        evidence_output=_zero_evidence_output(),
+        source_snapshot=_malicious_process_source_snapshot(),
+    )
+    expected_floor = int(round(76 * SOURCE_BASELINE_FLOOR_RATIO))
+    assert adjustment.evidence_limited is True
+    assert adjustment.source_risk_baseline == 76
+    assert adjustment.risk_score >= max(expected_floor, 70)
+    assert adjustment.severity is Severity.HIGH
+    assert adjustment.severity_floor_applied is True
+    assert adjustment.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
+
+
+def test_apply_evidence_limited_skips_fp_low_severity() -> None:
+    adjustment = apply_evidence_limited_adjustments(
+        risk_score=22,
+        confidence=0.25,
+        evidence_output=_zero_evidence_output(status=CollectionStatus.FAILED),
+        source_snapshot={
+            "severity": "low",
+            "normalized": {"risk_score": 18, "scenario": "account_anomaly_fp"},
+        },
+    )
+    assert adjustment.evidence_limited is True
+    assert adjustment.risk_score == 22
+    assert adjustment.severity_floor_applied is False
+    assert adjustment.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
+
+
+def test_low_severity_zero_evidence_no_score_floor() -> None:
+    """Score floor is gated on source severity >= HIGH; low FP must not lift."""
+    adjustment = apply_evidence_limited_adjustments(
+        risk_score=5,
+        confidence=0.4,
+        evidence_output=_zero_evidence_output(status=CollectionStatus.FAILED),
+        source_snapshot={
+            "severity": "low",
+            "normalized": {"risk_score": 18, "scenario": "account_anomaly_fp"},
+        },
+    )
+    assert adjustment.evidence_limited is True
+    assert adjustment.risk_score == 5
+    assert adjustment.severity is Severity.LOW
+    assert adjustment.severity_floor_applied is False
+    assert adjustment.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
+
+
+def test_critical_source_floor_keeps_score_severity_aligned() -> None:
+    """CRITICAL source floors one tier to HIGH; score stays in HIGH band (>=70)."""
+    adjustment = apply_evidence_limited_adjustments(
+        risk_score=45,
+        confidence=0.5,
+        evidence_output=_zero_evidence_output(),
+        source_snapshot={
+            "severity": "critical",
+            "normalized": {"risk_score": 95, "event_type": "malicious_process"},
+        },
+    )
+    assert adjustment.evidence_limited is True
+    assert adjustment.severity_floor_applied is True
+    assert adjustment.severity is Severity.HIGH
+    assert 70 <= adjustment.risk_score < 90
+    assert severity_from_score(adjustment.risk_score) is adjustment.severity
+
+
+def test_source_baseline_from_frozen_ingest_snapshot() -> None:
+    from app.db import models as orm
+    from app.services.event_service import _source_snapshot_from_row
+
+    row = orm.SecurityEvent(
+        event_id="evt-ingest-baseline",
+        event_type="malicious_process",
+        title="Suspicious process",
+        severity="high",
+        creation_source_ref={
+            "source_product": "mock_xdr",
+            "source_tenant_id": "tenant-demo",
+            "connector_id": "conn-1",
+            "source_kind": "incident",
+            "source_object_id": "inc-1",
+        },
+        source_reference_snapshots=[],
+        raw_alert_snapshot={
+            "normalized": {"risk_score": 76, "event_type": "malicious_process"},
+        },
+    )
+    snapshot = _source_snapshot_from_row(row)
+    baseline, severity = extract_source_baseline(snapshot)
+    assert baseline == 76
+    assert severity is Severity.HIGH
+    adjustment = apply_evidence_limited_adjustments(
+        risk_score=45,
+        confidence=0.55,
+        evidence_output=_zero_evidence_output(),
+        source_snapshot=snapshot,
+    )
+    assert adjustment.source_risk_baseline == 76
+    assert adjustment.risk_score >= int(round(76 * SOURCE_BASELINE_FLOOR_RATIO))
+
+
+@pytest.mark.asyncio
+async def test_malicious_process_zero_evidence_applies_severity_floor(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-mp-zero-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = _malicious_process_source_snapshot()
+    agent = RiskAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    output = await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_malicious_process_triage(),
+            evidence_output=_zero_evidence_output(),
+        )
+    )
+    assert output.evidence_limited is True
+    assert output.source_risk_baseline == 76
+    assert output.severity_floor_applied is True
+    assert output.risk_score >= 70
+    assert output.severity is Severity.HIGH
+    assert output.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
+    assert agent.last_verdict is FinalVerdict.NONE
+    evidence_factor = next(
+        f for f in output.risk_factors if f.factor_name == "evidence_confidence"
+    )
+    assert "source_baseline=76" in evidence_factor.reasoning
+    assert "evidence_limited=true" in evidence_factor.reasoning
+
+
+@pytest.mark.asyncio
+async def test_account_anomaly_fp_zero_evidence_not_floored_to_high(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-fp-zero-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = {
+        "severity": "low",
+        "normalized": {"risk_score": 18, "scenario": "account_anomaly_fp"},
+    }
+    agent = RiskAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    output = await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=TriageResult(
+                event_type=EventType.ACCOUNT_ANOMALY,
+                severity=Severity.LOW,
+                need_investigation=False,
+            ),
+            evidence_output=_zero_evidence_output(),
+        )
+    )
+    assert output.evidence_limited is True
+    assert output.severity_floor_applied is False
+    assert output.severity is not Severity.HIGH
+    assert output.risk_score < 40
+    assert output.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
+
+
+@pytest.mark.asyncio
+async def test_full_evidence_path_not_raised_by_floor(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-full-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = _malicious_process_source_snapshot()
+    agent = RiskAgent(
+        llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    output = await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_main_triage(),
+            evidence_output=_main_evidence(event_id),
+        )
+    )
+    assert output.evidence_limited is False
+    assert output.severity_floor_applied is False
+    assert output.risk_score >= 70
+
+
+@pytest.mark.asyncio
+async def test_llm_failure_zero_evidence_still_applies_floor(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-llm-fail-floor-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = _malicious_process_source_snapshot()
+    agent = RiskAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    output = await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_malicious_process_triage(),
+            evidence_output=_zero_evidence_output(status=CollectionStatus.DEGRADED),
+        )
+    )
+    assert output.scoring_mode is ScoringMode.RULE_ONLY
+    assert output.evidence_limited is True
+    assert output.risk_score >= 70
+    assert output.severity is Severity.HIGH

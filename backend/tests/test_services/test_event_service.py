@@ -151,6 +151,94 @@ def _ref(
 # --------------------------------------------------------------------------- #
 
 
+def test_snapshot_has_risk_baseline_helper() -> None:
+    from app.services.event_service import _snapshot_has_risk_baseline
+
+    assert _snapshot_has_risk_baseline({"normalized": {"risk_score": 76}}) is True
+    assert _snapshot_has_risk_baseline({"normalized": {"event_type": "x"}}) is False
+    assert _snapshot_has_risk_baseline({"normalized": {"risk_score": "bad"}}) is False
+    assert _snapshot_has_risk_baseline({}) is False
+    assert _snapshot_has_risk_baseline(None) is False
+
+
+def test_source_snapshot_from_row_reads_nested_normalized() -> None:
+    from app.db import models as orm
+    from app.services.event_service import (
+        _snapshot_has_risk_baseline,
+        _source_snapshot_from_row,
+    )
+
+    row = orm.SecurityEvent(
+        event_id="evt-snap-baseline",
+        event_type="malicious_process",
+        title="Suspicious process",
+        severity="high",
+        creation_source_ref={
+            "source_product": "mock_xdr",
+            "source_tenant_id": "tenant-demo",
+            "connector_id": "conn-1",
+            "source_kind": "incident",
+            "source_object_id": "inc-1",
+        },
+        source_reference_snapshots=[],
+        raw_alert_snapshot={
+            "normalized": {"risk_score": 76, "event_type": "malicious_process"},
+        },
+    )
+    snapshot = _source_snapshot_from_row(row)
+    assert _snapshot_has_risk_baseline(snapshot) is True
+    assert snapshot["normalized"]["risk_score"] == 76
+
+
+def test_ensure_source_snapshot_repairs_missing_normalized_baseline_logic() -> None:
+    """Incomplete existing snapshot merges in baseline keys without dropping others."""
+    from app.services.event_service import _snapshot_has_risk_baseline
+
+    existing = {
+        "severity": "high",
+        "title": "old",
+        "normalized": {"event_type": "malicious_process"},
+    }
+    candidate = {
+        "severity": "high",
+        "normalized": {"risk_score": 76, "event_type": "malicious_process"},
+    }
+    assert _snapshot_has_risk_baseline(existing) is False
+    assert _snapshot_has_risk_baseline(candidate) is True
+    repaired = {**existing, "normalized": dict(candidate["normalized"])}
+    assert _snapshot_has_risk_baseline(repaired) is True
+    assert repaired["title"] == "old"
+    assert repaired["normalized"]["risk_score"] == 76
+
+
+@pytest.mark.asyncio
+async def test_ingest_source_snapshot_includes_normalized_baseline(
+    event_service: EventService,
+    store: EventContextStore,
+) -> None:
+    sfx = _sfx()
+    result = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(
+                kind=SourceObjectKind.INCIDENT,
+                object_id=f"INC-baseline-{sfx}",
+            ),
+            title="malicious process spawned",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            normalized={"event_type": "malicious_process", "risk_score": 76},
+            source_type="mock_xdr",
+        )
+    )
+    assert result.event_id
+    snapshot = await store.get(result.event_id, "source_snapshot")
+    assert isinstance(snapshot, dict)
+    normalized = snapshot.get("normalized")
+    assert isinstance(normalized, dict)
+    assert normalized.get("risk_score") == 76
+    assert normalized.get("event_type") == "malicious_process"
+
+
 @pytest.mark.asyncio
 async def test_ingest_creates_event_pg_redis_audit(
     event_service: EventService,

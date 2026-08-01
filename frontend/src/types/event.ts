@@ -455,6 +455,9 @@ export interface RiskAssessment {
   risk_factors: RiskFactor[];
   possible_false_positive: boolean;
   scoring_mode: ScoringMode;
+  evidence_limited?: boolean;
+  severity_floor_applied?: boolean;
+  source_risk_baseline?: number | null;
 }
 
 export interface SourceSyncState {

@@ -212,6 +212,46 @@ def _entities_from_source_ref(
     return validated.entity_set.model_dump(mode="json")
 
 
+def _normalized_baseline_from_dict(
+    normalized: dict[str, Any] | None,
+    *,
+    event_type: str | None = None,
+) -> dict[str, Any] | None:
+    """Project immutable source baseline fields for ISSUE-102 risk floor."""
+    baseline: dict[str, Any] = {}
+    if isinstance(normalized, dict):
+        raw_score = normalized.get("risk_score")
+        if raw_score is not None:
+            try:
+                baseline["risk_score"] = max(0, min(100, int(raw_score)))
+            except (TypeError, ValueError):
+                pass
+        for key in ("event_type", "alert_type", "scenario"):
+            value = normalized.get(key)
+            if value is not None:
+                baseline[key] = value
+    if event_type and "event_type" not in baseline:
+        baseline["event_type"] = event_type
+    return baseline or None
+
+
+def _snapshot_has_risk_baseline(snapshot: dict[str, Any] | None) -> bool:
+    """True when frozen snapshot carries a usable ``normalized.risk_score``."""
+    if not isinstance(snapshot, dict):
+        return False
+    normalized = snapshot.get("normalized")
+    if not isinstance(normalized, dict):
+        return False
+    raw_score = normalized.get("risk_score")
+    if raw_score is None:
+        return False
+    try:
+        int(raw_score)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _source_snapshot_from_row(row: orm.SecurityEvent) -> dict[str, Any]:
     """Return immutable source evidence only; never include mutable current_* state."""
     snapshot: dict[str, Any] = {
@@ -231,6 +271,15 @@ def _source_snapshot_from_row(row: orm.SecurityEvent) -> dict[str, Any]:
         snapshot["description"] = row.description
     if row.severity:
         snapshot["severity"] = row.severity
+    raw_alert = row.raw_alert_snapshot
+    if isinstance(raw_alert, dict):
+        nested = raw_alert.get("normalized")
+        if isinstance(nested, dict) and nested:
+            snapshot["normalized"] = dict(nested)
+    if "normalized" not in snapshot:
+        fallback = _normalized_baseline_from_dict(None, event_type=row.event_type)
+        if fallback:
+            snapshot["normalized"] = fallback
     return snapshot
 
 
@@ -1209,6 +1258,26 @@ class EventService:
         field so a crash between ``event`` init and snapshot write can heal.
         """
         snapshot = _source_snapshot_from_row(row)
+        if not _snapshot_has_risk_baseline(snapshot):
+            async with self._session_factory() as session:
+                source_record_id = row.current_primary_source_record_id
+                if source_record_id:
+                    source_obj = await session.get(orm.SourceObject, source_record_id)
+                    if source_obj is not None and source_obj.normalized:
+                        baseline = _normalized_baseline_from_dict(
+                            dict(source_obj.normalized),
+                            event_type=row.event_type,
+                        )
+                        if baseline:
+                            existing_norm = (
+                                dict(snapshot["normalized"])
+                                if isinstance(snapshot.get("normalized"), dict)
+                                else {}
+                            )
+                            snapshot = {
+                                **snapshot,
+                                "normalized": {**existing_norm, **baseline},
+                            }
         if not overwrite:
             async with self._session_factory() as session:
                 exists = await session.scalar(
@@ -1218,6 +1287,24 @@ class EventService:
                     )
                 )
             if exists is not None:
+                # Heal incomplete snapshots that predate ISSUE-102 baseline fields.
+                if _snapshot_has_risk_baseline(snapshot):
+                    existing = await self._store.get(row.event_id, "source_snapshot")
+                    if isinstance(existing, dict) and not _snapshot_has_risk_baseline(
+                        existing
+                    ):
+                        repaired = {
+                            **existing,
+                            "normalized": dict(snapshot["normalized"]),
+                        }
+                        if existing.get("severity") is None and snapshot.get("severity"):
+                            repaired["severity"] = snapshot["severity"]
+                        result = await self._store.set(
+                            row.event_id,
+                            "source_snapshot",
+                            repaired,
+                        )
+                        return result.redis_ok
                 return True
         result = await self._store.set(row.event_id, "source_snapshot", snapshot)
         return result.redis_ok
@@ -1615,8 +1702,14 @@ class EventService:
         scenario_id = normalized.get("scenario")
         if isinstance(scenario_id, str) and scenario_id:
             fp_meta["scenario"] = scenario_id
-        if fp_meta:
-            raw_alert_snapshot = fp_meta
+        normalized_baseline = _normalized_baseline_from_dict(
+            normalized,
+            event_type=event_type.value,
+        )
+        if fp_meta or normalized_baseline:
+            raw_alert_snapshot = dict(fp_meta)
+            if normalized_baseline:
+                raw_alert_snapshot["normalized"] = normalized_baseline
 
         row = orm.SecurityEvent(
             event_id=event_id,

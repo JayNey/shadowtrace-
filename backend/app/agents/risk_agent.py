@@ -9,7 +9,13 @@ from typing import Any
 from app.agents.base import BaseAgent
 from app.agents.confidence_calibration import DEFAULT_TEMPERATURE, calibrate_confidence
 from app.agents.prompts.risk_prompt import FACTOR_NAMES, build_risk_messages
-from app.agents.risk_scoring_engine import FACTOR_WEIGHTS, RiskScoringEngine, severity_from_score
+from app.agents.risk_scoring_engine import (
+    FACTOR_WEIGHTS,
+    RiskScoringEngine,
+    apply_evidence_limited_adjustments,
+    augment_factors_for_evidence_limited,
+    severity_from_score,
+)
 from app.agents.verdict_resolver import VerdictResolver
 from app.core.errors import LLMError
 from app.models.agent_io import (
@@ -70,12 +76,15 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         storyline = await self._read_optional(input.event_id, "storyline")
         fp_match = await self._read_optional(input.event_id, "false_positive_match")
         fp_adjudication = await self._read_optional(input.event_id, "fp_adjudication")
+        source_snapshot = await self._read_optional(input.event_id, "source_snapshot")
         if not isinstance(fp_match, dict):
             fp_match = None
         if not isinstance(fp_adjudication, dict):
             fp_adjudication = None
         if not isinstance(storyline, dict):
             storyline = None
+        if not isinstance(source_snapshot, dict):
+            source_snapshot = None
 
         rule_scores = self.scoring_engine.score(
             triage_result=input.triage_result,
@@ -90,7 +99,11 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
 
         if self.llm_client is not None:
             try:
-                llm_scores, llm_confidence = await self._score_with_llm(input, storyline)
+                llm_scores, llm_confidence = await self._score_with_llm(
+                    input,
+                    storyline,
+                    source_snapshot=source_snapshot,
+                )
                 if llm_scores:
                     scoring_mode = ScoringMode.LLM_AND_RULE
                     raw_confidence = max(raw_confidence, llm_confidence)
@@ -114,6 +127,21 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             temperature=self.calibration_temperature,
         )
 
+        adjustment = apply_evidence_limited_adjustments(
+            risk_score=risk_score,
+            confidence=confidence,
+            evidence_output=input.evidence_output,
+            source_snapshot=source_snapshot,
+        )
+        risk_score = adjustment.risk_score
+        severity = adjustment.severity
+        confidence = adjustment.confidence
+        if adjustment.evidence_limited:
+            factors = augment_factors_for_evidence_limited(
+                factors,
+                adjustment=adjustment,
+            )
+
         possible_fp = bool(
             (fp_adjudication or {}).get("recommendation") == "close_as_fp"
             or (fp_match or {}).get("recommendation") in {"investigate_with_flag"}
@@ -130,6 +158,9 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             risk_factors=factors,
             possible_false_positive=possible_fp,
             scoring_mode=scoring_mode,
+            evidence_limited=adjustment.evidence_limited,
+            severity_floor_applied=adjustment.severity_floor_applied,
+            source_risk_baseline=adjustment.source_risk_baseline,
         )
 
         await self._write_context(input.event_id, assessment)
@@ -141,6 +172,8 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             rag_output=input.rag_output,
             fp_adjudication=fp_adjudication,
         )
+        if adjustment.evidence_limited and verdict is FinalVerdict.CONFIRMED_THREAT:
+            verdict = FinalVerdict.NONE
         self.last_verdict = verdict
         await self._persist_verdict(input.event_id, verdict, risk_score=assessment.risk_score)
         return assessment
@@ -149,6 +182,8 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         self,
         input: RiskAgentInput,
         storyline: dict[str, Any] | None,
+        *,
+        source_snapshot: dict[str, Any] | None = None,
     ) -> tuple[dict[str, tuple[float, str]], float]:
         assert self.llm_client is not None
         rag_summary = None
@@ -177,6 +212,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             evidence_output=input.evidence_output,
             rag_summary=rag_summary,
             storyline_summary=storyline_summary,
+            source_snapshot=source_snapshot,
         )
         response = await self.llm_client.chat(
             messages,
@@ -225,6 +261,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         except (TypeError, ValueError):
             conf = 0.75
         conf = max(0.0, min(1.0, conf))
+        # LLM may echo evidence_limited; deterministic rule path owns the flag.
         return scores, conf
 
     def _merge_factors(

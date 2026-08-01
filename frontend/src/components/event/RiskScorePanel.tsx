@@ -82,6 +82,19 @@ export default function RiskScorePanel({
       data-testid="risk-radar"
       style={{ height: "100%" }}
     >
+      {(assessment.evidence_limited || assessment.severity_floor_applied) && (
+        <Space wrap style={{ marginBottom: 12 }} data-testid="risk-evidence-limited-tags">
+          {assessment.evidence_limited ? (
+            <Tag color="orange">证据不足 · 降信</Tag>
+          ) : null}
+          {assessment.severity_floor_applied ? (
+            <Tag color="volcano">源严重度底线已应用</Tag>
+          ) : null}
+          {assessment.source_risk_baseline != null ? (
+            <Tag>源基线 {assessment.source_risk_baseline}</Tag>
+          ) : null}
+        </Space>
+      )}
       <ReactECharts option={option} style={{ height: 260 }} />
       <Space wrap>
         {factors.map((factor) => (
