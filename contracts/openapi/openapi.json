@@ -1044,6 +1044,52 @@
         }
       }
     },
+    "/api/v1/investigation-intents/dispatch": {
+      "post": {
+        "tags": [
+          "investigation-intents"
+        ],
+        "summary": "Dispatch Investigation Intents Sync",
+        "description": "Explicitly claim pending intents and publish to the Celery broker.",
+        "operationId": "dispatch_investigation_intents_sync_api_v1_investigation_intents_dispatch_post",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 50,
+              "minimum": 1,
+              "default": 10,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvestigationIntentDispatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/actions/{action_id}/approve": {
       "post": {
         "tags": [
@@ -4741,6 +4787,24 @@
           "status"
         ],
         "title": "InvestigateResponse"
+      },
+      "InvestigationIntentDispatchResponse": {
+        "properties": {
+          "claimed": {
+            "type": "integer",
+            "title": "Claimed"
+          },
+          "published": {
+            "type": "integer",
+            "title": "Published"
+          }
+        },
+        "type": "object",
+        "required": [
+          "claimed",
+          "published"
+        ],
+        "title": "InvestigationIntentDispatchResponse"
       },
       "InvestigationReport": {
         "properties": {

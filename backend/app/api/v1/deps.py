@@ -36,6 +36,7 @@ _pipeline: Any = None  # AnalysisOnlyPipeline
 _super_agent: Any = None  # SuperAgent
 _event_lease: Any = None  # EventLease
 _investigation_stack: dict[str, Any] | None = None
+_investigation_intent_service: Any = None  # InvestigationIntentService
 _approval_engine: Any = None  # ApprovalEngine
 _impact_assessment_service: Any = None  # ImpactAssessmentService
 _disposition_sync: Any = None  # DispositionSyncService
@@ -138,6 +139,20 @@ async def get_event_service() -> Any:
             investigation_intent=intent_service,
         )
     return _event_service
+
+
+async def get_investigation_intent_service() -> Any:
+    global _investigation_intent_service
+    if _investigation_intent_service is None:
+        from app.services.auto_investigate_policy import AutoInvestigatePolicyService
+        from app.services.investigation_intent_service import InvestigationIntentService
+
+        _investigation_intent_service = InvestigationIntentService(
+            _get_session_factory(),
+            policy=AutoInvestigatePolicyService(),
+            degraded_flags=_get_degraded_flags(),
+        )
+    return _investigation_intent_service
 
 
 async def get_state_machine() -> Any:
@@ -750,7 +765,7 @@ def reset_deps() -> None:
     """Reset all lazy singletons (for tests)."""
     global _redis_client, _context_store, _degraded_flags
     global _audit_log, _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
-    global _super_agent, _event_lease, _investigation_stack
+    global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
     global _disposition_sync, _action_execution, _rollback_service
     global _adapter_registry, _workflow_runtime, _event_disposition
     global _impact_assessment_service
@@ -774,6 +789,7 @@ def reset_deps() -> None:
     _super_agent = None
     _event_lease = None
     _investigation_stack = None
+    _investigation_intent_service = None
     _approval_engine = None
     _impact_assessment_service = None
     _disposition_sync = None

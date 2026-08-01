@@ -188,7 +188,9 @@ auto-investigate-test:
 	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
 		$(PYTHON) -m pytest tests/test_services/test_auto_investigate_policy.py \
 		tests/test_services/test_investigation_intent_service.py \
-		tests/integration/test_auto_investigate_mock.py -q
+		tests/test_services/test_investigation_intent_crash_windows.py \
+		tests/integration/test_auto_investigate_mock.py \
+		tests/test_api/test_investigation_intents_api.py -q
 
 # --- ISSUE-107 Mock XDR ingestion scheduler quality gate -------------------- #
 ingestion-scheduler-test:

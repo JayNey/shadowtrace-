@@ -179,6 +179,11 @@ class InvestigateResponse(BaseModel):
     full_loop_available: bool = True
 
 
+class InvestigationIntentDispatchResponse(BaseModel):
+    claimed: int
+    published: int
+
+
 class EventCloseResponse(BaseModel):
     event_id: str
     status: EventStatus

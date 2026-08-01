@@ -13,11 +13,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, get_settings
+from app.core.errors import DependencyUnavailableError
 from app.db import models as orm
 from app.models.enums import EventStatus, InvestigationIntentStatus
 from app.models.investigation_intent import (
     INTENT_KIND_AUTO_INVESTIGATE,
     INTENT_VERSION_ISSUE108_V1,
+    PRIMARY_LINK_ROLE,
+    PROVISIONAL_LINK_ROLE,
     TERMINAL_INTENT_STATUSES,
     IntentDeliveryAdmission,
     validate_intent_transition,
@@ -141,9 +144,9 @@ class InvestigationIntentService:
             return None
         return intent_id
 
-    def schedule_dispatch(self, intent_ids: Sequence[str]) -> None:
+    def schedule_dispatch(self, intent_ids: Sequence[str] | None = None) -> None:
         """Best-effort async dispatch trigger; must never raise to ingest callers."""
-        if not intent_ids or not self._policy.enabled:
+        if not self._policy.enabled:
             return
         try:
             from app.tasks.investigation_intent_tasks import dispatch_pending_investigation_intents
@@ -151,10 +154,65 @@ class InvestigationIntentService:
             dispatch_pending_investigation_intents.delay()
         except Exception:
             logger.warning(
-                "failed to enqueue investigation intent dispatch count=%d",
-                len(intent_ids),
+                "failed to enqueue investigation intent dispatch pending=%s",
+                len(intent_ids) if intent_ids else 0,
                 exc_info=True,
             )
+
+    async def dispatch_sync_batch(self, *, limit: int = 10) -> dict[str, int]:
+        """Synchronously claim and publish pending intents (#612 management API).
+
+        Raises ``DependencyUnavailableError`` when broker/metadata is unavailable
+        and no investigation task was accepted by the broker in this batch.
+        """
+        claimed = await self._claim_batch(limit=limit)
+        published = 0
+        transient_failure = False
+        for intent_id in claimed:
+            try:
+                if await self._publish_claimed_intent(intent_id, strict=True):
+                    published += 1
+            except DependencyUnavailableError:
+                transient_failure = True
+        if transient_failure and published == 0:
+            raise DependencyUnavailableError(
+                message="celery broker unavailable",
+                error_code="dependency_unavailable",
+                details={"dependency": "celery_broker", "claimed": len(claimed)},
+            )
+        return {"claimed": len(claimed), "published": published}
+
+    async def skip_active_intents_for_event_in_session(
+        self,
+        session: AsyncSession,
+        event_id: str,
+        *,
+        reason: str,
+    ) -> int:
+        """Mark non-terminal auto-investigate intents skipped (e.g. event merged away)."""
+        rows = (
+            await session.scalars(
+                select(orm.InvestigationIntent).where(
+                    orm.InvestigationIntent.event_id == event_id,
+                    orm.InvestigationIntent.intent_kind == INTENT_KIND_AUTO_INVESTIGATE,
+                    orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE108_V1,
+                    orm.InvestigationIntent.status.not_in(
+                        tuple(status.value for status in TERMINAL_INTENT_STATUSES)
+                    ),
+                )
+            )
+        ).all()
+        skipped = 0
+        for row in rows:
+            current = InvestigationIntentStatus(row.status)
+            validate_intent_transition(current, InvestigationIntentStatus.SKIPPED)
+            row.status = InvestigationIntentStatus.SKIPPED.value
+            row.skip_reason = reason
+            row.broker_task_id = None
+            row.claim_owner = None
+            row.claim_expires_at = None
+            skipped += 1
+        return skipped
 
     async def claim_and_publish_batch(self, *, limit: int = 10) -> int:
         claimed = await self._claim_batch(limit=limit)
@@ -416,7 +474,33 @@ class InvestigationIntentService:
                     claimed.append(row.intent_id)
         return claimed
 
-    async def _publish_claimed_intent(self, intent_id: str) -> bool:
+    async def _handle_publish_transient_failure(
+        self,
+        row: orm.InvestigationIntent,
+        exc: Exception,
+    ) -> None:
+        if int(row.attempt or 0) + 1 >= int(self._settings.auto_investigate_max_attempts):
+            await self._set_status_in_session(
+                row,
+                InvestigationIntentStatus.DEAD,
+                last_error=str(exc),
+            )
+        else:
+            await self._set_status_in_session(
+                row,
+                InvestigationIntentStatus.RETRY,
+                last_error=str(exc),
+                increment_attempt=True,
+            )
+        if self._degraded is not None:
+            await self._degraded.set_flag(
+                row.event_id,
+                "auto_investigate_dispatch_unavailable",
+                True,
+                writer="InvestigationIntentService",
+            )
+
+    async def _publish_claimed_intent(self, intent_id: str, *, strict: bool = False) -> bool:
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(orm.InvestigationIntent, intent_id)
@@ -445,6 +529,7 @@ class InvestigationIntentService:
                     publish_investigation_for_intent,
                     register_task_metadata,
                 )
+                from kombu.exceptions import OperationalError
 
                 try:
                     await register_task_metadata(task_id, row.event_id)
@@ -453,7 +538,19 @@ class InvestigationIntentService:
                         task_id=task_id,
                         intent_id=row.intent_id,
                     )
-                except Exception as exc:
+                except DependencyUnavailableError as exc:
+                    await delete_task_metadata(task_id)
+                    logger.warning(
+                        "task metadata store unavailable intent=%s event=%s",
+                        row.intent_id,
+                        row.event_id,
+                        exc_info=True,
+                    )
+                    await self._handle_publish_transient_failure(row, exc)
+                    if strict:
+                        raise
+                    return False
+                except (OperationalError, OSError, ConnectionError) as exc:
                     await delete_task_metadata(task_id)
                     logger.warning(
                         "broker publish failed intent=%s event=%s err=%s",
@@ -462,26 +559,31 @@ class InvestigationIntentService:
                         exc,
                         exc_info=True,
                     )
-                    if int(row.attempt or 0) + 1 >= int(self._settings.auto_investigate_max_attempts):
-                        await self._set_status_in_session(
-                            row,
-                            InvestigationIntentStatus.DEAD,
-                            last_error=str(exc),
-                        )
-                    else:
-                        await self._set_status_in_session(
-                            row,
-                            InvestigationIntentStatus.RETRY,
-                            last_error=str(exc),
-                            increment_attempt=True,
-                        )
-                    if self._degraded is not None:
-                        await self._degraded.set_flag(
-                            row.event_id,
-                            "auto_investigate_dispatch_unavailable",
-                            True,
-                            writer="InvestigationIntentService",
-                        )
+                    await self._handle_publish_transient_failure(row, exc)
+                    if strict:
+                        raise DependencyUnavailableError(
+                            message="celery broker unavailable",
+                            error_code="dependency_unavailable",
+                            details={
+                                "dependency": "celery_broker",
+                                "event_id": row.event_id,
+                                "intent_id": row.intent_id,
+                            },
+                        ) from exc
+                    return False
+                except Exception as exc:
+                    await delete_task_metadata(task_id)
+                    logger.error(
+                        "unexpected publish failure intent=%s event=%s",
+                        row.intent_id,
+                        row.event_id,
+                        exc_info=True,
+                    )
+                    await self._set_status_in_session(
+                        row,
+                        InvestigationIntentStatus.DEAD,
+                        last_error=str(exc),
+                    )
                     return False
                 validate_intent_transition(
                     InvestigationIntentStatus.CLAIMED,
@@ -575,7 +677,7 @@ class InvestigationIntentService:
                             orm.SecurityEvent.event_id == orm.SourceEventLink.event_id,
                         )
                         .where(
-                            orm.SourceEventLink.role == "provisional",
+                            orm.SourceEventLink.role == PROVISIONAL_LINK_ROLE,
                             orm.SecurityEvent.status == EventStatus.NEW.value,
                             orm.SecurityEvent.created_at <= cutoff,
                             ~intent_exists,
@@ -596,7 +698,7 @@ class InvestigationIntentService:
                     intent_id = await self.maybe_create_pending_in_session(
                         session,
                         event,
-                        link_role="primary",
+                        link_role=PRIMARY_LINK_ROLE,
                         source_product=source_product,
                         created_or_promoted=True,
                     )

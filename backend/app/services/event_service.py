@@ -2002,6 +2002,12 @@ class EventService:
                 orm.EventContextFieldVersion.event_id == secondary.event_id
             )
         )
+        if self._investigation_intent is not None:
+            await self._investigation_intent.skip_active_intents_for_event_in_session(
+                session,
+                secondary.event_id,
+                reason="event_merged",
+            )
         await session.delete(secondary)
 
     async def _promote_or_relate_alerts(

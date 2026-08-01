@@ -9,6 +9,8 @@ from app.models.enums import InvestigationIntentStatus
 
 INTENT_KIND_AUTO_INVESTIGATE = "auto_investigate"
 INTENT_VERSION_ISSUE108_V1 = "issue108_v1"
+PROVISIONAL_LINK_ROLE = "provisional"
+PRIMARY_LINK_ROLE = "primary"
 
 
 class IntentDeliveryAdmission(StrEnum):
@@ -21,7 +23,12 @@ class IntentDeliveryAdmission(StrEnum):
 
 
 INTENT_TRANSITIONS: dict[InvestigationIntentStatus, frozenset[InvestigationIntentStatus]] = {
-    InvestigationIntentStatus.PENDING: frozenset({InvestigationIntentStatus.CLAIMED}),
+    InvestigationIntentStatus.PENDING: frozenset(
+        {
+            InvestigationIntentStatus.CLAIMED,
+            InvestigationIntentStatus.SKIPPED,
+        }
+    ),
     InvestigationIntentStatus.CLAIMED: frozenset(
         {
             InvestigationIntentStatus.ENQUEUED,
@@ -51,6 +58,7 @@ INTENT_TRANSITIONS: dict[InvestigationIntentStatus, frozenset[InvestigationInten
         {
             InvestigationIntentStatus.CLAIMED,
             InvestigationIntentStatus.DEAD,
+            InvestigationIntentStatus.SKIPPED,
         }
     ),
     InvestigationIntentStatus.TERMINAL: frozenset(),
@@ -100,6 +108,8 @@ __all__ = [
     "INTENT_KIND_AUTO_INVESTIGATE",
     "INTENT_TRANSITIONS",
     "INTENT_VERSION_ISSUE108_V1",
+    "PRIMARY_LINK_ROLE",
+    "PROVISIONAL_LINK_ROLE",
     "IntentDeliveryAdmission",
     "InvestigationIntentRecord",
     "InvestigationIntentTransitionError",
