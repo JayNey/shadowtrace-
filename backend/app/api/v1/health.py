@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Response
 from redis.asyncio import Redis
 
+from app.core.celery_health import build_celery_health
 from app.core.config import Settings, get_settings
 from app.db.session_provider import peek_session_provider, ping_postgres_url
 
@@ -140,12 +141,24 @@ async def health(
         },
     )
 
-    overall = (
-        "ok"
-        if postgres == "ok" and redis_status == "ok" and embedding_provider.get("status") == "ok"
-        else "degraded"
+    broker_url = (settings.celery_broker_url or settings.redis_url).strip()
+    celery_health = await build_celery_health(
+        task_mode=settings.task_mode,
+        broker_url=broker_url,
     )
-    if overall != "ok":
+
+    hard_deps_ok = postgres == "ok" and redis_status == "ok"
+    embedding_ok = embedding_provider.get("status") == "ok"
+    celery_worker_status = str(celery_health.get("worker", {}).get("status", "not_applicable"))
+
+    overall = "ok"
+    if not hard_deps_ok or not embedding_ok:
+        overall = "degraded"
+    elif celery_worker_status == "degraded":
+        overall = "degraded"
+
+    # 503 only for hard dependency / embedding failures — not missing workers alone (#622).
+    if not hard_deps_ok or not embedding_ok:
         response.status_code = 503
 
     return {
@@ -153,6 +166,7 @@ async def health(
         "postgres": postgres,
         "redis": redis_status,
         "embedding_provider": embedding_provider,
+        "celery": celery_health,
         "source_adapter": source_adapter,
         "disposition_adapter": disposition_adapter,
         "tool_provider": tool_provider,
@@ -162,5 +176,6 @@ async def health(
             "orchestration_mode": settings.orchestration_mode,
             "full_loop_available": settings.orchestration_mode.strip().lower()
             != "analysis_only",
+            "task_mode": (settings.task_mode or "background").strip().lower(),
         },
     }

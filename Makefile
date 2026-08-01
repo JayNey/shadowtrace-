@@ -18,9 +18,10 @@ COMPOSE := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
 	-f "$(COMPOSE_FILE)"
 
-# Optional: set WORKER=1 to include the Celery investigation worker.
+# Optional: set WORKER=1 to include the Celery investigation worker (sets TASK_MODE=celery).
 WORKER ?=
 WORKER_PROFILE = $(if $(WORKER),--profile worker,)
+export TASK_MODE := $(if $(WORKER),celery,$(if $(TASK_MODE),$(TASK_MODE),background))
 
 INTEGRATION_PROJECT_NAME ?= $(COMPOSE_PROJECT_NAME)-integration
 CI_TEST_PROJECT_NAME ?= $(COMPOSE_PROJECT_NAME)-ci-test
@@ -30,7 +31,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
+.PHONY: up down down-v bootstrap smoke-bootstrap test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) up -d --build
@@ -143,10 +144,21 @@ orchestration-test:
 	trap cleanup EXIT INT TERM; \
 	compose up -d --wait --wait-timeout 120 postgres redis; \
 	cd "$(CURDIR)/backend"; \
-	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
 		$(PYTHON) -m pytest tests/integration/test_orchestration.py -m orchestration -v \
 		--cov=app.orchestration --cov=app.agents.super_agent \
 		--cov-report=term-missing --cov-fail-under=75
+
+# --- ISSUE-117 Celery worker / broker semantics quality gate ---------------- #
+worker-smoke-test:
+	cd "$(CURDIR)/backend"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		$(PYTHON) -m pytest \
+		tests/test_core/test_celery_health.py \
+		tests/test_api/test_celery_worker_health.py \
+		tests/test_tasks/test_worker_tasks.py \
+		tests/test_api/test_celery_investigation.py \
+		tests/test_tasks/test_investigation_tasks.py -q
 
 # --- ISSUE-086 full-system quality gate ----------------------------------- #
 test-system:

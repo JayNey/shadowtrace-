@@ -54,10 +54,18 @@ celery_app.conf.update(
     task_default_queue="investigation",
     task_routes={
         "shadowtrace.run_investigation": {"queue": "investigation"},
+        "shadowtrace.worker_ping": {"queue": "investigation"},
     },
     task_acks_late=True,
     task_soft_time_limit=600,
-    imports=("app.tasks.investigation_tasks",),
+    worker_prefetch_multiplier=1,
+    broker_transport_options={
+        "visibility_timeout": 900,
+    },
+    imports=(
+        "app.tasks.investigation_tasks",
+        "app.tasks.worker_tasks",
+    ),
 )
 
 __all__ = [
