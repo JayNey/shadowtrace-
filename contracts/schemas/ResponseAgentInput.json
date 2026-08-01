@@ -314,6 +314,11 @@
           "default": null,
           "title": "Source Risk Baseline"
         },
+        "source_scale_unnormalized": {
+          "default": false,
+          "title": "Source Scale Unnormalized",
+          "type": "boolean"
+        },
         "high_source_evidence_limited": {
           "default": false,
           "title": "High Source Evidence Limited",

@@ -19,7 +19,9 @@ class VerdictResolver:
     Priority (ISSUE-035 / ISSUE-047 / ISSUE-114 / #675):
     1. ``fp_adjudication.recommendation == close_as_fp`` → false_positive
        (post-evidence typed decision; never overridden by risk_score >= 70),
-       **except** high-source + evidence-limited events (``#675`` guard)
+       **except** high-source + evidence-limited events (``#675`` guard).
+       RiskAgent additionally downgrades ``confirmed_threat`` → ``none`` when
+       ``evidence_limited`` (see ``risk_agent.py`` post-resolve hook).
     2. Pre-evidence vector / RAG FP signal → possible_false_positive (advisory only)
     3. risk_score >= 70 → confirmed_threat
     4. else → none

@@ -175,6 +175,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             evidence_limited=adjustment.evidence_limited,
             severity_floor_applied=adjustment.severity_floor_applied,
             source_risk_baseline=adjustment.source_risk_baseline,
+            source_scale_unnormalized=adjustment.source_scale_unnormalized,
             high_source_evidence_limited=adjustment.high_source_evidence_limited,
             llm_admissibility=llm_admissibility,
             confidence_cap_version=adjustment.confidence_cap_version,

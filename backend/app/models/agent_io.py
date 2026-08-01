@@ -350,6 +350,7 @@ class RiskAssessment(BaseModel):
     evidence_limited: bool = False
     severity_floor_applied: bool = False
     source_risk_baseline: int | None = Field(default=None, ge=0, le=100)
+    source_scale_unnormalized: bool = False
     high_source_evidence_limited: bool = False
     llm_admissibility: LlmAdmissibility | None = None
     confidence_cap_version: str | None = None

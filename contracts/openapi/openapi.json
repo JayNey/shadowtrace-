@@ -6271,8 +6271,7 @@
           },
           "state": {
             "type": "string",
-            "title": "State",
-            "description": "Celery task state. RETRY/REVOKED are surfaced as UNKNOWN — poll event investigation status via event_id."
+            "title": "State"
           },
           "event_id": {
             "anyOf": [

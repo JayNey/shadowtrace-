@@ -130,6 +130,36 @@ def extract_source_baseline(
     return baseline, source_severity
 
 
+def source_scale_unnormalized(
+    source_snapshot: dict[str, Any] | None,
+    *,
+    source_baseline: int | None,
+) -> bool:
+    """True when upstream scale is present but ``normalized.risk_score`` is unusable.
+
+    Preserves vendor/raw values without guessing a 0–100 baseline (ISSUE-102 / #605).
+    """
+    if source_baseline is not None:
+        return False
+    if not isinstance(source_snapshot, dict):
+        return False
+    normalized = source_snapshot.get("normalized")
+    if not isinstance(normalized, dict):
+        return False
+    flag = normalized.get("unnormalized")
+    if flag in (True, "true", "True", 1, "1"):
+        return True
+    if normalized.get("risk_score") is not None:
+        return False
+    vendor_markers = (
+        "vendor_risk_score",
+        "raw_risk_score",
+        "raw_score",
+        "scale",
+    )
+    return any(normalized.get(key) is not None for key in vendor_markers)
+
+
 def is_evidence_limited(evidence_output: EvidenceOutput) -> bool:
     """True when collection failed/degraded and no evidence was collected."""
     if evidence_output.collection_status not in {
@@ -258,6 +288,7 @@ class EvidenceLimitedAdjustment:
     evidence_limited: bool
     severity_floor_applied: bool
     source_risk_baseline: int | None
+    source_scale_unnormalized: bool = False
     high_source_evidence_limited: bool = False
     confidence_cap_version: str | None = None
 
@@ -271,6 +302,10 @@ def apply_evidence_limited_adjustments(
 ) -> EvidenceLimitedAdjustment:
     """Apply ISSUE-102 floor/cap when threat signal is strong but evidence is missing."""
     source_baseline, source_severity = extract_source_baseline(source_snapshot)
+    scale_unnormalized = source_scale_unnormalized(
+        source_snapshot,
+        source_baseline=source_baseline,
+    )
     evidence_limited = is_evidence_limited(evidence_output)
     high_source = _source_eligible_for_severity_floor(source_severity)
     if not evidence_limited:
@@ -281,6 +316,7 @@ def apply_evidence_limited_adjustments(
             evidence_limited=False,
             severity_floor_applied=False,
             source_risk_baseline=source_baseline,
+            source_scale_unnormalized=scale_unnormalized,
             high_source_evidence_limited=False,
             confidence_cap_version=None,
         )
@@ -315,6 +351,7 @@ def apply_evidence_limited_adjustments(
         evidence_limited=True,
         severity_floor_applied=floor_applied,
         source_risk_baseline=source_baseline,
+        source_scale_unnormalized=scale_unnormalized,
         high_source_evidence_limited=high_source,
         confidence_cap_version=cap_version,
     )

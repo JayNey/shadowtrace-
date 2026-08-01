@@ -159,6 +159,7 @@ class ReportSectionBuilder:
             f"severity_floor_applied={risk_assessment.severity_floor_applied}\n"
             f"high_source_evidence_limited={risk_assessment.high_source_evidence_limited}\n"
             f"source_risk_baseline={risk_assessment.source_risk_baseline}\n"
+            f"source_scale_unnormalized={risk_assessment.source_scale_unnormalized}\n"
             f"final_verdict={final_verdict.value}"
         )
         risk_scoring = self._risk_scoring(risk_assessment)
@@ -473,6 +474,7 @@ class ReportSectionBuilder:
             f"severity_floor_applied={risk_assessment.severity_floor_applied}",
             f"high_source_evidence_limited={risk_assessment.high_source_evidence_limited}",
             f"source_risk_baseline={risk_assessment.source_risk_baseline}",
+            f"source_scale_unnormalized={risk_assessment.source_scale_unnormalized}",
             f"llm_admissibility={llm_adm}",
             f"confidence_cap_version={risk_assessment.confidence_cap_version}",
             "six_dimension_breakdown:",

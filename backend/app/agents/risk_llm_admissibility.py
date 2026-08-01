@@ -1,4 +1,10 @@
-"""LLM output admissibility for RiskAgent merge path (ISSUE-102 Phase B / #675)."""
+"""LLM output admissibility for RiskAgent merge path (ISSUE-102 Phase B / #675).
+
+Production ``BaseLLMClient`` sets ``degraded_reason`` whenever a fallback model is
+used (``fallback_level > 0``). ``MockLLMClient`` intentionally omits
+``degraded_reason`` so golden responses stay ``VALID`` for integration tests; do
+not use ``fallback_level`` alone as the admissibility signal.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +18,7 @@ def classify_llm_risk_response(response: LLMResponse) -> LlmAdmissibility:
     ``degraded`` responses are structurally valid but must not alter deterministic
     gaps/confidence (rule-only contract applies).
     """
-    if response.degraded_reason:
+    if (response.degraded_reason or "").strip():
         return LlmAdmissibility.DEGRADED
     return LlmAdmissibility.VALID
 

@@ -24,6 +24,7 @@ from app.agents.risk_scoring_engine import (
     extract_source_baseline,
     is_evidence_limited,
     severity_from_score,
+    source_scale_unnormalized,
 )
 from app.core.llm.base import InMemoryLLMCallAuditRecorder, LLMResponse
 from app.core.llm.mock_client import MockLLMClient
@@ -814,6 +815,16 @@ def test_classify_llm_risk_response_marks_degraded() -> None:
     assert classify_llm_risk_response(response) is LlmAdmissibility.DEGRADED
 
 
+def test_classify_llm_risk_response_empty_degraded_reason_is_valid() -> None:
+    response = LLMResponse(content="{}", model_name="m", degraded_reason="")
+    assert classify_llm_risk_response(response) is LlmAdmissibility.VALID
+
+
+def test_classify_llm_risk_response_whitespace_degraded_reason_is_valid() -> None:
+    response = LLMResponse(content="{}", model_name="m", degraded_reason="   ")
+    assert classify_llm_risk_response(response) is LlmAdmissibility.VALID
+
+
 def test_apply_versioned_confidence_cap_only_lowers() -> None:
     capped, version = apply_versioned_confidence_cap(0.9, evidence_limited=True)
     assert capped == EVIDENCE_LIMITED_CONFIDENCE_CAP
@@ -827,17 +838,29 @@ def test_apply_versioned_confidence_cap_only_lowers() -> None:
 
 
 def test_extract_source_baseline_unknown_vendor_scale() -> None:
-    baseline, severity = extract_source_baseline(
-        {
-            "severity": "high",
-            "normalized": {
-                "vendor_risk_score": 76,
-                "scale": "vendor_x_unnormalized",
-            },
-        }
-    )
+    snapshot = {
+        "severity": "high",
+        "normalized": {
+            "vendor_risk_score": 76,
+            "scale": "vendor_x_unnormalized",
+        },
+    }
+    baseline, severity = extract_source_baseline(snapshot)
     assert baseline is None
     assert severity is Severity.HIGH
+    assert source_scale_unnormalized(snapshot, source_baseline=baseline) is True
+
+
+def test_source_scale_unnormalized_explicit_flag() -> None:
+    snapshot = {"normalized": {"unnormalized": True, "vendor_risk_score": 50}}
+    assert source_scale_unnormalized(snapshot, source_baseline=None) is True
+
+
+def test_source_scale_unnormalized_false_when_baseline_present() -> None:
+    snapshot = {"normalized": {"risk_score": 76, "scale": "vendor_x"}}
+    baseline, _ = extract_source_baseline(snapshot)
+    assert baseline == 76
+    assert source_scale_unnormalized(snapshot, source_baseline=baseline) is False
 
 
 @pytest.mark.asyncio
@@ -871,6 +894,35 @@ async def test_degraded_llm_matches_rule_only_contract(
     assert rule_output.confidence == degraded_output.confidence
     assert rule_output.evidence_limited == degraded_output.evidence_limited
     assert degraded_output.confidence_cap_version == CONFIDENCE_CAP_VERSION
+
+
+@pytest.mark.asyncio
+async def test_valid_llm_zero_evidence_still_applies_floor_and_cap(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-valid-llm-zero-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = _malicious_process_source_snapshot()
+    agent = RiskAgent(
+        llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    output = await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_malicious_process_triage(),
+            evidence_output=_zero_evidence_output(),
+        )
+    )
+    assert output.scoring_mode is ScoringMode.LLM_AND_RULE
+    assert output.llm_admissibility is LlmAdmissibility.VALID
+    assert output.evidence_limited is True
+    assert output.high_source_evidence_limited is True
+    assert output.risk_score >= 70
+    assert output.severity is Severity.HIGH
+    assert output.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
+    assert output.confidence_cap_version == CONFIDENCE_CAP_VERSION
 
 
 @pytest.mark.asyncio
