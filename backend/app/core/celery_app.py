@@ -48,13 +48,12 @@ worker_process_shutdown.connect(shutdown_worker_session_provider, weak=False)
 
 celery_app = Celery("shadowtrace")
 
-_settings = get_settings()
-
 
 def _build_beat_schedule() -> dict[str, dict[str, object]]:
-    if not _settings.ingestion_scheduler_enabled:
+    settings = get_settings()
+    if not settings.ingestion_scheduler_enabled:
         return {}
-    interval = float(_settings.ingestion_poll_interval_s)
+    interval = float(settings.ingestion_poll_interval_s)
     return {
         "shadowtrace-poll-sources": {
             "task": "shadowtrace.poll_sources",

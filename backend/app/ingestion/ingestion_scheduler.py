@@ -49,6 +49,7 @@ class IngestionRunResult(BaseModel):
 
     status: Literal["completed", "skipped", "error"] = "completed"
     reason: str | None = None
+    error_message: str | None = None
     summary: IngestionSummary | None = None
 
 
@@ -114,8 +115,12 @@ class IngestionScheduler:
                 )
                 return IngestionRunResult(status="completed", summary=summary)
             except Exception as exc:  # noqa: BLE001 — return structured error, keep watermark
-                logger.exception("ingestion poll failed")
-                return IngestionRunResult(status="error", reason=type(exc).__name__)
+                logger.exception("ingestion poll failed: %s", exc)
+                return IngestionRunResult(
+                    status="error",
+                    reason=type(exc).__name__,
+                    error_message=str(exc),
+                )
             finally:
                 if adapter is not None:
                     closer = getattr(adapter, "aclose", None)
@@ -135,6 +140,7 @@ class IngestionScheduler:
         )
 
     async def _record_stats(self, summary: IngestionSummary) -> None:
+        """Best-effort counters in Redis (no TTL; operational metrics only)."""
         if self._redis_client is None:
             return
         try:

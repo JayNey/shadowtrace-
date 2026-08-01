@@ -48,7 +48,7 @@ ISSUE-016、ISSUE-010（Mock XDR）、ISSUE-056（Celery，可选 Beat profile�
 
 测试与验证：
 `pytest backend/tests/test_ingestion/test_ingestion_scheduler.py -v`  
-手工：`INGESTION_SCHEDULER_ENABLED=true make up WORKER=1`，seed mock-xdr 后观察 ingest log。
+手工：`make up SCHEDULER=1`（或 `docker compose --profile scheduler up -d`），向 mock-xdr seed 新场景后观察 `scheduler-worker` ingest log。
 
 降级策略：
 scheduler 失败保留最后 watermark，标记 connector degraded；**不得**回退 file 模式或伪造 ingest success。
