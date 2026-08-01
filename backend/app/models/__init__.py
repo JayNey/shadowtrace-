@@ -52,6 +52,14 @@ from app.models.agent_io import (
     VerificationResult,
     VerifyAgentInput,
 )
+from app.models.behavior_observation import (
+    BehaviorEntityRef,
+    BehaviorObservation,
+    BehaviorObservationListResult,
+    BehaviorObservationProvenance,
+    BehaviorObservationQuery,
+    BehaviorObservationSourceRef,
+)
 from app.models.context import EventContext
 from app.models.decision_record import DecisionRecord, DecisionRecordCandidate
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
@@ -259,6 +267,13 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "DetectionScopeListResult": DetectionScopeListResult,
     "UpstreamConnectorMember": UpstreamConnectorMember,
     "DerivedDetectionConnectorBinding": DerivedDetectionConnectorBinding,
+    # behavior observation (ISSUE-119 / #624)
+    "BehaviorObservation": BehaviorObservation,
+    "BehaviorObservationSourceRef": BehaviorObservationSourceRef,
+    "BehaviorEntityRef": BehaviorEntityRef,
+    "BehaviorObservationProvenance": BehaviorObservationProvenance,
+    "BehaviorObservationQuery": BehaviorObservationQuery,
+    "BehaviorObservationListResult": BehaviorObservationListResult,
     # evaluation truth (ISSUE-113)
     "EvaluationCaseTruth": EvaluationCaseTruth,
     "EvaluationDatasetManifest": EvaluationDatasetManifest,

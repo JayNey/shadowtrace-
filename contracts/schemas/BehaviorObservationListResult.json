@@ -1,0 +1,343 @@
+{
+  "$defs": {
+    "BehaviorEntityRef": {
+      "additionalProperties": false,
+      "description": "Normalized entity reference extracted from source semantics.",
+      "properties": {
+        "entity_type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Entity Type",
+          "type": "string"
+        },
+        "entity_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Entity Id",
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        }
+      },
+      "required": [
+        "entity_type",
+        "entity_id"
+      ],
+      "title": "BehaviorEntityRef",
+      "type": "object"
+    },
+    "BehaviorObservation": {
+      "additionalProperties": false,
+      "description": "Immutable semantic observation derived from one source object revision.",
+      "properties": {
+        "observation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Observation Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/BehaviorObservationSourceRef"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "ingested_at": {
+          "format": "date-time",
+          "title": "Ingested At",
+          "type": "string"
+        },
+        "entity_refs": {
+          "items": {
+            "$ref": "#/$defs/BehaviorEntityRef"
+          },
+          "title": "Entity Refs",
+          "type": "array"
+        },
+        "action": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Category"
+        },
+        "normalized_attributes": {
+          "additionalProperties": true,
+          "title": "Normalized Attributes",
+          "type": "object"
+        },
+        "detection_score": {
+          "anyOf": [
+            {
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detection Score"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "projection_schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Projection Schema Version",
+          "type": "string"
+        },
+        "content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "observation_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Observation Hash",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/BehaviorObservationProvenance"
+        },
+        "supersedes_observation_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Supersedes Observation Id"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        }
+      },
+      "required": [
+        "observation_id",
+        "source_tenant_id",
+        "detection_scope_id",
+        "source_ref",
+        "observed_at",
+        "ingested_at",
+        "content_hash",
+        "observation_hash",
+        "idempotency_key",
+        "provenance"
+      ],
+      "title": "BehaviorObservation",
+      "type": "object"
+    },
+    "BehaviorObservationProvenance": {
+      "additionalProperties": false,
+      "description": "Rebuild metadata — references durable source store, never raw payload copies.",
+      "properties": {
+        "source_record_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Record Id",
+          "type": "string"
+        },
+        "raw_payload_hash": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Payload Hash"
+        },
+        "source_concurrency_token": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Concurrency Token"
+        },
+        "projection_engine": {
+          "default": "behavior_observation_v1",
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Projection Engine",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_record_id"
+      ],
+      "title": "BehaviorObservationProvenance",
+      "type": "object"
+    },
+    "BehaviorObservationSourceRef": {
+      "additionalProperties": false,
+      "description": "Pointer to the upstream source object revision that produced the observation.",
+      "properties": {
+        "source_product": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Source Product",
+          "type": "string"
+        },
+        "connector_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Connector Id",
+          "type": "string"
+        },
+        "source_kind": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "source_object_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source Object Id",
+          "type": "string"
+        },
+        "source_object_type": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Object Type"
+        },
+        "source_revision": {
+          "minimum": 1,
+          "title": "Source Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source_product",
+        "connector_id",
+        "source_kind",
+        "source_object_id",
+        "source_revision"
+      ],
+      "title": "BehaviorObservationSourceRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Paginated observation query result.",
+  "properties": {
+    "total": {
+      "minimum": 0,
+      "title": "Total",
+      "type": "integer"
+    },
+    "page": {
+      "minimum": 1,
+      "title": "Page",
+      "type": "integer"
+    },
+    "page_size": {
+      "minimum": 1,
+      "title": "Page Size",
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/BehaviorObservation"
+      },
+      "title": "Items",
+      "type": "array"
+    }
+  },
+  "required": [
+    "total",
+    "page",
+    "page_size"
+  ],
+  "title": "BehaviorObservationListResult",
+  "type": "object"
+}

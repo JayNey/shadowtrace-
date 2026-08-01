@@ -1,0 +1,50 @@
+{
+  "additionalProperties": false,
+  "description": "Rebuild metadata — references durable source store, never raw payload copies.",
+  "properties": {
+    "source_record_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Record Id",
+      "type": "string"
+    },
+    "raw_payload_hash": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Raw Payload Hash"
+    },
+    "source_concurrency_token": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Concurrency Token"
+    },
+    "projection_engine": {
+      "default": "behavior_observation_v1",
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Projection Engine",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_record_id"
+  ],
+  "title": "BehaviorObservationProvenance",
+  "type": "object"
+}

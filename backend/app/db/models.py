@@ -680,6 +680,91 @@ class LLMCallLog(Base):
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
 
 
+class BehaviorObservation(Base):
+    """Durable semantic projection of one source object revision (ISSUE-119 / #624)."""
+
+    __tablename__ = "behavior_observation"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_behavior_observation_idempotency_key"),
+        Index(
+            "ix_behavior_observation_tenant_scope_observed",
+            "source_tenant_id",
+            "detection_scope_id",
+            "observed_at",
+        ),
+        Index(
+            "ix_behavior_observation_source_identity",
+            "source_tenant_id",
+            "detection_scope_id",
+            "source_kind",
+            "source_object_id",
+            "source_revision",
+        ),
+    )
+
+    observation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    detection_scope_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_product: Mapped[str] = mapped_column(String, nullable=False)
+    connector_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_kind: Mapped[str] = mapped_column(String, nullable=False)
+    source_object_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_object_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_ref: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    ingested_at: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    entity_refs: Mapped[list[Any]] = mapped_column(JSONB, default=list, nullable=False)
+    action: Mapped[str | None] = mapped_column(String, nullable=True)
+    category: Mapped[str | None] = mapped_column(String, nullable=True)
+    normalized_attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    detection_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    projection_schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    observation_hash: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    supersedes_observation_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("behavior_observation.observation_id"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class BehaviorObservationProjectionFailure(Base):
+    """Durable retry/dead-letter queue for semantic projection failures."""
+
+    __tablename__ = "behavior_observation_projection_failure"
+    __table_args__ = (
+        Index(
+            "ix_behavior_obs_projection_failure_retry",
+            "status",
+            "next_retry_at",
+        ),
+        Index(
+            "ix_behavior_obs_projection_failure_source",
+            "source_record_id",
+            "status",
+        ),
+    )
+
+    failure_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_record_id: Mapped[str] = mapped_column(String, nullable=False)
+    source_tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_category: Mapped[str] = mapped_column(String, nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    next_retry_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TS, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class DataQualityError(Base):
     """Ingestion/normalization quality issues; event_id nullable (pre-event errors)."""
 

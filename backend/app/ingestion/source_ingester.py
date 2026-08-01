@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -40,6 +40,7 @@ from app.services.event_service import (
     should_apply_source_update,
     stable_source_record_id,
 )
+from app.services.behavior_observation_projection import BehaviorObservationProjection
 from app.services.evidence_projection import EvidenceProjection
 
 logger = logging.getLogger(__name__)
@@ -150,12 +151,29 @@ class SourceIngester:
         source_mode: str | None = None,
         supported_schema_versions: frozenset[str] = SUPPORTED_SCHEMA_VERSIONS,
         evidence_projection: EvidenceProjection | None = None,
+        behavior_observation_projection: BehaviorObservationProjection | None = None,
     ) -> None:
         self._events = event_service
         self._session_factory = session_factory
         self._source_mode = source_mode or get_settings().source_mode
         self._supported_schema_versions = supported_schema_versions
         self._evidence_projection = evidence_projection or EvidenceProjection(session_factory)
+        if behavior_observation_projection is not None:
+            self._behavior_observation = behavior_observation_projection
+        elif callable(session_factory):
+            self._behavior_observation = BehaviorObservationProjection(session_factory)
+        else:
+            self._behavior_observation = None
+
+    def _behavior_on_persisted(self) -> Callable[[str], Awaitable[None]] | None:
+        if self._behavior_observation is None:
+            return None
+        return self._behavior_observation.persisted_callback()
+
+    async def _project_behavior_observation(self, source_record_id: str) -> None:
+        if self._behavior_observation is None:
+            return
+        await self._behavior_observation.on_source_record_persisted(source_record_id)
 
     async def poll(
         self,
@@ -595,6 +613,7 @@ class SourceIngester:
             source_tenant_id=source_tenant_id,
             connector_id=connector_id or f"{source_type}-evidence",
             watermark=watermark,
+            on_persisted=self._behavior_on_persisted(),
         )
 
     async def _project_adapter_evidence(
@@ -620,6 +639,7 @@ class SourceIngester:
                 connector_id=page.connector_id,
                 schema_version=page.schema_version,
                 watermark=summary.watermark_after,
+                on_persisted=self._behavior_on_persisted(),
             )
         except Exception as exc:  # noqa: BLE001 — project gap degrades, never fabricates
             summary.degraded = True
@@ -645,6 +665,7 @@ class SourceIngester:
             result = await self._events.ingest_source_object(
                 source_to_ingestable(item, source_type=source_type)
             )
+            await self._project_behavior_observation(result.source_record_id)
             return result.idempotent
         if isinstance(item, _SUPPORTING_SOURCE_TYPES):
             return await self._persist_supporting_object(
@@ -736,6 +757,7 @@ class SourceIngester:
         # Supporting object is now committed: re-enrich the parent event's entities
         # via the adapter-recorded parent_source_object_id back-reference.
         await self._events.refresh_events_for_supporting_ref(ref)
+        await self._project_behavior_observation(record_id)
         return idempotent
 
     async def _persist_connector(

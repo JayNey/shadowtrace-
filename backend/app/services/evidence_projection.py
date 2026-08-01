@@ -6,7 +6,7 @@ import base64
 import contextvars
 import hashlib
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -148,6 +148,7 @@ class EvidenceProjection:
         connector_status: ConnectorStatus | None = None,
         watermark: dict[str, Any] | None = None,
         ingested_at: datetime | None = None,
+        on_persisted: Callable[[str], Awaitable[None]] | None = None,
     ) -> int:
         """Normalize raw telemetry into traceable SourceLog/SourceAsset rows."""
         observed_at = _as_utc(ingested_at or datetime.now(UTC))
@@ -193,6 +194,7 @@ class EvidenceProjection:
                     watermark=dict(watermark) if watermark is not None else None,
                 )
             inserted = 0
+            inserted_ids: list[str] = []
             for row in prepared:
                 existing = self._memory_rows.get(row.source_record_id)
                 if existing is not None:
@@ -201,8 +203,12 @@ class EvidenceProjection:
                     continue
                 self._memory_rows[row.source_record_id] = row
                 inserted += 1
+                inserted_ids.append(row.source_record_id)
+            if on_persisted is not None:
+                for record_id in inserted_ids:
+                    await on_persisted(record_id)
             return inserted
-        return await self._persist_rows(
+        inserted_ids = await self._persist_rows(
             prepared,
             source_product=source_product,
             source_tenant_id=source_tenant_id,
@@ -212,6 +218,10 @@ class EvidenceProjection:
             watermark=watermark,
             observed_at=observed_at,
         )
+        if on_persisted is not None:
+            for record_id in inserted_ids:
+                await on_persisted(record_id)
+        return len(inserted_ids)
 
     async def query(
         self,
@@ -382,7 +392,7 @@ class EvidenceProjection:
         connector_status: ConnectorStatus | None,
         watermark: dict[str, Any] | None,
         observed_at: datetime,
-    ) -> int:
+    ) -> list[str]:
         assert self._session_factory is not None
         async with self._session_factory() as session:
             async with session.begin():
@@ -439,7 +449,7 @@ class EvidenceProjection:
                     metadata["source_tenant_id"] = source_tenant_id
                     connector.connector_metadata = metadata
 
-                inserted = 0
+                inserted_ids: list[str] = []
                 for row in rows:
                     existing = await session.get(orm.SourceObject, row.source_record_id)
                     if existing is not None:
@@ -469,9 +479,9 @@ class EvidenceProjection:
                             source_sync_state="synced",
                         )
                     )
-                    inserted += 1
+                    inserted_ids.append(row.source_record_id)
                 await session.flush()
-                return inserted
+                return inserted_ids
 
     async def _source_rows(
         self,

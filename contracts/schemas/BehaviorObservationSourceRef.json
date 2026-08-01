@@ -1,0 +1,57 @@
+{
+  "additionalProperties": false,
+  "description": "Pointer to the upstream source object revision that produced the observation.",
+  "properties": {
+    "source_product": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Source Product",
+      "type": "string"
+    },
+    "connector_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Connector Id",
+      "type": "string"
+    },
+    "source_kind": {
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Source Kind",
+      "type": "string"
+    },
+    "source_object_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Source Object Id",
+      "type": "string"
+    },
+    "source_object_type": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Object Type"
+    },
+    "source_revision": {
+      "minimum": 1,
+      "title": "Source Revision",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "source_product",
+    "connector_id",
+    "source_kind",
+    "source_object_id",
+    "source_revision"
+  ],
+  "title": "BehaviorObservationSourceRef",
+  "type": "object"
+}

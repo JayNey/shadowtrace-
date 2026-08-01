@@ -1,0 +1,37 @@
+{
+  "additionalProperties": false,
+  "description": "Normalized entity reference extracted from source semantics.",
+  "properties": {
+    "entity_type": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Entity Type",
+      "type": "string"
+    },
+    "entity_id": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Entity Id",
+      "type": "string"
+    },
+    "role": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Role"
+    }
+  },
+  "required": [
+    "entity_type",
+    "entity_id"
+  ],
+  "title": "BehaviorEntityRef",
+  "type": "object"
+}
