@@ -51,16 +51,25 @@ celery_app = Celery("shadowtrace")
 
 def _build_beat_schedule() -> dict[str, dict[str, object]]:
     settings = get_settings()
-    if not settings.ingestion_scheduler_enabled:
-        return {}
-    interval = float(settings.ingestion_poll_interval_s)
-    return {
-        "shadowtrace-poll-sources": {
+    schedule: dict[str, dict[str, object]] = {}
+    if settings.ingestion_scheduler_enabled:
+        schedule["shadowtrace-poll-sources"] = {
             "task": "shadowtrace.poll_sources",
-            "schedule": interval,
+            "schedule": float(settings.ingestion_poll_interval_s),
             "options": {"queue": "ingestion"},
-        },
-    }
+        }
+    if settings.auto_investigate_enabled:
+        schedule["shadowtrace-dispatch-investigation-intents"] = {
+            "task": "shadowtrace.dispatch_investigation_intents",
+            "schedule": float(settings.auto_investigate_dispatch_interval_s),
+            "options": {"queue": "investigation"},
+        }
+        schedule["shadowtrace-reconcile-investigation-intents"] = {
+            "task": "shadowtrace.reconcile_investigation_intents",
+            "schedule": float(settings.auto_investigate_reconcile_interval_s),
+            "options": {"queue": "investigation"},
+        }
+    return schedule
 
 
 celery_app.conf.update(
@@ -71,6 +80,8 @@ celery_app.conf.update(
         "shadowtrace.run_investigation": {"queue": "investigation"},
         "shadowtrace.worker_ping": {"queue": "investigation"},
         "shadowtrace.poll_sources": {"queue": "ingestion"},
+        "shadowtrace.dispatch_investigation_intents": {"queue": "investigation"},
+        "shadowtrace.reconcile_investigation_intents": {"queue": "investigation"},
     },
     task_acks_late=True,
     task_reject_on_worker_lost=True,
@@ -82,6 +93,7 @@ celery_app.conf.update(
     beat_schedule=_build_beat_schedule(),
     imports=(
         "app.tasks.investigation_tasks",
+        "app.tasks.investigation_intent_tasks",
         "app.tasks.worker_tasks",
         "app.tasks.ingestion_tasks",
     ),

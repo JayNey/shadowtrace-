@@ -26,7 +26,20 @@ async def _run_poll_sources_async() -> dict[str, Any]:
     try:
         store = EventContextStore(redis, factory)
         degraded = DegradedFlagService(store, factory)
-        events = EventService(factory, store, degraded_flags=degraded)
+        from app.services.auto_investigate_policy import AutoInvestigatePolicyService
+        from app.services.investigation_intent_service import InvestigationIntentService
+
+        intent_service = InvestigationIntentService(
+            factory,
+            policy=AutoInvestigatePolicyService(),
+            degraded_flags=degraded,
+        )
+        events = EventService(
+            factory,
+            store,
+            degraded_flags=degraded,
+            investigation_intent=intent_service,
+        )
         scheduler = IngestionScheduler(
             session_factory=factory,
             event_service=events,

@@ -998,6 +998,45 @@ class EventContextFieldVersion(Base):
     current_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
+class InvestigationIntent(Base):
+    """PostgreSQL durable auto-investigate intent/outbox (ISSUE-108 / #612)."""
+
+    __tablename__ = "investigation_intent"
+    __table_args__ = (
+        UniqueConstraint(
+            "event_id",
+            "intent_kind",
+            "intent_version",
+            name="uq_investigation_intent_event_kind_version",
+        ),
+        Index("ix_investigation_intent_status_updated", "status", "updated_at"),
+        Index("ix_investigation_intent_claim_expires", "claim_expires_at"),
+    )
+
+    intent_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("security_event.event_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    intent_kind: Mapped[str] = mapped_column(String, nullable=False)
+    intent_version: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    claim_owner: Mapped[str | None] = mapped_column(String, nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    broker_task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    include_response_execution: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TS, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 from app.db.orm.approval import ApprovalRecordORM  # noqa: E402,F401
 from app.db.orm.memory_review import MemoryReviewORM  # noqa: E402,F401
 from app.db.orm.profile import EntityProfileORM  # noqa: E402,F401

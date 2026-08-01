@@ -104,6 +104,38 @@ class Settings(BaseSettings):
     ingestion_scheduler_enabled: bool = Field(default=False, alias="INGESTION_SCHEDULER_ENABLED")
     ingestion_poll_interval_s: int = Field(default=60, alias="INGESTION_POLL_INTERVAL_S", ge=1)
 
+    auto_investigate_enabled: bool = Field(default=False, alias="AUTO_INVESTIGATE_ENABLED")
+    auto_investigate_min_severity: str = Field(
+        default="medium",
+        alias="AUTO_INVESTIGATE_MIN_SEVERITY",
+    )
+    auto_investigate_event_types: str = Field(default="", alias="AUTO_INVESTIGATE_EVENT_TYPES")
+    auto_investigate_provisional_window_s: int = Field(
+        default=300,
+        alias="AUTO_INVESTIGATE_PROVISIONAL_WINDOW_S",
+        ge=0,
+    )
+    auto_investigate_claim_lease_s: int = Field(
+        default=30,
+        alias="AUTO_INVESTIGATE_CLAIM_LEASE_S",
+        ge=5,
+    )
+    auto_investigate_max_attempts: int = Field(
+        default=5,
+        alias="AUTO_INVESTIGATE_MAX_ATTEMPTS",
+        ge=1,
+    )
+    auto_investigate_dispatch_interval_s: int = Field(
+        default=15,
+        alias="AUTO_INVESTIGATE_DISPATCH_INTERVAL_S",
+        ge=5,
+    )
+    auto_investigate_reconcile_interval_s: int = Field(
+        default=60,
+        alias="AUTO_INVESTIGATE_RECONCILE_INTERVAL_S",
+        ge=10,
+    )
+
     neo4j_enabled: bool = Field(default=False, alias="NEO4J_ENABLED")
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")

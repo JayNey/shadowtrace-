@@ -163,6 +163,7 @@ class _CreateBundle:
     related_only: bool = False
     idempotent: bool = False
     merged_event_ids: tuple[str, ...] = ()
+    intent_ids: tuple[str, ...] = ()
 
 
 def stable_source_record_id(*, identity: str) -> str:
@@ -338,6 +339,7 @@ class EventService:
         event_bus: EventBus | None = None,
         policy_resolver: SourcePolicyResolver | None = None,
         state_machine: StateMachinePort | None = None,
+        investigation_intent: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._store = store
@@ -345,6 +347,27 @@ class EventService:
         self._degraded = degraded_flags
         self._policy = policy_resolver or SourcePolicyResolver()
         self._state_machine = state_machine
+        self._investigation_intent = investigation_intent
+
+    async def _attach_auto_investigate_intent(
+        self,
+        session: AsyncSession,
+        event: orm.SecurityEvent,
+        source: IngestableSource,
+        *,
+        link_role: str,
+        created_or_promoted: bool,
+    ) -> str | None:
+        if self._investigation_intent is None:
+            return None
+        ref = source.reference
+        return await self._investigation_intent.maybe_create_pending_in_session(
+            session,
+            event,
+            link_role=link_role,
+            source_product=ref.source_product,
+            created_or_promoted=created_or_promoted,
+        )
 
     # ------------------------------------------------------------------ #
     # Ingest / create
@@ -358,6 +381,8 @@ class EventService:
             force_context_refresh=not bundle.idempotent,
             publish_event=bundle.created or bundle.promoted,
         )
+        if bundle.intent_ids and self._investigation_intent is not None:
+            self._investigation_intent.schedule_dispatch(bundle.intent_ids)
         for merged_event_id in bundle.merged_event_ids:
             await self._store.delete_cached_context(merged_event_id)
         return IngestResult(
@@ -381,6 +406,8 @@ class EventService:
             force_context_refresh=not bundle.idempotent,
             publish_event=bundle.created or bundle.promoted,
         )
+        if bundle.intent_ids and self._investigation_intent is not None:
+            self._investigation_intent.schedule_dispatch(bundle.intent_ids)
         for merged_event_id in bundle.merged_event_ids:
             await self._store.delete_cached_context(merged_event_id)
         return _security_event_from_row(bundle.event)
@@ -1471,10 +1498,23 @@ class EventService:
                 event = await self._create_new_event(
                     session, source, obj, source_record_id, occurred
                 )
+                link_role = (
+                    LINK_ROLE_PROVISIONAL
+                    if ref.source_kind is SourceObjectKind.ALERT
+                    else LINK_ROLE_PRIMARY
+                )
+                intent_id = await self._attach_auto_investigate_intent(
+                    session,
+                    event,
+                    source,
+                    link_role=link_role,
+                    created_or_promoted=True,
+                )
                 return _CreateBundle(
                     event=event,
                     source_record_id=source_record_id,
                     created=True,
+                    intent_ids=(intent_id,) if intent_id else (),
                 )
 
     async def _ensure_connector(
@@ -2111,12 +2151,20 @@ class EventService:
         )
         await session.flush()
         await session.refresh(target)
+        intent_id = await self._attach_auto_investigate_intent(
+            session,
+            target,
+            source,
+            link_role=LINK_ROLE_PRIMARY,
+            created_or_promoted=True,
+        )
         return _CreateBundle(
             event=target,
             source_record_id=incident_record_id,
             created=False,
             promoted=True,
             merged_event_ids=tuple(merged_event_ids),
+            intent_ids=(intent_id,) if intent_id else (),
         )
 
     async def _refresh_event_entities_from_sources(

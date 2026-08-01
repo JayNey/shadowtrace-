@@ -119,15 +119,23 @@ def _get_event_bus() -> Any:
 async def get_event_service() -> Any:
     global _event_service
     if _event_service is None:
+        from app.services.auto_investigate_policy import AutoInvestigatePolicyService
         from app.services.event_service import EventService
+        from app.services.investigation_intent_service import InvestigationIntentService
 
         state_machine = await get_state_machine()
+        intent_service = InvestigationIntentService(
+            _get_session_factory(),
+            policy=AutoInvestigatePolicyService(),
+            degraded_flags=_get_degraded_flags(),
+        )
         _event_service = EventService(
             _get_session_factory(),
             _get_context_store(),
             degraded_flags=_get_degraded_flags(),
             state_machine=state_machine,
             event_bus=_get_event_bus(),
+            investigation_intent=intent_service,
         )
     return _event_service
 

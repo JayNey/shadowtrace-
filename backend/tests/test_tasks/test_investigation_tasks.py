@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 from kombu.exceptions import OperationalError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+pytest_plugins = ["tests.test_ingestion.conftest"]
 
 from app.core.celery_app import celery_app
 from app.core.errors import DependencyUnavailableError, InvestigationInProgressError
@@ -269,3 +273,72 @@ async def _noop_register(*_args: Any, **_kwargs: Any) -> None:
 
 async def _noop_delete(*_args: Any, **_kwargs: Any) -> None:
     return None
+
+
+def test_run_investigation_unhandled_exception_marks_intent_dead(
+    session_factory: async_sessionmaker[AsyncSession],
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from app.db import models as orm
+    from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+
+    intent_id = f"iin-dead-{uuid4().hex[:8]}"
+    event_id = f"evt-dead-{uuid4().hex[:8]}"
+
+    async def _seed() -> None:
+        async with session_factory() as session:
+            async with session.begin():
+                session.add(
+                    orm.SecurityEvent(
+                        event_id=event_id,
+                        event_type="malicious_process",
+                        title="Suspicious process",
+                        description="",
+                        status=EventStatus.NEW.value,
+                        severity=Severity.HIGH.value,
+                        final_verdict="none",
+                        creation_source_ref={"source_product": "mock_xdr"},
+                        source_reference_snapshots=[],
+                        disposition_policy="not_required",
+                        raw_alert_ids=[],
+                        source_type="mock_xdr",
+                    )
+                )
+                await session.flush()
+                session.add(
+                    orm.InvestigationIntent(
+                        intent_id=intent_id,
+                        event_id=event_id,
+                        intent_kind="auto_investigate",
+                        intent_version="issue108_v1",
+                        status=InvestigationIntentStatus.ENQUEUED.value,
+                        revision=1,
+                        attempt=0,
+                        broker_task_id="task-dead",
+                    )
+                )
+
+    asyncio.run(_seed())
+
+    async def _boom(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise RuntimeError("investigation exploded")
+
+    monkeypatch.setattr(tasks, "execute_investigation", _boom)
+
+    with pytest.raises(RuntimeError, match="investigation exploded"):
+        tasks.run_investigation.apply(
+            args=[event_id],
+            kwargs={"intent_id": intent_id},
+            task_id="task-dead",
+        ).result
+
+    async def _verify() -> None:
+        async with session_factory() as session:
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            assert row is not None
+            assert row.status == InvestigationIntentStatus.DEAD.value
+
+    asyncio.run(_verify())

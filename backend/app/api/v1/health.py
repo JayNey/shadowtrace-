@@ -181,5 +181,6 @@ async def health(
             "full_loop_available": settings.orchestration_mode.strip().lower()
             != "analysis_only",
             "task_mode": (settings.task_mode or "background").strip().lower(),
+            "auto_investigate_enabled": settings.auto_investigate_enabled,
         },
     }

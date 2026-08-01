@@ -142,6 +142,53 @@ async def dispatch_investigation(
     return task_id
 
 
+def publish_investigation_for_intent(
+    *,
+    event_id: str,
+    task_id: str,
+    intent_id: str,
+) -> None:
+    """Publish a deterministic Celery task for a claimed investigation intent.
+
+    Response execution is owned by #613 policy inside SuperAgent; auto-investigate
+    never sets ``include_response_execution`` here.
+
+    Raises broker connectivity errors to the caller; ingest paths must catch.
+    """
+    run_investigation.apply_async(
+        args=[event_id],
+        kwargs={
+            "include_response_execution": False,
+            "intent_id": intent_id,
+        },
+        task_id=task_id,
+        queue=TASK_QUEUE,
+    )
+
+
+async def _finalize_intent_from_result(intent_id: str, result: dict[str, str]) -> None:
+    from app.db.session import get_session_factory
+    from app.services.investigation_intent_service import InvestigationIntentService
+
+    service = InvestigationIntentService(get_session_factory())
+    status = str(result.get("status") or "")
+    if status == "skipped":
+        await service.mark_skipped(
+            intent_id,
+            reason=str(result.get("reason") or "investigation_skipped"),
+        )
+    else:
+        await service.mark_terminal(intent_id)
+
+
+async def _mark_intent_started(intent_id: str, broker_task_id: str) -> None:
+    from app.db.session import get_session_factory
+    from app.services.investigation_intent_service import InvestigationIntentService
+
+    service = InvestigationIntentService(get_session_factory())
+    await service.mark_started(intent_id, broker_task_id=broker_task_id)
+
+
 async def resolve_task_state(task_id: str) -> tuple[str, str | None]:
     """Return Celery state and optional event_id for a dispatched task."""
     from celery.result import AsyncResult
@@ -195,6 +242,7 @@ def run_investigation(
     self: Any,
     event_id: str,
     include_response_execution: bool = False,
+    intent_id: str | None = None,
 ) -> dict[str, str]:
     """Execute SuperAgent investigation for *event_id* (idempotent when lease held)."""
     owner_id = celery_task_owner_id(str(self.request.id))
@@ -206,8 +254,10 @@ def run_investigation(
             self.request.id,
             owner_id,
         )
+    if intent_id:
+        asyncio.run(_mark_intent_started(intent_id, str(self.request.id)))
     try:
-        return asyncio.run(
+        result = asyncio.run(
             _run_investigation_body(
                 event_id,
                 include_response_execution=bool(include_response_execution),
@@ -215,8 +265,21 @@ def run_investigation(
                 redelivered=redelivered,
             )
         )
+        if intent_id:
+            asyncio.run(_finalize_intent_from_result(intent_id, result))
+        return result
     except SoftTimeLimitExceeded:
         logger.warning("run_investigation soft time limit exceeded for event=%s", event_id)
+        if intent_id:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            asyncio.run(
+                InvestigationIntentService(get_session_factory()).mark_dead(
+                    intent_id,
+                    error="soft_time_limit_exceeded",
+                )
+            )
         raise
     except (DependencyUnavailableError, OperationalError, OSError, ConnectionError) as exc:
         logger.warning(
@@ -225,7 +288,26 @@ def run_investigation(
             self.request.retries,
             exc_info=True,
         )
+        # Keep intent in STARTED during Celery in-flight retries; dispatcher owns RETRY.
         raise self.retry(exc=exc) from exc
+    except Exception as exc:
+        logger.error(
+            "run_investigation failed for event=%s intent=%s",
+            event_id,
+            intent_id,
+            exc_info=True,
+        )
+        if intent_id:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            asyncio.run(
+                InvestigationIntentService(get_session_factory()).mark_dead(
+                    intent_id,
+                    error=str(exc),
+                )
+            )
+        raise
 
 
 __all__ = [
@@ -235,6 +317,7 @@ __all__ = [
     "dispatch_investigation",
     "execute_investigation",
     "lookup_task_event_id",
+    "publish_investigation_for_intent",
     "register_task_metadata",
     "resolve_task_state",
     "run_investigation",

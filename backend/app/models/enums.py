@@ -100,6 +100,19 @@ class Severity(StrEnum):
     CRITICAL = "critical"
 
 
+class InvestigationIntentStatus(StrEnum):
+    """Durable auto-investigate intent ledger (#612)."""
+
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    ENQUEUED = "enqueued"
+    STARTED = "started"
+    TERMINAL = "terminal"
+    SKIPPED = "skipped"
+    RETRY = "retry"
+    DEAD = "dead"
+
+
 class BusinessDisruption(StrEnum):
     """Business impact disruption level (ISSUE-079)."""
 

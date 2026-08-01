@@ -1,0 +1,559 @@
+"""Investigation intent durable ledger tests (ISSUE-108 / #612)."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+pytest_plugins = ["tests.test_ingestion.conftest"]
+
+from app.core.config import Settings
+from app.db import models as orm
+from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+from app.models.investigation_intent import (
+    InvestigationIntentTransitionError,
+    validate_intent_transition,
+)
+from app.services.auto_investigate_policy import AutoInvestigatePolicyService
+from app.services.investigation_intent_service import (
+    InvestigationIntentService,
+    deterministic_investigation_task_id,
+)
+
+
+def test_intent_transition_validation() -> None:
+    validate_intent_transition(
+        InvestigationIntentStatus.PENDING,
+        InvestigationIntentStatus.CLAIMED,
+    )
+    with pytest.raises(InvestigationIntentTransitionError):
+        validate_intent_transition(
+            InvestigationIntentStatus.PENDING,
+            InvestigationIntentStatus.TERMINAL,
+        )
+
+
+def test_deterministic_task_id_stable() -> None:
+    first = deterministic_investigation_task_id("iin-abc", 2)
+    second = deterministic_investigation_task_id("iin-abc", 2)
+    third = deterministic_investigation_task_id("iin-abc", 3)
+    assert first == second
+    assert first != third
+
+
+@pytest.mark.asyncio
+async def test_create_pending_intent_in_session(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    event_id = f"evt-intent-create-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            event = orm.SecurityEvent(
+                event_id=event_id,
+                event_type="malicious_process",
+                title="Suspicious process",
+                description="",
+                status=EventStatus.NEW.value,
+                severity=Severity.HIGH.value,
+                final_verdict="none",
+                creation_source_ref={"source_product": "mock_xdr"},
+                source_reference_snapshots=[],
+                disposition_policy="not_required",
+                raw_alert_ids=[],
+                source_type="mock_xdr",
+            )
+            session.add(event)
+            await session.flush()
+            intent_id = await service.maybe_create_pending_in_session(
+                session,
+                event,
+                link_role="primary",
+                source_product="mock_xdr",
+                created_or_promoted=True,
+            )
+            assert intent_id is not None
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(orm.InvestigationIntent).where(
+                orm.InvestigationIntent.intent_id == intent_id
+            )
+        )
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.PENDING.value
+        assert row.event_id == event_id
+
+
+@pytest.mark.asyncio
+async def test_duplicate_intent_unique_by_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    event_id = f"evt-intent-dup-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            event = orm.SecurityEvent(
+                event_id=event_id,
+                event_type="malicious_process",
+                title="Suspicious process",
+                description="",
+                status=EventStatus.NEW.value,
+                severity=Severity.HIGH.value,
+                final_verdict="none",
+                creation_source_ref={"source_product": "mock_xdr"},
+                source_reference_snapshots=[],
+                disposition_policy="not_required",
+                raw_alert_ids=[],
+                source_type="mock_xdr",
+            )
+            session.add(event)
+            await session.flush()
+            first = await service.maybe_create_pending_in_session(
+                session,
+                event,
+                link_role="primary",
+                source_product="mock_xdr",
+                created_or_promoted=True,
+            )
+            second = await service.maybe_create_pending_in_session(
+                session,
+                event,
+                link_role="primary",
+                source_product="mock_xdr",
+                created_or_promoted=True,
+            )
+            assert first is not None
+            assert second is None
+
+
+@pytest.mark.asyncio
+async def test_mark_started_and_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    event_id = f"evt-intent-terminal-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            event = orm.SecurityEvent(
+                event_id=event_id,
+                event_type="malicious_process",
+                title="Suspicious process",
+                description="",
+                status=EventStatus.NEW.value,
+                severity=Severity.HIGH.value,
+                final_verdict="none",
+                creation_source_ref={"source_product": "mock_xdr"},
+                source_reference_snapshots=[],
+                disposition_policy="not_required",
+                raw_alert_ids=[],
+                source_type="mock_xdr",
+            )
+            session.add(event)
+            await session.flush()
+            intent_id = await service.maybe_create_pending_in_session(
+                session,
+                event,
+                link_role="primary",
+                source_product="mock_xdr",
+                created_or_promoted=True,
+            )
+    assert intent_id is not None
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            assert row is not None
+            row.status = InvestigationIntentStatus.ENQUEUED.value
+            row.broker_task_id = "task-123"
+    await service.mark_started(intent_id, broker_task_id="task-123")
+    await service.mark_terminal(intent_id)
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.TERMINAL.value
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_enqueued_to_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=5,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-stale-{uuid4().hex[:8]}"
+    event_id = f"evt-intent-stale-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            event = orm.SecurityEvent(
+                event_id=event_id,
+                event_type="malicious_process",
+                title="Suspicious process",
+                description="",
+                status=EventStatus.NEW.value,
+                severity=Severity.HIGH.value,
+                final_verdict="none",
+                creation_source_ref={"source_product": "mock_xdr"},
+                source_reference_snapshots=[],
+                disposition_policy="not_required",
+                raw_alert_ids=[],
+                source_type="mock_xdr",
+            )
+            session.add(event)
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event.event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.ENQUEUED.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id="task-stale",
+                    updated_at=datetime.now(UTC) - timedelta(minutes=10),
+                )
+            )
+    count = await service.reconcile_stale(limit=5)
+    assert count >= 1
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.RETRY.value
+
+
+@pytest.mark.asyncio
+async def test_mark_started_is_idempotent_for_same_broker_task(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-idem-{uuid4().hex[:8]}"
+    event_id = f"evt-idem-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.ENQUEUED.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id="task-idem",
+                )
+            )
+    await service.mark_started(intent_id, broker_task_id="task-idem")
+    await service.mark_started(intent_id, broker_task_id="task-idem")
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.STARTED.value
+
+
+@pytest.mark.asyncio
+async def test_create_pending_intent_never_sets_include_response_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    event_id = f"evt-no-response-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            event = orm.SecurityEvent(
+                event_id=event_id,
+                event_type="malicious_process",
+                title="Suspicious process",
+                description="",
+                status=EventStatus.NEW.value,
+                severity=Severity.HIGH.value,
+                final_verdict="none",
+                creation_source_ref={"source_product": "mock_xdr"},
+                source_reference_snapshots=[],
+                disposition_policy="not_required",
+                raw_alert_ids=[],
+                source_type="mock_xdr",
+            )
+            session.add(event)
+            await session.flush()
+            intent_id = await service.maybe_create_pending_in_session(
+                session,
+                event,
+                link_role="primary",
+                source_product="mock_xdr",
+                created_or_promoted=True,
+            )
+    assert intent_id is not None
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.include_response_execution is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_started_event_new_goes_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=5,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-started-{uuid4().hex[:8]}"
+    event_id = f"evt-started-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.STARTED.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id="task-started",
+                    updated_at=datetime.now(UTC) - timedelta(minutes=15),
+                )
+            )
+    count = await service.reconcile_stale(limit=5)
+    assert count >= 1
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.RETRY.value
+        assert row.broker_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_started_event_triaging_goes_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=5,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-triage-{uuid4().hex[:8]}"
+    event_id = f"evt-triage-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.TRIAGING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.STARTED.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id="task-triage",
+                    updated_at=datetime.now(UTC) - timedelta(minutes=15),
+                )
+            )
+    count = await service.reconcile_stale(limit=5)
+    assert count >= 1
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.TERMINAL.value
+
+
+@pytest.mark.asyncio
+async def test_publish_failure_marks_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kombu.exceptions import OperationalError
+
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=30,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-pubfail-{uuid4().hex[:8]}"
+    event_id = f"evt-pubfail-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.CLAIMED.value,
+                    revision=1,
+                    attempt=0,
+                    claim_owner="test",
+                )
+            )
+
+    def _boom(**kwargs: object) -> None:
+        raise OperationalError("broker unavailable")
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _boom,
+    )
+    published = await service._publish_claimed_intent(intent_id)
+    assert published is False
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.RETRY.value
+        assert row.last_error is not None
+
+
+def test_beat_schedule_excludes_auto_investigate_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("AUTO_INVESTIGATE_ENABLED", "false")
+    get_settings.cache_clear()
+    from app.core.celery_app import _build_beat_schedule
+
+    schedule = _build_beat_schedule()
+    assert "shadowtrace-dispatch-investigation-intents" not in schedule
+    assert "shadowtrace-reconcile-investigation-intents" not in schedule
+    get_settings.cache_clear()
+
+
+def test_beat_schedule_includes_auto_investigate_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("AUTO_INVESTIGATE_ENABLED", "true")
+    monkeypatch.setenv("AUTO_INVESTIGATE_DISPATCH_INTERVAL_S", "20")
+    monkeypatch.setenv("AUTO_INVESTIGATE_RECONCILE_INTERVAL_S", "90")
+    get_settings.cache_clear()
+    from app.core.celery_app import _build_beat_schedule
+
+    schedule = _build_beat_schedule()
+    assert schedule["shadowtrace-dispatch-investigation-intents"]["schedule"] == 20.0
+    assert schedule["shadowtrace-reconcile-investigation-intents"]["schedule"] == 90.0
+    get_settings.cache_clear()

@@ -29,6 +29,7 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         "memory_governance_maintenance_failed",
         # ISSUE-131 decision audit degradation
         "decision_audit_degraded",
+        "auto_investigate_dispatch_unavailable",
     }
 )
 
@@ -44,6 +45,7 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "MemoryAgent",
         "AgentTraceService",
         "DecisionRecordService",
+        "InvestigationIntentService",
     }
 )
 
