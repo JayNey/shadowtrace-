@@ -16,12 +16,16 @@ INTENT_TRANSITIONS: dict[InvestigationIntentStatus, frozenset[InvestigationInten
             InvestigationIntentStatus.ENQUEUED,
             InvestigationIntentStatus.RETRY,
             InvestigationIntentStatus.PENDING,
+            InvestigationIntentStatus.SKIPPED,
+            InvestigationIntentStatus.DEAD,
         }
     ),
     InvestigationIntentStatus.ENQUEUED: frozenset(
         {
             InvestigationIntentStatus.STARTED,
             InvestigationIntentStatus.RETRY,
+            InvestigationIntentStatus.SKIPPED,
+            InvestigationIntentStatus.DEAD,
         }
     ),
     InvestigationIntentStatus.STARTED: frozenset(

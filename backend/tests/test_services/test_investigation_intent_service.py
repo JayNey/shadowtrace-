@@ -30,6 +30,14 @@ def test_intent_transition_validation() -> None:
         InvestigationIntentStatus.PENDING,
         InvestigationIntentStatus.CLAIMED,
     )
+    validate_intent_transition(
+        InvestigationIntentStatus.CLAIMED,
+        InvestigationIntentStatus.SKIPPED,
+    )
+    validate_intent_transition(
+        InvestigationIntentStatus.ENQUEUED,
+        InvestigationIntentStatus.DEAD,
+    )
     with pytest.raises(InvestigationIntentTransitionError):
         validate_intent_transition(
             InvestigationIntentStatus.PENDING,
@@ -525,6 +533,247 @@ async def test_publish_failure_marks_retry(
         assert row is not None
         assert row.status == InvestigationIntentStatus.RETRY.value
         assert row.last_error is not None
+
+
+@pytest.mark.asyncio
+async def test_publish_skips_when_event_not_new(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=30,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-skip-{uuid4().hex[:8]}"
+    event_id = f"evt-skip-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.CLAIMED.value,
+                    revision=1,
+                    attempt=0,
+                    claim_owner="test",
+                )
+            )
+    async with session_factory() as session:
+        async with session.begin():
+            event = await session.get(orm.SecurityEvent, event_id)
+            assert event is not None
+            event.status = EventStatus.TRIAGING.value
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        lambda **_kwargs: None,
+    )
+    published = await service._publish_claimed_intent(intent_id)
+    assert published is False
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.SKIPPED.value
+        assert row.skip_reason == "event_not_new"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_enqueued_max_attempts_goes_dead(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=5,
+        AUTO_INVESTIGATE_MAX_ATTEMPTS=1,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-dead-enq-{uuid4().hex[:8]}"
+    event_id = f"evt-dead-enq-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.ENQUEUED.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id="task-dead-enq",
+                    updated_at=datetime.now(UTC) - timedelta(minutes=10),
+                )
+            )
+    count = await service.reconcile_stale(limit=5)
+    assert count >= 1
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.DEAD.value
+
+
+@pytest.mark.asyncio
+async def test_materialize_is_idempotent_when_intent_exists(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client,
+) -> None:
+    """Provisional rows with an existing intent must not consume materialize batch slots."""
+    from app.services.context_service import EventContextStore
+    from app.services.degraded_flag_service import DegradedFlagService
+    from app.models.enums import EventType, SourceObjectKind
+    from app.models.source import SourceReference
+    from app.services.event_service import EventService, IngestableSource
+
+    store = EventContextStore(redis_client, session_factory)
+    degraded = DegradedFlagService(store, session_factory)
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        AUTO_INVESTIGATE_PROVISIONAL_WINDOW_S=60,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    events = EventService(
+        session_factory,
+        store,
+        degraded_flags=degraded,
+        investigation_intent=service,
+    )
+    ref = SourceReference(
+        source_kind=SourceObjectKind.ALERT,
+        source_product="mock_xdr",
+        source_tenant_id="tenant-demo",
+        connector_id="conn-mock",
+        source_object_id=f"al-mat-idem-{uuid4().hex[:8]}",
+        source_updated_at=datetime.now(UTC),
+    )
+    source = IngestableSource(
+        reference=ref,
+        title="Suspicious alert",
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        normalized={"risk_score": 76},
+    )
+    result = await events.ingest_source_object(source)
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, result.event_id)
+        assert event is not None
+        event.created_at = datetime.now(UTC) - timedelta(minutes=10)
+        await session.commit()
+    first = await service._materialize_provisional_intents(limit=5)
+    assert first >= 1
+    second = await service._materialize_provisional_intents(limit=5)
+    assert second == 0
+
+
+@pytest.mark.asyncio
+async def test_mark_started_accepts_current_revision_task_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-rev-{uuid4().hex[:8]}"
+    event_id = f"evt-rev-{uuid4().hex[:8]}"
+    revision = 3
+    current_task = deterministic_investigation_task_id(intent_id, revision)
+    stale_task = deterministic_investigation_task_id(intent_id, revision - 1)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.STARTED.value,
+                    revision=revision,
+                    attempt=1,
+                    broker_task_id=stale_task,
+                )
+            )
+    await service.mark_started(intent_id, broker_task_id=current_task)
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.broker_task_id == current_task
 
 
 def test_beat_schedule_excludes_auto_investigate_when_disabled(

@@ -176,8 +176,27 @@ class InvestigationIntentService:
                 if current is InvestigationIntentStatus.STARTED:
                     if row.broker_task_id == broker_task_id:
                         return
+                    expected = deterministic_investigation_task_id(
+                        row.intent_id,
+                        int(row.revision or 1),
+                    )
+                    if broker_task_id == expected:
+                        row.broker_task_id = broker_task_id
+                        return
                     logger.warning(
                         "investigation intent already started intent=%s existing_task=%s new_task=%s",
+                        intent_id,
+                        row.broker_task_id,
+                        broker_task_id,
+                    )
+                    return
+                if (
+                    current is InvestigationIntentStatus.ENQUEUED
+                    and row.broker_task_id
+                    and row.broker_task_id != broker_task_id
+                ):
+                    logger.warning(
+                        "stale broker task ignored intent=%s expected=%s got=%s",
                         intent_id,
                         row.broker_task_id,
                         broker_task_id,
@@ -262,7 +281,9 @@ class InvestigationIntentService:
                         reconciled += 1
         if reconciled:
             self.schedule_dispatch([])
-        provisional_created = await self._materialize_provisional_intents(limit=limit)
+        provisional_created = await self._materialize_provisional_intents(
+            limit=int(self._settings.auto_investigate_materialize_batch_size)
+        )
         return reconciled + provisional_created
 
     def _is_stale_intent_row(
@@ -528,6 +549,15 @@ class InvestigationIntentService:
             return 0
         window = timedelta(seconds=int(self._settings.auto_investigate_provisional_window_s))
         cutoff = datetime.now(UTC) - window
+        intent_exists = (
+            select(orm.InvestigationIntent.intent_id)
+            .where(
+                orm.InvestigationIntent.event_id == orm.SecurityEvent.event_id,
+                orm.InvestigationIntent.intent_kind == INTENT_KIND_AUTO_INVESTIGATE,
+                orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE108_V1,
+            )
+            .exists()
+        )
         created = 0
         async with self._session_factory() as session:
             async with session.begin():
@@ -542,6 +572,7 @@ class InvestigationIntentService:
                             orm.SourceEventLink.role == "provisional",
                             orm.SecurityEvent.status == EventStatus.NEW.value,
                             orm.SecurityEvent.created_at <= cutoff,
+                            ~intent_exists,
                         )
                         .order_by(orm.SecurityEvent.created_at.asc())
                         .limit(limit)

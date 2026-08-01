@@ -135,6 +135,11 @@ class Settings(BaseSettings):
         alias="AUTO_INVESTIGATE_RECONCILE_INTERVAL_S",
         ge=10,
     )
+    auto_investigate_materialize_batch_size: int = Field(
+        default=20,
+        alias="AUTO_INVESTIGATE_MATERIALIZE_BATCH_SIZE",
+        ge=1,
+    )
 
     neo4j_enabled: bool = Field(default=False, alias="NEO4J_ENABLED")
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
