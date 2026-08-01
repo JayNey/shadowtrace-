@@ -13,7 +13,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -398,3 +398,120 @@ async def test_idempotency_hash_mismatch_rejected(
         async with session.begin():
             with pytest.raises(ValidationError, match="different content hash"):
                 await service.persist_in_session(session, tampered)
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_fails_when_active_scope_missing_connector(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scoped_connector = f"conn-scoped-{suffix}"
+    missing_connector = f"conn-missing-{suffix}"
+    instance_id = f"inst-{suffix}"
+    await _seed_connector(
+        session_factory,
+        connector_id=scoped_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    await _seed_connector(
+        session_factory,
+        connector_id=missing_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    scope_service = _scope_service(session_factory)
+    identity = DetectionScopeIdentity(
+        source_tenant_id=tenant_id,
+        source_product="mock_xdr",
+        integration_instance_id=instance_id,
+    )
+    revision = await scope_service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=scoped_connector, source_product="mock_xdr"),
+        ],
+    )
+    await scope_service.activate_revision(revision.scope_revision_id)
+
+    record_id = await _seed_source_log(
+        session_factory,
+        suffix=suffix,
+        tenant_id=tenant_id,
+        connector_id=missing_connector,
+    )
+    service = _observation_service(session_factory)
+    with pytest.raises(ValidationError, match="not in active detection scope"):
+        await service.project_source_object(record_id)
+
+
+@pytest.mark.asyncio
+async def test_projection_failure_updates_single_row_on_repeat(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    record_id = f"src-{suffix}"
+    service = _observation_service(session_factory)
+    await service.record_projection_failure(
+        source_record_id=record_id,
+        source_tenant_id=tenant_id,
+        error_category="projection_failed",
+        detail={"message": "first"},
+    )
+    await service.record_projection_failure(
+        source_record_id=record_id,
+        source_tenant_id=tenant_id,
+        error_category="projection_failed",
+        detail={"message": "second"},
+    )
+    async with session_factory() as session:
+        rows = list(
+            await session.scalars(
+                select(orm.BehaviorObservationProjectionFailure).where(
+                    orm.BehaviorObservationProjectionFailure.source_record_id == record_id,
+                    orm.BehaviorObservationProjectionFailure.status
+                    == BehaviorObservationProjectionStatus.PENDING_RETRY.value,
+                )
+            )
+        )
+        total = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.BehaviorObservationProjectionFailure)
+                .where(orm.BehaviorObservationProjectionFailure.source_record_id == record_id)
+            )
+            or 0
+        )
+    assert total == 1
+    assert rows[0].attempt == 2
+    assert rows[0].detail["message"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_projection_dead_letter_after_max_attempts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    record_id = f"src-dead-{suffix}"
+    service = _observation_service(session_factory)
+    for attempt in range(5):
+        await service.record_projection_failure(
+            source_record_id=record_id,
+            source_tenant_id=tenant_id,
+            error_category="projection_failed",
+            detail={"message": f"attempt-{attempt + 1}"},
+        )
+    async with session_factory() as session:
+        failure = await session.scalar(
+            select(orm.BehaviorObservationProjectionFailure).where(
+                orm.BehaviorObservationProjectionFailure.source_record_id == record_id
+            )
+        )
+    assert failure is not None
+    assert failure.status == BehaviorObservationProjectionStatus.DEAD_LETTER.value
+    assert failure.attempt == 5
+    assert failure.next_retry_at is None

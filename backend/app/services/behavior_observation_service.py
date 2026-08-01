@@ -208,6 +208,7 @@ class BehaviorObservationService:
         error_category: str,
         detail: dict[str, object],
         session: AsyncSession | None = None,
+        force_dead_letter: bool = False,
     ) -> None:
         now = datetime.now(UTC)
 
@@ -226,6 +227,8 @@ class BehaviorObservationService:
                 .limit(1)
             )
             attempt = 1 if existing is None else int(existing.attempt) + 1
+            if force_dead_letter:
+                attempt = _MAX_PROJECTION_ATTEMPTS
             status = (
                 BehaviorObservationProjectionStatus.DEAD_LETTER.value
                 if attempt >= _MAX_PROJECTION_ATTEMPTS
@@ -236,18 +239,26 @@ class BehaviorObservationService:
                 if status == BehaviorObservationProjectionStatus.DEAD_LETTER.value
                 else now + timedelta(seconds=_RETRY_BASE_SECONDS * attempt)
             )
-            active_session.add(
-                orm.BehaviorObservationProjectionFailure(
-                    failure_id=f"bobs-fail-{secrets.token_hex(8)}",
-                    source_record_id=source_record_id,
-                    source_tenant_id=source_tenant_id,
-                    attempt=attempt,
-                    status=status,
-                    error_category=error_category,
-                    detail=dict(detail),
-                    next_retry_at=next_retry_at,
+            if existing is not None:
+                existing.attempt = attempt
+                existing.status = status
+                existing.error_category = error_category
+                existing.detail = dict(detail)
+                existing.next_retry_at = next_retry_at
+                existing.updated_at = now
+            else:
+                active_session.add(
+                    orm.BehaviorObservationProjectionFailure(
+                        failure_id=f"bobs-fail-{secrets.token_hex(8)}",
+                        source_record_id=source_record_id,
+                        source_tenant_id=source_tenant_id,
+                        attempt=attempt,
+                        status=status,
+                        error_category=error_category,
+                        detail=dict(detail),
+                        next_retry_at=next_retry_at,
+                    )
                 )
-            )
             active_session.add(
                 orm.DataQualityError(
                     event_id=None,
@@ -313,10 +324,26 @@ class BehaviorObservationService:
                 )
             )
         retried = 0
+        seen_source_records: set[str] = set()
         for failure in failures:
+            if failure.source_record_id in seen_source_records:
+                continue
+            seen_source_records.add(failure.source_record_id)
             try:
                 await self.project_source_object(failure.source_record_id)
                 retried += 1
+            except ValidationError as exc:
+                await self.record_projection_failure(
+                    source_record_id=failure.source_record_id,
+                    source_tenant_id=failure.source_tenant_id,
+                    error_category="projection_non_retryable",
+                    detail={
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                        "prior_failure_id": failure.failure_id,
+                    },
+                    force_dead_letter=True,
+                )
             except Exception as exc:  # noqa: BLE001 — record and continue
                 await self.record_projection_failure(
                     source_record_id=failure.source_record_id,

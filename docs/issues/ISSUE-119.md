@@ -30,6 +30,7 @@ Observation identity 至少包含：
 - 重放/upsert 幂等；`source_revision` 改变产生可追踪新 revision（`supersedes_observation_id`）。
 - projection failure **不回滚**已持久化 source object；写入 `behavior_observation_projection_failure` + `data_quality_error`，支持 retry/dead-letter。
 - 不创建 Event/Detection/Alert，不写 Disposition。
+- **Phase 0 投影范围**：log/asset 及 incident/alert 等已持久化 source object 均可产生 observation（仅语义规范化，不写回事件链）；connector kind 明确排除。
 
 ## 文件范围
 

@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.source.base import SourcePage
+from app.db import models as orm
 from app.ingestion.source_ingester import SourceIngester
-from app.models.behavior_observation import BehaviorObservationQuery
+from app.models.behavior_observation import (
+    BehaviorObservationProjectionStatus,
+    BehaviorObservationQuery,
+)
 from app.models.enums import SourceDisposition, SourceObjectKind
 from app.models.source import SourceConnector, SourceLog, SourceReference
+from app.services.behavior_observation_projection import BehaviorObservationProjection
 from app.services.behavior_observation_service import BehaviorObservationService
 from app.services.event_service import EventService
 from tests.test_ingestion.test_source_ingester import FakePagedAdapter
@@ -116,3 +123,80 @@ async def test_source_ingester_projects_behavior_observation_for_supporting_obje
     assert item.detection_score == 42.0
     assert item.provenance.raw_payload_hash == f"hash-{suffix}"
     assert "cmdline" not in item.normalized_attributes
+
+
+@pytest.mark.asyncio
+async def test_hook_records_failure_without_rolling_back_source(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = _suffix()
+    tenant_id = f"tenant-{suffix}"
+    connector_id = f"conn-{suffix}"
+    record_id = f"src-hook-{suffix}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SourceConnector(
+                    connector_id=connector_id,
+                    source_product="mock_xdr",
+                    display_name=f"Test {connector_id}",
+                    status="online",
+                    schema_version="1",
+                    connector_metadata={
+                        "source_tenant_id": tenant_id,
+                        "integration_instance_id": f"inst-{suffix}",
+                        "connector_set_version": 1,
+                    },
+                )
+            )
+            session.add(
+                orm.SourceObject(
+                    source_record_id=record_id,
+                    source_product="mock_xdr",
+                    source_tenant_id=tenant_id,
+                    connector_id=connector_id,
+                    source_kind=SourceObjectKind.LOG.value,
+                    source_object_id=f"log-{suffix}",
+                    source_object_type="edr",
+                    source_status_raw="indexed",
+                    source_disposition=SourceDisposition.UNKNOWN.value,
+                    schema_version="1",
+                    ingested_at=datetime(2026, 8, 1, tzinfo=UTC),
+                    raw_payload_hash=f"hash-{suffix}",
+                    normalized={"detection_score": 10, "logged_at": "2026-08-01T00:00:00+00:00"},
+                    raw_payload={"cmdline": "keep"},
+                    current_source_status_raw="indexed",
+                    current_source_disposition=SourceDisposition.UNKNOWN.value,
+                    current_state_version=1,
+                    source_sync_state="synced",
+                )
+            )
+
+    projection = BehaviorObservationProjection(session_factory)
+    with patch.object(
+        projection._service,
+        "project_source_object",
+        side_effect=RuntimeError("hook projection boom"),
+    ):
+        await projection.on_source_record_persisted(record_id)
+
+    async with session_factory() as session:
+        source_row = await session.get(orm.SourceObject, record_id)
+        assert source_row is not None
+        failure = await session.scalar(
+            select(orm.BehaviorObservationProjectionFailure).where(
+                orm.BehaviorObservationProjectionFailure.source_record_id == record_id
+            )
+        )
+        quality = await session.scalar(
+            select(orm.DataQualityError).where(
+                orm.DataQualityError.stage == "behavior_observation_projection"
+            )
+        )
+    assert failure is not None
+    assert failure.status == BehaviorObservationProjectionStatus.PENDING_RETRY.value
+    assert quality is not None
+    observations = await BehaviorObservationService(session_factory).query_observations(
+        BehaviorObservationQuery(source_tenant_id=tenant_id)
+    )
+    assert observations.total == 0

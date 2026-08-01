@@ -119,6 +119,15 @@ def _observed_at_from_row(row: orm.SourceObject) -> datetime:
     return datetime.now(UTC)
 
 
+def _connector_integration_instance_id(
+    connector: orm.SourceConnector | None,
+    *,
+    connector_id: str,
+) -> str:
+    metadata = dict(connector.connector_metadata or {}) if connector is not None else {}
+    return str(metadata.get("integration_instance_id") or connector_id)
+
+
 async def resolve_detection_scope_id(
     session: AsyncSession,
     *,
@@ -127,34 +136,70 @@ async def resolve_detection_scope_id(
     connector_id: str,
 ) -> str:
     """Bind connector to a canonical detection scope id (#625 contract)."""
-    active_rows = await session.scalars(
-        select(orm.DetectionScopeRevision).where(
-            and_(
-                orm.DetectionScopeRevision.source_tenant_id == source_tenant_id,
-                orm.DetectionScopeRevision.source_product == source_product,
-                orm.DetectionScopeRevision.lifecycle_state
-                == DetectionScopeLifecycleState.ACTIVE.value,
+    connector = await session.get(orm.SourceConnector, connector_id)
+    integration_instance_id = _connector_integration_instance_id(
+        connector,
+        connector_id=connector_id,
+    )
+
+    active_rows = list(
+        await session.scalars(
+            select(orm.DetectionScopeRevision)
+            .where(
+                and_(
+                    orm.DetectionScopeRevision.source_tenant_id == source_tenant_id,
+                    orm.DetectionScopeRevision.source_product == source_product,
+                    orm.DetectionScopeRevision.lifecycle_state
+                    == DetectionScopeLifecycleState.ACTIVE.value,
+                )
             )
+            .order_by(orm.DetectionScopeRevision.integration_instance_id.asc())
         )
     )
-    for scope_row in active_rows:
+    if not active_rows:
+        metadata = dict(connector.connector_metadata or {}) if connector is not None else {}
+        identity = DetectionScopeIdentity(
+            source_tenant_id=source_tenant_id,
+            source_product=source_product,
+            integration_instance_id=integration_instance_id,
+            environment=metadata.get("environment"),
+            region=metadata.get("region"),
+        )
+        connector_set_version = int(metadata.get("connector_set_version") or 1)
+        if connector_set_version < 1:
+            raise ValidationError("connector_set_version must be >= 1")
+        return build_detection_scope_id(identity, connector_set_version=connector_set_version)
+
+    instance_scopes = [
+        row for row in active_rows if row.integration_instance_id == integration_instance_id
+    ]
+    matching_scope_ids: list[str] = []
+    for scope_row in instance_scopes:
         connector_set = DetectionScopeConnectorSet.model_validate(scope_row.connector_set)
         if any(member.connector_id == connector_id for member in connector_set.upstream_connectors):
-            return scope_row.detection_scope_id
+            matching_scope_ids.append(scope_row.detection_scope_id)
 
-    connector = await session.get(orm.SourceConnector, connector_id)
-    metadata = dict(connector.connector_metadata or {}) if connector is not None else {}
-    identity = DetectionScopeIdentity(
-        source_tenant_id=source_tenant_id,
-        source_product=source_product,
-        integration_instance_id=str(metadata.get("integration_instance_id") or connector_id),
-        environment=metadata.get("environment"),
-        region=metadata.get("region"),
+    if len(matching_scope_ids) == 1:
+        return matching_scope_ids[0]
+    if len(matching_scope_ids) > 1:
+        raise ValidationError(
+            "ambiguous detection scope binding for connector",
+            details={
+                "connector_id": connector_id,
+                "integration_instance_id": integration_instance_id,
+                "detection_scope_ids": matching_scope_ids,
+            },
+        )
+
+    raise ValidationError(
+        "connector not in active detection scope connector set",
+        details={
+            "connector_id": connector_id,
+            "integration_instance_id": integration_instance_id,
+            "source_tenant_id": source_tenant_id,
+            "source_product": source_product,
+        },
     )
-    connector_set_version = int(metadata.get("connector_set_version") or 1)
-    if connector_set_version < 1:
-        raise ValidationError("connector_set_version must be >= 1")
-    return build_detection_scope_id(identity, connector_set_version=connector_set_version)
 
 
 def build_observation_idempotency_key(
