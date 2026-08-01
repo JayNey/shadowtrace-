@@ -32,7 +32,6 @@ _ANALYSIS_STATUSES = frozenset(
 @dataclass(frozen=True)
 class InvestigationGuidance:
     analysis_only_complete: bool
-    response_execution_deferred: bool
     execution_substate: ExecutionSubstate
     response_phase_state: ResponsePhaseState
     next_recommended_action: NextRecommendedAction
@@ -44,33 +43,8 @@ def full_loop_available(orchestration_mode: str | None) -> bool:
     return (orchestration_mode or "graph").strip().lower() != "analysis_only"
 
 
-def workflow_path_from_request(
-    *,
-    include_response_execution: bool,
-    continue_response_execution: bool = False,
-) -> WorkflowPath:
-    if include_response_execution or continue_response_execution:
-        return "full_loop"
-    return "analysis_only"
-
-
-def can_continue_response_execution(
-    *,
-    status: EventStatus,
-    disposition_policy: DispositionPolicy,
-    context_snapshot: dict[str, Any] | None,
-    orchestration_mode: str | None,
-) -> bool:
-    """True when deferred analysis at REPORTING may resume into ResponseAgent."""
-    if status is not EventStatus.REPORTING:
-        return False
-    guidance = derive_investigation_guidance(
-        status=status,
-        disposition_policy=disposition_policy,
-        context_snapshot=context_snapshot,
-        orchestration_mode=orchestration_mode,
-    )
-    return guidance.response_execution_deferred and guidance.full_loop_available
+def workflow_path_from_request(*, include_response_execution: bool) -> WorkflowPath:
+    return "full_loop" if include_response_execution else "analysis_only"
 
 
 def _execution_substate_from_snapshot(snapshot: dict[str, Any] | None) -> ExecutionSubstate:
@@ -103,16 +77,9 @@ def derive_investigation_guidance(
     execution_substate = _execution_substate_from_snapshot(context_snapshot)
     loop_available = full_loop_available(orchestration_mode)
 
-    response_deferred = (
-        status is EventStatus.REPORTING
-        and analysis_only_complete
-        and disposition_policy is not DispositionPolicy.NOT_REQUIRED
-    )
-
     if status is EventStatus.NEW:
         return InvestigationGuidance(
             analysis_only_complete=False,
-            response_execution_deferred=False,
             execution_substate=ExecutionSubstate.NONE,
             response_phase_state=ResponsePhaseState.NOT_STARTED,
             next_recommended_action=NextRecommendedAction.NONE,
@@ -122,28 +89,27 @@ def derive_investigation_guidance(
     if status in _ANALYSIS_STATUSES:
         return InvestigationGuidance(
             analysis_only_complete=analysis_only_complete,
-            response_execution_deferred=False,
             execution_substate=execution_substate,
             response_phase_state=ResponsePhaseState.ANALYSIS_IN_PROGRESS,
             next_recommended_action=NextRecommendedAction.NONE,
             full_loop_available=loop_available,
         )
 
-    if response_deferred:
+    if status is EventStatus.REPORTING and analysis_only_complete:
         next_action = (
-            NextRecommendedAction.START_RESPONSE_EXECUTION
-            if loop_available
+            NextRecommendedAction.CLOSE
+            if disposition_policy is DispositionPolicy.NOT_REQUIRED
             else NextRecommendedAction.NONE
         )
         message = (
-            "分析已完成，处置方案未生成或未执行。"
-            "可点击下方「生成处置方案并提交审批」继续 ResponseAgent 与审批流程。"
+            "分析已完成，未生成/执行处置方案。"
+            "当前为仅分析路径；如需生成安全处置方案，请在事件 NEW 状态选择"
+            "「分析并生成处置方案」发起调查。"
         )
         if not loop_available:
             message += "（当前部署 ORCHESTRATION_MODE=analysis_only，完整处置链路不可用。）"
         return InvestigationGuidance(
             analysis_only_complete=True,
-            response_execution_deferred=True,
             execution_substate=execution_substate,
             response_phase_state=ResponsePhaseState.ANALYSIS_COMPLETE_DEFERRED,
             next_recommended_action=next_action,
@@ -151,20 +117,9 @@ def derive_investigation_guidance(
             phase_message=message,
         )
 
-    if status is EventStatus.REPORTING and analysis_only_complete:
-        return InvestigationGuidance(
-            analysis_only_complete=True,
-            response_execution_deferred=False,
-            execution_substate=execution_substate,
-            response_phase_state=ResponsePhaseState.ANALYSIS_COMPLETE_DEFERRED,
-            next_recommended_action=NextRecommendedAction.CLOSE,
-            full_loop_available=loop_available,
-        )
-
     if status is EventStatus.PLANNING_RESPONSE:
         return InvestigationGuidance(
             analysis_only_complete=analysis_only_complete,
-            response_execution_deferred=False,
             execution_substate=execution_substate,
             response_phase_state=ResponsePhaseState.RESPONSE_PLANNING,
             next_recommended_action=NextRecommendedAction.NONE,
@@ -174,7 +129,6 @@ def derive_investigation_guidance(
     if status is EventStatus.WAITING_APPROVAL:
         return InvestigationGuidance(
             analysis_only_complete=analysis_only_complete,
-            response_execution_deferred=False,
             execution_substate=execution_substate,
             response_phase_state=ResponsePhaseState.AWAITING_APPROVAL,
             next_recommended_action=NextRecommendedAction.APPROVE_ACTIONS,
@@ -188,7 +142,6 @@ def derive_investigation_guidance(
     }:
         return InvestigationGuidance(
             analysis_only_complete=analysis_only_complete,
-            response_execution_deferred=False,
             execution_substate=execution_substate,
             response_phase_state=ResponsePhaseState.EXECUTING,
             next_recommended_action=NextRecommendedAction.NONE,
@@ -198,7 +151,6 @@ def derive_investigation_guidance(
     if status in {EventStatus.CLOSED, EventStatus.CONTAINED}:
         return InvestigationGuidance(
             analysis_only_complete=analysis_only_complete,
-            response_execution_deferred=False,
             execution_substate=execution_substate,
             response_phase_state=ResponsePhaseState.COMPLETE,
             next_recommended_action=NextRecommendedAction.NONE,
@@ -207,7 +159,6 @@ def derive_investigation_guidance(
 
     return InvestigationGuidance(
         analysis_only_complete=analysis_only_complete,
-        response_execution_deferred=False,
         execution_substate=execution_substate,
         response_phase_state=ResponsePhaseState.NOT_STARTED,
         next_recommended_action=NextRecommendedAction.NONE,
@@ -242,7 +193,6 @@ async def record_investigation_workflow_path(
 __all__ = [
     "InvestigationGuidance",
     "WorkflowPath",
-    "can_continue_response_execution",
     "derive_investigation_guidance",
     "full_loop_available",
     "record_investigation_workflow_path",

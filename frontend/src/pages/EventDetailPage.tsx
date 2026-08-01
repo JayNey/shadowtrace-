@@ -1,6 +1,5 @@
 import {
   Alert,
-  App,
   Button,
   Card,
   Col,
@@ -15,7 +14,6 @@ import {
   Typography,
 } from "antd";
 import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
-import { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import type { ColumnsType } from "antd/es/table";
 import { triageContextFromSnapshot } from "../utils/evidenceContext";
@@ -32,8 +30,7 @@ import StorylineTimeline from "../components/storyline/StorylineTimeline";
 import EventAuditPanel from "../components/audit/EventAuditPanel";
 import EventChatPanel from "../components/chat/EventChatPanel";
 import { isEventChatEnabled } from "../config/features";
-import { triggerInvestigation } from "../services/eventApi";
-import { ApiError } from "../services/apiClient";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEventDetail, type EventWriteback } from "../hooks/useEventDetail";
 import type { Action } from "../types/action";
 import type {
@@ -433,8 +430,6 @@ export default function EventDetailPage() {
   const { eventId } = useParams<{ eventId: string }>();
   const location = useLocation();
   const navigate = useNavigate();
-  const { message } = App.useApp();
-  const [startingResponse, setStartingResponse] = useState(false);
   const {
     event,
     traces,
@@ -479,22 +474,6 @@ export default function EventDetailPage() {
   const triageContext =
     evidenceDetail?.triage_context ?? triageContextFromSnapshot(context) ?? null;
   const writebackSummary = context?.writeback_summary;
-
-  const handleStartResponseExecution = async () => {
-    if (!eventId) return;
-    setStartingResponse(true);
-    try {
-      await triggerInvestigation(eventId, { includeResponseExecution: true });
-      message.success("已启动处置方案生成与审批流程");
-      await refresh("all");
-    } catch (err: unknown) {
-      if (err instanceof ApiError && err.error_code === "full_loop_unavailable") {
-        message.error("当前部署不支持完整处置链路");
-      }
-    } finally {
-      setStartingResponse(false);
-    }
-  };
 
   const sourceContent = (
     <Row gutter={[16, 16]}>
@@ -652,11 +631,7 @@ export default function EventDetailPage() {
         </Button>
       </Space>
       <EventOverviewCard detail={event} />
-      <InvestigationPhaseBanner
-        detail={event}
-        onStartResponse={() => void handleStartResponseExecution()}
-        startingResponse={startingResponse}
-      />
+      <InvestigationPhaseBanner detail={event} />
       <AgentStatusPanel
         eventId={eventId}
         eventStatus={event.event.status}

@@ -84,7 +84,6 @@ async def execute_investigation(
     event_id: str,
     *,
     include_response_execution: bool = False,
-    continue_response_execution: bool = False,
 ) -> dict[str, str]:
     """Run SuperAgent investigation (called from Celery worker via ``asyncio.run``)."""
     from app.api.v1.deps import _get_session_factory, get_super_agent
@@ -97,7 +96,6 @@ async def execute_investigation(
             await agent.investigate(
                 event_id,
                 include_response_execution=include_response_execution,
-                continue_response_execution=continue_response_execution,
             )
         return {"status": "completed", "event_id": event_id}
     except InvestigationInProgressError:
@@ -112,7 +110,6 @@ async def dispatch_investigation(
     event_id: str,
     *,
     include_response_execution: bool = False,
-    continue_response_execution: bool = False,
 ) -> str:
     """Enqueue ``run_investigation`` and return the Celery task id."""
     task_id = str(celery_uuid())
@@ -120,10 +117,7 @@ async def dispatch_investigation(
     try:
         run_investigation.apply_async(
             args=[event_id],
-            kwargs={
-                "include_response_execution": include_response_execution,
-                "continue_response_execution": continue_response_execution,
-            },
+            kwargs={"include_response_execution": include_response_execution},
             task_id=task_id,
             queue=TASK_QUEUE,
         )
@@ -163,7 +157,6 @@ def run_investigation(
     self: Any,
     event_id: str,
     include_response_execution: bool = False,
-    continue_response_execution: bool = False,
 ) -> dict[str, str]:
     """Execute SuperAgent investigation for *event_id* (idempotent when lease held)."""
     try:
@@ -171,7 +164,6 @@ def run_investigation(
             execute_investigation(
                 event_id,
                 include_response_execution=bool(include_response_execution),
-                continue_response_execution=bool(continue_response_execution),
             )
         )
     except SoftTimeLimitExceeded:

@@ -280,7 +280,6 @@ class NextRecommendedAction(StrEnum):
     """Operator next step hint; never implies hidden auto-execution (ISSUE-103)."""
 
     NONE = "none"
-    START_RESPONSE_EXECUTION = "start_response_execution"
     APPROVE_ACTIONS = "approve_actions"
     CLOSE = "close"
 

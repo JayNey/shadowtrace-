@@ -1419,6 +1419,80 @@ async def test_investigate_releases_lease_when_super_agent_wiring_fails(
     assert released[0][0] == event_id
 
 
+@pytest.mark.asyncio
+async def test_investigate_reporting_status_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-103 / #606: investigate accepts NEW only; REPORTING cannot re-investigate."""
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        title="Reporting investigate rejected",
+        include_action=False,
+    )
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+        json={"include_response_execution": True},
+    )
+    assert resp.status_code == 400, resp.text
+    data = resp.json()
+    assert data["error_code"] == "invalid_state_transition"
+
+
+@pytest.mark.asyncio
+async def test_investigate_full_loop_unavailable_in_analysis_only_mode(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-103: ORCHESTRATION_MODE=analysis_only rejects include_response_execution."""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    get_settings.cache_clear()
+
+    event_id = await _create_test_event(event_service, title="Analysis-only mode gate")
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+        json={"include_response_execution": True},
+    )
+    assert resp.status_code == 422, resp.text
+    data = resp.json()
+    assert data["error_code"] == "full_loop_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_event_get_projects_deferred_analysis_guidance(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-103: deferred REPORTING exposes phase guidance without resume CTA."""
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        title="Deferred analysis guidance",
+        include_action=False,
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.SecurityEvent, event_id)
+            assert row is not None
+            row.event_context_snapshot = {"analysis_only_complete": True}
+            await session.flush()
+
+    resp = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["analysis_only_complete"] is True
+    assert data["response_phase_state"] == "analysis_complete_deferred"
+    assert data["next_recommended_action"] == "none"
+    assert data["phase_message"] is not None
+
+
 # --------------------------------------------------------------------------- #
 # Helper: integration pipeline with tool executor + evidence projection
 # --------------------------------------------------------------------------- #

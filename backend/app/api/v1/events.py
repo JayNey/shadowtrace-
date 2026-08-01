@@ -58,8 +58,6 @@ from app.models.enums import (
     EventStatus,
     EventType,
     FinalVerdict,
-    NextRecommendedAction,
-    ResponsePhaseState,
     Severity,
     SourceObjectKind,
     WritebackReadiness,
@@ -68,8 +66,8 @@ from app.models.enums import (
 from app.models.workflow import TransitionContext
 from app.services.decision_trace_service import DecisionTraceService
 from app.services.investigation_guidance import (
-    can_continue_response_execution,
     derive_investigation_guidance,
+    full_loop_available,
     record_investigation_workflow_path,
     workflow_path_from_request,
 )
@@ -608,51 +606,11 @@ def _guidance_fields(event: Any, settings: Any) -> dict[str, Any]:
     )
     return {
         "analysis_only_complete": guidance.analysis_only_complete,
-        "response_execution_deferred": guidance.response_execution_deferred,
         "execution_substate": guidance.execution_substate,
         "response_phase_state": guidance.response_phase_state,
         "next_recommended_action": guidance.next_recommended_action,
         "full_loop_available": guidance.full_loop_available,
         "phase_message": guidance.phase_message,
-    }
-
-
-def _investigate_response_fields(
-    *,
-    event: Any,
-    settings: Any,
-    include_response: bool,
-    continue_response: bool,
-) -> dict[str, Any]:
-    guidance = derive_investigation_guidance(
-        status=event.status,
-        disposition_policy=event.disposition_policy,
-        context_snapshot=event.event_context_snapshot,
-        orchestration_mode=settings.orchestration_mode,
-    )
-    if continue_response:
-        phase = ResponsePhaseState.RESPONSE_PLANNING
-        next_action = NextRecommendedAction.NONE
-        message = "正在启动处置方案生成与审批流程。"
-    elif include_response and event.status is EventStatus.NEW:
-        phase = ResponsePhaseState.ANALYSIS_IN_PROGRESS
-        next_action = NextRecommendedAction.NONE
-        message = "已发起完整调查（含处置方案）。"
-    elif not include_response and event.status is EventStatus.NEW:
-        phase = ResponsePhaseState.ANALYSIS_IN_PROGRESS
-        next_action = NextRecommendedAction.NONE
-        message = "已发起仅分析调查；完成后可在详情页继续生成处置方案。"
-    else:
-        phase = guidance.response_phase_state
-        next_action = guidance.next_recommended_action
-        message = guidance.phase_message
-    return {
-        "include_response_execution": include_response,
-        "continue_response_execution": continue_response,
-        "response_phase_state": phase,
-        "next_recommended_action": next_action,
-        "full_loop_available": guidance.full_loop_available,
-        "phase_message": message,
     }
 
 
@@ -683,28 +641,7 @@ async def investigate_event(
     task_mode = (settings.task_mode or "background").strip().lower()
     include_response = bool(body.include_response_execution) if body else False
 
-    deferred_resume_allowed = can_continue_response_execution(
-        status=event.status,
-        disposition_policy=event.disposition_policy,
-        context_snapshot=event.event_context_snapshot,
-        orchestration_mode=settings.orchestration_mode,
-    )
-    continue_response = include_response and deferred_resume_allowed
-    if include_response and not continue_response and event.status is not EventStatus.NEW:
-        raise InvalidStateTransitionError(
-            "include_response_execution requires NEW or deferred REPORTING resume",
-            current=event.status,
-            target=EventStatus.PLANNING_RESPONSE,
-            details={"event_id": event_id},
-        )
-    if continue_response:
-        if not include_response:
-            raise ValidationError(
-                "deferred response continuation requires include_response_execution=true",
-                error_code="validation_error",
-                details={"event_id": event_id},
-            )
-    elif event.status is not EventStatus.NEW:
+    if event.status is not EventStatus.NEW:
         raise InvalidStateTransitionError(
             f"event must be in NEW status to start investigation, current: {event.status.value}",
             current=event.status,
@@ -718,16 +655,9 @@ async def investigate_event(
             error_code="full_loop_unavailable",
             details={"orchestration_mode": mode},
         )
-    if continue_response and mode == "analysis_only":
-        raise ValidationError(
-            "response continuation is unavailable when ORCHESTRATION_MODE=analysis_only",
-            error_code="full_loop_unavailable",
-            details={"orchestration_mode": mode},
-        )
 
     workflow_path = workflow_path_from_request(
         include_response_execution=include_response,
-        continue_response_execution=continue_response,
     )
 
     async def _record_workflow_path() -> None:
@@ -783,7 +713,6 @@ async def investigate_event(
         task_id = await dispatch_investigation(
             event_id,
             include_response_execution=include_response,
-            continue_response_execution=continue_response,
         )
     else:
         lease = get_event_lease()
@@ -817,8 +746,7 @@ async def investigate_event(
                         event_id,
                         owner_id=owner_id,
                         lease_acquired=True,
-                        include_response_execution=include_response and not continue_response,
-                        continue_response_execution=continue_response,
+                        include_response_execution=include_response,
                     )
                 await _record_workflow_path()
             except InvestigationInProgressError:
@@ -853,12 +781,8 @@ async def investigate_event(
         event_id=event_id,
         task_id=task_id,
         status=event.status,
-        **_investigate_response_fields(
-            event=event,
-            settings=settings,
-            include_response=include_response,
-            continue_response=continue_response,
-        ),
+        include_response_execution=include_response,
+        full_loop_available=full_loop_available(settings.orchestration_mode),
     )
 
 

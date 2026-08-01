@@ -649,12 +649,12 @@ describe("EventDetailPage", () => {
     expect(screen.queryByText("待效果验证后激活")).not.toBeInTheDocument();
   });
 
-  it("shows analysis-only deferred banner when response_phase_state is analysis_complete_deferred", async () => {
+  it("shows analysis-only deferred banner without response CTA", async () => {
     mockGetEvent.mockResolvedValue({
       data: {
         ...makeDetail({ status: "reporting" }),
         response_phase_state: "analysis_complete_deferred",
-        next_recommended_action: "start_response_execution",
+        next_recommended_action: "none",
         full_loop_available: true,
         phase_message: "分析已完成，未生成/执行处置方案。",
       },
@@ -665,6 +665,6 @@ describe("EventDetailPage", () => {
     expect(banner).toBeInTheDocument();
     expect(screen.getByText("分析已完成，处置方案未生成")).toBeInTheDocument();
     expect(screen.getByText("分析已完成，未生成/执行处置方案。")).toBeInTheDocument();
-    expect(screen.getByTestId("start-response-execution-cta")).toBeInTheDocument();
+    expect(screen.queryByTestId("start-response-execution-cta")).not.toBeInTheDocument();
   });
 });

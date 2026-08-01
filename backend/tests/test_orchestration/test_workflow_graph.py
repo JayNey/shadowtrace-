@@ -670,38 +670,6 @@ async def test_deferred_response_required_stays_reporting() -> None:
 
 
 @pytest.mark.asyncio
-async def test_continue_response_execution_skips_analysis_nodes() -> None:
-    """ISSUE-103: deferred REPORTING resume enters graph at response_node."""
-    machine = FakeStateMachine()
-    machine.statuses["evt-continue-response"] = EventStatus.REPORTING
-    machine.status = EventStatus.REPORTING
-    services = _services(machine)
-    risk = RiskAssessment(
-        risk_score=80,
-        severity=Severity.HIGH,
-        confidence=0.9,
-        scoring_mode=ScoringMode.RULE_ONLY,
-    ).model_dump(mode="json")
-    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED).model_dump(mode="json")
-    final = await build_investigation_graph(_agents(), services).ainvoke(
-        _base_state(
-            event_id="evt-continue-response",
-            event_status=EventStatus.REPORTING.value,
-            disposition_policy=DispositionPolicy.REQUIRED.value,
-            continue_response_execution=True,
-            defer_response_execution=False,
-            report_generated=True,
-            risk_assessment=risk,
-            evidence_output=evidence,
-        ),
-        {"configurable": {"thread_id": "evt-continue-response:continuation"}},
-    )
-    assert final["node_trace"][0] == NODE_RESPONSE
-    assert "triage_node" not in final["node_trace"]
-    assert NODE_RESPONSE in final["node_trace"]
-
-
-@pytest.mark.asyncio
 async def test_required_threat_never_enters_disposition_only() -> None:
     """REQUIRED non-FP threat does not take the disposition-only shortcut.
 

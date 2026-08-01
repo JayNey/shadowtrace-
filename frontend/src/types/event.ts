@@ -578,7 +578,6 @@ export type ResponsePhaseState =
 
 export type NextRecommendedAction =
   | "none"
-  | "start_response_execution"
   | "approve_actions"
   | "close";
 
@@ -596,7 +595,6 @@ export interface EventDetailResponse {
   writeback_overall_status: WritebackStatus | null;
   pending_writeback_count: number;
   analysis_only_complete?: boolean;
-  response_execution_deferred?: boolean;
   execution_substate?: ExecutionSubstate;
   response_phase_state?: ResponsePhaseState;
   next_recommended_action?: NextRecommendedAction;

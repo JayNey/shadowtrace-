@@ -164,7 +164,6 @@ class EventDetailResponse(BaseModel):
     writeback_overall_status: WritebackStatus | None = None
     pending_writeback_count: int = 0
     analysis_only_complete: bool = False
-    response_execution_deferred: bool = False
     execution_substate: ExecutionSubstate = ExecutionSubstate.NONE
     response_phase_state: ResponsePhaseState = ResponsePhaseState.NOT_STARTED
     next_recommended_action: NextRecommendedAction = NextRecommendedAction.NONE
@@ -177,11 +176,7 @@ class InvestigateResponse(BaseModel):
     task_id: str
     status: EventStatus
     include_response_execution: bool = False
-    continue_response_execution: bool = False
-    response_phase_state: ResponsePhaseState = ResponsePhaseState.NOT_STARTED
-    next_recommended_action: NextRecommendedAction = NextRecommendedAction.NONE
     full_loop_available: bool = True
-    phase_message: str | None = None
 
 
 class EventCloseResponse(BaseModel):

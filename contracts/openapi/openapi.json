@@ -3525,11 +3525,6 @@
             "title": "Analysis Only Complete",
             "default": false
           },
-          "response_execution_deferred": {
-            "type": "boolean",
-            "title": "Response Execution Deferred",
-            "default": false
-          },
           "execution_substate": {
             "$ref": "#/components/schemas/ExecutionSubstate",
             "default": "none"
@@ -4733,34 +4728,10 @@
             "title": "Include Response Execution",
             "default": false
           },
-          "continue_response_execution": {
-            "type": "boolean",
-            "title": "Continue Response Execution",
-            "default": false
-          },
-          "response_phase_state": {
-            "$ref": "#/components/schemas/ResponsePhaseState",
-            "default": "not_started"
-          },
-          "next_recommended_action": {
-            "$ref": "#/components/schemas/NextRecommendedAction",
-            "default": "none"
-          },
           "full_loop_available": {
             "type": "boolean",
             "title": "Full Loop Available",
             "default": true
-          },
-          "phase_message": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Phase Message"
           }
         },
         "type": "object",
@@ -5036,7 +5007,6 @@
         "type": "string",
         "enum": [
           "none",
-          "start_response_execution",
           "approve_actions",
           "close"
         ],

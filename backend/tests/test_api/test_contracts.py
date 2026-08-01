@@ -614,30 +614,14 @@ def test_event_detail_response_includes_investigation_guidance_fields() -> None:
         writeback_required=True,
         writeback_readiness=WritebackReadiness.CAPABILITY_UNKNOWN,
         analysis_only_complete=True,
-        response_execution_deferred=True,
         response_phase_state=ResponsePhaseState.ANALYSIS_COMPLETE_DEFERRED,
-        next_recommended_action=NextRecommendedAction.START_RESPONSE_EXECUTION,
-        full_loop_available=True,
-        phase_message="分析已完成，处置方案未生成或未执行。",
-    )
-    assert detail.response_execution_deferred is True
-    assert detail.response_phase_state is ResponsePhaseState.ANALYSIS_COMPLETE_DEFERRED
-    assert detail.analysis_only_complete is True
-
-
-def test_investigate_response_includes_guidance_fields() -> None:
-    resp = s.InvestigateResponse(
-        event_id="evt-test",
-        task_id="evt-test",
-        status=EventStatus.REPORTING,
-        include_response_execution=True,
-        continue_response_execution=True,
-        response_phase_state=ResponsePhaseState.RESPONSE_PLANNING,
         next_recommended_action=NextRecommendedAction.NONE,
         full_loop_available=True,
-        phase_message="正在启动处置方案生成与审批流程。",
+        phase_message="分析已完成，未生成/执行处置方案。",
     )
-    assert resp.continue_response_execution is True
+    assert detail.response_phase_state is ResponsePhaseState.ANALYSIS_COMPLETE_DEFERRED
+    assert detail.analysis_only_complete is True
+    assert detail.next_recommended_action is NextRecommendedAction.NONE
 
 
 def test_investigate_response_echoes_include_response_execution() -> None:
@@ -646,8 +630,10 @@ def test_investigate_response_echoes_include_response_execution() -> None:
         task_id="evt-test",
         status=EventStatus.NEW,
         include_response_execution=True,
+        full_loop_available=True,
     )
     assert resp.include_response_execution is True
+    assert resp.full_loop_available is True
 
 
 def test_ingest_source_record_request_accepts_incident_associations() -> None:

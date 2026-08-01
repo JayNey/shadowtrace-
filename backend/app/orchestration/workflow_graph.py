@@ -147,14 +147,6 @@ ROUTE_REPLAN = "replan"
 ROUTE_MANUAL = "manual"
 ROUTE_WRITEBACK = "writeback"
 ROUTE_HALT = "halt"
-ROUTE_TRIAGE = "triage"
-
-
-def route_at_start(state: InvestigationState) -> str:
-    """ISSUE-103: resume deferred response without replaying analysis nodes."""
-    if state.get("continue_response_execution"):
-        return ROUTE_RESPONSE
-    return ROUTE_TRIAGE
 
 
 class _AgentLike(Protocol):
@@ -500,34 +492,6 @@ async def build_initial_investigation_state(
         state["risk_assessment"] = context.risk_assessment
     if context.response_plan is not None:
         state["response_plan"] = context.response_plan
-    return state
-
-
-async def build_response_continuation_state(
-    event_id: str,
-    *,
-    context_store: EventContextStore,
-) -> InvestigationState:
-    """Build graph state to resume ResponseAgent after deferred analysis (ISSUE-103)."""
-    context = await context_store.get_full_context(event_id)
-    event = context.event
-    if event is None:
-        raise ValueError(f"missing event summary for {event_id}")
-    if event.status is not EventStatus.REPORTING:
-        raise ValueError(
-            f"response continuation requires REPORTING, got {event.status.value}",
-        )
-    if context.risk_assessment is None or context.evidence_output is None:
-        raise ValueError("response continuation requires completed analysis artifacts")
-    state = await build_initial_investigation_state(
-        event_id,
-        context_store=context_store,
-        defer_response_execution=False,
-    )
-    state["continue_response_execution"] = True
-    state["defer_response_execution"] = False
-    state["report_generated"] = context.report is not None or bool(state.get("report_generated"))
-    state["halted"] = False
     return state
 
 
@@ -982,37 +946,21 @@ def build_investigation_graph(
             )
             response_update["response_plan"] = result.model_dump(mode="json")
         verdict_raw = state.get("final_verdict")
-        response_ctx = TransitionContext(
-            disposition_only_intent=bool(state.get("disposition_only_intent")),
-            final_verdict=FinalVerdict(verdict_raw) if verdict_raw else None,
-        )
-        status_patch: InvestigationState = cast(InvestigationState, {})
-        current_status = EventStatus(
-            state.get("event_status", EventStatus.NEW.value),
-        )
-        if state.get("continue_response_execution") or current_status is EventStatus.REPORTING:
-            status_patch = await _transition_status(
-                services,
-                state,
-                EventStatus.PLANNING_RESPONSE,
-                context=response_ctx.model_copy(
-                    update={"continue_response_execution": True},
-                ),
-                reason="investigation:resume_response_planning",
-            )
-            state = {**state, **status_patch}
         status = await _transition_status(
             services,
             state,
             EventStatus.WAITING_APPROVAL,
-            context=response_ctx,
+            context=TransitionContext(
+                disposition_only_intent=bool(state.get("disposition_only_intent")),
+                final_verdict=FinalVerdict(verdict_raw) if verdict_raw else None,
+            ),
             reason=(
                 "investigation:response_plan"
                 if response_agent is not None
                 else "investigation:response_stub"
             ),
         )
-        return _patch_state(_trace(NODE_RESPONSE), status_patch, status, response_update)
+        return _patch_state(_trace(NODE_RESPONSE), status, response_update)
 
     async def approval_node(state: InvestigationState) -> InvestigationState:
         approval_engine = services.get("approval_engine")
@@ -1497,14 +1445,7 @@ def build_investigation_graph(
     if rag_agent is not None:
         register(NODE_RAG, rag_graph_node)
 
-    graph.add_conditional_edges(
-        START,
-        route_at_start,
-        {
-            ROUTE_TRIAGE: NODE_TRIAGE,
-            ROUTE_RESPONSE: NODE_RESPONSE,
-        },
-    )
+    graph.add_edge(START, NODE_TRIAGE)
     graph.add_conditional_edges(
         NODE_TRIAGE,
         route_after_triage,
