@@ -1,0 +1,308 @@
+{
+  "$defs": {
+    "CandidateDetection": {
+      "additionalProperties": false,
+      "description": "Shadow-only detection candidate — never creates Event/SourceAlert.",
+      "properties": {
+        "candidate_detection_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Candidate Detection Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Package Id",
+          "type": "string"
+        },
+        "package_version": {
+          "minimum": 1,
+          "title": "Package Version",
+          "type": "integer"
+        },
+        "rule_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "rule_version": {
+          "minimum": 1,
+          "title": "Rule Version",
+          "type": "integer"
+        },
+        "operator": {
+          "$ref": "#/$defs/RuleOperatorKind"
+        },
+        "group_key": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Group Key",
+          "type": "object"
+        },
+        "cutoff_at": {
+          "format": "date-time",
+          "title": "Cutoff At",
+          "type": "string"
+        },
+        "window_kind": {
+          "maxLength": 16,
+          "minLength": 1,
+          "title": "Window Kind",
+          "type": "string"
+        },
+        "matched_value": {
+          "minimum": 0,
+          "title": "Matched Value",
+          "type": "number"
+        },
+        "severity": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Severity",
+          "type": "string"
+        },
+        "shadow_only": {
+          "default": true,
+          "title": "Shadow Only",
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/CandidateDetectionProvenance"
+        },
+        "content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        }
+      },
+      "required": [
+        "candidate_detection_id",
+        "source_tenant_id",
+        "detection_scope_id",
+        "package_id",
+        "package_version",
+        "rule_id",
+        "rule_version",
+        "operator",
+        "cutoff_at",
+        "window_kind",
+        "matched_value",
+        "severity",
+        "provenance",
+        "content_hash",
+        "idempotency_key"
+      ],
+      "title": "CandidateDetection",
+      "type": "object"
+    },
+    "CandidateDetectionProvenance": {
+      "additionalProperties": false,
+      "description": "Evidence anchors for shadow candidate output.",
+      "properties": {
+        "observation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Observation Ids",
+          "type": "array"
+        },
+        "snapshot_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Snapshot Ids",
+          "type": "array"
+        },
+        "window_start": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window Start"
+        },
+        "window_end": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window End"
+        }
+      },
+      "title": "CandidateDetectionProvenance",
+      "type": "object"
+    },
+    "DetectionRuleRuntimeError": {
+      "additionalProperties": false,
+      "description": "Typed runtime failure — never silently treated as benign.",
+      "properties": {
+        "error_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Error Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Package Id",
+          "type": "string"
+        },
+        "rule_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Id"
+        },
+        "error_category": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Error Category",
+          "type": "string"
+        },
+        "error_message": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Error Message",
+          "type": "string"
+        },
+        "detail": {
+          "additionalProperties": true,
+          "title": "Detail",
+          "type": "object"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        }
+      },
+      "required": [
+        "error_id",
+        "source_tenant_id",
+        "package_id",
+        "error_category",
+        "error_message"
+      ],
+      "title": "DetectionRuleRuntimeError",
+      "type": "object"
+    },
+    "RuleOperatorKind": {
+      "description": "Phase A operators supported by the minimal runtime.",
+      "enum": [
+        "event_match",
+        "event_count",
+        "value_count"
+      ],
+      "title": "RuleOperatorKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Execution outcome for one shadow run.",
+  "properties": {
+    "candidates": {
+      "items": {
+        "$ref": "#/$defs/CandidateDetection"
+      },
+      "title": "Candidates",
+      "type": "array"
+    },
+    "errors": {
+      "items": {
+        "$ref": "#/$defs/DetectionRuleRuntimeError"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "rules_evaluated": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Rules Evaluated",
+      "type": "integer"
+    },
+    "observations_scanned": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Observations Scanned",
+      "type": "integer"
+    }
+  },
+  "title": "DetectionRuleRuntimeResult",
+  "type": "object"
+}

@@ -83,6 +83,19 @@ from app.models.feature_snapshot import (
     FeatureSnapshotQuery,
     SeasonalityProfile,
 )
+from app.models.detection_rule import (
+    CandidateDetection,
+    CandidateDetectionListResult,
+    CandidateDetectionProvenance,
+    CandidateDetectionQuery,
+    DetectionRuleDefinition,
+    DetectionRulePackage,
+    DetectionRulePackageListResult,
+    DetectionRulePackageProvenance,
+    DetectionRulePackageQuery,
+    DetectionRuleRuntimeError,
+    DetectionRuleRuntimeResult,
+)
 from app.models.evaluation_truth import (
     BenignSliceExpectation,
     EvaluationCaseTruth,
@@ -293,6 +306,18 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "DetectionFeatureBaselineQuery": DetectionFeatureBaselineQuery,
     "DetectionFeatureBaselineListResult": DetectionFeatureBaselineListResult,
     "SeasonalityProfile": SeasonalityProfile,
+    # detection rule runtime (ISSUE-121 / #626)
+    "DetectionRulePackage": DetectionRulePackage,
+    "DetectionRuleDefinition": DetectionRuleDefinition,
+    "DetectionRulePackageProvenance": DetectionRulePackageProvenance,
+    "DetectionRulePackageQuery": DetectionRulePackageQuery,
+    "DetectionRulePackageListResult": DetectionRulePackageListResult,
+    "CandidateDetection": CandidateDetection,
+    "CandidateDetectionProvenance": CandidateDetectionProvenance,
+    "CandidateDetectionQuery": CandidateDetectionQuery,
+    "CandidateDetectionListResult": CandidateDetectionListResult,
+    "DetectionRuleRuntimeError": DetectionRuleRuntimeError,
+    "DetectionRuleRuntimeResult": DetectionRuleRuntimeResult,
     # evaluation truth (ISSUE-113)
     "EvaluationCaseTruth": EvaluationCaseTruth,
     "EvaluationDatasetManifest": EvaluationDatasetManifest,

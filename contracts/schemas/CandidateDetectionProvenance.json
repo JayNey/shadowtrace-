@@ -1,0 +1,50 @@
+{
+  "additionalProperties": false,
+  "description": "Evidence anchors for shadow candidate output.",
+  "properties": {
+    "observation_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 256,
+      "title": "Observation Ids",
+      "type": "array"
+    },
+    "snapshot_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64,
+      "title": "Snapshot Ids",
+      "type": "array"
+    },
+    "window_start": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Window Start"
+    },
+    "window_end": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Window End"
+    }
+  },
+  "title": "CandidateDetectionProvenance",
+  "type": "object"
+}

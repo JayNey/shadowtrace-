@@ -1,0 +1,56 @@
+{
+  "additionalProperties": false,
+  "description": "Authoring and review trace — not a substitute for #630 governance.",
+  "properties": {
+    "author": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Author",
+      "type": "string"
+    },
+    "review_artifact_ref": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Review Artifact Ref"
+    },
+    "test_artifact_ref": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Test Artifact Ref"
+    },
+    "compiled_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Compiled At"
+    }
+  },
+  "required": [
+    "author"
+  ],
+  "title": "DetectionRulePackageProvenance",
+  "type": "object"
+}

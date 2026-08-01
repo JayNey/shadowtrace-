@@ -1,0 +1,130 @@
+{
+  "$defs": {
+    "MissingDataPolicy": {
+      "description": "Behavior when required fields or snapshot signal is absent.",
+      "enum": [
+        "skip",
+        "fail",
+        "treat_as_zero"
+      ],
+      "title": "MissingDataPolicy",
+      "type": "string"
+    },
+    "RuleOperatorKind": {
+      "description": "Phase A operators supported by the minimal runtime.",
+      "enum": [
+        "event_match",
+        "event_count",
+        "value_count"
+      ],
+      "title": "RuleOperatorKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Single compiled rule within a package.",
+  "properties": {
+    "rule_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Rule Id",
+      "type": "string"
+    },
+    "rule_version": {
+      "minimum": 1,
+      "title": "Rule Version",
+      "type": "integer"
+    },
+    "operator": {
+      "$ref": "#/$defs/RuleOperatorKind"
+    },
+    "feature_contract_version": {
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Feature Contract Version",
+      "type": "string"
+    },
+    "detection_scope_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Detection Scope Id",
+      "type": "string"
+    },
+    "window_kind": {
+      "maxLength": 16,
+      "minLength": 1,
+      "title": "Window Kind",
+      "type": "string"
+    },
+    "group_key_fields": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 8,
+      "minItems": 1,
+      "title": "Group Key Fields",
+      "type": "array"
+    },
+    "threshold": {
+      "minimum": 0,
+      "title": "Threshold",
+      "type": "number"
+    },
+    "severity": {
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Severity",
+      "type": "string"
+    },
+    "required_fields": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16,
+      "title": "Required Fields",
+      "type": "array"
+    },
+    "missing_data_policy": {
+      "$ref": "#/$defs/MissingDataPolicy",
+      "default": "skip"
+    },
+    "match_criteria": {
+      "additionalProperties": true,
+      "title": "Match Criteria",
+      "type": "object"
+    },
+    "value_field": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Value Field"
+    },
+    "max_observation_scan": {
+      "default": 1000,
+      "maximum": 10000,
+      "minimum": 1,
+      "title": "Max Observation Scan",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "rule_id",
+    "rule_version",
+    "operator",
+    "feature_contract_version",
+    "detection_scope_id",
+    "window_kind",
+    "group_key_fields",
+    "threshold",
+    "severity"
+  ],
+  "title": "DetectionRuleDefinition",
+  "type": "object"
+}

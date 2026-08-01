@@ -1,0 +1,76 @@
+{
+  "additionalProperties": false,
+  "description": "Typed runtime failure — never silently treated as benign.",
+  "properties": {
+    "error_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Error Id",
+      "type": "string"
+    },
+    "source_tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Tenant Id",
+      "type": "string"
+    },
+    "package_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Package Id",
+      "type": "string"
+    },
+    "rule_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Rule Id"
+    },
+    "error_category": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Error Category",
+      "type": "string"
+    },
+    "error_message": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Error Message",
+      "type": "string"
+    },
+    "detail": {
+      "additionalProperties": true,
+      "title": "Detail",
+      "type": "object"
+    },
+    "created_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created At"
+    }
+  },
+  "required": [
+    "error_id",
+    "source_tenant_id",
+    "package_id",
+    "error_category",
+    "error_message"
+  ],
+  "title": "DetectionRuleRuntimeError",
+  "type": "object"
+}

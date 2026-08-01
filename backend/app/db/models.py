@@ -863,6 +863,99 @@ class DetectionFeatureBaseline(Base):
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
 
 
+class DetectionRulePackage(Base):
+    """Versioned detection-as-code rule package (ISSUE-121 / #626)."""
+
+    __tablename__ = "detection_rule_package"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_detection_rule_package_idempotency_key"),
+        Index(
+            "ix_detection_rule_package_tenant_state",
+            "source_tenant_id",
+            "runtime_state",
+        ),
+    )
+
+    package_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    package_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    runtime_state: Mapped[str] = mapped_column(String, nullable=False)
+    rules: Mapped[list[Any]] = mapped_column(JSONB, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    supersedes_package_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("detection_rule_package.package_id"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class CandidateDetection(Base):
+    """Shadow-only candidate detection output (ISSUE-121 / #626)."""
+
+    __tablename__ = "candidate_detection"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_candidate_detection_idempotency_key"),
+        Index(
+            "ix_candidate_detection_tenant_scope_cutoff",
+            "source_tenant_id",
+            "detection_scope_id",
+            "cutoff_at",
+        ),
+        Index(
+            "ix_candidate_detection_package_rule",
+            "source_tenant_id",
+            "package_id",
+            "rule_id",
+        ),
+    )
+
+    candidate_detection_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    detection_scope_id: Mapped[str] = mapped_column(String, nullable=False)
+    package_id: Mapped[str] = mapped_column(String, nullable=False)
+    package_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    rule_id: Mapped[str] = mapped_column(String, nullable=False)
+    rule_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operator: Mapped[str] = mapped_column(String, nullable=False)
+    group_key: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    cutoff_at: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    window_kind: Mapped[str] = mapped_column(String, nullable=False)
+    matched_value: Mapped[float] = mapped_column(Float, nullable=False)
+    severity: Mapped[str] = mapped_column(String, nullable=False)
+    shadow_only: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class DetectionRuleRuntimeError(Base):
+    """Typed runtime execution failure (ISSUE-121 / #626)."""
+
+    __tablename__ = "detection_rule_runtime_error"
+    __table_args__ = (
+        Index(
+            "ix_detection_rule_runtime_error_tenant_package",
+            "source_tenant_id",
+            "package_id",
+        ),
+    )
+
+    error_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    package_id: Mapped[str] = mapped_column(String, nullable=False)
+    rule_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    error_category: Mapped[str] = mapped_column(String, nullable=False)
+    error_message: Mapped[str] = mapped_column(String, nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
 class DataQualityError(Base):
     """Ingestion/normalization quality issues; event_id nullable (pre-event errors)."""
 
