@@ -235,6 +235,23 @@ def _normalized_baseline_from_dict(
     return baseline or None
 
 
+def _snapshot_has_risk_baseline(snapshot: dict[str, Any] | None) -> bool:
+    """True when frozen snapshot carries a usable ``normalized.risk_score``."""
+    if not isinstance(snapshot, dict):
+        return False
+    normalized = snapshot.get("normalized")
+    if not isinstance(normalized, dict):
+        return False
+    raw_score = normalized.get("risk_score")
+    if raw_score is None:
+        return False
+    try:
+        int(raw_score)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def _source_snapshot_from_row(row: orm.SecurityEvent) -> dict[str, Any]:
     """Return immutable source evidence only; never include mutable current_* state."""
     snapshot: dict[str, Any] = {
@@ -1241,7 +1258,7 @@ class EventService:
         field so a crash between ``event`` init and snapshot write can heal.
         """
         snapshot = _source_snapshot_from_row(row)
-        if not isinstance(snapshot.get("normalized"), dict):
+        if not _snapshot_has_risk_baseline(snapshot):
             async with self._session_factory() as session:
                 source_record_id = row.current_primary_source_record_id
                 if source_record_id:
@@ -1252,7 +1269,15 @@ class EventService:
                             event_type=row.event_type,
                         )
                         if baseline:
-                            snapshot = {**snapshot, "normalized": baseline}
+                            existing_norm = (
+                                dict(snapshot["normalized"])
+                                if isinstance(snapshot.get("normalized"), dict)
+                                else {}
+                            )
+                            snapshot = {
+                                **snapshot,
+                                "normalized": {**existing_norm, **baseline},
+                            }
         if not overwrite:
             async with self._session_factory() as session:
                 exists = await session.scalar(
@@ -1262,6 +1287,24 @@ class EventService:
                     )
                 )
             if exists is not None:
+                # Heal incomplete snapshots that predate ISSUE-102 baseline fields.
+                if _snapshot_has_risk_baseline(snapshot):
+                    existing = await self._store.get(row.event_id, "source_snapshot")
+                    if isinstance(existing, dict) and not _snapshot_has_risk_baseline(
+                        existing
+                    ):
+                        repaired = {
+                            **existing,
+                            "normalized": dict(snapshot["normalized"]),
+                        }
+                        if existing.get("severity") is None and snapshot.get("severity"):
+                            repaired["severity"] = snapshot["severity"]
+                        result = await self._store.set(
+                            row.event_id,
+                            "source_snapshot",
+                            repaired,
+                        )
+                        return result.redis_ok
                 return True
         result = await self._store.set(row.event_id, "source_snapshot", snapshot)
         return result.redis_ok

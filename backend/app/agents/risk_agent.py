@@ -261,13 +261,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         except (TypeError, ValueError):
             conf = 0.75
         conf = max(0.0, min(1.0, conf))
-        llm_evidence_limited = data.get("evidence_limited")
-        if llm_evidence_limited is not None and not isinstance(llm_evidence_limited, bool):
-            logger.debug(
-                "RiskAgent LLM evidence_limited ignored (non-boolean) event=%s value=%r",
-                input.event_id,
-                llm_evidence_limited,
-            )
+        # LLM may echo evidence_limited; deterministic rule path owns the flag.
         return scores, conf
 
     def _merge_factors(

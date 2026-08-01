@@ -19,6 +19,7 @@ from app.models.evidence import Evidence
 EVIDENCE_LIMITED_CONFIDENCE_CAP = 0.35
 SOURCE_BASELINE_FLOOR_RATIO = 0.85
 _HIGH_SOURCE_MIN_SCORE = 70
+_CRITICAL_SOURCE_MIN_SCORE = 90
 
 # Fixed weights (sum = 1.0).
 FACTOR_WEIGHTS: dict[str, float] = {
@@ -130,19 +131,49 @@ def is_evidence_limited(evidence_output: EvidenceOutput) -> bool:
     return len(evidence_output.evidence_list) == 0
 
 
+def _source_eligible_for_severity_floor(source_severity: Severity | None) -> bool:
+    """Floor only applies when source severity is HIGH or CRITICAL (ISSUE-102 step 2)."""
+    if source_severity is None:
+        return False
+    return _severity_rank(source_severity) >= _severity_rank(Severity.HIGH)
+
+
+def _min_floored_severity(source_severity: Severity) -> Severity:
+    """Minimum output severity under evidence-limited floor.
+
+    HIGH keeps HIGH. CRITICAL floors one tier to HIGH so score/severity stay
+    aligned with intro §4.6 bands (CRITICAL requires score >= 90 only with evidence).
+    """
+    if source_severity is Severity.CRITICAL:
+        return Severity.HIGH
+    return Severity.HIGH
+
+
+def _min_score_for_severity(severity: Severity) -> int:
+    if severity is Severity.CRITICAL:
+        return _CRITICAL_SOURCE_MIN_SCORE
+    if severity is Severity.HIGH:
+        return _HIGH_SOURCE_MIN_SCORE
+    if severity is Severity.MEDIUM:
+        return 40
+    return 0
+
+
 def compute_score_floor(
     *,
     source_baseline: int | None,
     source_severity: Severity | None,
 ) -> int | None:
-    """Minimum rule/merged score when evidence is limited (ISSUE-102)."""
+    """Minimum rule/merged score when evidence is limited (ISSUE-102).
+
+    Gated on ``source_severity >= HIGH``. Low/medium source alerts never get a
+    score floor from baseline (avoids FP mis-lift).
+    """
+    if not _source_eligible_for_severity_floor(source_severity):
+        return None
     if source_baseline is not None:
         return max(0, min(100, int(round(source_baseline * SOURCE_BASELINE_FLOOR_RATIO))))
-    if source_severity is not None and _severity_rank(source_severity) >= _severity_rank(
-        Severity.HIGH
-    ):
-        return _HIGH_SOURCE_MIN_SCORE
-    return None
+    return _HIGH_SOURCE_MIN_SCORE
 
 
 def apply_severity_floor(
@@ -152,22 +183,28 @@ def apply_severity_floor(
     source_severity: Severity | None,
     evidence_limited: bool,
 ) -> tuple[int, Severity, bool]:
-    """Ensure high-severity source alerts are not silently downgraded."""
-    if not evidence_limited or source_severity is None:
-        return risk_score, severity, False
-    if _severity_rank(source_severity) < _severity_rank(Severity.HIGH):
-        return risk_score, severity, False
+    """Ensure high-severity source alerts are not silently downgraded.
 
-    floor_applied = False
+    Score and severity stay band-aligned: floor severity maps through
+    ``severity_from_score`` mins (HIGH → score >= 70).
+    """
+    if not evidence_limited or not _source_eligible_for_severity_floor(source_severity):
+        return risk_score, severity, False
+    assert source_severity is not None
+
+    min_severity = _min_floored_severity(source_severity)
+    min_score = _min_score_for_severity(min_severity)
     adjusted_score = risk_score
     adjusted_severity = severity
+    floor_applied = False
 
-    if adjusted_score < _HIGH_SOURCE_MIN_SCORE:
-        adjusted_score = max(adjusted_score, _HIGH_SOURCE_MIN_SCORE)
-        adjusted_severity = Severity.HIGH
+    if adjusted_score < min_score:
+        adjusted_score = min_score
         floor_applied = True
-    elif _severity_rank(adjusted_severity) < _severity_rank(source_severity):
-        adjusted_severity = source_severity
+    adjusted_severity = severity_from_score(adjusted_score)
+    if _severity_rank(adjusted_severity) < _severity_rank(min_severity):
+        adjusted_severity = min_severity
+        adjusted_score = max(adjusted_score, min_score)
         floor_applied = True
 
     return adjusted_score, adjusted_severity, floor_applied

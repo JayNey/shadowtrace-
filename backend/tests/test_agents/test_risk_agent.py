@@ -562,8 +562,8 @@ def test_apply_evidence_limited_floor_formula() -> None:
     expected_floor = int(round(76 * SOURCE_BASELINE_FLOOR_RATIO))
     assert adjustment.evidence_limited is True
     assert adjustment.source_risk_baseline == 76
-    assert adjustment.risk_score >= expected_floor
-    assert adjustment.severity in {Severity.HIGH, Severity.MEDIUM}
+    assert adjustment.risk_score >= max(expected_floor, 70)
+    assert adjustment.severity is Severity.HIGH
     assert adjustment.severity_floor_applied is True
     assert adjustment.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
 
@@ -582,6 +582,42 @@ def test_apply_evidence_limited_skips_fp_low_severity() -> None:
     assert adjustment.risk_score == 22
     assert adjustment.severity_floor_applied is False
     assert adjustment.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
+
+
+def test_low_severity_zero_evidence_no_score_floor() -> None:
+    """Score floor is gated on source severity >= HIGH; low FP must not lift."""
+    adjustment = apply_evidence_limited_adjustments(
+        risk_score=5,
+        confidence=0.4,
+        evidence_output=_zero_evidence_output(status=CollectionStatus.FAILED),
+        source_snapshot={
+            "severity": "low",
+            "normalized": {"risk_score": 18, "scenario": "account_anomaly_fp"},
+        },
+    )
+    assert adjustment.evidence_limited is True
+    assert adjustment.risk_score == 5
+    assert adjustment.severity is Severity.LOW
+    assert adjustment.severity_floor_applied is False
+    assert adjustment.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
+
+
+def test_critical_source_floor_keeps_score_severity_aligned() -> None:
+    """CRITICAL source floors one tier to HIGH; score stays in HIGH band (>=70)."""
+    adjustment = apply_evidence_limited_adjustments(
+        risk_score=45,
+        confidence=0.5,
+        evidence_output=_zero_evidence_output(),
+        source_snapshot={
+            "severity": "critical",
+            "normalized": {"risk_score": 95, "event_type": "malicious_process"},
+        },
+    )
+    assert adjustment.evidence_limited is True
+    assert adjustment.severity_floor_applied is True
+    assert adjustment.severity is Severity.HIGH
+    assert 70 <= adjustment.risk_score < 90
+    assert severity_from_score(adjustment.risk_score) is adjustment.severity
 
 
 def test_source_baseline_from_frozen_ingest_snapshot() -> None:
@@ -641,8 +677,8 @@ async def test_malicious_process_zero_evidence_applies_severity_floor(
     assert output.evidence_limited is True
     assert output.source_risk_baseline == 76
     assert output.severity_floor_applied is True
-    assert output.risk_score >= int(round(76 * SOURCE_BASELINE_FLOOR_RATIO))
-    assert output.severity in {Severity.HIGH, Severity.MEDIUM}
+    assert output.risk_score >= 70
+    assert output.severity is Severity.HIGH
     assert output.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
     assert agent.last_verdict is FinalVerdict.NONE
     evidence_factor = next(
@@ -650,6 +686,39 @@ async def test_malicious_process_zero_evidence_applies_severity_floor(
     )
     assert "source_baseline=76" in evidence_factor.reasoning
     assert "evidence_limited=true" in evidence_factor.reasoning
+
+
+@pytest.mark.asyncio
+async def test_account_anomaly_fp_zero_evidence_not_floored_to_high(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-fp-zero-{uuid4().hex[:8]}"
+    wm.values[(event_id, "source_snapshot")] = {
+        "severity": "low",
+        "normalized": {"risk_score": 18, "scenario": "account_anomaly_fp"},
+    }
+    agent = RiskAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    output = await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=TriageResult(
+                event_type=EventType.ACCOUNT_ANOMALY,
+                severity=Severity.LOW,
+                need_investigation=False,
+            ),
+            evidence_output=_zero_evidence_output(),
+        )
+    )
+    assert output.evidence_limited is True
+    assert output.severity_floor_applied is False
+    assert output.severity is not Severity.HIGH
+    assert output.risk_score < 40
+    assert output.confidence <= EVIDENCE_LIMITED_CONFIDENCE_CAP
 
 
 @pytest.mark.asyncio
@@ -697,4 +766,5 @@ async def test_llm_failure_zero_evidence_still_applies_floor(
     )
     assert output.scoring_mode is ScoringMode.RULE_ONLY
     assert output.evidence_limited is True
-    assert output.risk_score >= int(round(76 * SOURCE_BASELINE_FLOOR_RATIO))
+    assert output.risk_score >= 70
+    assert output.severity is Severity.HIGH
