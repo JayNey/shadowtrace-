@@ -165,15 +165,43 @@ class SourceIngester:
         else:
             self._behavior_observation = None
 
-    def _behavior_on_persisted(self) -> Callable[[str], Awaitable[None]] | None:
+    def _behavior_on_persisted(
+        self,
+        failures: list[dict[str, Any]] | None = None,
+    ) -> Callable[[str], Awaitable[None]] | None:
         if self._behavior_observation is None:
             return None
-        return self._behavior_observation.persisted_callback()
 
-    async def _project_behavior_observation(self, source_record_id: str) -> None:
+        async def _callback(source_record_id: str) -> None:
+            if not await self._behavior_observation.on_source_record_persisted(source_record_id):
+                if failures is not None:
+                    failures.append({"source_record_id": source_record_id})
+
+        return _callback
+
+    async def _project_behavior_observation(self, source_record_id: str) -> bool:
         if self._behavior_observation is None:
-            return
-        await self._behavior_observation.on_source_record_persisted(source_record_id)
+            return True
+        return await self._behavior_observation.on_source_record_persisted(source_record_id)
+
+    def _mark_behavior_projection_failure(
+        self,
+        summary: IngestionSummary,
+        *,
+        source_record_id: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        summary.degraded = True
+        payload: dict[str, Any] = {"source_record_id": source_record_id}
+        if detail is not None:
+            payload.update(detail)
+        summary.errors.append(
+            {
+                "stage": "behavior_observation_projection",
+                "error_category": "projection_failed",
+                "detail": payload,
+            }
+        )
 
     async def poll(
         self,
@@ -311,8 +339,6 @@ class SourceIngester:
         aggregate = IngestionSummary()
         for summary in summaries:
             _merge_counts(aggregate, summary)
-            aggregate.degraded = aggregate.degraded or summary.degraded
-            aggregate.errors.extend(summary.errors)
         if len(summaries) == 1:
             aggregate.watermark_before = _copy_watermark(summaries[0].watermark_before)
             aggregate.watermark_after = _copy_watermark(summaries[0].watermark_after)
@@ -488,8 +514,6 @@ class SourceIngester:
                 checkpoint_connector_id = next(iter(page_connectors))
 
             if page_summary.rejected:
-                summary.degraded = True
-                summary.errors.extend(page_summary.errors)
                 if checkpoint_connector_id is not None:
                     await self._mark_kind_checkpoint(
                         checkpoint_connector_id,
@@ -569,7 +593,10 @@ class SourceIngester:
             if connector_id:
                 connector_ids.add(connector_id)
             try:
-                duplicate = await self._ingest_one(item, source_type=source_type)
+                idempotent, behavior_failed = await self._ingest_one(
+                    item,
+                    source_type=source_type,
+                )
             except Exception as exc:  # noqa: BLE001 — partial batch acceptance
                 summary.rejected += 1
                 detail: dict[str, Any] = {
@@ -590,7 +617,17 @@ class SourceIngester:
                 )
                 continue
 
-            if duplicate:
+            if behavior_failed:
+                summary.degraded = True
+                summary.errors.append(
+                    {
+                        "stage": "behavior_observation_projection",
+                        "error_category": "projection_failed",
+                        "detail": {"connector_id": connector_id},
+                    }
+                )
+
+            if idempotent:
                 summary.duplicate += 1
             else:
                 summary.accepted += 1
@@ -622,6 +659,7 @@ class SourceIngester:
         *,
         summary: IngestionSummary,
     ) -> None:
+        behavior_failures: list[dict[str, Any]] = []
         try:
             # Evidence has its own idempotent identities. Until adapters expose
             # a dedicated evidence watermark, replay the page rather than reuse
@@ -639,8 +677,13 @@ class SourceIngester:
                 connector_id=page.connector_id,
                 schema_version=page.schema_version,
                 watermark=summary.watermark_after,
-                on_persisted=self._behavior_on_persisted(),
+                on_persisted=self._behavior_on_persisted(behavior_failures),
             )
+            for failure in behavior_failures:
+                self._mark_behavior_projection_failure(
+                    summary,
+                    source_record_id=str(failure["source_record_id"]),
+                )
         except Exception as exc:  # noqa: BLE001 — project gap degrades, never fabricates
             summary.degraded = True
             summary.errors.append(
@@ -660,20 +703,23 @@ class SourceIngester:
                 detail={"adapter": adapter.name, "type": type(exc).__name__},
             )
 
-    async def _ingest_one(self, item: Any, *, source_type: str) -> bool:
+    async def _ingest_one(self, item: Any, *, source_type: str) -> tuple[bool, bool]:
+        behavior_failed = False
         if isinstance(item, _EVENT_SOURCE_TYPES):
             result = await self._events.ingest_source_object(
                 source_to_ingestable(item, source_type=source_type)
             )
-            await self._project_behavior_observation(result.source_record_id)
-            return result.idempotent
+            if not await self._project_behavior_observation(result.source_record_id):
+                behavior_failed = True
+            return result.idempotent, behavior_failed
         if isinstance(item, _SUPPORTING_SOURCE_TYPES):
-            return await self._persist_supporting_object(
+            idempotent, supporting_failed = await self._persist_supporting_object(
                 item,
                 source_type=source_type,
             )
+            return idempotent, supporting_failed
         if isinstance(item, SourceConnector):
-            return await self._persist_connector(item, adapter_name=source_type)
+            return await self._persist_connector(item, adapter_name=source_type), False
         raise TypeError(f"unsupported source object type: {type(item).__name__}")
 
     async def _persist_supporting_object(
@@ -681,7 +727,7 @@ class SourceIngester:
         item: SourceAsset | SourceLog,
         *,
         source_type: str,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         ref = item.reference
         identity = source_identity(ref)
         record_id = stable_source_record_id(identity=identity)
@@ -757,8 +803,8 @@ class SourceIngester:
         # Supporting object is now committed: re-enrich the parent event's entities
         # via the adapter-recorded parent_source_object_id back-reference.
         await self._events.refresh_events_for_supporting_ref(ref)
-        await self._project_behavior_observation(record_id)
-        return idempotent
+        behavior_failed = not await self._project_behavior_observation(record_id)
+        return idempotent, behavior_failed
 
     async def _persist_connector(
         self,
@@ -1195,6 +1241,8 @@ def _merge_counts(target: IngestionSummary, source: IngestionSummary) -> None:
     target.accepted += source.accepted
     target.duplicate += source.duplicate
     target.rejected += source.rejected
+    target.degraded = target.degraded or source.degraded
+    target.errors.extend(source.errors)
 
 
 def _connector_id(item: Any) -> str | None:

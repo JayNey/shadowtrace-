@@ -29,10 +29,11 @@ class BehaviorObservationProjection:
     async def project_source_record(self, source_record_id: str) -> BehaviorObservation | None:
         return await self._service.project_source_object(source_record_id)
 
-    async def on_source_record_persisted(self, source_record_id: str) -> None:
+    async def on_source_record_persisted(self, source_record_id: str) -> bool:
         """Best-effort projection; failures are durable and observable."""
         try:
             await self.project_source_record(source_record_id)
+            return True
         except Exception as exc:  # noqa: BLE001 — degrade without rolling back source writes
             logger.warning(
                 "BehaviorObservation projection failed source_record_id=%s err=%s",
@@ -58,6 +59,7 @@ class BehaviorObservationProjection:
                     "message": str(exc),
                 },
             )
+            return False
 
     def persisted_callback(self) -> OnPersistedCallback:
         return self.on_source_record_persisted

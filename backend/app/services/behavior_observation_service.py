@@ -239,6 +239,7 @@ class BehaviorObservationService:
                 if status == BehaviorObservationProjectionStatus.DEAD_LETTER.value
                 else now + timedelta(seconds=_RETRY_BASE_SECONDS * attempt)
             )
+            prior_status = existing.status if existing is not None else None
             if existing is not None:
                 existing.attempt = attempt
                 existing.status = status
@@ -259,20 +260,21 @@ class BehaviorObservationService:
                         next_retry_at=next_retry_at,
                     )
                 )
-            active_session.add(
-                orm.DataQualityError(
-                    event_id=None,
-                    stage="behavior_observation_projection",
-                    error_category=error_category,
-                    detail={
-                        "source_record_id": source_record_id,
-                        "source_tenant_id": source_tenant_id,
-                        "attempt": attempt,
-                        "status": status,
-                        **detail,
-                    },
+            if prior_status is None or prior_status != status:
+                active_session.add(
+                    orm.DataQualityError(
+                        event_id=None,
+                        stage="behavior_observation_projection",
+                        error_category=error_category,
+                        detail={
+                            "source_record_id": source_record_id,
+                            "source_tenant_id": source_tenant_id,
+                            "attempt": attempt,
+                            "status": status,
+                            **detail,
+                        },
+                    )
                 )
-            )
 
         if session is not None:
             await _run(session)

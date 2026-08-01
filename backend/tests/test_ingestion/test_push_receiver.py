@@ -14,7 +14,8 @@ from app.ingestion.push_receiver import PushBatchEnvelope, PushReceiver
 from app.ingestion.source_ingester import SourceIngester
 from app.models.enums import ConnectorStatus, SourceObjectKind
 from app.models.source import SourceIncident, SourceReference
-from app.services.event_service import EventService
+from app.models.behavior_observation import BehaviorObservationQuery
+from app.services.behavior_observation_service import BehaviorObservationService
 
 
 def _suffix() -> str:
@@ -142,3 +143,36 @@ async def test_push_rejects_schema_incompatible_object_but_marks_delivery(
 
     replay = await receiver.receive(envelope)
     assert replay.duplicate == 1
+
+
+@pytest.mark.asyncio
+async def test_push_projects_behavior_observation_for_incident(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = _suffix()
+    connector_id = f"conn-push-bobs-{suffix}"
+    tenant_id = f"tenant-push-{suffix}"
+    ingester = SourceIngester(
+        event_service,
+        session_factory,
+        source_mode="mock_xdr",
+    )
+    receiver = PushReceiver(ingester, event_service, session_factory)
+    payload = _incident_payload(connector_id, f"INC-{suffix}")
+    payload["reference"]["source_tenant_id"] = tenant_id
+    envelope = PushBatchEnvelope(
+        connector_id=connector_id,
+        delivery_id=f"delivery-bobs-{suffix}",
+        source_product="mock_xdr",
+        objects=[{"source_kind": "incident", "payload": payload}],
+    )
+
+    result = await receiver.receive(envelope)
+    assert result.accepted == 1
+    assert result.degraded is False
+
+    observations = await BehaviorObservationService(session_factory).query_observations(
+        BehaviorObservationQuery(source_tenant_id=tenant_id)
+    )
+    assert observations.total >= 1

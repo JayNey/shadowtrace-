@@ -18,6 +18,15 @@ Observation identity 至少包含：
 - `projection_schema_version`
 - `detection_scope_id`（消费 #625 Phase 0 contract，禁止仅靠全局 `connector_id`）
 
+### Scope 绑定状态机（Phase 0）
+
+1. **Tenant 级零 ACTIVE scope**：对该 connector 的 `integration_instance_id` 走 metadata fallback（`connector_metadata.integration_instance_id` + `connector_set_version` → 确定性 `detection_scope_id`）。
+2. **该 instance 尚无 ACTIVE scope，但同 tenant 其他 instance 已有 ACTIVE scope**：仍对该 instance 走 metadata fallback（不因其他 instance 已注册而 fail-closed）。
+3. **该 instance 已有 ACTIVE scope 且 connector 在 upstream set 中**：绑定 registered `detection_scope_id`。
+4. **该 instance 已有 ACTIVE scope 但 connector 不在 upstream set 中**：fail-closed（`ValidationError`），写入 projection failure + DQE，ingest 本身不回滚；poll/push summary 标记 `degraded=true`。
+
+部署 ISSUE-120 后，应逐步为每个 integration instance 注册并激活 scope；在过渡期内，未注册 instance 仍可通过 fallback 产生 observation。
+
 ## 字段
 
 `observation_id`、`source_tenant_id`、`detection_scope_id`、`source_ref`、`observed_at`、`ingested_at`、`entity_refs`、`action`/`category`、`normalized_attributes`、`detection_score`（非 `risk_score`）、`schema_version`、`provenance`/`content_hash`。

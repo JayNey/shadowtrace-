@@ -69,18 +69,22 @@ async def clean_tables(
             await session.execute(delete(orm.BehaviorObservationProjectionFailure))
             await session.execute(delete(orm.BehaviorObservation))
             await session.execute(delete(orm.DetectionScopeRevision))
+            await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
             await session.execute(delete(orm.SourceConnector))
             await session.execute(delete(orm.DataQualityError))
+            await session.execute(delete(orm.SecurityEvent))
     yield
     async with session_factory() as session:
         async with session.begin():
             await session.execute(delete(orm.BehaviorObservationProjectionFailure))
             await session.execute(delete(orm.BehaviorObservation))
             await session.execute(delete(orm.DetectionScopeRevision))
+            await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
             await session.execute(delete(orm.SourceConnector))
             await session.execute(delete(orm.DataQualityError))
+            await session.execute(delete(orm.SecurityEvent))
 
 
 def _observation_service(
@@ -401,6 +405,54 @@ async def test_idempotency_hash_mismatch_rejected(
 
 
 @pytest.mark.asyncio
+async def test_resolve_scope_fallback_when_other_instance_has_active_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scoped_connector = f"conn-a-{suffix}"
+    fallback_connector = f"conn-b-{suffix}"
+    instance_a = f"inst-a-{suffix}"
+    instance_b = f"inst-b-{suffix}"
+    await _seed_connector(
+        session_factory,
+        connector_id=scoped_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_a,
+    )
+    await _seed_connector(
+        session_factory,
+        connector_id=fallback_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_b,
+    )
+    scope_service = _scope_service(session_factory)
+    identity = DetectionScopeIdentity(
+        source_tenant_id=tenant_id,
+        source_product="mock_xdr",
+        integration_instance_id=instance_a,
+    )
+    revision = await scope_service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=scoped_connector, source_product="mock_xdr"),
+        ],
+    )
+    await scope_service.activate_revision(revision.scope_revision_id)
+
+    record_id = await _seed_source_log(
+        session_factory,
+        suffix=f"b-{suffix}",
+        tenant_id=tenant_id,
+        connector_id=fallback_connector,
+    )
+    observation = await _observation_service(session_factory).project_source_object(record_id)
+    assert observation is not None
+    assert observation.detection_scope_id.startswith("dscope-")
+
+
+@pytest.mark.asyncio
 async def test_resolve_scope_fails_when_active_scope_missing_connector(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -485,9 +537,21 @@ async def test_projection_failure_updates_single_row_on_repeat(
             )
             or 0
         )
+        dqe_total = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.DataQualityError)
+                .where(
+                    orm.DataQualityError.stage == "behavior_observation_projection",
+                    orm.DataQualityError.detail["source_record_id"].as_string() == record_id,
+                )
+            )
+            or 0
+        )
     assert total == 1
     assert rows[0].attempt == 2
     assert rows[0].detail["message"] == "second"
+    assert dqe_total == 1
 
 
 @pytest.mark.asyncio

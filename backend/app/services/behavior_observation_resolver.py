@@ -30,8 +30,7 @@ from app.models.detection_scope import (
     DetectionScopeIdentity,
     DetectionScopeLifecycleState,
 )
-from app.models.enums import SourceDisposition, SourceObjectKind
-from app.models.source import SourceReference
+from app.models.enums import SourceObjectKind
 from app.services.detection_scope_resolver import build_detection_scope_id
 
 _RAW_PAYLOAD_KEY_PATTERN = re.compile(
@@ -128,6 +127,28 @@ def _connector_integration_instance_id(
     return str(metadata.get("integration_instance_id") or connector_id)
 
 
+def _metadata_fallback_scope_id(
+    *,
+    connector: orm.SourceConnector | None,
+    source_tenant_id: str,
+    source_product: str,
+    integration_instance_id: str,
+) -> str:
+    """Bootstrap scope id from connector metadata when no ACTIVE scope is registered."""
+    metadata = dict(connector.connector_metadata or {}) if connector is not None else {}
+    identity = DetectionScopeIdentity(
+        source_tenant_id=source_tenant_id,
+        source_product=source_product,
+        integration_instance_id=integration_instance_id,
+        environment=metadata.get("environment"),
+        region=metadata.get("region"),
+    )
+    connector_set_version = int(metadata.get("connector_set_version") or 1)
+    if connector_set_version < 1:
+        raise ValidationError("connector_set_version must be >= 1")
+    return build_detection_scope_id(identity, connector_set_version=connector_set_version)
+
+
 async def resolve_detection_scope_id(
     session: AsyncSession,
     *,
@@ -157,22 +178,24 @@ async def resolve_detection_scope_id(
         )
     )
     if not active_rows:
-        metadata = dict(connector.connector_metadata or {}) if connector is not None else {}
-        identity = DetectionScopeIdentity(
+        return _metadata_fallback_scope_id(
+            connector=connector,
             source_tenant_id=source_tenant_id,
             source_product=source_product,
             integration_instance_id=integration_instance_id,
-            environment=metadata.get("environment"),
-            region=metadata.get("region"),
         )
-        connector_set_version = int(metadata.get("connector_set_version") or 1)
-        if connector_set_version < 1:
-            raise ValidationError("connector_set_version must be >= 1")
-        return build_detection_scope_id(identity, connector_set_version=connector_set_version)
 
     instance_scopes = [
         row for row in active_rows if row.integration_instance_id == integration_instance_id
     ]
+    if not instance_scopes:
+        return _metadata_fallback_scope_id(
+            connector=connector,
+            source_tenant_id=source_tenant_id,
+            source_product=source_product,
+            integration_instance_id=integration_instance_id,
+        )
+
     matching_scope_ids: list[str] = []
     for scope_row in instance_scopes:
         connector_set = DetectionScopeConnectorSet.model_validate(scope_row.connector_set)
@@ -331,21 +354,3 @@ def build_behavior_observation(
         projection_schema_version=BEHAVIOR_OBSERVATION_PROJECTION_SCHEMA_VERSION,
     )
 
-
-def source_reference_from_row(row: orm.SourceObject) -> SourceReference:
-    return SourceReference(
-        source_kind=SourceObjectKind(row.source_kind),
-        source_product=row.source_product,
-        source_tenant_id=row.source_tenant_id,
-        connector_id=row.connector_id,
-        source_object_type=row.source_object_type,
-        source_object_id=row.source_object_id,
-        parent_source_object_id=row.parent_source_object_id,
-        source_status_raw=row.source_status_raw,
-        source_disposition=SourceDisposition(row.source_disposition),
-        source_concurrency_token=row.source_concurrency_token,
-        source_updated_at=row.source_updated_at,
-        schema_version=row.schema_version,
-        ingested_at=row.ingested_at,
-        raw_payload_hash=row.raw_payload_hash,
-    )
