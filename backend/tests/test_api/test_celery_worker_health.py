@@ -113,7 +113,7 @@ async def test_health_worker_error_returns_200_with_degraded_overall(
 
 
 @pytest.mark.asyncio
-async def test_health_celery_broker_down_still_503_via_hard_deps(client: AsyncClient) -> None:
+async def test_health_redis_hard_dep_down_returns_503(client: AsyncClient) -> None:
     settings = Settings(
         TASK_MODE="celery",
         SIMULATION_ENABLED=True,
@@ -143,3 +143,46 @@ async def test_health_celery_broker_down_still_503_via_hard_deps(client: AsyncCl
     app.dependency_overrides.clear()
     assert response.status_code == 503
     assert response.json()["redis"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_health_celery_broker_error_degrades_overall_in_celery_mode(
+    client: AsyncClient,
+) -> None:
+    settings = Settings(
+        DATABASE_URL="postgresql+asyncpg://u:p@localhost:5432/db",
+        REDIS_URL="redis://localhost:6379/0",
+        CELERY_BROKER_URL="redis://broker-only:6379/1",
+        TASK_MODE="celery",
+        SIMULATION_ENABLED=True,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    celery_payload: dict[str, Any] = {
+        "task_mode": "celery",
+        "broker": "error",
+        "worker": {"status": "ok", "workers": 1, "worker_ids": ["investigation@host"]},
+    }
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock"},
+        ),
+        patch(
+            "app.api.v1.health.build_celery_health",
+            new_callable=AsyncMock,
+            return_value=celery_payload,
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["celery"]["broker"] == "error"
+    assert body["celery"]["worker"]["status"] == "ok"

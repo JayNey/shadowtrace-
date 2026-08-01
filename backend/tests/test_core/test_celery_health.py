@@ -67,6 +67,20 @@ def test_probe_celery_workers_degraded_when_empty_replies() -> None:
     assert result["workers"] == 0
 
 
+def test_probe_celery_workers_error_on_inspect_exception() -> None:
+    from app.core.celery_app import celery_app
+
+    with patch.object(
+        celery_app.control,
+        "inspect",
+        side_effect=TimeoutError("inspect timed out"),
+    ):
+        result = probe_celery_workers(timeout=1.0)
+    assert result["status"] == "error"
+    assert result["workers"] == 0
+    assert result["reason"] == "TimeoutError"
+
+
 @pytest.mark.asyncio
 async def test_build_celery_health_skips_worker_probe_in_background_mode() -> None:
     with patch(

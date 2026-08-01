@@ -6,19 +6,31 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 BASE="http://127.0.0.1:${BACKEND_PORT}/api/v1"
+COMPOSE_FILE="${ROOT}/infra/docker-compose.yml"
 
 echo "==> health (expect celery.worker ok when worker profile is up)"
 curl -sf "${BASE}/health" | python3 -m json.tool | grep -A6 '"celery"'
 
+if ! command -v docker >/dev/null 2>&1; then
+  echo "ERROR: docker is required for worker smoke (inspect + enqueue need a running worker)"
+  echo "Run: make up WORKER=1"
+  exit 1
+fi
+
+worker_id="$(docker compose -f "${COMPOSE_FILE}" ps -q worker 2>/dev/null | head -1 || true)"
+if [[ -z "${worker_id}" ]]; then
+  echo "ERROR: worker container not found — enqueue smoke requires a healthy worker"
+  echo "Run: make up WORKER=1"
+  exit 1
+fi
+
 echo "==> worker ping via celery inspect (destination=investigation@hostname)"
-if command -v docker >/dev/null 2>&1; then
-  worker_id="$(docker compose -f "${ROOT}/infra/docker-compose.yml" ps -q worker 2>/dev/null | head -1 || true)"
-  if [[ -n "${worker_id}" ]]; then
-    worker_host="$(docker exec "${worker_id}" hostname)"
-    docker exec "${worker_id}" python -m celery -A app.core.celery_app inspect ping -d "investigation@${worker_host}" -t 5
-  else
-    echo "WARN: worker container not found — skip in-container inspect"
-  fi
+worker_host="$(docker exec "${worker_id}" hostname)"
+if ! docker exec "${worker_id}" python -m celery -A app.core.celery_app inspect ping \
+  -d "investigation@${worker_host}" -t 5; then
+  echo "ERROR: worker inspect ping failed — worker may still be starting"
+  echo "Retry after: docker compose -f ${COMPOSE_FILE} ps worker"
+  exit 1
 fi
 
 echo "==> enqueue worker_ping (requires redis broker reachable from host)"

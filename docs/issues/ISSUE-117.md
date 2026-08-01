@@ -40,7 +40,8 @@ GitHub 权威：
 
 - Queue: `investigation`
 - Tasks: `shadowtrace.run_investigation`, `shadowtrace.worker_ping`
-- Health keys: `celery.broker`, `celery.worker`
+- Health keys: `celery.broker`, `celery.worker`（HTTP 响应中为嵌套对象 `celery: { broker, worker, task_mode }`）
+- `TASK_MODE=celery` 且 `celery.broker=error` 时顶层 `status=degraded`（HTTP 仍为 200；publish 失败仍走 503）
 
 ## 测试与验证
 

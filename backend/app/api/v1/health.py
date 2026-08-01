@@ -149,12 +149,16 @@ async def health(
 
     hard_deps_ok = postgres == "ok" and redis_status == "ok"
     embedding_ok = embedding_provider.get("status") == "ok"
+    celery_task_mode = str(celery_health.get("task_mode", "background"))
+    celery_broker_status = str(celery_health.get("broker", "error"))
     celery_worker_status = str(celery_health.get("worker", {}).get("status", "not_applicable"))
 
     overall = "ok"
     if not hard_deps_ok or not embedding_ok:
         overall = "degraded"
     elif celery_worker_status in {"degraded", "error"}:
+        overall = "degraded"
+    elif celery_task_mode == "celery" and celery_broker_status == "error":
         overall = "degraded"
 
     # 503 only for hard dependency / embedding failures — not missing workers alone (#622).
