@@ -166,6 +166,26 @@ def publish_investigation_for_intent(
     )
 
 
+async def _admit_intent_delivery(intent_id: str, broker_task_id: str):
+    from app.db.session import get_session_factory
+    from app.services.investigation_intent_service import InvestigationIntentService
+
+    service = InvestigationIntentService(get_session_factory())
+    return await service.mark_started(intent_id, broker_task_id=broker_task_id)
+
+
+def _skipped_delivery_result(
+    event_id: str,
+    *,
+    reason: str,
+) -> dict[str, str]:
+    return {
+        "status": "skipped",
+        "event_id": event_id,
+        "reason": reason,
+    }
+
+
 async def _finalize_intent_from_result(intent_id: str, result: dict[str, str]) -> None:
     from app.db.session import get_session_factory
     from app.services.investigation_intent_service import InvestigationIntentService
@@ -179,14 +199,6 @@ async def _finalize_intent_from_result(intent_id: str, result: dict[str, str]) -
         )
     else:
         await service.mark_terminal(intent_id)
-
-
-async def _mark_intent_started(intent_id: str, broker_task_id: str) -> None:
-    from app.db.session import get_session_factory
-    from app.services.investigation_intent_service import InvestigationIntentService
-
-    service = InvestigationIntentService(get_session_factory())
-    await service.mark_started(intent_id, broker_task_id=broker_task_id)
 
 
 async def resolve_task_state(task_id: str) -> tuple[str, str | None]:
@@ -255,7 +267,22 @@ def run_investigation(
             owner_id,
         )
     if intent_id:
-        asyncio.run(_mark_intent_started(intent_id, str(self.request.id)))
+        from app.models.investigation_intent import IntentDeliveryAdmission
+
+        admission = asyncio.run(_admit_intent_delivery(intent_id, str(self.request.id)))
+        if admission is not IntentDeliveryAdmission.ACCEPTED:
+            reason = {
+                IntentDeliveryAdmission.STALE_SUPERSEDED: "stale_broker_task",
+                IntentDeliveryAdmission.ALREADY_TERMINAL: "intent_already_terminal",
+                IntentDeliveryAdmission.MISSING: "intent_missing",
+            }[admission]
+            logger.info(
+                "run_investigation delivery rejected event=%s intent=%s admission=%s",
+                event_id,
+                intent_id,
+                admission.value,
+            )
+            return _skipped_delivery_result(event_id, reason=reason)
     try:
         result = asyncio.run(
             _run_investigation_body(
@@ -288,6 +315,17 @@ def run_investigation(
             self.request.retries,
             exc_info=True,
         )
+        if intent_id and self.request.retries >= self.max_retries:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            asyncio.run(
+                InvestigationIntentService(get_session_factory()).mark_retry(
+                    intent_id,
+                    error=str(exc),
+                )
+            )
+            raise
         # Keep intent in STARTED during Celery in-flight retries; dispatcher owns RETRY.
         raise self.retry(exc=exc) from exc
     except Exception as exc:

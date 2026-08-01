@@ -207,3 +207,80 @@ async def test_provisional_alert_materializes_intent_after_window(
         )
     assert row is not None
     assert row.status == InvestigationIntentStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_promoted_incident_creates_pending_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client,
+) -> None:
+    from uuid import uuid4
+
+    store = EventContextStore(redis_client, session_factory)
+    degraded = DegradedFlagService(store, session_factory)
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    intent_service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        degraded_flags=degraded,
+        settings=settings,
+    )
+    events = EventService(
+        session_factory,
+        store,
+        degraded_flags=degraded,
+        investigation_intent=intent_service,
+    )
+    sfx = uuid4().hex[:8]
+    alert_ref = SourceReference(
+        source_kind=SourceObjectKind.ALERT,
+        source_product="mock_xdr",
+        source_tenant_id="tenant-demo",
+        connector_id="conn-mock",
+        source_object_id=f"AL-promote-{sfx}",
+        source_updated_at=datetime.now(UTC),
+    )
+    incident_ref = SourceReference(
+        source_kind=SourceObjectKind.INCIDENT,
+        source_product="mock_xdr",
+        source_tenant_id="tenant-demo",
+        connector_id="conn-mock",
+        source_object_id=f"INC-promote-{sfx}",
+        source_updated_at=datetime.now(UTC),
+    )
+    alert = await events.ingest_source_object(
+        IngestableSource(
+            reference=alert_ref,
+            title="provisional alert",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            normalized={"risk_score": 76, "event_type": "malicious_process"},
+        )
+    )
+    async with session_factory() as session:
+        before = await session.scalar(
+            select(orm.InvestigationIntent).where(
+                orm.InvestigationIntent.event_id == alert.event_id
+            )
+        )
+        assert before is None
+
+    promoted = await events.ingest_source_object(
+        IngestableSource(
+            reference=incident_ref,
+            title="parent incident",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            normalized={"risk_score": 76, "event_type": "malicious_process"},
+            related_alert_refs=[alert_ref],
+        )
+    )
+    assert promoted.promoted is True
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(orm.InvestigationIntent).where(
+                orm.InvestigationIntent.event_id == promoted.event_id
+            )
+        )
+    assert row is not None
+    assert row.status == InvestigationIntentStatus.PENDING.value

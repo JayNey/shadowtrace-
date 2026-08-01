@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 from app.models.enums import InvestigationIntentStatus
 
 INTENT_KIND_AUTO_INVESTIGATE = "auto_investigate"
 INTENT_VERSION_ISSUE108_V1 = "issue108_v1"
+
+
+class IntentDeliveryAdmission(StrEnum):
+    """Whether a Celery delivery may execute SuperAgent for an intent."""
+
+    ACCEPTED = "accepted"
+    STALE_SUPERSEDED = "stale_superseded"
+    ALREADY_TERMINAL = "already_terminal"
+    MISSING = "missing"
+
 
 INTENT_TRANSITIONS: dict[InvestigationIntentStatus, frozenset[InvestigationIntentStatus]] = {
     InvestigationIntentStatus.PENDING: frozenset({InvestigationIntentStatus.CLAIMED}),
@@ -89,6 +100,7 @@ __all__ = [
     "INTENT_KIND_AUTO_INVESTIGATE",
     "INTENT_TRANSITIONS",
     "INTENT_VERSION_ISSUE108_V1",
+    "IntentDeliveryAdmission",
     "InvestigationIntentRecord",
     "InvestigationIntentTransitionError",
     "TERMINAL_INTENT_STATUSES",

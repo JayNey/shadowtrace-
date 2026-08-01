@@ -19,6 +19,7 @@ from app.models.investigation_intent import (
     INTENT_KIND_AUTO_INVESTIGATE,
     INTENT_VERSION_ISSUE108_V1,
     TERMINAL_INTENT_STATUSES,
+    IntentDeliveryAdmission,
     validate_intent_transition,
 )
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
@@ -163,50 +164,55 @@ class InvestigationIntentService:
                 published += 1
         return published
 
-    async def mark_started(self, intent_id: str, *, broker_task_id: str) -> None:
-        """ENQUEUED→STARTED on first delivery; idempotent for Celery retries/redelivery."""
+    async def mark_started(self, intent_id: str, *, broker_task_id: str) -> IntentDeliveryAdmission:
+        """Admit or reject a Celery delivery against the durable intent ledger."""
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(orm.InvestigationIntent, intent_id)
                 if row is None:
-                    return
+                    return IntentDeliveryAdmission.MISSING
                 current = InvestigationIntentStatus(row.status)
                 if current in TERMINAL_INTENT_STATUSES:
-                    return
+                    return IntentDeliveryAdmission.ALREADY_TERMINAL
                 if current is InvestigationIntentStatus.STARTED:
                     if row.broker_task_id == broker_task_id:
-                        return
+                        return IntentDeliveryAdmission.ACCEPTED
                     expected = deterministic_investigation_task_id(
                         row.intent_id,
                         int(row.revision or 1),
                     )
                     if broker_task_id == expected:
                         row.broker_task_id = broker_task_id
-                        return
+                        return IntentDeliveryAdmission.ACCEPTED
                     logger.warning(
                         "investigation intent already started intent=%s existing_task=%s new_task=%s",
                         intent_id,
                         row.broker_task_id,
                         broker_task_id,
                     )
-                    return
-                if (
-                    current is InvestigationIntentStatus.ENQUEUED
-                    and row.broker_task_id
-                    and row.broker_task_id != broker_task_id
-                ):
+                    return IntentDeliveryAdmission.STALE_SUPERSEDED
+                if current is not InvestigationIntentStatus.ENQUEUED:
+                    logger.warning(
+                        "broker task ignored for non-enqueued intent=%s status=%s task=%s",
+                        intent_id,
+                        current.value,
+                        broker_task_id,
+                    )
+                    return IntentDeliveryAdmission.STALE_SUPERSEDED
+                if row.broker_task_id and row.broker_task_id != broker_task_id:
                     logger.warning(
                         "stale broker task ignored intent=%s expected=%s got=%s",
                         intent_id,
                         row.broker_task_id,
                         broker_task_id,
                     )
-                    return
+                    return IntentDeliveryAdmission.STALE_SUPERSEDED
                 validate_intent_transition(current, InvestigationIntentStatus.STARTED)
                 row.status = InvestigationIntentStatus.STARTED.value
                 row.broker_task_id = broker_task_id
                 row.claim_owner = None
                 row.claim_expires_at = None
+                return IntentDeliveryAdmission.ACCEPTED
 
     async def mark_terminal(self, intent_id: str) -> None:
         await self._transition(intent_id, InvestigationIntentStatus.TERMINAL, clear_claim=True)

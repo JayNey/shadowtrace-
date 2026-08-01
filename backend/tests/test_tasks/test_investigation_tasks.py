@@ -342,3 +342,226 @@ def test_run_investigation_unhandled_exception_marks_intent_dead(
             assert row.status == InvestigationIntentStatus.DEAD.value
 
     asyncio.run(_verify())
+
+
+def test_run_investigation_skips_body_when_broker_task_superseded(
+    session_factory: async_sessionmaker[AsyncSession],
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from app.db import models as orm
+    from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+
+    intent_id = f"iin-skip-body-{uuid4().hex[:8]}"
+    event_id = f"evt-skip-body-{uuid4().hex[:8]}"
+    current_task = "task-current"
+    stale_task = "task-stale"
+
+    async def _seed() -> None:
+        async with session_factory() as session:
+            async with session.begin():
+                session.add(
+                    orm.SecurityEvent(
+                        event_id=event_id,
+                        event_type="malicious_process",
+                        title="Suspicious process",
+                        description="",
+                        status=EventStatus.NEW.value,
+                        severity=Severity.HIGH.value,
+                        final_verdict="none",
+                        creation_source_ref={"source_product": "mock_xdr"},
+                        source_reference_snapshots=[],
+                        disposition_policy="not_required",
+                        raw_alert_ids=[],
+                        source_type="mock_xdr",
+                    )
+                )
+                await session.flush()
+                session.add(
+                    orm.InvestigationIntent(
+                        intent_id=intent_id,
+                        event_id=event_id,
+                        intent_kind="auto_investigate",
+                        intent_version="issue108_v1",
+                        status=InvestigationIntentStatus.ENQUEUED.value,
+                        revision=1,
+                        attempt=0,
+                        broker_task_id=current_task,
+                    )
+                )
+
+    asyncio.run(_seed())
+
+    calls = {"n": 0}
+
+    async def _execute(*_args: object, **_kwargs: object) -> dict[str, str]:
+        calls["n"] += 1
+        return {"status": "completed", "event_id": event_id}
+
+    monkeypatch.setattr(tasks, "execute_investigation", _execute)
+
+    result = tasks.run_investigation.apply(
+        args=[event_id],
+        kwargs={"intent_id": intent_id},
+        task_id=stale_task,
+    ).result
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "stale_broker_task"
+    assert calls["n"] == 0
+
+    async def _verify() -> None:
+        async with session_factory() as session:
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            assert row is not None
+            assert row.status == InvestigationIntentStatus.ENQUEUED.value
+
+    asyncio.run(_verify())
+
+
+def test_run_investigation_stale_retry_state_skips_without_dead(
+    session_factory: async_sessionmaker[AsyncSession],
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from app.db import models as orm
+    from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+
+    intent_id = f"iin-retry-skip-{uuid4().hex[:8]}"
+    event_id = f"evt-retry-skip-{uuid4().hex[:8]}"
+
+    async def _seed() -> None:
+        async with session_factory() as session:
+            async with session.begin():
+                session.add(
+                    orm.SecurityEvent(
+                        event_id=event_id,
+                        event_type="malicious_process",
+                        title="Suspicious process",
+                        description="",
+                        status=EventStatus.NEW.value,
+                        severity=Severity.HIGH.value,
+                        final_verdict="none",
+                        creation_source_ref={"source_product": "mock_xdr"},
+                        source_reference_snapshots=[],
+                        disposition_policy="not_required",
+                        raw_alert_ids=[],
+                        source_type="mock_xdr",
+                    )
+                )
+                await session.flush()
+                session.add(
+                    orm.InvestigationIntent(
+                        intent_id=intent_id,
+                        event_id=event_id,
+                        intent_kind="auto_investigate",
+                        intent_version="issue108_v1",
+                        status=InvestigationIntentStatus.RETRY.value,
+                        revision=2,
+                        attempt=1,
+                    )
+                )
+
+    asyncio.run(_seed())
+
+    async def _execute(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {"status": "completed", "event_id": event_id}
+
+    monkeypatch.setattr(tasks, "execute_investigation", _execute)
+
+    result = tasks.run_investigation.apply(
+        args=[event_id],
+        kwargs={"intent_id": intent_id},
+        task_id="task-old",
+    ).result
+
+    assert result["reason"] == "stale_broker_task"
+
+    async def _verify() -> None:
+        async with session_factory() as session:
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            assert row is not None
+            assert row.status == InvestigationIntentStatus.RETRY.value
+
+    asyncio.run(_verify())
+
+
+def test_celery_retries_exhausted_marks_intent_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from celery.app.task import Context
+    from kombu.exceptions import OperationalError
+
+    from app.db import models as orm
+    from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+
+    intent_id = f"iin-exhaust-{uuid4().hex[:8]}"
+    event_id = f"evt-exhaust-{uuid4().hex[:8]}"
+
+    async def _seed() -> None:
+        async with session_factory() as session:
+            async with session.begin():
+                session.add(
+                    orm.SecurityEvent(
+                        event_id=event_id,
+                        event_type="malicious_process",
+                        title="Suspicious process",
+                        description="",
+                        status=EventStatus.NEW.value,
+                        severity=Severity.HIGH.value,
+                        final_verdict="none",
+                        creation_source_ref={"source_product": "mock_xdr"},
+                        source_reference_snapshots=[],
+                        disposition_policy="not_required",
+                        raw_alert_ids=[],
+                        source_type="mock_xdr",
+                    )
+                )
+                await session.flush()
+                session.add(
+                    orm.InvestigationIntent(
+                        intent_id=intent_id,
+                        event_id=event_id,
+                        intent_kind="auto_investigate",
+                        intent_version="issue108_v1",
+                        status=InvestigationIntentStatus.ENQUEUED.value,
+                        revision=1,
+                        attempt=0,
+                        broker_task_id="task-exhaust",
+                    )
+                )
+
+    asyncio.run(_seed())
+
+    async def _boom(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise OperationalError("broker down")
+
+    monkeypatch.setattr(tasks, "execute_investigation", _boom)
+
+    ctx = Context(id="task-exhaust", delivery_info={}, retries=2)
+    tasks.run_investigation.request_stack.push(ctx)
+    try:
+        with pytest.raises(OperationalError):
+            tasks.run_investigation.run(
+                event_id,
+                include_response_execution=False,
+                intent_id=intent_id,
+            )
+    finally:
+        tasks.run_investigation.request_stack.pop()
+
+    async def _verify() -> None:
+        async with session_factory() as session:
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            assert row is not None
+            assert row.status == InvestigationIntentStatus.RETRY.value
+
+    asyncio.run(_verify())
