@@ -1,12 +1,24 @@
-"""Rule-based six-dimension risk scoring engine (ISSUE-035)."""
+"""Rule-based six-dimension risk scoring engine (ISSUE-035 / ISSUE-102)."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
-from app.models.agent_io import EvidenceOutput, RAGOutput, TriageResult
+from app.models.agent_io import (
+    CollectionStatus,
+    EvidenceOutput,
+    RAGOutput,
+    RiskFactor,
+    TriageResult,
+)
 from app.models.enums import EvidenceSource, Severity
 from app.models.evidence import Evidence
+
+# ISSUE-102: evidence-sparse scoring guardrails (fixed, testable formulas).
+EVIDENCE_LIMITED_CONFIDENCE_CAP = 0.35
+SOURCE_BASELINE_FLOOR_RATIO = 0.85
+_HIGH_SOURCE_MIN_SCORE = 70
 
 # Fixed weights (sum = 1.0).
 FACTOR_WEIGHTS: dict[str, float] = {
@@ -66,6 +78,207 @@ def severity_from_score(score: int) -> Severity:
     if score >= 40:
         return Severity.MEDIUM
     return Severity.LOW
+
+
+def _severity_rank(severity: Severity) -> int:
+    order = {
+        Severity.LOW: 0,
+        Severity.MEDIUM: 1,
+        Severity.HIGH: 2,
+        Severity.CRITICAL: 3,
+    }
+    return order[severity]
+
+
+def _parse_severity(raw: Any) -> Severity | None:
+    if raw is None:
+        return None
+    try:
+        return Severity(str(raw).lower())
+    except ValueError:
+        return None
+
+
+def extract_source_baseline(
+    source_snapshot: dict[str, Any] | None,
+) -> tuple[int | None, Severity | None]:
+    """Read ``source_risk_baseline`` and source severity from frozen snapshot."""
+    if not isinstance(source_snapshot, dict):
+        return None, None
+
+    baseline: int | None = None
+    normalized = source_snapshot.get("normalized")
+    if isinstance(normalized, dict):
+        raw_score = normalized.get("risk_score")
+        if raw_score is not None:
+            try:
+                baseline = max(0, min(100, int(raw_score)))
+            except (TypeError, ValueError):
+                baseline = None
+
+    source_severity = _parse_severity(source_snapshot.get("severity"))
+    return baseline, source_severity
+
+
+def is_evidence_limited(evidence_output: EvidenceOutput) -> bool:
+    """True when collection failed/degraded and no evidence was collected."""
+    if evidence_output.collection_status not in {
+        CollectionStatus.FAILED,
+        CollectionStatus.DEGRADED,
+    }:
+        return False
+    return len(evidence_output.evidence_list) == 0
+
+
+def compute_score_floor(
+    *,
+    source_baseline: int | None,
+    source_severity: Severity | None,
+) -> int | None:
+    """Minimum rule/merged score when evidence is limited (ISSUE-102)."""
+    if source_baseline is not None:
+        return max(0, min(100, int(round(source_baseline * SOURCE_BASELINE_FLOOR_RATIO))))
+    if source_severity is not None and _severity_rank(source_severity) >= _severity_rank(
+        Severity.HIGH
+    ):
+        return _HIGH_SOURCE_MIN_SCORE
+    return None
+
+
+def apply_severity_floor(
+    *,
+    risk_score: int,
+    severity: Severity,
+    source_severity: Severity | None,
+    evidence_limited: bool,
+) -> tuple[int, Severity, bool]:
+    """Ensure high-severity source alerts are not silently downgraded."""
+    if not evidence_limited or source_severity is None:
+        return risk_score, severity, False
+    if _severity_rank(source_severity) < _severity_rank(Severity.HIGH):
+        return risk_score, severity, False
+
+    floor_applied = False
+    adjusted_score = risk_score
+    adjusted_severity = severity
+
+    if adjusted_score < _HIGH_SOURCE_MIN_SCORE:
+        adjusted_score = max(adjusted_score, _HIGH_SOURCE_MIN_SCORE)
+        adjusted_severity = Severity.HIGH
+        floor_applied = True
+    elif _severity_rank(adjusted_severity) < _severity_rank(source_severity):
+        adjusted_severity = source_severity
+        floor_applied = True
+
+    return adjusted_score, adjusted_severity, floor_applied
+
+
+@dataclass(frozen=True)
+class EvidenceLimitedAdjustment:
+    risk_score: int
+    severity: Severity
+    confidence: float
+    evidence_limited: bool
+    severity_floor_applied: bool
+    source_risk_baseline: int | None
+
+
+def apply_evidence_limited_adjustments(
+    *,
+    risk_score: int,
+    confidence: float,
+    evidence_output: EvidenceOutput,
+    source_snapshot: dict[str, Any] | None,
+) -> EvidenceLimitedAdjustment:
+    """Apply ISSUE-102 floor/cap when threat signal is strong but evidence is missing."""
+    source_baseline, source_severity = extract_source_baseline(source_snapshot)
+    evidence_limited = is_evidence_limited(evidence_output)
+    if not evidence_limited:
+        return EvidenceLimitedAdjustment(
+            risk_score=risk_score,
+            severity=severity_from_score(risk_score),
+            confidence=confidence,
+            evidence_limited=False,
+            severity_floor_applied=False,
+            source_risk_baseline=source_baseline,
+        )
+
+    adjusted_score = risk_score
+    floor_applied = False
+    score_floor = compute_score_floor(
+        source_baseline=source_baseline,
+        source_severity=source_severity,
+    )
+    if score_floor is not None and adjusted_score < score_floor:
+        adjusted_score = score_floor
+        floor_applied = True
+
+    adjusted_score, adjusted_severity, severity_floor_applied = apply_severity_floor(
+        risk_score=adjusted_score,
+        severity=severity_from_score(adjusted_score),
+        source_severity=source_severity,
+        evidence_limited=True,
+    )
+    floor_applied = floor_applied or severity_floor_applied
+
+    capped_confidence = min(confidence, EVIDENCE_LIMITED_CONFIDENCE_CAP)
+
+    return EvidenceLimitedAdjustment(
+        risk_score=adjusted_score,
+        severity=adjusted_severity,
+        confidence=capped_confidence,
+        evidence_limited=True,
+        severity_floor_applied=floor_applied,
+        source_risk_baseline=source_baseline,
+    )
+
+
+def augment_factors_for_evidence_limited(
+    factors: list[RiskFactor],
+    *,
+    adjustment: EvidenceLimitedAdjustment,
+) -> list[RiskFactor]:
+    """Ensure decision trace cites evidence confidence and source baseline."""
+    if not adjustment.evidence_limited:
+        return factors
+
+    baseline_text = (
+        "null"
+        if adjustment.source_risk_baseline is None
+        else str(adjustment.source_risk_baseline)
+    )
+    floor_note = (
+        f"; severity_floor_applied=true, score={adjustment.risk_score}"
+        if adjustment.severity_floor_applied
+        else ""
+    )
+    suffix = (
+        "; evidence_limited=true: zero evidence under failed/degraded collection, "
+        f"confidence capped at {EVIDENCE_LIMITED_CONFIDENCE_CAP:.2f}; "
+        f"source_baseline={baseline_text}{floor_note}"
+    )
+
+    updated: list[RiskFactor] = []
+    found = False
+    for factor in factors:
+        if factor.factor_name == "evidence_confidence":
+            found = True
+            updated.append(
+                factor.model_copy(update={"reasoning": factor.reasoning + suffix}),
+            )
+        else:
+            updated.append(factor)
+    if not found:
+        updated.append(
+            RiskFactor(
+                factor_name="evidence_confidence",
+                weight=FACTOR_WEIGHTS["evidence_confidence"],
+                raw_score=0.0,
+                weighted_score=0.0,
+                reasoning=suffix.lstrip("; "),
+            )
+        )
+    return updated
 
 
 class RiskScoringEngine:

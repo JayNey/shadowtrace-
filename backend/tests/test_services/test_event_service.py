@@ -152,6 +152,34 @@ def _ref(
 
 
 @pytest.mark.asyncio
+async def test_ingest_source_snapshot_includes_normalized_baseline(
+    event_service: EventService,
+    store: EventContextStore,
+) -> None:
+    sfx = _sfx()
+    result = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(
+                kind=SourceObjectKind.INCIDENT,
+                object_id=f"INC-baseline-{sfx}",
+            ),
+            title="malicious process spawned",
+            event_type=EventType.MALICIOUS_PROCESS,
+            severity=Severity.HIGH,
+            normalized={"event_type": "malicious_process", "risk_score": 76},
+            source_type="mock_xdr",
+        )
+    )
+    assert result.event_id
+    snapshot = await store.get(result.event_id, "source_snapshot")
+    assert isinstance(snapshot, dict)
+    normalized = snapshot.get("normalized")
+    assert isinstance(normalized, dict)
+    assert normalized.get("risk_score") == 76
+    assert normalized.get("event_type") == "malicious_process"
+
+
+@pytest.mark.asyncio
 async def test_ingest_creates_event_pg_redis_audit(
     event_service: EventService,
     store: EventContextStore,

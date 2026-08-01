@@ -689,6 +689,36 @@ def test_report_includes_impact_assessment_hint() -> None:
     assert "isolate_host" in recommendations.content
 
 
+def test_builder_includes_evidence_limited_risk_semantics() -> None:
+    builder = ReportSectionBuilder()
+    event_id = "evt-report-evidence-limited"
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            overall_confidence=0.0,
+            collection_status=CollectionStatus.FAILED,
+        ),
+        risk_assessment=RiskAssessment(
+            risk_score=70,
+            severity=Severity.HIGH,
+            confidence=0.35,
+            risk_factors=[],
+            possible_false_positive=False,
+            scoring_mode=ScoringMode.RULE_ONLY,
+            evidence_limited=True,
+            severity_floor_applied=True,
+            source_risk_baseline=76,
+        ),
+        triage_result=_main_triage(),
+    )
+    risk_section = next(section for section in sections if section.key == "risk_scoring")
+    severity_section = next(section for section in sections if section.key == "severity_level")
+    assert "evidence_limited=True" in risk_section.content
+    assert "source_risk_baseline=76" in risk_section.content
+    assert "evidence_limited=True" in severity_section.content
+
+
 def test_builder_includes_human_escalation_note() -> None:
     """ISSUE-062 acceptance: escalated events must carry human-escalation text."""
     builder = ReportSectionBuilder()

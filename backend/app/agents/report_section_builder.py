@@ -99,6 +99,9 @@ class ReportSectionBuilder:
             f"confidence={risk_assessment.confidence:.4f}\n"
             f"possible_false_positive={risk_assessment.possible_false_positive}\n"
             f"scoring_mode={risk_assessment.scoring_mode.value}\n"
+            f"evidence_limited={risk_assessment.evidence_limited}\n"
+            f"severity_floor_applied={risk_assessment.severity_floor_applied}\n"
+            f"source_risk_baseline={risk_assessment.source_risk_baseline}\n"
             f"final_verdict={final_verdict.value}"
         )
         risk_scoring = self._risk_scoring(risk_assessment)
@@ -363,6 +366,9 @@ class ReportSectionBuilder:
             f"total_score={risk_assessment.risk_score}",
             f"severity={risk_assessment.severity.value}",
             f"scoring_mode={risk_assessment.scoring_mode.value}",
+            f"evidence_limited={risk_assessment.evidence_limited}",
+            f"severity_floor_applied={risk_assessment.severity_floor_applied}",
+            f"source_risk_baseline={risk_assessment.source_risk_baseline}",
             "six_dimension_breakdown:",
         ]
         for factor in risk_assessment.risk_factors:

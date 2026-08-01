@@ -86,6 +86,30 @@
     },
     "scoring_mode": {
       "$ref": "#/$defs/ScoringMode"
+    },
+    "evidence_limited": {
+      "default": false,
+      "title": "Evidence Limited",
+      "type": "boolean"
+    },
+    "severity_floor_applied": {
+      "default": false,
+      "title": "Severity Floor Applied",
+      "type": "boolean"
+    },
+    "source_risk_baseline": {
+      "anyOf": [
+        {
+          "maximum": 100,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Risk Baseline"
     }
   },
   "required": [
