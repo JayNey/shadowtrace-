@@ -284,7 +284,8 @@
       "enum": [
         "event_match",
         "event_count",
-        "value_count"
+        "value_count",
+        "statistical_anomaly"
       ],
       "title": "RuleOperatorKind",
       "type": "string"

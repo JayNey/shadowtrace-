@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ValidationError
 from app.db import models as orm
+from app.detection.scoring.robust_stats import robust_feature_stats
 from app.models.behavior_observation import BehaviorObservation
 from app.models.feature_snapshot import (
     BASELINE_SCHEMA_VERSION,
@@ -474,12 +475,20 @@ def build_detection_feature_baseline(
             status = DetectionBaselineStatus.READY
             mean_score = sum(scores) / len(scores)
             variance = sum((value - mean_score) ** 2 for value in scores) / len(scores)
+            unique_actions = [
+                float(snap.features.get("unique_action_count", 0)) for snap in eligible
+            ]
             stats = {
                 "snapshot_count": len(eligible),
                 "mean_avg_detection_score": round(mean_score, 4),
                 "std_avg_detection_score": round(variance**0.5, 4),
                 "mean_observation_count": round(sum(counts) / len(counts), 4),
                 "max_observation_count": max(counts),
+                "robust": {
+                    "observation_count": robust_feature_stats([float(c) for c in counts]),
+                    "avg_detection_score": robust_feature_stats(scores),
+                    "unique_action_count": robust_feature_stats(unique_actions),
+                },
             }
 
     latest = eligible[-1] if eligible else None

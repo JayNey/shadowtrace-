@@ -18,6 +18,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.errors import ValidationError
 from app.db import models as orm
+from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE
 from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
@@ -33,9 +34,11 @@ from app.models.detection_rule import (
 from app.models.detection_scope import DetectionScopeIdentity, UpstreamConnectorMember
 from app.models.feature_snapshot import (
     FEATURE_CONTRACT_VERSION,
+    DetectionBaselineStatus,
     FeatureSnapshotStatus,
     FeatureWindowKind,
 )
+from app.services.detection_baseline_service import DetectionBaselineService
 from app.services.detection_rule_runtime import DetectionRuleRuntimeService
 from app.services.detection_rule_service import DetectionRuleService
 from app.services.detection_scope_service import DetectionScopeService
@@ -125,6 +128,7 @@ async def _insert_observation(
     scope_id: str,
     observed_at: datetime,
     action: str = "create_process",
+    entity_type: str = "ip",
     entity_id: str = "10.0.0.10",
 ) -> BehaviorObservation:
     observation = BehaviorObservation(
@@ -141,7 +145,7 @@ async def _insert_observation(
         ),
         observed_at=observed_at,
         ingested_at=observed_at,
-        entity_refs=[BehaviorEntityRef(entity_type="ip", entity_id=entity_id, role="src")],
+        entity_refs=[BehaviorEntityRef(entity_type=entity_type, entity_id=entity_id, role="src")],
         action=action,
         category="process_create",
         detection_score=55.0,
@@ -1055,3 +1059,267 @@ async def test_shadow_execute_isolates_unexpected_operator_failure(
     assert len(result.errors) == 1
     assert result.errors[0].error_category == "internal_error"
     assert len(result.candidates) == 1
+
+
+@pytest.mark.asyncio
+async def test_statistical_anomaly_operator_produces_shadow_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    entity_type = "user"
+    entity_id = f"account-{suffix}"
+    day_one = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    day_two = datetime(2026, 8, 2, 15, 30, 0, tzinfo=UTC)
+    day_three = datetime(2026, 8, 3, 15, 30, 0, tzinfo=UTC)
+    snapshot_service = FeatureSnapshotService(session_factory)
+    baseline_service = DetectionBaselineService(session_factory)
+
+    for day_index, day_cutoff in enumerate((day_one, day_two), start=1):
+        minutes_before = (60, 45, 30) if day_index == 1 else (60, 50, 40, 30)
+        for obs_index, minutes in enumerate(minutes_before):
+            await _insert_observation(
+                session_factory,
+                suffix=f"{suffix}-d{day_index}-{obs_index}",
+                tenant_id=tenant_id,
+                scope_id=scope_id,
+                observed_at=day_cutoff - timedelta(minutes=minutes),
+                entity_type=entity_type,
+                entity_id=entity_id,
+                action=f"action-{obs_index % 2}",
+            )
+        await snapshot_service.materialize(
+            source_tenant_id=tenant_id,
+            detection_scope_id=scope_id,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            window_kind=FeatureWindowKind.ONE_HOUR,
+            cutoff_at=day_cutoff,
+        )
+
+    baseline = await baseline_service.materialize_baseline(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=day_three,
+    )
+    assert baseline.status is DetectionBaselineStatus.READY
+    assert "robust" in baseline.stats
+
+    # Observations must fall within window_end (15:00 for 15:30 cutoff) and span >=30min.
+    for minutes_before in range(60, 29, -3):
+        await _insert_observation(
+            session_factory,
+            suffix=f"{suffix}-burst-{minutes_before}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=day_three - timedelta(minutes=minutes_before),
+            entity_type=entity_type,
+            entity_id=entity_id,
+            action=f"rare-action-{minutes_before}",
+        )
+    current_snapshot = await snapshot_service.materialize(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=day_three,
+    )
+    assert current_snapshot.status is FeatureSnapshotStatus.READY
+    assert int(current_snapshot.features["observation_count"]) >= 10
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-account-mad",
+        rule_version=1,
+        operator=RuleOperatorKind.STATISTICAL_ANOMALY,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=3.5,
+        severity="medium",
+        missing_data_policy=MissingDataPolicy.FAIL,
+        match_criteria={
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "model_release_id": MOCK_ACCOUNT_MAD_RELEASE.release_id,
+            "model_release_hash": MOCK_ACCOUNT_MAD_RELEASE.release_hash,
+        },
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=day_three,
+        package_id=package_id,
+    )
+    assert result.errors == []
+    assert len(result.candidates) == 1
+    candidate = result.candidates[0]
+    assert candidate.operator is RuleOperatorKind.STATISTICAL_ANOMALY
+    assert candidate.shadow_only is True
+    assert candidate.provenance.detection_score is not None
+    assert candidate.provenance.detection_score == candidate.matched_value
+    assert candidate.provenance.model_release_id == MOCK_ACCOUNT_MAD_RELEASE.release_id
+    assert candidate.provenance.contributing_features
+    assert candidate.provenance.baseline_content_hash == baseline.content_hash
+
+    second = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=day_three,
+        package_id=package_id,
+    )
+    assert second.candidates[0].candidate_detection_id == candidate.candidate_detection_id
+
+
+@pytest.mark.asyncio
+async def test_statistical_anomaly_tenant_isolation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_a = f"tenant-a-{suffix}"
+    tenant_b = f"tenant-b-{suffix}"
+    scope_a = await _seed_scope(session_factory, suffix=f"a-{suffix}", tenant_id=tenant_a)
+    cutoff = datetime(2026, 8, 3, 15, 30, 0, tzinfo=UTC)
+    entity_type = "user"
+    entity_id = f"account-{suffix}"
+
+    for obs_index, minutes in enumerate((60, 45, 30)):
+        await _insert_observation(
+            session_factory,
+            suffix=f"{suffix}-hist-{obs_index}",
+            tenant_id=tenant_a,
+            scope_id=scope_a,
+            observed_at=cutoff - timedelta(minutes=minutes),
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+
+    snapshot_service = FeatureSnapshotService(session_factory)
+    baseline_service = DetectionBaselineService(session_factory)
+    await snapshot_service.materialize(
+        source_tenant_id=tenant_a,
+        detection_scope_id=scope_a,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+    )
+    await baseline_service.materialize_baseline(
+        source_tenant_id=tenant_a,
+        detection_scope_id=scope_a,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+    )
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-mad-iso",
+        rule_version=1,
+        operator=RuleOperatorKind.STATISTICAL_ANOMALY,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_a,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=3.5,
+        severity="medium",
+        missing_data_policy=MissingDataPolicy.SKIP,
+        match_criteria={
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "model_release_id": MOCK_ACCOUNT_MAD_RELEASE.release_id,
+        },
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_a,
+        scope_id=scope_a,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    with pytest.raises(ValidationError, match="not found for tenant"):
+        await runtime.execute_shadow(
+            source_tenant_id=tenant_b,
+            cutoff_at=cutoff,
+            package_id=package_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_statistical_anomaly_insufficient_history_emits_no_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    snapshot_service = FeatureSnapshotService(session_factory)
+    baseline_service = DetectionBaselineService(session_factory)
+    await _insert_observation(
+        session_factory,
+        suffix=f"{suffix}-solo",
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        observed_at=cutoff - timedelta(minutes=30),
+        entity_type="user",
+        entity_id="account-cold",
+    )
+    await snapshot_service.materialize(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="user",
+        entity_id="account-cold",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+    )
+    baseline = await baseline_service.materialize_baseline(
+        source_tenant_id=tenant_id,
+        detection_scope_id=scope_id,
+        entity_type="user",
+        entity_id="account-cold",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+    )
+    assert baseline.status is DetectionBaselineStatus.INSUFFICIENT_HISTORY
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-cold",
+        rule_version=1,
+        operator=RuleOperatorKind.STATISTICAL_ANOMALY,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=3.5,
+        severity="medium",
+        missing_data_policy=MissingDataPolicy.SKIP,
+        match_criteria={
+            "entity_type": "user",
+            "entity_id": "account-cold",
+            "model_release_id": MOCK_ACCOUNT_MAD_RELEASE.release_id,
+        },
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert result.candidates == []
+    assert result.errors == []

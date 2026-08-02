@@ -8,6 +8,7 @@ import pytest
 
 from app.core.errors import ValidationError
 from app.detection.operators import default_operator_registry
+from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE, MOCK_ACCOUNT_MAD_RELEASE_ID
 from app.detection.operators.base import OperatorExecutionContext
 from app.detection.operators.event_count import EventCountOperator
 from app.detection.operators.event_match import EventMatchOperator
@@ -36,6 +37,7 @@ from app.models.feature_snapshot import (
 from app.services.detection_rule_resolver import (
     allowed_runtime_transition,
     build_candidate_detection,
+    compile_rule_definition,
     compile_rule_package,
 )
 
@@ -98,11 +100,61 @@ def _rule(
     )
 
 
+def _statistical_anomaly_rule(
+    *,
+    match_criteria: dict | None = None,
+    threshold: float = 3.5,
+) -> DetectionRuleDefinition:
+    return DetectionRuleDefinition(
+        rule_id="rule-mad",
+        rule_version=1,
+        operator=RuleOperatorKind.STATISTICAL_ANOMALY,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id="dscope-test",
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=threshold,
+        severity="medium",
+        missing_data_policy=MissingDataPolicy.SKIP,
+        match_criteria=match_criteria
+        or {"model_release_id": MOCK_ACCOUNT_MAD_RELEASE_ID},
+    )
+
+
+def test_compile_statistical_anomaly_requires_model_release_id() -> None:
+    rule = _statistical_anomaly_rule(match_criteria={"entity_type": "user"})
+    with pytest.raises(ValidationError, match="requires model_release_id"):
+        compile_rule_definition(rule)
+
+
+def test_compile_statistical_anomaly_rejects_unknown_release() -> None:
+    rule = _statistical_anomaly_rule(
+        match_criteria={"model_release_id": "unknown-release-v9"},
+    )
+    with pytest.raises(ValidationError, match="unsupported anomaly scorer release"):
+        compile_rule_definition(rule)
+
+
+def test_compile_statistical_anomaly_accepts_mock_release() -> None:
+    rule = _statistical_anomaly_rule(
+        match_criteria={
+            "model_release_id": MOCK_ACCOUNT_MAD_RELEASE_ID,
+            "model_release_hash": MOCK_ACCOUNT_MAD_RELEASE.release_hash,
+        },
+    )
+    compiled = compile_rule_definition(rule)
+    assert compiled.match_criteria["model_release_id"] == MOCK_ACCOUNT_MAD_RELEASE_ID
+
+
 def test_default_operator_registry_contains_phase_a_operators() -> None:
     registry = default_operator_registry()
     assert registry.get(RuleOperatorKind.EVENT_MATCH.value).operator_kind == "event_match"
     assert registry.get(RuleOperatorKind.EVENT_COUNT.value).operator_kind == "event_count"
     assert registry.get(RuleOperatorKind.VALUE_COUNT.value).operator_kind == "value_count"
+    assert (
+        registry.get(RuleOperatorKind.STATISTICAL_ANOMALY.value).operator_kind
+        == "statistical_anomaly"
+    )
 
 
 def test_compile_rule_package_rejects_unknown_operator() -> None:
@@ -190,10 +242,8 @@ def test_candidate_detection_shadow_only_rejects_false() -> None:
         )
 
 
-def test_shadow_only_from_row_forces_true_and_logs_when_db_false(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    from unittest.mock import MagicMock
+def test_shadow_only_from_row_forces_true_and_logs_when_db_false() -> None:
+    from unittest.mock import MagicMock, patch
 
     from app.services.detection_rule_runtime import _shadow_only_from_row
 
@@ -201,10 +251,11 @@ def test_shadow_only_from_row_forces_true_and_logs_when_db_false(
     row.shadow_only = False
     row.candidate_detection_id = "dcand-dirty"
 
-    with caplog.at_level("WARNING"):
+    with patch("app.services.detection_rule_runtime.logger.warning") as warn:
         assert _shadow_only_from_row(row) is True
-    assert "shadow_only=false" in caplog.text
-    assert "dcand-dirty" in caplog.text
+    warn.assert_called_once()
+    assert "shadow_only=false" in str(warn.call_args)
+    assert "dcand-dirty" in str(warn.call_args)
 
 
 def test_shadow_only_from_row_true_when_db_true() -> None:

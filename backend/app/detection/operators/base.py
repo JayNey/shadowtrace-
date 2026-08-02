@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
 
 from app.core.errors import ValidationError
 from app.models.behavior_observation import BehaviorObservation
 from app.models.detection_rule import DetectionRuleDefinition, MissingDataPolicy
-from app.models.feature_snapshot import FeatureSnapshot
+from app.models.feature_snapshot import DetectionFeatureBaseline, FeatureSnapshot
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class OperatorMatch:
     snapshot_ids: list[str]
     window_start: datetime | None = None
     window_end: datetime | None = None
+    scorer_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,7 @@ class OperatorExecutionContext:
     cutoff_at: datetime
     observations: list[BehaviorObservation]
     snapshots: list[FeatureSnapshot]
+    baselines: list[DetectionFeatureBaseline] = field(default_factory=list)
     window_start: datetime | None = None
     window_end: datetime | None = None
 

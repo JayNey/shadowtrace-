@@ -27,7 +27,12 @@ from app.models.detection_rule import (
     DetectionRuleRuntimeState,
     RuleOperatorKind,
 )
-from app.models.feature_snapshot import DEFAULT_ALLOWED_LATENESS, FeatureSnapshot, FeatureWindowKind
+from app.models.feature_snapshot import (
+    DEFAULT_ALLOWED_LATENESS,
+    DetectionFeatureBaseline,
+    FeatureSnapshot,
+    FeatureWindowKind,
+)
 from app.services.behavior_observation_service import row_to_behavior_observation
 from app.services.detection_rule_resolver import (
     build_candidate_detection,
@@ -39,6 +44,7 @@ from app.services.feature_snapshot_resolver import (
     compute_window_bounds,
     dedupe_latest_snapshots_by_entity,
     effective_observation_upper_bound,
+    row_to_detection_baseline,
     row_to_feature_snapshot,
 )
 
@@ -156,6 +162,49 @@ class DetectionRuleRuntimeService:
             )
         snapshots = [row_to_feature_snapshot(row) for row in rows]
         return dedupe_latest_snapshots_by_entity(snapshots)
+
+    async def _load_baselines(
+        self,
+        session: AsyncSession,
+        *,
+        source_tenant_id: str,
+        detection_scope_id: str,
+        entity_type: str | None,
+        entity_id: str | None,
+        window_kind: FeatureWindowKind,
+        cutoff_at: datetime,
+        max_scan: int,
+    ) -> list[DetectionFeatureBaseline]:
+        filters = [
+            orm.DetectionFeatureBaseline.source_tenant_id == source_tenant_id,
+            orm.DetectionFeatureBaseline.detection_scope_id == detection_scope_id,
+            orm.DetectionFeatureBaseline.window_kind == window_kind.value,
+            orm.DetectionFeatureBaseline.cutoff_at == ensure_utc(cutoff_at),
+        ]
+        if entity_type is not None:
+            filters.append(orm.DetectionFeatureBaseline.entity_type == entity_type)
+        if entity_id is not None:
+            filters.append(orm.DetectionFeatureBaseline.entity_id == entity_id)
+
+        rows = list(
+            await session.scalars(
+                select(orm.DetectionFeatureBaseline)
+                .where(and_(*filters))
+                .order_by(orm.DetectionFeatureBaseline.revision.desc())
+                .limit(max_scan + 1)
+            )
+        )
+        if len(rows) > max_scan:
+            raise ValidationError(
+                "baseline scan cost limit exceeded",
+                details={"max_scan": max_scan, "found": len(rows)},
+            )
+        deduped: dict[tuple[str, str], DetectionFeatureBaseline] = {}
+        for row in rows:
+            key = (row.entity_type, row.entity_id)
+            if key not in deduped:
+                deduped[key] = row_to_detection_baseline(row)
+        return list(deduped.values())
 
     async def persist_candidate_in_session(
         self,
@@ -310,6 +359,7 @@ class DetectionRuleRuntimeService:
 
         observations: list[BehaviorObservation] = []
         snapshots: list[FeatureSnapshot] = []
+        baselines: list[DetectionFeatureBaseline] = []
         scanned = 0
 
         if rule.operator in {RuleOperatorKind.EVENT_MATCH, RuleOperatorKind.EVENT_COUNT}:
@@ -334,6 +384,17 @@ class DetectionRuleRuntimeService:
                 max_scan=rule.max_observation_scan,
             )
             scanned = len(snapshots)
+            if rule.operator is RuleOperatorKind.STATISTICAL_ANOMALY:
+                baselines = await self._load_baselines(
+                    session,
+                    source_tenant_id=package.source_tenant_id,
+                    detection_scope_id=rule.detection_scope_id,
+                    entity_type=entity_type,
+                    entity_id=entity_id,
+                    window_kind=window_kind,
+                    cutoff_at=cutoff_at,
+                    max_scan=rule.max_observation_scan,
+                )
 
         operator = self._operators.get(rule.operator.value)
         matches = operator.evaluate(
@@ -343,6 +404,7 @@ class DetectionRuleRuntimeService:
                 cutoff_at=cutoff_at,
                 observations=observations,
                 snapshots=snapshots,
+                baselines=baselines,
                 window_start=window_start,
                 window_end=window_end,
             ),
@@ -350,6 +412,14 @@ class DetectionRuleRuntimeService:
 
         candidates: list[CandidateDetection] = []
         for match in matches:
+            provenance_payload = CandidateDetectionProvenance(
+                observation_ids=match.observation_ids,
+                snapshot_ids=match.snapshot_ids,
+                window_start=match.window_start,
+                window_end=match.window_end,
+            ).model_dump(mode="json")
+            if match.scorer_provenance:
+                provenance_payload.update(match.scorer_provenance)
             candidates.append(
                 build_candidate_detection(
                     source_tenant_id=package.source_tenant_id,
@@ -359,12 +429,7 @@ class DetectionRuleRuntimeService:
                     cutoff_at=cutoff_at,
                     group_key=match.group_key,
                     matched_value=match.matched_value,
-                    provenance=CandidateDetectionProvenance(
-                        observation_ids=match.observation_ids,
-                        snapshot_ids=match.snapshot_ids,
-                        window_start=match.window_start,
-                        window_end=match.window_end,
-                    ),
+                    provenance=CandidateDetectionProvenance.model_validate(provenance_payload),
                 )
             )
         return candidates, scanned, None

@@ -10,7 +10,11 @@ from app.models.behavior_observation import (
     BehaviorObservationProvenance,
     BehaviorObservationSourceRef,
 )
-from app.models.feature_snapshot import FeatureSnapshotStatus, FeatureWindowKind
+from app.models.feature_snapshot import (
+    DetectionBaselineStatus,
+    FeatureSnapshotStatus,
+    FeatureWindowKind,
+)
 from app.services.feature_snapshot_resolver import (
     align_window_end,
     build_detection_feature_baseline,
@@ -410,3 +414,44 @@ def test_baseline_dedupes_superseded_snapshot_revisions() -> None:
     assert rev1.snapshot_id not in baseline.snapshot_revision_refs
     assert rev2.snapshot_id in baseline.snapshot_revision_refs
     assert baseline.stats.get("snapshot_count", 0) <= 1
+
+
+def test_baseline_ready_includes_robust_stats() -> None:
+    snapshots = []
+    for day_offset in range(4):
+        cutoff = datetime(2026, 8, 1 + day_offset, 12, 0, 0, tzinfo=UTC)
+        observations = [
+            _observation(
+                obs_id=f"o{day_offset}-{index}",
+                observed_at=cutoff - timedelta(minutes=60 - index * 20),
+                score=50.0 + day_offset,
+                action=f"action-{index % 3}",
+                category=f"category-{index % 2}",
+            )
+            for index in range(3)
+        ]
+        snap = build_feature_snapshot(
+            source_tenant_id="tenant-a",
+            detection_scope_id="dscope-test",
+            entity_type="ip",
+            entity_id="10.0.0.1",
+            window_kind=FeatureWindowKind.ONE_HOUR,
+            cutoff_at=cutoff,
+            observations=observations,
+        )
+        assert snap.status is FeatureSnapshotStatus.READY, snap.status
+        snapshots.append(snap)
+    baseline = build_detection_feature_baseline(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="ip",
+        entity_id="10.0.0.1",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC),
+        snapshots=snapshots,
+    )
+    assert baseline.status is DetectionBaselineStatus.READY
+    robust = baseline.stats.get("robust")
+    assert isinstance(robust, dict)
+    assert "observation_count" in robust
+    assert "median" in robust["observation_count"]

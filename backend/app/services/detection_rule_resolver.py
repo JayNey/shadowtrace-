@@ -10,6 +10,7 @@ import orjson
 
 from app.core.errors import ValidationError
 from app.detection.operators import default_operator_registry
+from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE_ID
 from app.models.detection_rule import (
     CANDIDATE_DETECTION_SCHEMA_VERSION,
     DETECTION_RULE_SCHEMA_VERSION,
@@ -32,7 +33,17 @@ _ALLOWED_REQUIRED_FIELDS = frozenset(
 _ALLOWED_VALUE_FIELDS = frozenset(
     {"observation_count", "avg_detection_score", "max_detection_score"}
 )
-_ALLOWED_MATCH_CRITERIA_KEYS = frozenset({"action", "category", "entity_type", "entity_id"})
+_ALLOWED_MATCH_CRITERIA_KEYS = frozenset(
+    {
+        "action",
+        "category",
+        "entity_type",
+        "entity_id",
+        "model_release_id",
+        "model_release_hash",
+        "baseline_content_hash",
+    }
+)
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -96,13 +107,18 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
     if operator_value in {
         RuleOperatorKind.EVENT_MATCH.value,
         RuleOperatorKind.EVENT_COUNT.value,
+        RuleOperatorKind.STATISTICAL_ANOMALY.value,
     }:
         if rule.missing_data_policy is MissingDataPolicy.TREAT_AS_ZERO:
             raise ValidationError(
-                "treat_as_zero missing_data_policy is not supported for observation operators",
+                "treat_as_zero missing_data_policy is not supported for "
+                "observation/scorer operators",
                 details={"rule_id": rule.rule_id, "operator": operator_value},
             )
-        if "observation_count" in rule.required_fields:
+        if (
+            operator_value != RuleOperatorKind.STATISTICAL_ANOMALY.value
+            and "observation_count" in rule.required_fields
+        ):
             raise ValidationError(
                 "observation_count required_field is not valid for observation operators",
                 details={"rule_id": rule.rule_id, "operator": operator_value},
@@ -131,6 +147,29 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
             raise ValidationError(
                 f"unsupported value_field: {rule.value_field}",
                 details={"value_field": rule.value_field},
+            )
+
+    if operator_value == RuleOperatorKind.STATISTICAL_ANOMALY.value:
+        if rule.threshold <= 0:
+            raise ValidationError(
+                "statistical_anomaly requires positive robust_z threshold",
+                details={"rule_id": rule.rule_id, "threshold": rule.threshold},
+            )
+        if rule.value_field is not None:
+            raise ValidationError(
+                "statistical_anomaly must not set value_field",
+                details={"rule_id": rule.rule_id},
+            )
+        release_id = rule.match_criteria.get("model_release_id")
+        if not isinstance(release_id, str) or not release_id:
+            raise ValidationError(
+                "statistical_anomaly requires model_release_id in match_criteria",
+                details={"rule_id": rule.rule_id},
+            )
+        if release_id != MOCK_ACCOUNT_MAD_RELEASE_ID:
+            raise ValidationError(
+                "unsupported anomaly scorer release",
+                details={"rule_id": rule.rule_id, "model_release_id": release_id},
             )
 
     return rule
