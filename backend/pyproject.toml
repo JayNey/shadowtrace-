@@ -54,7 +54,7 @@ packages = ["app"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-m 'not opensearch and not neo4j and not system and not regression and not baseline_refresh'"
+addopts = "-m 'not opensearch and not neo4j and not system and not regression and not baseline_refresh and not autonomous_mock_e2e'"
 markers = [
   "integration: requires real PostgreSQL and Redis services",
   "tool_system: Registry/Executor/Mock tool-system integration chains (ISSUE-025)",
@@ -66,6 +66,7 @@ markers = [
   "regression: golden-path snapshot regression gate (ISSUE-087; requires PostgreSQL + Redis)",
   "baseline_refresh: explicit baseline overwrite (ISSUE-087; UPDATE_BASELINE=1 only)",
   "evaluation: evaluation pipeline gate (ISSUE-105; requires PostgreSQL)",
+  "autonomous_mock_e2e: ISSUE-110 full-loop E2E with live Celery worker (make up WORKER=1)",
   "unit: pure unit tests with no external services",
   "opensearch: requires OpenSearch service (ISSUE-084)",
   "neo4j: requires Neo4j service (docker compose --profile optional up -d neo4j)",
