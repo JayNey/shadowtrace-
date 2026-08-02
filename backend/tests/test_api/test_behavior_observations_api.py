@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,14 +12,16 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.deps import reset_deps
 from app.core.config import get_settings
-from app.db import models as orm
 from app.main import app
 from app.models.behavior_observation import (
     BehaviorObservationProjectionStatus,
     BehaviorObservationQuery,
 )
-from app.models.enums import SourceDisposition, SourceObjectKind
 from app.services.behavior_observation_service import BehaviorObservationService
+from tests.test_services.behavior_observation_fixtures import (
+    seed_behavior_observation_connector,
+    seed_behavior_observation_source_log,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("clean_state")]
 
@@ -52,71 +53,22 @@ def _hdr() -> dict[str, str]:
     return {"Authorization": "Bearer analyst-token"}
 
 
-async def _seed_connector(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    connector_id: str,
-    tenant_id: str,
-) -> None:
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                orm.SourceConnector(
-                    connector_id=connector_id,
-                    source_product="mock_xdr",
-                    display_name=f"Test {connector_id}",
-                    status="online",
-                    schema_version="1",
-                    connector_metadata={
-                        "source_tenant_id": tenant_id,
-                        "integration_instance_id": "inst-primary",
-                        "connector_set_version": 1,
-                    },
-                )
-            )
+@pytest.mark.asyncio
+async def test_list_projection_failures_requires_auth(client: TestClient) -> None:
+    response = client.get(
+        "/api/v1/behavior-observation-projection-failures",
+        params={"source_tenant_id": "tenant-auth"},
+    )
+    assert response.status_code == 401
 
 
-async def _seed_source_log(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    suffix: str,
-    tenant_id: str,
-    connector_id: str,
-) -> str:
-    record_id = f"src-api-{suffix}"
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                orm.SourceObject(
-                    source_record_id=record_id,
-                    source_product="mock_xdr",
-                    source_tenant_id=tenant_id,
-                    connector_id=connector_id,
-                    source_kind=SourceObjectKind.LOG.value,
-                    source_object_id=f"log-{suffix}",
-                    source_object_type="edr",
-                    source_status_raw="indexed",
-                    source_disposition=SourceDisposition.UNKNOWN.value,
-                    schema_version="1",
-                    ingested_at=datetime(2026, 8, 1, tzinfo=UTC),
-                    raw_payload_hash=f"hash-{suffix}",
-                    normalized={
-                        "channel": "endpoint",
-                        "category": "process_create",
-                        "action": "create_process",
-                        "src_ip": "10.0.0.10",
-                        "detection_score": 55,
-                        "logged_at": "2026-08-01T00:00:00+00:00",
-                    },
-                    raw_payload={"cmdline": "sensitive"},
-                    current_source_status_raw="indexed",
-                    current_source_disposition=SourceDisposition.UNKNOWN.value,
-                    current_state_version=1,
-                    source_updated_at=datetime(2026, 8, 1, tzinfo=UTC),
-                    source_sync_state="synced",
-                )
-            )
-    return record_id
+@pytest.mark.asyncio
+async def test_list_behavior_observations_requires_auth(client: TestClient) -> None:
+    response = client.get(
+        "/api/v1/behavior-observations",
+        params={"source_tenant_id": "tenant-auth"},
+    )
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio
@@ -180,8 +132,10 @@ async def test_list_projection_failures_defaults_to_open_backlog_only(
         force_dead_letter=True,
     )
     connector_id = f"conn-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
+    await seed_behavior_observation_connector(
+        session_factory, connector_id=connector_id, tenant_id=tenant_id
+    )
+    record_id = await seed_behavior_observation_source_log(
         session_factory,
         suffix=f"resolved-{suffix}",
         tenant_id=tenant_id,
@@ -277,8 +231,10 @@ async def test_list_behavior_observations_returns_projected_row(
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-obs-{suffix}"
     connector_id = f"conn-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
+    await seed_behavior_observation_connector(
+        session_factory, connector_id=connector_id, tenant_id=tenant_id
+    )
+    record_id = await seed_behavior_observation_source_log(
         session_factory,
         suffix=suffix,
         tenant_id=tenant_id,

@@ -17,11 +17,14 @@ from app.models.behavior_observation import (
     BehaviorObservationProjectionStatus,
     BehaviorObservationQuery,
 )
-from app.models.enums import SourceDisposition, SourceObjectKind
 from app.services.behavior_observation_service import BehaviorObservationService
 from app.tasks.behavior_observation_tasks import (
     RETRY_PENDING_TASK,
     retry_behavior_observation_pending,
+)
+from tests.test_services.behavior_observation_fixtures import (
+    seed_behavior_observation_connector,
+    seed_behavior_observation_source_log,
 )
 
 
@@ -83,73 +86,7 @@ def test_retry_pending_task_eager(celery_eager: None, monkeypatch: pytest.Monkey
     get_settings.cache_clear()
 
 
-async def _seed_connector(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    connector_id: str,
-    tenant_id: str,
-) -> None:
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                orm.SourceConnector(
-                    connector_id=connector_id,
-                    source_product="mock_xdr",
-                    display_name=f"Test {connector_id}",
-                    status="online",
-                    schema_version="1",
-                    connector_metadata={
-                        "source_tenant_id": tenant_id,
-                        "integration_instance_id": "inst-primary",
-                        "connector_set_version": 1,
-                    },
-                )
-            )
-
-
-async def _seed_source_log(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    suffix: str,
-    tenant_id: str,
-    connector_id: str,
-) -> str:
-    record_id = f"src-{suffix}"
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                orm.SourceObject(
-                    source_record_id=record_id,
-                    source_product="mock_xdr",
-                    source_tenant_id=tenant_id,
-                    connector_id=connector_id,
-                    source_kind=SourceObjectKind.LOG.value,
-                    source_object_id=f"log-{suffix}",
-                    source_object_type="edr",
-                    source_status_raw="indexed",
-                    source_disposition=SourceDisposition.UNKNOWN.value,
-                    schema_version="1",
-                    ingested_at=datetime(2026, 8, 1, tzinfo=UTC),
-                    raw_payload_hash=f"hash-{suffix}",
-                    normalized={
-                        "channel": "endpoint",
-                        "category": "process_create",
-                        "action": "create_process",
-                        "src_ip": "10.0.0.10",
-                        "detection_score": 55,
-                        "logged_at": "2026-08-01T00:00:00+00:00",
-                    },
-                    raw_payload={"cmdline": "sensitive"},
-                    current_source_status_raw="indexed",
-                    current_source_disposition=SourceDisposition.UNKNOWN.value,
-                    current_state_version=1,
-                    source_updated_at=datetime(2026, 8, 1, tzinfo=UTC),
-                    source_sync_state="synced",
-                )
-            )
-    return record_id
-
-
+@pytest.mark.integration
 def test_celery_retry_pending_resolves_transient_failure(
     session_factory: async_sessionmaker[AsyncSession],
     celery_eager: None,
@@ -159,12 +96,12 @@ def test_celery_retry_pending_resolves_transient_failure(
     connector_id = f"conn-{suffix}"
 
     async def _prepare_failure() -> str:
-        await _seed_connector(
+        await seed_behavior_observation_connector(
             session_factory,
             connector_id=connector_id,
             tenant_id=tenant_id,
         )
-        record_id = await _seed_source_log(
+        record_id = await seed_behavior_observation_source_log(
             session_factory,
             suffix=suffix,
             tenant_id=tenant_id,

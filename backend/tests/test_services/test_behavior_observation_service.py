@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,9 +27,14 @@ from app.models.detection_scope import (
     DetectionScopeLifecycleState,
     UpstreamConnectorMember,
 )
-from app.models.enums import SourceDisposition, SourceObjectKind
 from app.services.behavior_observation_service import BehaviorObservationService
 from app.services.detection_scope_service import DetectionScopeService
+from tests.test_services.behavior_observation_fixtures import (
+    seed_behavior_observation_connector as seed_connector,
+)
+from tests.test_services.behavior_observation_fixtures import (
+    seed_behavior_observation_source_log as seed_source_log,
+)
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -99,75 +103,6 @@ def _scope_service(session_factory: async_sessionmaker[AsyncSession]) -> Detecti
     return DetectionScopeService(session_factory)
 
 
-async def _seed_connector(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    connector_id: str,
-    tenant_id: str,
-    integration_instance_id: str = "inst-primary",
-) -> None:
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                orm.SourceConnector(
-                    connector_id=connector_id,
-                    source_product="mock_xdr",
-                    display_name=f"Test {connector_id}",
-                    status="online",
-                    schema_version="1",
-                    connector_metadata={
-                        "source_tenant_id": tenant_id,
-                        "integration_instance_id": integration_instance_id,
-                        "connector_set_version": 1,
-                    },
-                )
-            )
-
-
-async def _seed_source_log(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    suffix: str,
-    tenant_id: str,
-    connector_id: str,
-    source_revision: int = 1,
-) -> str:
-    record_id = f"src-{suffix}"
-    async with session_factory() as session:
-        async with session.begin():
-            session.add(
-                orm.SourceObject(
-                    source_record_id=record_id,
-                    source_product="mock_xdr",
-                    source_tenant_id=tenant_id,
-                    connector_id=connector_id,
-                    source_kind=SourceObjectKind.LOG.value,
-                    source_object_id=f"log-{suffix}",
-                    source_object_type="edr",
-                    source_status_raw="indexed",
-                    source_disposition=SourceDisposition.UNKNOWN.value,
-                    schema_version="1",
-                    ingested_at=datetime(2026, 8, 1, tzinfo=UTC),
-                    raw_payload_hash=f"hash-{suffix}",
-                    normalized={
-                        "channel": "endpoint",
-                        "category": "process_create",
-                        "action": "create_process",
-                        "src_ip": "10.0.0.10",
-                        "detection_score": 55,
-                        "logged_at": "2026-08-01T00:00:00+00:00",
-                    },
-                    raw_payload={"cmdline": "sensitive"},
-                    current_source_status_raw="indexed",
-                    current_source_disposition=SourceDisposition.UNKNOWN.value,
-                    current_state_version=source_revision,
-                    source_updated_at=datetime(2026, 8, 1, tzinfo=UTC),
-                    source_sync_state="synced",
-                )
-            )
-    return record_id
-
-
 @pytest.mark.asyncio
 async def test_project_source_object_persists_observation(
     session_factory: async_sessionmaker[AsyncSession],
@@ -175,8 +110,8 @@ async def test_project_source_object_persists_observation(
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
     connector_id = f"conn-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
+    await seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
+    record_id = await seed_source_log(
         session_factory,
         suffix=suffix,
         tenant_id=tenant_id,
@@ -202,8 +137,8 @@ async def test_project_is_idempotent_for_same_source_revision(
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
     connector_id = f"conn-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
+    await seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
+    record_id = await seed_source_log(
         session_factory,
         suffix=suffix,
         tenant_id=tenant_id,
@@ -223,8 +158,8 @@ async def test_source_revision_bump_creates_new_observation(
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
     connector_id = f"conn-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
+    await seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
+    record_id = await seed_source_log(
         session_factory,
         suffix=suffix,
         tenant_id=tenant_id,
@@ -261,15 +196,15 @@ async def test_tenant_isolation_for_same_source_object_id(
     tenant_b = f"tenant-b-{suffix}"
     connector_a = f"conn-a-{suffix}"
     connector_b = f"conn-b-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_a, tenant_id=tenant_a)
-    await _seed_connector(session_factory, connector_id=connector_b, tenant_id=tenant_b)
-    record_a = await _seed_source_log(
+    await seed_connector(session_factory, connector_id=connector_a, tenant_id=tenant_a)
+    await seed_connector(session_factory, connector_id=connector_b, tenant_id=tenant_b)
+    record_a = await seed_source_log(
         session_factory,
         suffix=f"a-{suffix}",
         tenant_id=tenant_a,
         connector_id=connector_a,
     )
-    record_b = await _seed_source_log(
+    record_b = await seed_source_log(
         session_factory,
         suffix=f"b-{suffix}",
         tenant_id=tenant_b,
@@ -292,7 +227,7 @@ async def test_uses_registered_detection_scope_when_available(
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
     connector_id = f"conn-{suffix}"
-    await _seed_connector(
+    await seed_connector(
         session_factory,
         connector_id=connector_id,
         tenant_id=tenant_id,
@@ -314,7 +249,7 @@ async def test_uses_registered_detection_scope_when_available(
     activated = await scope_service.activate_revision(revision.scope_revision_id)
     assert activated.lifecycle_state is DetectionScopeLifecycleState.ACTIVE
 
-    record_id = await _seed_source_log(
+    record_id = await seed_source_log(
         session_factory,
         suffix=suffix,
         tenant_id=tenant_id,
@@ -332,8 +267,8 @@ async def test_projection_failure_is_durable_and_retryable(
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
     connector_id = f"conn-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
+    await seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
+    record_id = await seed_source_log(
         session_factory,
         suffix=suffix,
         tenant_id=tenant_id,
@@ -382,8 +317,8 @@ async def test_idempotency_hash_mismatch_rejected(
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
     connector_id = f"conn-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
+    await seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
+    record_id = await seed_source_log(
         session_factory,
         suffix=suffix,
         tenant_id=tenant_id,
@@ -414,13 +349,13 @@ async def test_resolve_scope_fallback_when_other_instance_has_active_scope(
     fallback_connector = f"conn-b-{suffix}"
     instance_a = f"inst-a-{suffix}"
     instance_b = f"inst-b-{suffix}"
-    await _seed_connector(
+    await seed_connector(
         session_factory,
         connector_id=scoped_connector,
         tenant_id=tenant_id,
         integration_instance_id=instance_a,
     )
-    await _seed_connector(
+    await seed_connector(
         session_factory,
         connector_id=fallback_connector,
         tenant_id=tenant_id,
@@ -441,7 +376,7 @@ async def test_resolve_scope_fallback_when_other_instance_has_active_scope(
     )
     await scope_service.activate_revision(revision.scope_revision_id)
 
-    record_id = await _seed_source_log(
+    record_id = await seed_source_log(
         session_factory,
         suffix=f"b-{suffix}",
         tenant_id=tenant_id,
@@ -461,13 +396,13 @@ async def test_resolve_scope_fails_when_active_scope_missing_connector(
     scoped_connector = f"conn-scoped-{suffix}"
     missing_connector = f"conn-missing-{suffix}"
     instance_id = f"inst-{suffix}"
-    await _seed_connector(
+    await seed_connector(
         session_factory,
         connector_id=scoped_connector,
         tenant_id=tenant_id,
         integration_instance_id=instance_id,
     )
-    await _seed_connector(
+    await seed_connector(
         session_factory,
         connector_id=missing_connector,
         tenant_id=tenant_id,
@@ -488,7 +423,7 @@ async def test_resolve_scope_fails_when_active_scope_missing_connector(
     )
     await scope_service.activate_revision(revision.scope_revision_id)
 
-    record_id = await _seed_source_log(
+    record_id = await seed_source_log(
         session_factory,
         suffix=suffix,
         tenant_id=tenant_id,
@@ -645,8 +580,8 @@ async def test_query_projection_failures_excludes_resolved_by_default(
         detail={"message": "dead"},
         force_dead_letter=True,
     )
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
+    await seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
+    record_id = await seed_source_log(
         session_factory,
         suffix=f"resolved-{suffix}",
         tenant_id=tenant_id,
