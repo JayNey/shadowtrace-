@@ -631,6 +631,15 @@ async def _build_investigation_agents() -> dict[str, Any]:
         llm_client=llm_client,
         embed_service=embed_service,
     )
+    if retrieval_resources.status != "ready":
+        logger.warning(
+            "Retrieval resources not ready during investigation stack build",
+            extra={
+                "status": retrieval_resources.status,
+                "reasons": list(retrieval_resources.reasons),
+                "mode": retrieval_resources.mode,
+            },
+        )
     rag = RAGAgent(
         working_memory=wm.for_writer("RAGAgent"),
         pipeline=retrieval_resources.pipeline,

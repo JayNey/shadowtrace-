@@ -78,3 +78,35 @@ def test_from_rag_input_requires_tenant_in_production() -> None:
     )
     with pytest.raises(ValueError, match="tenant_id is required"):
         RetrievalContext.from_rag_input(_rag_input(), settings=settings)
+
+
+def test_for_investigation_resolves_tenant_from_source_snapshot() -> None:
+    ctx = RetrievalContext.for_investigation(
+        event_id="evt-42",
+        source_snapshot={
+            "creation_source_ref": {"source_tenant_id": "tenant-from-snapshot"},
+        },
+        principal="investigation:workflow_graph",
+        trace_id="trace-42",
+    )
+    assert ctx.tenant_id == "tenant-from-snapshot"
+    assert ctx.principal == "investigation:workflow_graph"
+    assert ctx.trace_id == "trace-42"
+
+
+def test_for_investigation_requires_tenant_in_production() -> None:
+    settings = Settings(
+        app_env="production",
+        simulation_enabled=False,
+        source_mode="live_xdr",
+        tool_mode="live",
+        disposition_mode="live_xdr",
+        disposition_adapter_kind="live",
+        llm_mode="openai_compatible",
+        embedding_mode="remote",
+    )
+    with pytest.raises(ValueError, match="tenant_id is required"):
+        RetrievalContext.for_investigation(
+            event_id="evt-prod",
+            settings=settings,
+        )

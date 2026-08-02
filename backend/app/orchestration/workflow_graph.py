@@ -1700,6 +1700,8 @@ async def rag_node(
         event_id=event_id,
         triage_result=triage_result,
         evidence_output=evidence_output,
+        source_snapshot=event_context.source_snapshot,
+        principal="investigation:workflow_graph",
     )
     return output
 

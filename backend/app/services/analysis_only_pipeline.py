@@ -42,6 +42,7 @@ from app.models.entities import EntitySet
 from app.models.enums import DispositionPolicy, EventStatus, FinalVerdict
 from app.models.report import InvestigationReport
 from app.models.workflow import TransitionContext
+from app.services.change_window_baseline_loader import resolve_tenant_id
 from app.services.event_service import EventService, StateMachinePort
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
@@ -134,14 +135,22 @@ async def run_rag_stage(
     event_id: str,
     triage_result: TriageResult,
     evidence_output: EvidenceOutput,
+    tenant_id: str | None = None,
+    principal: str | None = None,
+    trace_id: str | None = None,
+    source_snapshot: dict[str, Any] | None = None,
 ) -> tuple[RAGOutput | None, bool]:
     """Invoke RAGAgent between evidence and risk; never raise to callers."""
+    resolved_tenant = tenant_id or resolve_tenant_id(source_snapshot)
     try:
         output = await rag_agent.execute(
             RAGAgentInput(
                 event_id=event_id,
                 triage_result=triage_result,
                 evidence_output=evidence_output,
+                tenant_id=resolved_tenant,
+                principal=principal,
+                trace_id=trace_id,
             )
         )
         if not isinstance(output, RAGOutput):
@@ -297,6 +306,15 @@ class AnalysisOnlyPipeline:
             event_id=event_id,
             triage_result=triage_result,
             evidence_output=evidence_output,
+            tenant_id=(
+                event.creation_source_ref.source_tenant_id if event is not None else None
+            ),
+            principal="investigation:analysis_only_pipeline",
+            source_snapshot=(
+                (await self._context_store.get_full_context(event_id)).source_snapshot
+                if self._context_store is not None and event is None
+                else None
+            ),
         )
 
         await self._transition(

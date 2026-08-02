@@ -7,11 +7,13 @@ identifiers. Nil UUIDs and empty strings are rejected.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from opentelemetry import trace
 
 from app.core.config import Settings, get_settings
 from app.models.agent_io import RAGAgentInput
+from app.services.change_window_baseline_loader import resolve_tenant_id
 
 _NIL_UUID = "00000000-0000-0000-0000-000000000000"
 
@@ -67,6 +69,33 @@ class RetrievalContext:
             principal=principal,
             event_id=input.event_id,
             trace_id=trace_id,
+        )
+
+    @classmethod
+    def for_investigation(
+        cls,
+        *,
+        event_id: str,
+        tenant_id: str | None = None,
+        source_snapshot: dict[str, Any] | None = None,
+        principal: str | None = None,
+        trace_id: str | None = None,
+        settings: Settings | None = None,
+    ) -> RetrievalContext:
+        """Build context for workflow/pipeline callers with explicit tenant resolution."""
+        cfg = settings or get_settings()
+        resolved_tenant = (tenant_id or resolve_tenant_id(source_snapshot) or "").strip()
+        if not resolved_tenant:
+            if cfg.app_env.strip().lower() == "production":
+                raise ValueError("tenant_id is required in production")
+            resolved_tenant = cfg.retrieval_default_tenant_id.strip()
+        resolved_principal = (principal or "investigation:workflow").strip()
+        resolved_trace = (trace_id or current_trace_id() or f"evt:{event_id}").strip()
+        return cls(
+            tenant_id=resolved_tenant,
+            principal=resolved_principal,
+            event_id=event_id,
+            trace_id=resolved_trace,
         )
 
 

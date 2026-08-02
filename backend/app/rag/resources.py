@@ -109,7 +109,7 @@ def get_loaded_retrieval_resources(
     if cfg.retrieval_fixture_fallback:
         provider = peek_session_provider()
         return LoadedRetrievalResources(
-            status="unavailable",
+            status="degraded",
             mode="fixture",
             pipeline=None,
             reasons=("retrieval_fixture_fallback_enabled",),

@@ -53,6 +53,7 @@ def test_fixture_fallback_skips_pipeline_in_non_production() -> None:
     loaded = get_loaded_retrieval_resources(settings=settings)
     assert loaded.pipeline is None
     assert loaded.mode == "fixture"
+    assert loaded.status == "degraded"
     assert "retrieval_fixture_fallback_enabled" in loaded.reasons
 
 
