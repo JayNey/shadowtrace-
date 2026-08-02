@@ -28,6 +28,8 @@ from app.db import models as m
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
+# Must match Alembic head public tables (excl. alembic_version) and
+# ``Base.metadata.tables``; update in the same PR as any core migration.
 CORE_TABLES = {
     "action",
     "action_execution_job",
