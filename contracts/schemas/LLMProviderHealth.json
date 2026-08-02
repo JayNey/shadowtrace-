@@ -1,0 +1,181 @@
+{
+  "$defs": {
+    "LLMCallLogAggregate": {
+      "additionalProperties": false,
+      "description": "Rolling summary from durable ``llm_call_log`` rows (no prompt text).",
+      "properties": {
+        "window_minutes": {
+          "minimum": 1,
+          "title": "Window Minutes",
+          "type": "integer"
+        },
+        "total_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total Calls",
+          "type": "integer"
+        },
+        "success_calls": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Success Calls",
+          "type": "integer"
+        },
+        "success_rate": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Success Rate"
+        },
+        "last_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Status"
+        },
+        "last_error_class": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Error Class"
+        }
+      },
+      "required": [
+        "window_minutes"
+      ],
+      "title": "LLMCallLogAggregate",
+      "type": "object"
+    },
+    "LLMProbeStatus": {
+      "additionalProperties": false,
+      "description": "Sanitized result of the most recent optional provider probe.",
+      "properties": {
+        "status": {
+          "description": "ok | error | skipped",
+          "title": "Status",
+          "type": "string"
+        },
+        "probe_method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Probe Method"
+        },
+        "error_class": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Class"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "latency_ms": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latency Ms"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "LLMProbeStatus",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Sanitized LLM readiness for /health and smoke tooling.",
+  "properties": {
+    "status": {
+      "description": "ok | degraded | error",
+      "title": "Status",
+      "type": "string"
+    },
+    "mode": {
+      "title": "Mode",
+      "type": "string"
+    },
+    "base_url_redacted": {
+      "default": "",
+      "title": "Base Url Redacted",
+      "type": "string"
+    },
+    "primary_model": {
+      "title": "Primary Model",
+      "type": "string"
+    },
+    "probe_enabled": {
+      "default": false,
+      "title": "Probe Enabled",
+      "type": "boolean"
+    },
+    "last_probe_status": {
+      "$ref": "#/$defs/LLMProbeStatus"
+    },
+    "audit": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/LLMCallLogAggregate"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "status",
+    "mode",
+    "primary_model",
+    "last_probe_status"
+  ],
+  "title": "LLMProviderHealth",
+  "type": "object"
+}

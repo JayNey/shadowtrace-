@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import time
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -29,7 +28,20 @@ from app.models.llm_provider import (
 
 logger = logging.getLogger(__name__)
 
-_PROBE_CACHE: dict[str, Any] = {"expires_at": 0.0, "status": None}
+# cache_key -> (expires_at_monotonic, probe_status)
+_PROBE_CACHE: dict[str, tuple[float, LLMProbeStatus]] = {}
+
+
+def _probe_cache_key(settings: Settings) -> str:
+    method = (settings.llm_probe_method or "chat").strip().lower()
+    return "|".join(
+        [
+            settings.llm_mode.strip().lower(),
+            normalize_llm_base_url(settings.llm_api_base_url),
+            (settings.llm_primary_model or "").strip(),
+            method,
+        ]
+    )
 
 
 def classify_llm_error(
@@ -209,18 +221,20 @@ async def probe_llm_provider(
     if not settings.llm_probe_enabled and not force:
         return LLMProbeStatus(status="skipped", probe_method=None)
 
+    cache_key = _probe_cache_key(settings)
     now = time.monotonic()
-    if (
-        not force
-        and _PROBE_CACHE["status"] is not None
-        and now < float(_PROBE_CACHE["expires_at"])
-    ):
-        cached: LLMProbeStatus = _PROBE_CACHE["status"]
-        return cached
+    if not force:
+        cached_entry = _PROBE_CACHE.get(cache_key)
+        if cached_entry is not None:
+            expires_at, cached = cached_entry
+            if now < expires_at:
+                return cached
 
     probe_status = await _run_openai_probe(settings)
-    _PROBE_CACHE["status"] = probe_status
-    _PROBE_CACHE["expires_at"] = now + max(int(settings.llm_probe_ttl_seconds), 1)
+    _PROBE_CACHE[cache_key] = (
+        now + max(int(settings.llm_probe_ttl_seconds), 1),
+        probe_status,
+    )
     return probe_status
 
 
@@ -311,8 +325,7 @@ async def check_llm_provider(
 
 def reset_llm_probe_cache() -> None:
     """Clear cached probe status (tests)."""
-    _PROBE_CACHE["expires_at"] = 0.0
-    _PROBE_CACHE["status"] = None
+    _PROBE_CACHE.clear()
 
 
 __all__ = [

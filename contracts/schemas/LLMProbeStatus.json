@@ -1,0 +1,64 @@
+{
+  "additionalProperties": false,
+  "description": "Sanitized result of the most recent optional provider probe.",
+  "properties": {
+    "status": {
+      "description": "ok | error | skipped",
+      "title": "Status",
+      "type": "string"
+    },
+    "probe_method": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Probe Method"
+    },
+    "error_class": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Class"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "latency_ms": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Latency Ms"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "LLMProbeStatus",
+  "type": "object"
+}

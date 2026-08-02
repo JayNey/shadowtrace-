@@ -132,6 +132,11 @@ from app.models.embedding import (
     VectorQueryFilter,
     VectorRecordIdentity,
 )
+from app.models.llm_provider import (
+    LLMCallLogAggregate,
+    LLMProbeStatus,
+    LLMProviderHealth,
+)
 from app.models.disposition import (
     DispositionCommand,
     DispositionOutboxRecord,
@@ -350,6 +355,10 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "VectorQueryContext": VectorQueryContext,
     "EmbeddingProviderHealth": EmbeddingProviderHealth,
     "VectorImportUpsert": VectorImportUpsert,
+    # llm provider health (ISSUE-106 / #609)
+    "LLMProviderHealth": LLMProviderHealth,
+    "LLMProbeStatus": LLMProbeStatus,
+    "LLMCallLogAggregate": LLMCallLogAggregate,
 }
 
 __all__ = ["MODEL_REGISTRY", *sorted(MODEL_REGISTRY.keys())]

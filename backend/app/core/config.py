@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.errors import ConfigurationError
@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     llm_required: bool = Field(default=False, alias="LLM_REQUIRED")
     llm_audit_window_minutes: int = Field(default=60, alias="LLM_AUDIT_WINDOW_MINUTES")
     event_chat_enabled: bool = Field(default=True, alias="EVENT_CHAT_ENABLED")
+
+    @field_validator("llm_probe_method", mode="before")
+    @classmethod
+    def validate_llm_probe_method(cls, value: object) -> str:
+        normalized = str(value or "chat").strip().lower()
+        if normalized not in {"chat", "models"}:
+            raise ValueError("LLM_PROBE_METHOD must be 'chat' or 'models'")
+        return normalized
 
     embedding_mode: str = Field(default="mock", alias="EMBEDDING_MODE")
     embedding_api_base_url: str = Field(default="", alias="EMBEDDING_API_BASE_URL")

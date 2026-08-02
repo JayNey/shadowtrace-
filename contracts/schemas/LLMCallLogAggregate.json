@@ -1,0 +1,64 @@
+{
+  "additionalProperties": false,
+  "description": "Rolling summary from durable ``llm_call_log`` rows (no prompt text).",
+  "properties": {
+    "window_minutes": {
+      "minimum": 1,
+      "title": "Window Minutes",
+      "type": "integer"
+    },
+    "total_calls": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Total Calls",
+      "type": "integer"
+    },
+    "success_calls": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Success Calls",
+      "type": "integer"
+    },
+    "success_rate": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Success Rate"
+    },
+    "last_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Status"
+    },
+    "last_error_class": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Last Error Class"
+    }
+  },
+  "required": [
+    "window_minutes"
+  ],
+  "title": "LLMCallLogAggregate",
+  "type": "object"
+}

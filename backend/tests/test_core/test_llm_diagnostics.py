@@ -9,23 +9,29 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 import respx
+from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.core.errors import LLMError
 from app.core.llm.base import (
+    InMemoryLLMCallAuditRecorder,
     LLMAuthError,
+    LLMMessage,
     LLMProviderError,
     LLMRateLimitedError,
     LLMTimeoutError,
 )
 from app.core.llm.diagnostics import (
+    _aggregate_llm_call_log,
     build_llm_provider_health,
     classify_llm_error,
     probe_llm_provider,
     reset_llm_probe_cache,
     validate_openai_compatible_config,
 )
+from app.core.llm.factory import get_llm_client
 from app.core.llm.url_utils import normalize_llm_base_url, redact_base_url
+from app.db import models as orm
 from app.models.llm_provider import LLMCallLogAggregate, LLMProviderMode
 
 
@@ -80,6 +86,11 @@ def test_validate_openai_compatible_config_requires_base_url_and_model() -> None
         LLM_PRIMARY_MODEL="model-a",
     )
     assert validate_openai_compatible_config(ok) is None
+
+
+def test_settings_rejects_invalid_llm_probe_method() -> None:
+    with pytest.raises(ValidationError):
+        Settings(LLM_PROBE_METHOD="invalid")
 
 
 @pytest.mark.asyncio
@@ -178,6 +189,131 @@ async def test_probe_timeout_classified(respx_mock: respx.MockRouter) -> None:
     probe = await probe_llm_provider(settings, force=True)
     assert probe.status == "error"
     assert probe.error_class == "timeout"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_probe_chat_classifies_transport_error(respx_mock: respx.MockRouter) -> None:
+    respx_mock.post("https://llm.example/v1/chat/completions").mock(
+        side_effect=httpx.ConnectError("connection refused", request=httpx.Request("POST", "http://x"))
+    )
+    settings = Settings(
+        LLM_MODE="openai_compatible",
+        LLM_API_BASE_URL="https://llm.example/v1",
+        LLM_PRIMARY_MODEL="primary-model",
+        LLM_PROBE_ENABLED=True,
+    )
+    probe = await probe_llm_provider(settings, force=True)
+    assert probe.status == "error"
+    assert probe.error_class == "provider"
+
+
+@respx.mock
+@pytest.mark.asyncio
+async def test_openai_compatible_synthetic_chat_records_success_audit(
+    respx_mock: respx.MockRouter,
+) -> None:
+    respx_mock.post("https://llm.example/v1/chat/completions").respond(
+        200,
+        json={
+            "model": "primary-model",
+            "choices": [{"message": {"content": "pong"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    settings = Settings(
+        LLM_MODE="openai_compatible",
+        LLM_API_BASE_URL="https://llm.example/v1",
+        LLM_API_KEY="secret-key",
+        LLM_PRIMARY_MODEL="primary-model",
+    )
+    audit = InMemoryLLMCallAuditRecorder()
+    client = get_llm_client(settings=settings, audit_recorder=audit)
+    try:
+        await client.chat(
+            [LLMMessage(role="user", content="ping")],
+            event_id="evt-llm-smoke",
+            agent_name="LLMSmoke",
+            prompt_key="llm_smoke",
+            max_tokens=8,
+        )
+    finally:
+        await client.aclose()
+    assert audit.entries
+    assert audit.entries[-1].status == "success"
+
+
+@pytest.mark.asyncio
+async def test_aggregate_llm_call_log_computes_success_rate_and_last_error_class() -> None:
+    from datetime import UTC, datetime
+
+    last_row = orm.LLMCallLog(
+        event_id="evt-1",
+        agent_name="RiskAgent",
+        prompt_key="risk_score",
+        model_name="primary-model",
+        prompt_tokens=1,
+        completion_tokens=1,
+        total_tokens=2,
+        latency_ms=10,
+        fallback_level=0,
+        status="llm_auth_error",
+        created_at=datetime.now(UTC),
+    )
+    scalar_results = iter([2, 1, last_row])
+
+    class _FakeSession:
+        async def __aenter__(self) -> _FakeSession:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def scalar(self, _stmt: object) -> object:
+            return next(scalar_results)
+
+    def session_factory() -> _FakeSession:
+        return _FakeSession()
+
+    aggregate = await _aggregate_llm_call_log(session_factory, window_minutes=60)  # type: ignore[arg-type]
+
+    assert aggregate.total_calls == 2
+    assert aggregate.success_calls == 1
+    assert aggregate.success_rate == 0.5
+    assert aggregate.last_status == "llm_auth_error"
+    assert aggregate.last_error_class == "auth"
+
+
+@pytest.mark.asyncio
+async def test_probe_cache_invalidates_on_config_change() -> None:
+    from app.models.llm_provider import LLMProbeStatus
+
+    base = dict(
+        LLM_MODE="openai_compatible",
+        LLM_API_BASE_URL="https://llm.example/v1",
+        LLM_PROBE_ENABLED=True,
+        LLM_PROBE_TTL_SECONDS=300,
+    )
+    settings_a = Settings(**base, LLM_PRIMARY_MODEL="model-a")
+    settings_b = Settings(**base, LLM_PRIMARY_MODEL="model-b")
+    ok_status = LLMProbeStatus(status="ok", probe_method="chat", latency_ms=1.0)
+    error_status = LLMProbeStatus(
+        status="error",
+        probe_method="chat",
+        error_class="auth",
+        error_code="llm_auth_error",
+        latency_ms=1.0,
+    )
+    with patch(
+        "app.core.llm.diagnostics._run_openai_probe",
+        new_callable=AsyncMock,
+        side_effect=[ok_status, error_status],
+    ) as run_probe:
+        first = await probe_llm_provider(settings_a, force=True)
+        second = await probe_llm_provider(settings_b, force=False)
+    assert run_probe.await_count == 2
+    assert first.status == "ok"
+    assert second.status == "error"
 
 
 @pytest.mark.asyncio
