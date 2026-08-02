@@ -190,6 +190,8 @@ class ObservabilitySnapshot:
     pending_action_count: int = 0
     approval_record_count: int = 0
     approval_operators: list[str] = field(default_factory=list)
+    approval_plan_revisions: list[int] = field(default_factory=list)
+    approval_cycles: list[int] = field(default_factory=list)
     disposition_outbox_count: int = 0
     audit_log_count: int = 0
 
@@ -252,6 +254,8 @@ async def collect_observability(
         pending_action_count=len(pending_actions),
         approval_record_count=len(approval_rows),
         approval_operators=[str(r.operator or "") for r in approval_rows if r.decided_at],
+        approval_plan_revisions=[int(r.plan_revision) for r in approval_rows if r.decided_at],
+        approval_cycles=[int(r.approval_cycle) for r in approval_rows if r.decided_at],
         disposition_outbox_count=outbox_count,
         audit_log_count=audit_count,
     )

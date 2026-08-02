@@ -277,18 +277,71 @@ async def test_scenario_a_stale_broker_task_skips_second_investigation(
 
 
 @pytest.mark.integration
+def test_scenario_a_dual_delivery_one_terminal_stale_skipped(
+    session_factory: async_sessionmaker[AsyncSession],
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production run_investigation: current task completes once; stale task is skipped."""
+    import asyncio
+
+    event_id = unique_id("evt-a-dual")
+    intent_id = unique_id("iin-a-dual")
+    current_task = "task-current-dual"
+    stale_task = "task-stale-dual"
+
+    async def _seed() -> None:
+        await _seed_event_and_intent(
+            session_factory,
+            event_id=event_id,
+            intent_id=intent_id,
+            intent_status=InvestigationIntentStatus.ENQUEUED,
+            broker_task_id=current_task,
+        )
+
+    asyncio.run(_seed())
+
+    calls = {"n": 0}
+
+    async def _execute(investigated_id: str, **_kwargs: Any) -> dict[str, str]:
+        calls["n"] += 1
+        return {"status": "completed", "event_id": investigated_id}
+
+    monkeypatch.setattr(tasks, "execute_investigation", _execute)
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
+
+    first = tasks.run_investigation.apply(
+        args=[event_id],
+        kwargs={"intent_id": intent_id},
+        task_id=current_task,
+    ).result
+    assert first["status"] == "completed"
+    assert calls["n"] == 1
+
+    second = tasks.run_investigation.apply(
+        args=[event_id],
+        kwargs={"intent_id": intent_id},
+        task_id=stale_task,
+    ).result
+    assert second["status"] == "skipped"
+    assert second["reason"] in {"intent_already_terminal", "stale_broker_task"}
+    assert calls["n"] == 1
+
+    snap = asyncio.run(collect_observability(session_factory, event_id))
+    assert snap.intent_statuses == [InvestigationIntentStatus.TERMINAL.value]
+    assert snap.intent_broker_task_ids == [current_task]
+    assert snap.audit_log_count >= 0
+
+
+@pytest.mark.integration
 @pytest.mark.asyncio
 async def test_scenario_a_publish_skips_intent_when_event_not_new(
     session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Second dispatch attempt marks intent SKIPPED when event left NEW."""
-    settings = mock_autonomous_settings(AUTO_INVESTIGATE_CLAIM_LEASE_S=30)
-    service = InvestigationIntentService(
-        session_factory,
-        policy=AutoInvestigatePolicyService(settings),
-        settings=settings,
-    )
+    """Public claim_and_publish_batch marks intent SKIPPED when event left NEW."""
+    _events, intent_service, _store = build_autonomous_stack(session_factory, redis_client)
     event_id = unique_id("evt-a-skip")
     intent_id = unique_id("iin-a-skip")
     await _seed_security_event(
@@ -297,6 +350,7 @@ async def test_scenario_a_publish_skips_intent_when_event_not_new(
         status=EventStatus.NEW,
         object_id=f"inc-{event_id}",
     )
+    stale_created = datetime.now(UTC) - timedelta(days=7)
     async with session_factory() as session:
         async with session.begin():
             session.add(
@@ -305,10 +359,11 @@ async def test_scenario_a_publish_skips_intent_when_event_not_new(
                     event_id=event_id,
                     intent_kind="auto_investigate",
                     intent_version="issue108_v1",
-                    status=InvestigationIntentStatus.CLAIMED.value,
+                    status=InvestigationIntentStatus.PENDING.value,
                     revision=1,
                     attempt=0,
-                    claim_owner="iss110-test",
+                    created_at=stale_created,
+                    updated_at=stale_created,
                 )
             )
     async with session_factory() as session:
@@ -325,8 +380,8 @@ async def test_scenario_a_publish_skips_intent_when_event_not_new(
         "app.tasks.investigation_tasks.run_investigation.apply_async",
         lambda **_kwargs: None,
     )
-    published = await service._publish_claimed_intent(intent_id)
-    assert published is False
+    published = await intent_service.claim_and_publish_batch(limit=1)
+    assert published == 0
 
     snap = await collect_observability(session_factory, event_id)
     assert snap.intent_statuses == [InvestigationIntentStatus.SKIPPED.value]
@@ -441,6 +496,7 @@ async def test_scenario_a_worker_completes_enqueued_intent(
     assert snap.intent_broker_task_ids[0] is not None
     assert snap.event_status is not None
     assert snap.audit_log_count >= 1
+    assert snap.agent_trace_count >= 0
 
 
 # --------------------------------------------------------------------------- #
@@ -504,7 +560,95 @@ async def test_scenario_b_l2_human_approval_persists_operator(
     assert snap.pending_action_count == 0
     assert snap.approval_record_count >= 1
     assert snap.approval_operators == ["iss110-test-approver"]
+    assert snap.approval_plan_revisions == [1]
+    assert snap.approval_cycles == [0]
     assert snap.action_count == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scenario_b_ingest_investigation_produces_l2_pending_then_executes_once(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    approve_api_client: Any,
+) -> None:
+    """Ingest → investigation produces waiting_approval L2 → human API approve → single execute."""
+    engine = await build_approval_engine(session_factory, redis_client)
+    stack = await build_mock_execution_stack(session_factory, redis_client)
+    events, _intent_service, _store = build_autonomous_stack(session_factory, redis_client)
+    produced: dict[str, str] = {}
+
+    async def _investigate(event_id: str, **_kwargs: Any) -> None:
+        action_id = unique_id("act-ingest-l2")
+        produced["action_id"] = action_id
+        action = _response_action(event_id=event_id, level=ActionLevel.L2, action_id=action_id)
+        async with session_factory() as session:
+            async with session.begin():
+                session.add(orm.Action(**action.model_dump()))
+                event_row = await session.get(orm.SecurityEvent, event_id)
+                assert event_row is not None
+                event_row.status = EventStatus.WAITING_APPROVAL.value
+        await engine.evaluate(action, _risk(), approval_cycle=0)
+
+    async def _fake_super_agent() -> Any:
+        agent = MagicMock()
+        agent.investigate = _investigate
+        return agent
+
+    monkeypatch.setattr("app.api.v1.deps.get_super_agent", _fake_super_agent)
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(
+        "app.services.evidence_projection.bind_evidence_projection",
+        lambda _projection: nullcontext(),
+    )
+    monkeypatch.setattr(
+        "app.services.evidence_projection.EvidenceProjection",
+        lambda _factory: MagicMock(),
+    )
+    monkeypatch.setattr(
+        "app.services.investigation_guidance.record_investigation_workflow_path",
+        AsyncMock(),
+    )
+
+    ingest = await events.ingest_source_object(
+        incident_source(object_id=unique_id("inc-b-ingest"))
+    )
+    result = await tasks.execute_investigation(ingest.event_id)
+    assert result["status"] == "completed"
+    action_id = produced["action_id"]
+
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action_id)
+        assert row is not None
+        assert row.status == ActionStatus.WAITING_APPROVAL.value
+
+    decision_id = f"dec-ingest-{uuid4().hex[:10]}"
+    resp = approve_api_client.post(
+        f"/api/v1/actions/{action_id}/approve",
+        headers=auth_headers("approver"),
+        json={"comment": "human gate", "decision_id": decision_id},
+    )
+    assert resp.status_code == 200
+
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, ingest.event_id)
+        assert row is not None
+        from app.services.context_service import event_summary_from_security_event
+
+        await stack.store.init_context(ingest.event_id, event_summary_from_security_event(row))
+
+    await stack.service.execute_action(action_id)
+    with pytest.raises(InvalidStateTransitionError):
+        await stack.service.execute_action(action_id)
+
+    assert len(stack.recorder.calls) == 1
+    snap = await collect_observability(session_factory, ingest.event_id)
+    assert snap.pending_action_count == 0
+    assert snap.approval_operators == ["iss110-approver"]
+    assert snap.approval_plan_revisions == [1]
+    assert snap.approval_cycles == [0]
+    assert await count_execution_jobs(session_factory, ingest.event_id) == 1
 
 
 @pytest.mark.integration
@@ -886,7 +1030,68 @@ async def test_scenario_c_action_redelivery_no_duplicate_side_effect(
 
     snap = await collect_observability(session_factory, event_id)
     assert snap.approval_operators == ["iss110-sidefx-approver"]
+    assert snap.approval_plan_revisions == [1]
     assert snap.action_count == 1
+
+
+@pytest.mark.integration
+def test_scenario_c_investigation_crash_marks_intent_dead_no_duplicate_work(
+    session_factory: async_sessionmaker[AsyncSession],
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker crash during investigate marks intent DEAD; redelivery does not re-run body."""
+    import asyncio
+
+    event_id = unique_id("evt-c-crash")
+    intent_id = unique_id("iin-c-crash")
+    current_task = "task-current-crash"
+    stale_task = "task-stale-crash"
+
+    async def _seed() -> None:
+        await _seed_event_and_intent(
+            session_factory,
+            event_id=event_id,
+            intent_id=intent_id,
+            intent_status=InvestigationIntentStatus.ENQUEUED,
+            broker_task_id=current_task,
+        )
+
+    asyncio.run(_seed())
+
+    calls = {"n": 0}
+
+    async def _crash(_event_id: str, **_kwargs: Any) -> dict[str, str]:
+        calls["n"] += 1
+        raise RuntimeError("simulated worker crash")
+
+    monkeypatch.setattr(tasks, "execute_investigation", _crash)
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
+
+    with pytest.raises(RuntimeError, match="simulated worker crash"):
+        _ = tasks.run_investigation.apply(
+            args=[event_id],
+            kwargs={"intent_id": intent_id},
+            task_id=current_task,
+        ).result
+    assert calls["n"] == 1
+
+    async def _verify_dead() -> None:
+        async with session_factory() as session:
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            assert row is not None
+            assert row.status == InvestigationIntentStatus.DEAD.value
+
+    asyncio.run(_verify_dead())
+
+    redelivery = tasks.run_investigation.apply(
+        args=[event_id],
+        kwargs={"intent_id": intent_id},
+        task_id=stale_task,
+    ).result
+    assert redelivery["status"] == "skipped"
+    assert redelivery["reason"] == "intent_already_terminal"
+    assert calls["n"] == 1
 
 
 @pytest.mark.integration
@@ -1002,6 +1207,18 @@ async def test_scenario_c_unknown_action_requires_manual_resolve(
 
 
 @pytest.mark.integration
+def test_scenario_d_auto_response_rejects_live_disposition_at_startup() -> None:
+    """AUTO_RESPONSE with live disposition adapter must fail closed at startup."""
+    with pytest.raises(ConfigurationError):
+        Settings(
+            AUTO_RESPONSE_ENABLED=True,
+            SOURCE_MODE="mock_xdr",
+            TOOL_MODE="mock",
+            DISPOSITION_MODE="live_crowdstrike",
+        )
+
+
+@pytest.mark.integration
 def test_scenario_d_auto_response_rejects_live_source_at_startup() -> None:
     """AUTO_RESPONSE with live source must fail closed at Settings construction."""
     with pytest.raises(ConfigurationError):
@@ -1086,6 +1303,7 @@ async def test_scenario_d_task_stays_pending_when_broker_up_worker_absent(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Phase 1 of worker recovery: broker accepts task; isolated queue keeps PENDING."""
     event_id = unique_id("evt-d-queue")
     await _seed_event_and_intent(session_factory, event_id=event_id, intent_id=unique_id("iin-d"))
 
@@ -1141,7 +1359,11 @@ async def test_scenario_d_worker_recovery_completes_queued_task(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
 ) -> None:
-    """Published intent reaches ENQUEUED with broker task id, then terminal via worker."""
+    """Phase 2 of worker recovery: published intent reaches terminal via live worker.
+
+    Complements ``test_scenario_d_task_stays_pending_when_broker_up_worker_absent``
+    (isolated queue PENDING semantics when no consumer is attached).
+    """
     require_celery_worker()
     events, intent_service, _store = build_autonomous_stack(session_factory, redis_client)
     ingest = await events.ingest_source_object(
@@ -1180,6 +1402,7 @@ async def test_scenario_d_worker_recovery_completes_queued_task(
     assert snap.intent_broker_task_ids[0] is not None
     assert snap.event_status is not None
     assert snap.audit_log_count >= 1
+    assert snap.agent_trace_count >= 0
 
 
 @pytest.mark.integration
