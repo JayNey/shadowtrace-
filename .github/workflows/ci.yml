@@ -369,7 +369,7 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Unit tests (Vitest)
+      - name: Unit tests (Vitest, ISSUE-111)
         run: pnpm test
 
       - name: Build

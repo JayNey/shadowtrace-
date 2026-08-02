@@ -34,7 +34,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
+.PHONY: up down down-v bootstrap smoke-bootstrap llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -354,6 +354,12 @@ update-baseline:
 	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
 		UPDATE_BASELINE=1 UPDATE_BASELINE_CONFIRM=ISSUE-087 $(PYTHON) -m scripts.update_regression_baseline
 
+# --- ISSUE-111 frontend Vitest unit tests (Playwright e2e stays separate) --- #
+frontend-test:
+	cd frontend && (corepack enable && corepack prepare pnpm@9.15.9 --activate || true)
+	cd frontend && pnpm install --frozen-lockfile
+	cd frontend && pnpm test
+
 # --- ISSUE-077 frontend Playwright e2e (optional; does not block P0 CI) --- #
 # Requires a healthy Compose stack (postgres/redis/backend/frontend).
 # Usage: docker compose up -d && make test-e2e-frontend
@@ -449,6 +455,7 @@ ci-lint:
 	cd frontend && pnpm install --frozen-lockfile
 	cd frontend && pnpm lint
 	cd frontend && pnpm typecheck
+	cd frontend && pnpm test
 
 ci-test:
 	cd backend && $(UV) sync --frozen --extra dev
