@@ -105,7 +105,6 @@ services:
       SOURCE_MODE: mock_xdr
       DISPOSITION_MODE: mock_xdr
       TOOL_MODE: mock
-      LLM_MODE: mock
       SIMULATION_ENABLED: "true"
       TASK_MODE: ${TASK_MODE:-background}
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -195,7 +194,6 @@ services:
       SOURCE_MODE: mock_xdr
       DISPOSITION_MODE: mock_xdr
       TOOL_MODE: mock
-      LLM_MODE: mock
       SIMULATION_ENABLED: "true"
       ALLOW_LIVE_SIDE_EFFECTS: "false"
       ALLOW_XDR_WRITEBACK: "false"
@@ -299,7 +297,6 @@ services:
       SOURCE_MODE: mock_xdr
       DISPOSITION_MODE: mock_xdr
       TOOL_MODE: mock
-      LLM_MODE: mock
       SIMULATION_ENABLED: "true"
       ALLOW_LIVE_SIDE_EFFECTS: "false"
       ALLOW_XDR_WRITEBACK: "false"

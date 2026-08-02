@@ -57,6 +57,13 @@ async def check_embedding_provider() -> dict[str, object]:
         }
 
 
+async def check_llm_provider(settings: Settings | None = None) -> dict[str, object]:
+    """Return sanitized LLM provider readiness (ISSUE-106)."""
+    from app.core.llm.diagnostics import check_llm_provider as _check_llm
+
+    return await _check_llm(settings)
+
+
 async def check_postgres(database_url: str) -> str:
     """Return 'ok' if SELECT 1 succeeds, else 'error'."""
     try:
@@ -103,6 +110,7 @@ async def health(
     postgres = await check_postgres(settings.database_url)
     redis_status = await check_redis(settings.redis_url)
     embedding_provider = await check_embedding_provider()
+    llm_provider = await check_llm_provider(settings)
 
     # NOTE: capability values below are UNVERIFIED placeholders for the Mock
     # phase. Once real adapters land they must be replaced with actual
@@ -150,6 +158,8 @@ async def health(
 
     hard_deps_ok = postgres == "ok" and redis_status == "ok"
     embedding_ok = embedding_provider.get("status") == "ok"
+    llm_ok = llm_provider.get("status") == "ok"
+    llm_required = bool(settings.llm_required)
     celery_task_mode = str(celery_health.get("task_mode", "background"))
     celery_broker_status = str(celery_health.get("broker", "error"))
     celery_worker_status = str(celery_health.get("worker", {}).get("status", "not_applicable"))
@@ -157,13 +167,16 @@ async def health(
     overall = "ok"
     if not hard_deps_ok or not embedding_ok:
         overall = "degraded"
+    elif llm_required and not llm_ok:
+        overall = "degraded"
     elif celery_worker_status in {"degraded", "error"}:
         overall = "degraded"
     elif celery_task_mode == "celery" and celery_broker_status == "error":
         overall = "degraded"
 
     # 503 only for hard dependency / embedding failures — not missing workers alone (#622).
-    if not hard_deps_ok or not embedding_ok:
+    # LLM affects HTTP status only when explicitly required (#609).
+    if not hard_deps_ok or not embedding_ok or (llm_required and not llm_ok):
         response.status_code = 503
 
     return {
@@ -171,6 +184,7 @@ async def health(
         "postgres": postgres,
         "redis": redis_status,
         "embedding_provider": embedding_provider,
+        "llm": llm_provider,
         "celery": celery_health,
         "source_adapter": source_adapter,
         "disposition_adapter": disposition_adapter,

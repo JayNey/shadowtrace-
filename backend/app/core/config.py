@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     llm_primary_model: str = Field(default="mock-model", alias="LLM_PRIMARY_MODEL")
     llm_fallback_models: str = Field(default="", alias="LLM_FALLBACK_MODELS")
     llm_timeout_seconds: int = Field(default=30, alias="LLM_TIMEOUT_SECONDS")
+    llm_probe_enabled: bool = Field(default=False, alias="LLM_PROBE_ENABLED")
+    llm_probe_ttl_seconds: int = Field(default=60, alias="LLM_PROBE_TTL_SECONDS")
+    llm_probe_method: str = Field(default="chat", alias="LLM_PROBE_METHOD")
+    llm_required: bool = Field(default=False, alias="LLM_REQUIRED")
+    llm_audit_window_minutes: int = Field(default=60, alias="LLM_AUDIT_WINDOW_MINUTES")
     event_chat_enabled: bool = Field(default=True, alias="EVENT_CHAT_ENABLED")
 
     embedding_mode: str = Field(default="mock", alias="EMBEDDING_MODE")

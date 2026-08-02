@@ -15,6 +15,7 @@ from app.core.llm.base import (
     LLMTimeoutError,
     ProviderResponse,
 )
+from app.core.llm.url_utils import normalize_llm_base_url
 
 
 class OpenAICompatibleLLMClient(BaseLLMClient):
@@ -31,7 +32,7 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
         if not base_url.strip():
             raise ValueError("base_url is required for openai_compatible mode")
         super().__init__(**kwargs)
-        self._base_url = base_url.rstrip("/")
+        self._base_url = normalize_llm_base_url(base_url)
         self._api_key = api_key
         self._client = client
         self._owns_client = client is None
@@ -124,6 +125,49 @@ class OpenAICompatibleLLMClient(BaseLLMClient):
             completion_tokens=completion_tokens,
             total_tokens=total_tokens or prompt_tokens + completion_tokens,
         )
+
+    async def probe_chat(self, *, model_name: str | None = None) -> ProviderResponse:
+        """Minimal synthetic chat used by health/smoke probes (ISSUE-106)."""
+        return await self._request(
+            [LLMMessage(role="user", content="ping")],
+            model_name=model_name or self.primary_model,
+            temperature=0.0,
+            max_tokens=1,
+            json_mode=False,
+        )
+
+    async def probe_models(self) -> int:
+        """Optional GET /models probe; returns HTTP status (not all providers support it)."""
+        client = await self._http()
+        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+        try:
+            response = await client.get(f"{self._base_url}/models", headers=headers)
+        except httpx.TimeoutException as exc:
+            raise LLMTimeoutError(
+                "LLM models probe timed out",
+                details={"endpoint": "models"},
+            ) from exc
+        except httpx.TransportError as exc:
+            raise LLMProviderError(
+                "LLM models probe transport failed",
+                details={"endpoint": "models"},
+            ) from exc
+        if response.status_code in {401, 403}:
+            raise LLMAuthError(
+                "LLM provider rejected credentials",
+                details={"endpoint": "models", "status": response.status_code},
+            )
+        if response.status_code == 429:
+            raise LLMRateLimitedError(
+                "LLM provider rate limited the models probe",
+                details={"endpoint": "models", "status": response.status_code},
+            )
+        if response.status_code >= 400:
+            raise LLMProviderError(
+                "LLM models probe returned an error",
+                details={"endpoint": "models", "status": response.status_code},
+            )
+        return int(response.status_code)
 
 
 __all__ = ["OpenAICompatibleLLMClient"]

@@ -44,6 +44,25 @@ def _mock_celery_health() -> Iterator[None]:
         yield
 
 
+def _llm_health_payload(*, status: str = "ok") -> dict[str, Any]:
+    return {
+        "status": status,
+        "mode": "mock",
+        "base_url_redacted": "",
+        "primary_model": "mock-model",
+        "probe_enabled": False,
+        "last_probe_status": {"status": "skipped"},
+        "audit": {
+            "window_minutes": 60,
+            "total_calls": 0,
+            "success_calls": 0,
+            "success_rate": None,
+            "last_status": None,
+            "last_error_class": None,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     settings = Settings(
@@ -78,6 +97,11 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
                 "latency_ms": 1.0,
             },
         ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
     ):
         response = await client.get("/api/v1/health")
 
@@ -91,6 +115,10 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     assert body["embedding_provider"]["status"] == "ok"
     assert body["embedding_provider"]["mode"] == "mock"
     assert "api_key" not in str(body["embedding_provider"]).lower()
+    assert body["llm"]["status"] == "ok"
+    assert body["llm"]["mode"] == "mock"
+    assert "api_key" not in str(body["llm"]).lower()
+    assert "prompt" not in str(body["llm"]).lower()
     assert body["simulation_enabled"] is True
     assert body["version"] == "0.1.0"
     assert set(body["celery"].keys()) >= {"task_mode", "broker", "worker"}
@@ -129,6 +157,11 @@ async def test_health_investigation_block_matches_contract(client: AsyncClient) 
             "app.api.v1.health.check_embedding_provider",
             new_callable=AsyncMock,
             return_value={"status": "ok", "mode": "mock"},
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
         ),
     ):
         response = await client.get("/api/v1/health")

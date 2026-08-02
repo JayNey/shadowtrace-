@@ -198,11 +198,22 @@ make down && make up
 
 ```ini
 SIMULATION_ENABLED=false
-LLM_MODE=live
+LLM_MODE=openai_compatible
+LLM_API_BASE_URL=https://your-provider.example/v1
 LLM_API_KEY=sk-your-key-here
+LLM_PRIMARY_MODEL=your-model-id
 SOURCE_MODE=live_crowdstrike    # 替换为实际 provider
 TOOL_MODE=live
 ALLOW_LIVE_SIDE_EFFECTS=true    # 显式授权
+```
+
+`LLM_API_BASE_URL` 是 **chat/completions 路径前缀**（不含 `/chat/completions` 后缀）。火山 Ark 示例：`https://ark.cn-beijing.volces.com/api/v3`。
+
+诊断：
+
+```bash
+make llm-smoke
+curl -s http://localhost:8000/api/v1/health | python3 -c "import json,sys; print(json.load(sys.stdin)['llm'])"
 ```
 
 **安全栅栏**：`APP_ENV=production` 时，应用启动即拒绝任何 mock/simulation 模式组合（fail-closed）。  
