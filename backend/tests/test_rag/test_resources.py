@@ -237,6 +237,8 @@ def test_warmup_retrieval_resources_builds_pipeline(monkeypatch: pytest.MonkeyPa
     mock_provider.pool_policy = "pooled"
     mock_provider.session_factory = MagicMock(return_value=session_factory)
     monkeypatch.setattr("app.rag.resources.peek_session_provider", lambda: mock_provider)
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("app.api.v1.deps._get_redis", lambda: MagicMock())
 
     settings = Settings()
     llm = MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder())

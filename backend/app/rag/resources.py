@@ -212,13 +212,13 @@ def warmup_retrieval_resources() -> None:
     if provider is None:
         return
 
+    from app.api.v1.deps import _get_redis, _get_session_factory
     from app.core.embedding.factory import get_embedding_client
     from app.core.llm.factory import get_llm_client
-    from app.core.redis_client import RedisClient
     from app.services.budget_service import BudgetService
 
-    session_factory = provider.session_factory()
-    budget_service = BudgetService(redis=RedisClient(url=cfg.redis_url), settings=cfg)
+    session_factory = _get_session_factory()
+    budget_service = BudgetService(redis=_get_redis(), settings=cfg)
     llm_client = get_llm_client(settings=cfg, budget_service=budget_service)
     embed_service = get_embedding_client(settings=cfg)
     get_loaded_retrieval_resources(
