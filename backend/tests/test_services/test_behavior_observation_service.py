@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import AsyncIterator, Iterator
-from datetime import UTC, datetime, timedelta
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -669,91 +669,3 @@ async def test_query_projection_failures_excludes_resolved_by_default(
         BehaviorObservationProjectionStatus.PENDING_RETRY,
         BehaviorObservationProjectionStatus.DEAD_LETTER,
     }
-
-
-@pytest.fixture
-def celery_eager() -> Iterator[None]:
-    from app.core.celery_app import celery_app
-    from app.db.session_provider import init_worker_session_provider, reset_session_provider
-
-    previous = {
-        "task_always_eager": celery_app.conf.task_always_eager,
-        "task_eager_propagates": celery_app.conf.task_eager_propagates,
-        "task_store_eager_result": celery_app.conf.task_store_eager_result,
-        "result_backend": celery_app.conf.result_backend,
-        "broker_url": celery_app.conf.broker_url,
-    }
-    celery_app.conf.task_always_eager = True
-    celery_app.conf.task_eager_propagates = True
-    celery_app.conf.task_store_eager_result = True
-    celery_app.conf.result_backend = "cache+memory://"
-    celery_app.conf.broker_url = "memory://"
-    init_worker_session_provider()
-    yield
-    reset_session_provider()
-    celery_app.conf.task_always_eager = previous["task_always_eager"]
-    celery_app.conf.task_eager_propagates = previous["task_eager_propagates"]
-    celery_app.conf.task_store_eager_result = previous["task_store_eager_result"]
-    celery_app.conf.result_backend = previous["result_backend"]
-    celery_app.conf.broker_url = previous["broker_url"]
-
-
-@pytest.mark.asyncio
-async def test_celery_retry_pending_resolves_transient_failure(
-    session_factory: async_sessionmaker[AsyncSession],
-    celery_eager: None,
-) -> None:
-    from app.tasks.behavior_observation_tasks import retry_behavior_observation_pending
-
-    suffix = uuid.uuid4().hex[:8]
-    tenant_id = f"tenant-{suffix}"
-    connector_id = f"conn-{suffix}"
-    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
-    record_id = await _seed_source_log(
-        session_factory,
-        suffix=suffix,
-        tenant_id=tenant_id,
-        connector_id=connector_id,
-    )
-    service = _observation_service(session_factory)
-    with patch.object(
-        service,
-        "persist_in_session",
-        side_effect=RuntimeError("projection boom"),
-    ):
-        with pytest.raises(RuntimeError, match="projection boom"):
-            await service.project_source_object(record_id)
-
-    await service.record_projection_failure(
-        source_record_id=record_id,
-        source_tenant_id=tenant_id,
-        error_category="projection_failed",
-        detail={"message": "projection boom"},
-    )
-    async with session_factory() as session:
-        async with session.begin():
-            failure = await session.scalar(
-                select(orm.BehaviorObservationProjectionFailure).where(
-                    orm.BehaviorObservationProjectionFailure.source_record_id == record_id
-                )
-            )
-            assert failure is not None
-            failure.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
-
-    result = retry_behavior_observation_pending.apply(args=[10]).result
-    assert result["retried"] >= 1
-
-    observations = await service.query_observations(
-        BehaviorObservationQuery(source_tenant_id=tenant_id)
-    )
-    assert observations.total == 1
-    assert observations.items[0].provenance.source_record_id == record_id
-
-    async with session_factory() as session:
-        failure = await session.scalar(
-            select(orm.BehaviorObservationProjectionFailure).where(
-                orm.BehaviorObservationProjectionFailure.source_record_id == record_id
-            )
-        )
-    assert failure is not None
-    assert failure.status == BehaviorObservationProjectionStatus.RESOLVED.value

@@ -240,7 +240,8 @@ services:
   # the investigation worker profile.
   # BEHAVIOR_OBSERVATION_RETRY_ENABLED=true on beat schedules projection retry
   # (ISSUE-156). scheduler-worker only consumes the ingestion queue — it does
-  # not need the retry env flag; beat owns the schedule.
+  # not need the retry env flag; beat owns the schedule. Restart scheduler-beat
+  # after changing BEHAVIOR_OBSERVATION_RETRY_* or related beat schedule flags.
   # --------------------------------------------------------------------------
   scheduler-beat:
     profiles: ["scheduler"]
