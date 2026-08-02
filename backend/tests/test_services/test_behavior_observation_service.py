@@ -371,7 +371,67 @@ async def test_resolve_scope_fallback_when_other_instance_has_active_scope(
 
 
 @pytest.mark.asyncio
-async def test_resolve_scope_fails_when_active_scope_missing_connector(
+async def test_unbound_connector_projects_with_unverified_fallback(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scoped_connector = f"conn-scoped-{suffix}"
+    missing_connector = f"conn-missing-{suffix}"
+    instance_id = f"inst-{suffix}"
+    await seed_connector(
+        session_factory,
+        connector_id=scoped_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    await seed_connector(
+        session_factory,
+        connector_id=missing_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    scope_service = _scope_service(session_factory)
+    identity = DetectionScopeIdentity(
+        source_tenant_id=tenant_id,
+        source_product="mock_xdr",
+        integration_instance_id=instance_id,
+    )
+    revision = await scope_service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=scoped_connector, source_product="mock_xdr"),
+        ],
+    )
+    activated = await scope_service.activate_revision(revision.scope_revision_id)
+
+    record_id = await seed_source_log(
+        session_factory,
+        suffix=suffix,
+        tenant_id=tenant_id,
+        connector_id=missing_connector,
+    )
+    service = _observation_service(session_factory)
+    observation = await service.project_source_object(record_id)
+    assert observation is not None
+    assert observation.provenance.scope_binding_unverified is True
+    assert observation.source_ref.connector_id == missing_connector
+
+    async with session_factory() as session:
+        quality = await session.scalar(
+            select(orm.DataQualityError).where(
+                orm.DataQualityError.stage == "behavior_observation_projection",
+                orm.DataQualityError.error_category == "scope_connector_unbound",
+            )
+        )
+    assert quality is not None
+    assert quality.detail["connector_id"] == missing_connector
+    assert activated.detection_scope_id in quality.detail["active_detection_scope_ids"]
+
+
+@pytest.mark.asyncio
+async def test_unbound_connector_quality_marker_is_idempotent(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
@@ -413,8 +473,157 @@ async def test_resolve_scope_fails_when_active_scope_missing_connector(
         connector_id=missing_connector,
     )
     service = _observation_service(session_factory)
-    with pytest.raises(ValidationError, match="not in active detection scope"):
-        await service.project_source_object(record_id)
+    await service.project_source_object(record_id)
+    await service.project_source_object(record_id)
+
+    async with session_factory() as session:
+        dqe_total = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.DataQualityError)
+                .where(
+                    orm.DataQualityError.stage == "behavior_observation_projection",
+                    orm.DataQualityError.error_category == "scope_connector_unbound",
+                    orm.DataQualityError.detail["source_record_id"].as_string() == record_id,
+                )
+            )
+            or 0
+        )
+    assert dqe_total == 1
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_scope_binding_still_fails_closed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.services.behavior_observation_resolver import resolve_detection_scope_id
+
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    connector_id = f"conn-ambiguous-{suffix}"
+    instance_id = f"inst-{suffix}"
+    await seed_connector(
+        session_factory,
+        connector_id=connector_id,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    connector_set = {
+        "connector_set_version": 1,
+        "upstream_connectors": [{"connector_id": connector_id, "source_product": "mock_xdr"}],
+    }
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DetectionScopeRevision(
+                    scope_revision_id=f"dsrev-a-{suffix}",
+                    detection_scope_id=f"dscope-a-{suffix}",
+                    source_tenant_id=tenant_id,
+                    source_product="mock_xdr",
+                    integration_instance_id=instance_id,
+                    connector_set=connector_set,
+                    connector_set_version=1,
+                    lifecycle_state=DetectionScopeLifecycleState.ACTIVE.value,
+                    revision=1,
+                    content_hash="a" * 64,
+                    identity_hash="b" * 64,
+                    idempotency_key=f"idem-a-{suffix}",
+                    schema_version="1.0",
+                )
+            )
+            session.add(
+                orm.DetectionScopeRevision(
+                    scope_revision_id=f"dsrev-b-{suffix}",
+                    detection_scope_id=f"dscope-b-{suffix}",
+                    source_tenant_id=tenant_id,
+                    source_product="mock_xdr",
+                    integration_instance_id=instance_id,
+                    connector_set=connector_set,
+                    connector_set_version=1,
+                    lifecycle_state=DetectionScopeLifecycleState.ACTIVE.value,
+                    revision=1,
+                    content_hash="c" * 64,
+                    identity_hash="d" * 64,
+                    idempotency_key=f"idem-b-{suffix}",
+                    schema_version="1.0",
+                )
+            )
+
+    async with session_factory() as session:
+        with pytest.raises(ValidationError, match="ambiguous detection scope binding"):
+            await resolve_detection_scope_id(
+                session,
+                source_tenant_id=tenant_id,
+                source_product="mock_xdr",
+                connector_id=connector_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_scope_update_rebinds_connector_on_reprojection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scoped_connector = f"conn-scoped-{suffix}"
+    missing_connector = f"conn-missing-{suffix}"
+    instance_id = f"inst-{suffix}"
+    await seed_connector(
+        session_factory,
+        connector_id=scoped_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    await seed_connector(
+        session_factory,
+        connector_id=missing_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    scope_service = _scope_service(session_factory)
+    identity = DetectionScopeIdentity(
+        source_tenant_id=tenant_id,
+        source_product="mock_xdr",
+        integration_instance_id=instance_id,
+    )
+    revision_v1 = await scope_service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=scoped_connector, source_product="mock_xdr"),
+        ],
+    )
+    activated_v1 = await scope_service.activate_revision(revision_v1.scope_revision_id)
+
+    record_id = await seed_source_log(
+        session_factory,
+        suffix=suffix,
+        tenant_id=tenant_id,
+        connector_id=missing_connector,
+    )
+    service = _observation_service(session_factory)
+    unverified = await service.project_source_object(record_id)
+    assert unverified is not None
+    assert unverified.provenance.scope_binding_unverified is True
+
+    revision_v2 = await scope_service.register_revision(
+        identity=identity,
+        connector_set_version=2,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=scoped_connector, source_product="mock_xdr"),
+            UpstreamConnectorMember(connector_id=missing_connector, source_product="mock_xdr"),
+        ],
+        revision=2,
+        supersedes_scope_revision_id=revision_v1.scope_revision_id,
+    )
+    activated_v2 = await scope_service.activate_revision(revision_v2.scope_revision_id)
+
+    verified = await service.project_source_object(record_id)
+    assert verified is not None
+    assert verified.provenance.scope_binding_unverified is False
+    assert verified.detection_scope_id == activated_v2.detection_scope_id
+    assert verified.detection_scope_id != activated_v1.detection_scope_id
+    assert verified.observation_id != unverified.observation_id
 
 
 @pytest.mark.asyncio

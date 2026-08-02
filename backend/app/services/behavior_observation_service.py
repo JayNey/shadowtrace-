@@ -25,6 +25,8 @@ from app.models.behavior_observation import (
     BehaviorObservationSourceRef,
 )
 from app.services.behavior_observation_resolver import (
+    SCOPE_CONNECTOR_UNBOUND_ERROR,
+    DetectionScopeBinding,
     build_behavior_observation,
     resolve_detection_scope_id,
 )
@@ -197,7 +199,7 @@ class BehaviorObservationService:
                     "source object not found for behavior observation projection",
                     details={"source_record_id": source_record_id},
                 )
-            detection_scope_id = await resolve_detection_scope_id(
+            binding = await resolve_detection_scope_id(
                 active_session,
                 source_tenant_id=row.source_tenant_id,
                 source_product=row.source_product,
@@ -206,17 +208,26 @@ class BehaviorObservationService:
             supersedes = await self._find_prior_observation_id(
                 active_session,
                 source_tenant_id=row.source_tenant_id,
-                detection_scope_id=detection_scope_id,
+                detection_scope_id=binding.detection_scope_id,
                 source_kind=row.source_kind,
                 source_object_id=row.source_object_id,
                 source_revision=int(row.current_state_version),
             )
             observation = build_behavior_observation(
                 row=row,
-                detection_scope_id=detection_scope_id,
+                detection_scope_id=binding.detection_scope_id,
                 supersedes_observation_id=supersedes,
+                scope_binding_unverified=binding.scope_binding_unverified,
             )
             persisted = await self.persist_in_session(active_session, observation)
+            if binding.scope_binding_unverified:
+                await self._record_scope_connector_unbound_quality(
+                    active_session,
+                    source_record_id=row.source_record_id,
+                    source_tenant_id=row.source_tenant_id,
+                    connector_id=row.connector_id,
+                    binding=binding,
+                )
             await self._resolve_failure(active_session, source_record_id=source_record_id)
             return persisted
 
@@ -225,6 +236,51 @@ class BehaviorObservationService:
         async with self._session_factory() as owned_session:
             async with owned_session.begin():
                 return await _run(owned_session)
+
+    async def _record_scope_connector_unbound_quality(
+        self,
+        session: AsyncSession,
+        *,
+        source_record_id: str,
+        source_tenant_id: str,
+        connector_id: str,
+        binding: DetectionScopeBinding,
+    ) -> None:
+        """Observability marker when projection used unverified metadata fallback (ISSUE-157)."""
+        detail = {
+            "source_record_id": source_record_id,
+            "source_tenant_id": source_tenant_id,
+            "connector_id": connector_id,
+            "integration_instance_id": binding.integration_instance_id,
+            "active_detection_scope_ids": list(binding.active_scope_ids),
+            "fallback_detection_scope_id": binding.detection_scope_id,
+            "scope_binding_unverified": True,
+            "runbook": (
+                "Add connector to ACTIVE DetectionScope connector_set, then retry projection"
+            ),
+        }
+        existing = await session.scalar(
+            select(orm.DataQualityError)
+            .where(
+                and_(
+                    orm.DataQualityError.stage == "behavior_observation_projection",
+                    orm.DataQualityError.error_category == SCOPE_CONNECTOR_UNBOUND_ERROR,
+                    orm.DataQualityError.detail["source_record_id"].as_string() == source_record_id,
+                )
+            )
+            .limit(1)
+        )
+        if existing is not None:
+            existing.detail = detail
+            return
+        session.add(
+            orm.DataQualityError(
+                event_id=None,
+                stage="behavior_observation_projection",
+                error_category=SCOPE_CONNECTOR_UNBOUND_ERROR,
+                detail=detail,
+            )
+        )
 
     async def record_projection_failure(
         self,

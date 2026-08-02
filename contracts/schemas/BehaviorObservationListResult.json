@@ -241,6 +241,12 @@
           "minLength": 1,
           "title": "Projection Engine",
           "type": "string"
+        },
+        "scope_binding_unverified": {
+          "default": false,
+          "description": "True when scope id came from metadata fallback while an ACTIVE scope exists",
+          "title": "Scope Binding Unverified",
+          "type": "boolean"
         }
       },
       "required": [

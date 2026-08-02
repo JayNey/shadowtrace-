@@ -1,20 +1,82 @@
-"""Unit tests for BehaviorObservation resolver (ISSUE-119 / #624)."""
+"""Unit and integration tests for BehaviorObservation resolver (ISSUE-119 / #624)."""
 
 from __future__ import annotations
 
+import os
+import uuid
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
+import pytest_asyncio
+from alembic import command
+from alembic.config import Config
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from app.core.errors import ValidationError
 from app.db import models as orm
+from app.models.detection_scope import (
+    DetectionScopeIdentity,
+    DetectionScopeLifecycleState,
+    UpstreamConnectorMember,
+)
 from app.models.enums import SourceObjectKind
 from app.services.behavior_observation_resolver import (
     build_behavior_observation,
     build_observation_id,
     build_observation_idempotency_key,
     compute_observation_content_hash,
+    resolve_detection_scope_id,
 )
+from app.services.detection_scope_service import DetectionScopeService
+from tests.test_services.behavior_observation_fixtures import (
+    seed_behavior_observation_connector as seed_connector,
+)
+from tests.test_services.behavior_observation_fixtures import (
+    truncate_behavior_observation_tables,
+)
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+DATABASE_URL = os.environ.get(
+    "DATABASE_URL",
+    "postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace",
+)
+
+
+def _alembic_config() -> Config:
+    config = Config(str(BACKEND_DIR / "alembic.ini"))
+    config.set_main_option("script_location", str(BACKEND_DIR / "migrations"))
+    return config
+
+
+@pytest.fixture(scope="module")
+def migrated_database() -> None:
+    command.upgrade(_alembic_config(), "head")
+
+
+@pytest_asyncio.fixture
+async def session_factory(
+    migrated_database: None,
+) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = create_async_engine(DATABASE_URL, poolclass=NullPool)
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    yield factory
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def clean_tables(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[None]:
+    await truncate_behavior_observation_tables(session_factory)
+    yield
+    await truncate_behavior_observation_tables(session_factory)
+
+
+def _scope_service(session_factory: async_sessionmaker[AsyncSession]) -> DetectionScopeService:
+    return DetectionScopeService(session_factory)
 
 
 def _source_row(**overrides: object) -> orm.SourceObject:
@@ -70,6 +132,7 @@ def test_build_behavior_observation_ignores_risk_score() -> None:
         detection_scope_id="dscope-test",
     )
     assert observation.detection_score == 72.0
+    assert observation.provenance.scope_binding_unverified is False
     assert "risk_score" not in observation.normalized_attributes
     assert "secret" not in observation.normalized_attributes
     assert any(ref.entity_id == "10.0.0.5" for ref in observation.entity_refs)
@@ -92,6 +155,16 @@ def test_content_hash_changes_with_source_revision() -> None:
     )
     assert first.content_hash != second.content_hash
     assert first.observation_id != second.observation_id
+
+
+def test_build_behavior_observation_marks_unverified_scope_binding() -> None:
+    observation = build_behavior_observation(
+        row=_source_row(),
+        detection_scope_id="dscope-fallback",
+        scope_binding_unverified=True,
+    )
+    assert observation.provenance.scope_binding_unverified is True
+    assert observation.detection_scope_id == "dscope-fallback"
 
 
 def test_connector_kind_rejected() -> None:
@@ -124,3 +197,148 @@ def test_compute_observation_content_hash_ignores_runtime_metadata() -> None:
         "observation_hash": "different",
     }
     assert compute_observation_content_hash(payload) == observation.content_hash
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_unbound_connector_uses_metadata_fallback(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_tables: None,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scoped_connector = f"conn-scoped-{suffix}"
+    missing_connector = f"conn-missing-{suffix}"
+    instance_id = f"inst-{suffix}"
+    await seed_connector(
+        session_factory,
+        connector_id=scoped_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    await seed_connector(
+        session_factory,
+        connector_id=missing_connector,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    scope_service = _scope_service(session_factory)
+    identity = DetectionScopeIdentity(
+        source_tenant_id=tenant_id,
+        source_product="mock_xdr",
+        integration_instance_id=instance_id,
+    )
+    revision = await scope_service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=scoped_connector, source_product="mock_xdr"),
+        ],
+    )
+    activated = await scope_service.activate_revision(revision.scope_revision_id)
+
+    async with session_factory() as session:
+        binding = await resolve_detection_scope_id(
+            session,
+            source_tenant_id=tenant_id,
+            source_product="mock_xdr",
+            connector_id=missing_connector,
+        )
+
+    assert binding.scope_binding_unverified is True
+    assert binding.detection_scope_id.startswith("dscope-")
+    # Fallback scope id may equal the ACTIVE scope id when identity + connector_set_version align;
+    # unverified flag signals connector is not yet in the active connector_set.
+    assert activated.detection_scope_id in binding.active_scope_ids
+    assert binding.integration_instance_id == instance_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_verified_connector_in_active_set(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_tables: None,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    connector_id = f"conn-verified-{suffix}"
+    instance_id = f"inst-{suffix}"
+    await seed_connector(
+        session_factory,
+        connector_id=connector_id,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    scope_service = _scope_service(session_factory)
+    identity = DetectionScopeIdentity(
+        source_tenant_id=tenant_id,
+        source_product="mock_xdr",
+        integration_instance_id=instance_id,
+    )
+    revision = await scope_service.register_revision(
+        identity=identity,
+        connector_set_version=1,
+        upstream_connectors=[
+            UpstreamConnectorMember(connector_id=connector_id, source_product="mock_xdr"),
+        ],
+    )
+    activated = await scope_service.activate_revision(revision.scope_revision_id)
+
+    async with session_factory() as session:
+        binding = await resolve_detection_scope_id(
+            session,
+            source_tenant_id=tenant_id,
+            source_product="mock_xdr",
+            connector_id=connector_id,
+        )
+
+    assert binding.scope_binding_unverified is False
+    assert binding.detection_scope_id == activated.detection_scope_id
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_ambiguous_binding_raises(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_tables: None,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    connector_id = f"conn-ambiguous-{suffix}"
+    instance_id = f"inst-{suffix}"
+    await seed_connector(
+        session_factory,
+        connector_id=connector_id,
+        tenant_id=tenant_id,
+        integration_instance_id=instance_id,
+    )
+    connector_set = {
+        "connector_set_version": 1,
+        "upstream_connectors": [{"connector_id": connector_id, "source_product": "mock_xdr"}],
+    }
+    async with session_factory() as session:
+        async with session.begin():
+            for label in ("a", "b"):
+                session.add(
+                    orm.DetectionScopeRevision(
+                        scope_revision_id=f"dsrev-{label}-{suffix}",
+                        detection_scope_id=f"dscope-{label}-{suffix}",
+                        source_tenant_id=tenant_id,
+                        source_product="mock_xdr",
+                        integration_instance_id=instance_id,
+                        connector_set=connector_set,
+                        connector_set_version=1,
+                        lifecycle_state=DetectionScopeLifecycleState.ACTIVE.value,
+                        revision=1,
+                        content_hash=f"{label}a" * 32,
+                        identity_hash=f"{label}b" * 32,
+                        idempotency_key=f"idem-{label}-{suffix}",
+                        schema_version="1.0",
+                    )
+                )
+
+    async with session_factory() as session:
+        with pytest.raises(ValidationError, match="ambiguous detection scope binding"):
+            await resolve_detection_scope_id(
+                session,
+                source_tenant_id=tenant_id,
+                source_product="mock_xdr",
+                connector_id=connector_id,
+            )

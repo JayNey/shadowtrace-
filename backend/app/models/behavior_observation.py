@@ -57,6 +57,10 @@ class BehaviorObservationProvenance(BaseModel):
     raw_payload_hash: str | None = Field(default=None, max_length=128)
     source_concurrency_token: str | None = Field(default=None, max_length=256)
     projection_engine: str = Field(default="behavior_observation_v1", min_length=1, max_length=64)
+    scope_binding_unverified: bool = Field(
+        default=False,
+        description="True when scope id came from metadata fallback while an ACTIVE scope exists",
+    )
 
 
 class BehaviorObservation(BaseModel):

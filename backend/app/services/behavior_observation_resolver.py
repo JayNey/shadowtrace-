@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -37,6 +38,18 @@ _RAW_PAYLOAD_KEY_PATTERN = re.compile(
     r"^(raw_payload|password|secret|token|credential)",
     re.IGNORECASE,
 )
+
+SCOPE_CONNECTOR_UNBOUND_ERROR = "scope_connector_unbound"
+
+
+@dataclass(frozen=True)
+class DetectionScopeBinding:
+    """Scope binding outcome for one connector projection (#625 / ISSUE-157)."""
+
+    detection_scope_id: str
+    scope_binding_unverified: bool = False
+    active_scope_ids: tuple[str, ...] = ()
+    integration_instance_id: str | None = None
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -155,7 +168,7 @@ async def resolve_detection_scope_id(
     source_tenant_id: str,
     source_product: str,
     connector_id: str,
-) -> str:
+) -> DetectionScopeBinding:
     """Bind connector to a canonical detection scope id (#625 contract)."""
     connector = await session.get(orm.SourceConnector, connector_id)
     integration_instance_id = _connector_integration_instance_id(
@@ -178,22 +191,26 @@ async def resolve_detection_scope_id(
         )
     )
     if not active_rows:
-        return _metadata_fallback_scope_id(
-            connector=connector,
-            source_tenant_id=source_tenant_id,
-            source_product=source_product,
-            integration_instance_id=integration_instance_id,
+        return DetectionScopeBinding(
+            detection_scope_id=_metadata_fallback_scope_id(
+                connector=connector,
+                source_tenant_id=source_tenant_id,
+                source_product=source_product,
+                integration_instance_id=integration_instance_id,
+            ),
         )
 
     instance_scopes = [
         row for row in active_rows if row.integration_instance_id == integration_instance_id
     ]
     if not instance_scopes:
-        return _metadata_fallback_scope_id(
-            connector=connector,
-            source_tenant_id=source_tenant_id,
-            source_product=source_product,
-            integration_instance_id=integration_instance_id,
+        return DetectionScopeBinding(
+            detection_scope_id=_metadata_fallback_scope_id(
+                connector=connector,
+                source_tenant_id=source_tenant_id,
+                source_product=source_product,
+                integration_instance_id=integration_instance_id,
+            ),
         )
 
     matching_scope_ids: list[str] = []
@@ -203,7 +220,10 @@ async def resolve_detection_scope_id(
             matching_scope_ids.append(scope_row.detection_scope_id)
 
     if len(matching_scope_ids) == 1:
-        return matching_scope_ids[0]
+        return DetectionScopeBinding(
+            detection_scope_id=matching_scope_ids[0],
+            scope_binding_unverified=False,
+        )
     if len(matching_scope_ids) > 1:
         raise ValidationError(
             "ambiguous detection scope binding for connector",
@@ -214,14 +234,17 @@ async def resolve_detection_scope_id(
             },
         )
 
-    raise ValidationError(
-        "connector not in active detection scope connector set",
-        details={
-            "connector_id": connector_id,
-            "integration_instance_id": integration_instance_id,
-            "source_tenant_id": source_tenant_id,
-            "source_product": source_product,
-        },
+    active_scope_ids = tuple(scope_row.detection_scope_id for scope_row in instance_scopes)
+    return DetectionScopeBinding(
+        detection_scope_id=_metadata_fallback_scope_id(
+            connector=connector,
+            source_tenant_id=source_tenant_id,
+            source_product=source_product,
+            integration_instance_id=integration_instance_id,
+        ),
+        scope_binding_unverified=True,
+        active_scope_ids=active_scope_ids,
+        integration_instance_id=integration_instance_id,
     )
 
 
@@ -278,6 +301,7 @@ def build_behavior_observation(
     row: orm.SourceObject,
     detection_scope_id: str,
     supersedes_observation_id: str | None = None,
+    scope_binding_unverified: bool = False,
 ) -> BehaviorObservation:
     if row.source_kind == SourceObjectKind.CONNECTOR.value:
         raise ValidationError("connector source objects cannot produce behavior observations")
@@ -313,6 +337,7 @@ def build_behavior_observation(
         source_record_id=row.source_record_id,
         raw_payload_hash=row.raw_payload_hash,
         source_concurrency_token=row.current_concurrency_token,
+        scope_binding_unverified=scope_binding_unverified,
     )
     body = {
         "observation_id": observation_id,

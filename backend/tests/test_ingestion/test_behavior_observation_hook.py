@@ -20,6 +20,7 @@ from app.models.behavior_observation import (
 )
 from app.models.detection_scope import (
     DetectionScopeIdentity,
+    DetectionScopeLifecycleState,
     UpstreamConnectorMember,
 )
 from app.models.enums import SourceDisposition, SourceObjectKind
@@ -382,7 +383,7 @@ async def test_ingest_telemetry_reports_behavior_projection_degraded(
 
 
 @pytest.mark.asyncio
-async def test_hook_marks_non_retryable_scope_errors_dead_letter(
+async def test_hook_projects_unbound_connector_with_unverified_fallback(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -422,7 +423,7 @@ async def test_hook_marks_non_retryable_scope_errors_dead_letter(
     )
     await scope_service.activate_revision(revision.scope_revision_id)
 
-    record_id = f"src-dead-{suffix}"
+    record_id = f"src-unbound-{suffix}"
     async with session_factory() as session:
         async with session.begin():
             session.add(
@@ -431,6 +432,91 @@ async def test_hook_marks_non_retryable_scope_errors_dead_letter(
                     source_product="mock_xdr",
                     source_tenant_id=tenant_id,
                     connector_id=missing_connector,
+                    source_kind=SourceObjectKind.LOG.value,
+                    source_object_id=f"log-{suffix}",
+                    source_object_type="edr",
+                    source_status_raw="indexed",
+                    source_disposition=SourceDisposition.UNKNOWN.value,
+                    schema_version="1",
+                    ingested_at=datetime(2026, 8, 1, tzinfo=UTC),
+                    raw_payload_hash=f"hash-{suffix}",
+                    normalized={"detection_score": 10, "logged_at": "2026-08-01T00:00:00+00:00"},
+                    raw_payload={"cmdline": "keep"},
+                    current_source_status_raw="indexed",
+                    current_source_disposition=SourceDisposition.UNKNOWN.value,
+                    current_state_version=1,
+                    source_sync_state="synced",
+                )
+            )
+
+    projection = BehaviorObservationProjection(session_factory)
+    assert await projection.on_source_record_persisted(record_id) is True
+
+    observations = await BehaviorObservationService(session_factory).query_observations(
+        BehaviorObservationQuery(source_tenant_id=tenant_id)
+    )
+    assert observations.total == 1
+    assert observations.items[0].provenance.scope_binding_unverified is True
+
+
+@pytest.mark.asyncio
+async def test_hook_marks_ambiguous_scope_binding_dead_letter(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = _suffix()
+    tenant_id = f"tenant-{suffix}"
+    connector_id = f"conn-ambiguous-{suffix}"
+    instance_id = f"inst-{suffix}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SourceConnector(
+                    connector_id=connector_id,
+                    source_product="mock_xdr",
+                    display_name=f"Test {connector_id}",
+                    status="online",
+                    schema_version="1",
+                    connector_metadata={
+                        "source_tenant_id": tenant_id,
+                        "integration_instance_id": instance_id,
+                        "connector_set_version": 1,
+                    },
+                )
+            )
+    connector_set = {
+        "connector_set_version": 1,
+        "upstream_connectors": [{"connector_id": connector_id, "source_product": "mock_xdr"}],
+    }
+    async with session_factory() as session:
+        async with session.begin():
+            for label in ("a", "b"):
+                session.add(
+                    orm.DetectionScopeRevision(
+                        scope_revision_id=f"dsrev-{label}-{suffix}",
+                        detection_scope_id=f"dscope-{label}-{suffix}",
+                        source_tenant_id=tenant_id,
+                        source_product="mock_xdr",
+                        integration_instance_id=instance_id,
+                        connector_set=connector_set,
+                        connector_set_version=1,
+                        lifecycle_state=DetectionScopeLifecycleState.ACTIVE.value,
+                        revision=1,
+                        content_hash=f"{label}a" * 32,
+                        identity_hash=f"{label}b" * 32,
+                        idempotency_key=f"idem-{label}-{suffix}",
+                        schema_version="1.0",
+                    )
+                )
+
+    record_id = f"src-dead-{suffix}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SourceObject(
+                    source_record_id=record_id,
+                    source_product="mock_xdr",
+                    source_tenant_id=tenant_id,
+                    connector_id=connector_id,
                     source_kind=SourceObjectKind.LOG.value,
                     source_object_id=f"log-{suffix}",
                     source_object_type="edr",

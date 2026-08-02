@@ -3468,6 +3468,12 @@
             "minLength": 1,
             "title": "Projection Engine",
             "default": "behavior_observation_v1"
+          },
+          "scope_binding_unverified": {
+            "type": "boolean",
+            "title": "Scope Binding Unverified",
+            "description": "True when scope id came from metadata fallback while an ACTIVE scope exists",
+            "default": false
           }
         },
         "additionalProperties": false,
