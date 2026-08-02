@@ -91,17 +91,17 @@ def test_alert_builder_noise_produces_no_alert() -> None:
 
 @pytest.mark.asyncio
 async def test_file_fallback_requires_explicit_mode(
-    event_service: EventService,
+    ingestion_event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     source_ingester = SourceIngester(
-        event_service,
+        ingestion_event_service,
         session_factory,
         source_mode="mock_xdr",
     )
     file_ingester = FileIngester(
         source_ingester,
-        event_service,
+        ingestion_event_service,
         source_mode="mock_xdr",
     )
     with pytest.raises(RuntimeError, match="SOURCE_MODE=file"):
@@ -110,17 +110,17 @@ async def test_file_fallback_requires_explicit_mode(
 
 @pytest.mark.asyncio
 async def test_main_scenario_file_ingest_creates_exactly_one_new_event(
-    event_service: EventService,
+    ingestion_event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     source_ingester = SourceIngester(
-        event_service,
+        ingestion_event_service,
         session_factory,
         source_mode="file",
     )
     file_ingester = FileIngester(
         source_ingester,
-        event_service,
+        ingestion_event_service,
         source_mode="file",
     )
     summary = await file_ingester.ingest(
@@ -155,20 +155,20 @@ async def test_main_scenario_file_ingest_creates_exactly_one_new_event(
 @pytest.mark.asyncio
 async def test_file_ingest_completes_when_batch_size_smaller_than_scenario(
     tmp_path: Path,
-    event_service: EventService,
+    ingestion_event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """FileSourceAdapter must page with cursors so SourceIngester can finish."""
     source_dir = tmp_path / uuid.uuid4().hex
     source_dir.mkdir()
     source_ingester = SourceIngester(
-        event_service,
+        ingestion_event_service,
         session_factory,
         source_mode="file",
     )
     file_ingester = FileIngester(
         source_ingester,
-        event_service,
+        ingestion_event_service,
         source_mode="file",
     )
     summary = await file_ingester.ingest(
@@ -214,19 +214,19 @@ async def test_file_ingest_completes_when_batch_size_smaller_than_scenario(
 @pytest.mark.asyncio
 async def test_file_watermarks_are_scoped_per_scenario(
     tmp_path: Path,
-    event_service: EventService,
+    ingestion_event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     source_dir = tmp_path / uuid.uuid4().hex
     source_dir.mkdir()
     source_ingester = SourceIngester(
-        event_service,
+        ingestion_event_service,
         session_factory,
         source_mode="file",
     )
     file_ingester = FileIngester(
         source_ingester,
-        event_service,
+        ingestion_event_service,
         source_mode="file",
     )
 
@@ -266,7 +266,7 @@ async def test_file_watermarks_are_scoped_per_scenario(
 @pytest.mark.asyncio
 async def test_noise_only_directory_creates_no_event(
     tmp_path: Path,
-    event_service: EventService,
+    ingestion_event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     connector_marker = "noise-only-unique-marker"
@@ -285,13 +285,13 @@ async def test_noise_only_directory_creates_no_event(
         encoding="utf-8",
     )
     source_ingester = SourceIngester(
-        event_service,
+        ingestion_event_service,
         session_factory,
         source_mode="file",
     )
     file_ingester = FileIngester(
         source_ingester,
-        event_service,
+        ingestion_event_service,
         source_mode="file",
     )
     summary = await file_ingester.ingest(tmp_path)
@@ -311,7 +311,7 @@ async def test_noise_only_directory_creates_no_event(
 @pytest.mark.asyncio
 async def test_legacy_suspicious_records_use_event_service_idempotently(
     tmp_path: Path,
-    event_service: EventService,
+    ingestion_event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     marker = uuid.uuid4().hex
@@ -333,13 +333,13 @@ async def test_legacy_suspicious_records_use_event_service_idempotently(
         encoding="utf-8",
     )
     source_ingester = SourceIngester(
-        event_service,
+        ingestion_event_service,
         session_factory,
         source_mode="file",
     )
     file_ingester = FileIngester(
         source_ingester,
-        event_service,
+        ingestion_event_service,
         source_mode="file",
     )
 

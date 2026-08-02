@@ -40,6 +40,7 @@ async def clean_hook_tables(
             await session.execute(delete(orm.BehaviorObservationProjectionFailure))
             await session.execute(delete(orm.BehaviorObservation))
             await session.execute(delete(orm.DetectionScopeRevision))
+            await session.execute(delete(orm.DispositionOutbox))
             await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
             await session.execute(delete(orm.SourceConnector))
@@ -51,6 +52,7 @@ async def clean_hook_tables(
             await session.execute(delete(orm.BehaviorObservationProjectionFailure))
             await session.execute(delete(orm.BehaviorObservation))
             await session.execute(delete(orm.DetectionScopeRevision))
+            await session.execute(delete(orm.DispositionOutbox))
             await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
             await session.execute(delete(orm.SourceConnector))
@@ -120,7 +122,7 @@ def _log_item(suffix: str, connector_id: str, tenant_id: str) -> SourceLog:
 @pytest.mark.asyncio
 async def test_source_ingester_projects_behavior_observation_for_supporting_object(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     tenant_id = f"tenant-{suffix}"
@@ -139,7 +141,7 @@ async def test_source_ingester_projects_behavior_observation_for_supporting_obje
         },
         connectors=[connector],
     )
-    ingester = SourceIngester(event_service, session_factory)
+    ingester = SourceIngester(ingestion_event_service, session_factory)
     summary = await ingester.poll(
         adapter,
         [SourceObjectKind.LOG],
@@ -161,7 +163,7 @@ async def test_source_ingester_projects_behavior_observation_for_supporting_obje
 @pytest.mark.asyncio
 async def test_poll_uses_registered_detection_scope_when_available(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     tenant_id = f"tenant-{suffix}"
@@ -212,7 +214,7 @@ async def test_poll_uses_registered_detection_scope_when_available(
         },
         connectors=[connector],
     )
-    ingester = SourceIngester(event_service, session_factory)
+    ingester = SourceIngester(ingestion_event_service, session_factory)
     summary = await ingester.poll(
         adapter,
         [SourceObjectKind.LOG],
@@ -231,7 +233,7 @@ async def test_poll_uses_registered_detection_scope_when_available(
 @pytest.mark.asyncio
 async def test_poll_marks_degraded_when_behavior_projection_fails(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     tenant_id = f"tenant-{suffix}"
@@ -250,7 +252,7 @@ async def test_poll_marks_degraded_when_behavior_projection_fails(
         },
         connectors=[connector],
     )
-    ingester = SourceIngester(event_service, session_factory)
+    ingester = SourceIngester(ingestion_event_service, session_factory)
     assert ingester._behavior_observation is not None
 
     async def _projection_failed(_record_id: str) -> bool:
@@ -351,10 +353,10 @@ async def test_hook_records_failure_without_rolling_back_source(
 @pytest.mark.asyncio
 async def test_ingest_telemetry_reports_behavior_projection_degraded(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
-    ingester = SourceIngester(event_service, session_factory)
+    ingester = SourceIngester(ingestion_event_service, session_factory)
     assert ingester._behavior_observation is not None
 
     async def _projection_failed(_record_id: str) -> bool:

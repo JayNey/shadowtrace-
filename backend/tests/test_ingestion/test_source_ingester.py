@@ -117,7 +117,7 @@ def _incident(
 
 @pytest.mark.asyncio
 async def test_incremental_pagination_and_next_poll_uses_committed_time(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -150,7 +150,7 @@ async def test_incremental_pagination_and_next_poll_uses_committed_time(
         },
     )
 
-    summary = await source_ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.INCIDENT],
         batch_size=1,
@@ -176,7 +176,7 @@ async def test_incremental_pagination_and_next_poll_uses_committed_time(
             )
         },
     )
-    second_summary = await source_ingester.poll(
+    second_summary = await ingestion_source_ingester.poll(
         empty,
         [SourceObjectKind.INCIDENT],
         batch_size=10,
@@ -196,7 +196,7 @@ async def test_incremental_pagination_and_next_poll_uses_committed_time(
 
 @pytest.mark.asyncio
 async def test_failure_does_not_advance_failed_page_and_resume_uses_cursor(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-resume-{suffix}"
@@ -217,7 +217,7 @@ async def test_failure_does_not_advance_failed_page_and_resume_uses_cursor(
             "resume-cursor": RuntimeError("temporary adapter failure"),
         },
     )
-    failed = await source_ingester.poll(
+    failed = await ingestion_source_ingester.poll(
         failing,
         [SourceObjectKind.INCIDENT],
         batch_size=1,
@@ -245,7 +245,7 @@ async def test_failure_does_not_advance_failed_page_and_resume_uses_cursor(
             )
         },
     )
-    recovered = await source_ingester.poll(
+    recovered = await ingestion_source_ingester.poll(
         recovered_adapter,
         [SourceObjectKind.INCIDENT],
         batch_size=1,
@@ -258,7 +258,7 @@ async def test_failure_does_not_advance_failed_page_and_resume_uses_cursor(
 
 @pytest.mark.asyncio
 async def test_out_of_order_alert_and_incident_merge_to_one_event(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -301,7 +301,7 @@ async def test_out_of_order_alert_and_incident_merge_to_one_event(
         },
     )
 
-    summary = await source_ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.ALERT, SourceObjectKind.INCIDENT],
         batch_size=10,
@@ -320,7 +320,7 @@ async def test_out_of_order_alert_and_incident_merge_to_one_event(
 
 @pytest.mark.asyncio
 async def test_unsupported_schema_rejected_without_watermark_advance(
-    event_service,
+    ingestion_event_service,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -340,7 +340,7 @@ async def test_unsupported_schema_rejected_without_watermark_advance(
             )
 
     ingester = SourceIngester(
-        event_service,
+        ingestion_event_service,
         session_factory,
         source_mode="mock_xdr",
     )
@@ -381,7 +381,7 @@ async def test_unsupported_schema_rejected_without_watermark_advance(
 
 @pytest.mark.asyncio
 async def test_supporting_object_cannot_reassign_connector_tenant(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -408,7 +408,7 @@ async def test_supporting_object_cannot_reassign_connector_tenant(
         connector_id,
         updated_at=datetime.now(UTC),
     ).model_copy(update={"source_tenant_id": "tenant-b"})
-    summary, _ = await source_ingester.ingest_items(
+    summary, _ = await ingestion_source_ingester.ingest_items(
         [SourceAsset(reference=ref, hostname="owner-conflict")],
         source_type=adapter_name,
     )
@@ -427,14 +427,14 @@ async def test_supporting_object_cannot_reassign_connector_tenant(
 
 @pytest.mark.asyncio
 async def test_offline_health_never_calls_list_or_advances(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
 ) -> None:
     adapter = FakePagedAdapter(
         f"adapter-offline-{_suffix()}",
         {},
         health=ConnectorStatus.OFFLINE,
     )
-    summary = await source_ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.INCIDENT],
         batch_size=10,
@@ -447,14 +447,14 @@ async def test_offline_health_never_calls_list_or_advances(
 
 @pytest.mark.asyncio
 async def test_health_exception_is_reported_as_degraded(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
 ) -> None:
     adapter = FakePagedAdapter(
         f"adapter-health-error-{_suffix()}",
         {},
         health=RuntimeError("health endpoint unavailable"),
     )
-    summary = await source_ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.INCIDENT],
         batch_size=10,
@@ -469,7 +469,7 @@ async def test_health_exception_is_reported_as_degraded(
 
 @pytest.mark.asyncio
 async def test_checkpoints_are_isolated_per_connector_and_kind(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -507,7 +507,7 @@ async def test_checkpoints_are_isolated_per_connector_and_kind(
         },
     )
 
-    summary = await source_ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.INCIDENT],
         batch_size=10,
@@ -532,7 +532,7 @@ async def test_checkpoints_are_isolated_per_connector_and_kind(
 
 @pytest.mark.asyncio
 async def test_checkpoint_insert_conflict_uses_real_cas(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -550,7 +550,7 @@ async def test_checkpoint_insert_conflict_uses_real_cas(
     first_watermark = {"cursor": "a", "updated_after": "2026-07-13T12:00:00+00:00"}
     second_watermark = {"cursor": "b", "updated_after": "2026-07-13T12:01:00+00:00"}
     results = await asyncio.gather(
-        source_ingester._commit_checkpoint(
+        ingestion_source_ingester._commit_checkpoint(
             connector_id=connector_id,
             object_kind=SourceObjectKind.INCIDENT,
             stream_scope="",
@@ -559,7 +559,7 @@ async def test_checkpoint_insert_conflict_uses_real_cas(
             expected_watermark=None,
             expected_row_version=None,
         ),
-        source_ingester._commit_checkpoint(
+        ingestion_source_ingester._commit_checkpoint(
             connector_id=connector_id,
             object_kind=SourceObjectKind.INCIDENT,
             stream_scope="",
@@ -584,7 +584,7 @@ async def test_checkpoint_insert_conflict_uses_real_cas(
 
 @pytest.mark.asyncio
 async def test_malformed_page_never_advances_checkpoint(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -613,7 +613,7 @@ async def test_malformed_page_never_advances_checkpoint(
         },
     )
 
-    summary = await source_ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.INCIDENT],
         batch_size=10,
@@ -633,7 +633,7 @@ async def test_malformed_page_never_advances_checkpoint(
 
 @pytest.mark.asyncio
 async def test_schema_failure_is_kind_local_and_connector_health_stays_online(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -675,7 +675,7 @@ async def test_schema_failure_is_kind_local_and_connector_health_stays_online(
         },
     )
 
-    summary = await source_ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.INCIDENT, SourceObjectKind.ALERT],
         batch_size=10,
@@ -703,7 +703,7 @@ async def test_schema_failure_is_kind_local_and_connector_health_stays_online(
 
 @pytest.mark.asyncio
 async def test_legacy_global_watermark_is_ignored_and_replayed(
-    source_ingester: SourceIngester,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -731,7 +731,7 @@ async def test_legacy_global_watermark_is_ignored_and_replayed(
         },
     )
 
-    summary = await source_ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.INCIDENT],
         batch_size=10,
@@ -743,8 +743,8 @@ async def test_legacy_global_watermark_is_ignored_and_replayed(
 
 @pytest.mark.asyncio
 async def test_persist_supporting_object_refreshes_on_stale_skip(
-    source_ingester: SourceIngester,
-    event_service: EventService,
+    ingestion_source_ingester: SourceIngester,
+    ingestion_event_service: EventService,
 ) -> None:
     """Stale CAS skip must still refresh parent entities (#655 / ISSUE-148)."""
     suffix = _suffix()
@@ -772,7 +772,9 @@ async def test_persist_supporting_object_refreshes_on_stale_skip(
         normalized={"hostname": "DEV-WKS-012", "account": "dev-user-012"},
         device_source="edr",
     )
-    first_summary, _ = await source_ingester.ingest_items([log_item], source_type=adapter_name)
+    first_summary, _ = await ingestion_source_ingester.ingest_items(
+        [log_item], source_type=adapter_name
+    )
     assert first_summary.accepted == 1
 
     incident_ref = SourceReference(
@@ -783,7 +785,7 @@ async def test_persist_supporting_object_refreshes_on_stale_skip(
         source_object_id=incident_id,
         ingested_at=datetime.now(UTC),
     )
-    inc = await event_service.ingest_source_object(
+    inc = await ingestion_event_service.ingest_source_object(
         IngestableSource(
             reference=incident_ref,
             title="incident after log",
@@ -793,7 +795,7 @@ async def test_persist_supporting_object_refreshes_on_stale_skip(
         )
     )
     assert inc.event_id
-    event_before = await event_service.get_event(inc.event_id)
+    event_before = await ingestion_event_service.get_event(inc.event_id)
     assert event_before is not None
     assert not {h.hostname for h in event_before.entities.hosts if h.hostname}
 
@@ -808,10 +810,12 @@ async def test_persist_supporting_object_refreshes_on_stale_skip(
         normalized={"hostname": "DEV-WKS-012", "account": "dev-user-012"},
         device_source="edr",
     )
-    second_summary, _ = await source_ingester.ingest_items([stale_log], source_type=adapter_name)
+    second_summary, _ = await ingestion_source_ingester.ingest_items(
+        [stale_log], source_type=adapter_name
+    )
     assert second_summary.duplicate == 1
 
-    event_after = await event_service.get_event(inc.event_id)
+    event_after = await ingestion_event_service.get_event(inc.event_id)
     assert event_after is not None
     hostnames = {h.hostname for h in event_after.entities.hosts if h.hostname}
     assert "DEV-WKS-012" in hostnames

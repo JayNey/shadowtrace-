@@ -1,4 +1,9 @@
-"""Shared real PostgreSQL/Redis fixtures for ISSUE-016."""
+"""Shared real PostgreSQL/Redis fixtures for ISSUE-016 / ISSUE-158.
+
+Registered once via ``tests/conftest.py`` pytest_plugins (not as a directory
+``conftest.py``) to avoid double plugin registration when collecting
+``tests/test_ingestion/``.
+"""
 
 from __future__ import annotations
 
@@ -59,10 +64,15 @@ async def redis_client() -> AsyncIterator[RedisClient]:
 
 
 @pytest_asyncio.fixture
-async def event_service(
+async def ingestion_event_service(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: RedisClient,
 ) -> EventService:
+    """Ingestion-scoped EventService without StateMachineService (ISSUE-158).
+
+    Renamed from ``event_service`` to avoid shadowing the integration-wide
+    ``event_service`` fixture in ``tests.integration.integration_fixtures``.
+    """
     store = EventContextStore(redis_client, session_factory)
     degraded = DegradedFlagService(store, session_factory)
     return EventService(
@@ -73,12 +83,13 @@ async def event_service(
 
 
 @pytest_asyncio.fixture
-async def source_ingester(
-    event_service: EventService,
+async def ingestion_source_ingester(
+    ingestion_event_service: EventService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> SourceIngester:
+    """Ingestion-scoped SourceIngester; does not shadow integration ``source_ingester``."""
     return SourceIngester(
-        event_service,
+        ingestion_event_service,
         session_factory,
         source_mode="mock_xdr",
     )

@@ -103,11 +103,11 @@ def _scheduler(
 @pytest.mark.asyncio
 async def test_run_once_skips_when_scheduler_disabled(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=_scheduler_settings(ingestion_scheduler_enabled=False),
     )
     result = await scheduler.run_once()
@@ -119,12 +119,12 @@ async def test_run_once_skips_when_scheduler_disabled(
 @pytest.mark.parametrize("source_mode", ["file", "live", "live_crowdstrike", "", "unknown"])
 async def test_run_once_skips_non_mock_source_modes(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
     source_mode: str,
 ) -> None:
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=_scheduler_settings(source_mode=source_mode),
     )
     result = await scheduler.run_once()
@@ -135,7 +135,7 @@ async def test_run_once_skips_non_mock_source_modes(
 @pytest.mark.asyncio
 async def test_run_once_accepts_new_incident(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-sched-{suffix}"
@@ -148,7 +148,7 @@ async def test_run_once_accepts_new_incident(
     settings = _scheduler_settings()
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=settings,
     )
 
@@ -178,7 +178,7 @@ async def test_run_once_accepts_new_incident(
 @pytest.mark.asyncio
 async def test_run_once_completed_with_degraded_summary_when_adapter_offline(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     adapter = FakePagedAdapter(
@@ -188,7 +188,7 @@ async def test_run_once_completed_with_degraded_summary_when_adapter_offline(
     )
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=_scheduler_settings(),
     )
 
@@ -204,7 +204,7 @@ async def test_run_once_completed_with_degraded_summary_when_adapter_offline(
 @pytest.mark.asyncio
 async def test_run_once_second_poll_accepted_zero_without_new_data(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-sched2-{suffix}"
@@ -217,7 +217,7 @@ async def test_run_once_second_poll_accepted_zero_without_new_data(
     settings = _scheduler_settings()
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=settings,
     )
 
@@ -233,7 +233,7 @@ async def test_run_once_second_poll_accepted_zero_without_new_data(
 @pytest.mark.asyncio
 async def test_run_once_replay_same_incident_counts_duplicate(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-dup-{suffix}"
@@ -248,7 +248,7 @@ async def test_run_once_replay_same_incident_counts_duplicate(
     settings = _scheduler_settings()
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=settings,
     )
 
@@ -266,12 +266,12 @@ async def test_run_once_replay_same_incident_counts_duplicate(
 @pytest.mark.asyncio
 async def test_run_once_skips_when_advisory_lock_held(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     settings = _scheduler_settings()
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=settings,
     )
     lock_key = ingestion_poll_advisory_lock_key()
@@ -292,7 +292,7 @@ async def test_run_once_skips_when_advisory_lock_held(
 @pytest.mark.asyncio
 async def test_run_once_releases_lock_after_poll_failure(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     adapter = MockXDRSourceAdapter(
         base_url="http://mock-xdr",
@@ -302,7 +302,7 @@ async def test_run_once_releases_lock_after_poll_failure(
     settings = _scheduler_settings()
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=settings,
     )
     lock_key = ingestion_poll_advisory_lock_key()
@@ -326,7 +326,7 @@ async def test_run_once_releases_lock_after_poll_failure(
 @pytest.mark.asyncio
 async def test_run_once_poll_failure_preserves_watermark(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-wm-{suffix}"
@@ -339,7 +339,7 @@ async def test_run_once_poll_failure_preserves_watermark(
     settings = _scheduler_settings()
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=settings,
     )
 
@@ -375,7 +375,7 @@ async def test_run_once_poll_failure_preserves_watermark(
 @pytest.mark.asyncio
 async def test_run_once_closes_adapter_on_success(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-close-{suffix}"
@@ -387,7 +387,7 @@ async def test_run_once_closes_adapter_on_success(
     )
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=_scheduler_settings(),
     )
 
@@ -401,7 +401,7 @@ async def test_run_once_closes_adapter_on_success(
 @pytest.mark.asyncio
 async def test_run_once_closes_adapter_on_poll_failure(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-close-fail-{suffix}"
@@ -413,7 +413,7 @@ async def test_run_once_closes_adapter_on_poll_failure(
     )
     scheduler = _scheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=_scheduler_settings(),
     )
 
@@ -428,7 +428,7 @@ async def test_run_once_closes_adapter_on_poll_failure(
 @pytest.mark.asyncio
 async def test_run_once_records_redis_stats(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
     redis_client,
 ) -> None:
     suffix = _suffix()
@@ -442,7 +442,7 @@ async def test_run_once_records_redis_stats(
     settings = _scheduler_settings()
     scheduler = IngestionScheduler(
         session_factory=session_factory,
-        event_service=event_service,
+        event_service=ingestion_event_service,
         settings=settings,
         redis_client=redis_client,
     )
@@ -557,7 +557,7 @@ def _scheduler_e2e_scenario() -> tuple[MockXDRState, str, str]:
 @pytest.mark.asyncio
 async def test_scheduler_e2e_mock_xdr_incident_visible(
     session_factory: async_sessionmaker[AsyncSession],
-    event_service: EventService,
+    ingestion_event_service: EventService,
 ) -> None:
     state, incident_id, connector_id = _scheduler_e2e_scenario()
     app = create_app(state=state)
@@ -572,7 +572,7 @@ async def test_scheduler_e2e_mock_xdr_incident_visible(
         )
         scheduler = _scheduler(
             session_factory=session_factory,
-            event_service=event_service,
+            event_service=ingestion_event_service,
             settings=_scheduler_settings(),
         )
         with patch.object(scheduler, "_build_mock_adapter", return_value=adapter):
