@@ -12,7 +12,7 @@ from app.detection.operators.event_sequence import (
     EventSequenceOperator,
     find_ordered_sequence_match,
 )
-from app.detection.sequences.releases import IDENTITY_EXFIL_SEQUENCE_V1
+from app.detection.sequences.releases import GEO_SENSITIVE_SEQUENCE_V1, IDENTITY_EXFIL_SEQUENCE_V1
 from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
@@ -284,3 +284,88 @@ def test_event_sequence_operator_hash_mismatch_fail_closed() -> None:
                 snapshots=[],
             ),
         )
+
+
+def test_event_sequence_operator_respects_threshold() -> None:
+    base = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    observations = [
+        _observation(
+            obs_id="o1",
+            observed_at=base - timedelta(minutes=50),
+            action="login",
+            category="identity",
+        ),
+        _observation(
+            obs_id="o2",
+            observed_at=base - timedelta(minutes=40),
+            action="privilege_change",
+            category="identity",
+        ),
+        _observation(
+            obs_id="o3",
+            observed_at=base - timedelta(minutes=30),
+            action="bulk_read",
+            category="data_access",
+        ),
+        _observation(
+            obs_id="o4",
+            observed_at=base - timedelta(minutes=20),
+            action="egress",
+            category="data_exfiltration",
+        ),
+    ]
+    rule = _identity_exfil_rule()
+    rule = rule.model_copy(update={"threshold": 5.0})
+    matches = EventSequenceOperator().evaluate(
+        rule,
+        OperatorExecutionContext(
+            source_tenant_id="tenant-a",
+            cutoff_at=base,
+            observations=observations,
+            snapshots=[],
+        ),
+    )
+    assert matches == []
+
+
+def test_event_sequence_operator_step_matches_include_source_revision() -> None:
+    base = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    observations = [
+        _observation(
+            obs_id="o1",
+            observed_at=base - timedelta(minutes=40),
+            action="anomalous_login",
+            category="identity",
+        ),
+        _observation(
+            obs_id="o2",
+            observed_at=base - timedelta(minutes=30),
+            action="sensitive_access",
+            category="data_access",
+        ),
+    ]
+    criteria = GEO_SENSITIVE_SEQUENCE_V1.as_match_criteria()
+    rule = DetectionRuleDefinition(
+        rule_id="rule-seq",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_SEQUENCE,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id="dscope-test",
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="high",
+        match_criteria=criteria,
+    )
+    matches = EventSequenceOperator().evaluate(
+        rule,
+        OperatorExecutionContext(
+            source_tenant_id="tenant-a",
+            cutoff_at=base,
+            observations=observations,
+            snapshots=[],
+        ),
+    )
+    assert len(matches) == 1
+    for step_match in matches[0].sequence_provenance["sequence_step_matches"]:
+        assert step_match["source_revision"] == 1

@@ -218,16 +218,20 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
                 details={"rule_id": rule.rule_id, "sequence_id": sequence_id},
             )
         sequence_hash = rule.match_criteria.get("sequence_hash")
-        if isinstance(sequence_hash, str) and sequence_hash:
-            if sequence_hash != release.sequence_hash:
-                raise ValidationError(
-                    "sequence package hash mismatch",
-                    details={
-                        "rule_id": rule.rule_id,
-                        "sequence_id": sequence_id,
-                        "expected_sequence_hash": sequence_hash,
-                    },
-                )
+        if not isinstance(sequence_hash, str) or not sequence_hash:
+            raise ValidationError(
+                "event_sequence requires sequence_hash in match_criteria",
+                details={"rule_id": rule.rule_id, "sequence_id": sequence_id},
+            )
+        if sequence_hash != release.sequence_hash:
+            raise ValidationError(
+                "sequence package hash mismatch",
+                details={
+                    "rule_id": rule.rule_id,
+                    "sequence_id": sequence_id,
+                    "expected_sequence_hash": sequence_hash,
+                },
+            )
         raw_steps = rule.match_criteria.get("sequence_steps")
         if not isinstance(raw_steps, list) or len(raw_steps) < 2:
             raise ValidationError(
@@ -246,11 +250,29 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
                         f"unsupported sequence step key: {key}",
                         details={"rule_id": rule.rule_id, "step_index": index, "key": key},
                     )
+        expected_steps = [dict(step) for step in release.sequence_steps]
+        if raw_steps != expected_steps:
+            raise ValidationError(
+                "sequence_steps must match frozen sequence release",
+                details={
+                    "rule_id": rule.rule_id,
+                    "sequence_id": sequence_id,
+                },
+            )
         max_gap = rule.match_criteria.get("max_step_gap_seconds")
-        if max_gap is not None and (not isinstance(max_gap, int) or max_gap <= 0):
+        if not isinstance(max_gap, int) or max_gap <= 0:
             raise ValidationError(
                 "max_step_gap_seconds must be a positive integer",
                 details={"rule_id": rule.rule_id, "max_step_gap_seconds": max_gap},
+            )
+        if max_gap != release.max_step_gap_seconds:
+            raise ValidationError(
+                "max_step_gap_seconds must match frozen sequence release",
+                details={
+                    "rule_id": rule.rule_id,
+                    "sequence_id": sequence_id,
+                    "expected_max_step_gap_seconds": release.max_step_gap_seconds,
+                },
             )
 
     return rule
@@ -352,9 +374,10 @@ def _candidate_identity_body(
     rule: DetectionRuleDefinition,
     cutoff_at: datetime,
     group_key: dict[str, str],
+    ordered_observation_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Stable identity material — excludes evidence (provenance / matched_value)."""
-    return {
+    """Stable identity material — excludes mutable evidence except sequence refs."""
+    body: dict[str, Any] = {
         "source_tenant_id": source_tenant_id,
         "detection_scope_id": detection_scope_id,
         "package_id": package.package_id,
@@ -369,6 +392,9 @@ def _candidate_identity_body(
         "shadow_only": True,
         "schema_version": CANDIDATE_DETECTION_SCHEMA_VERSION,
     }
+    if ordered_observation_ids is not None:
+        body["ordered_observation_ids"] = ordered_observation_ids
+    return body
 
 
 def build_candidate_detection(
@@ -382,6 +408,9 @@ def build_candidate_detection(
     matched_value: float,
     provenance: CandidateDetectionProvenance,
 ) -> CandidateDetection:
+    ordered_observation_ids: list[str] | None = None
+    if rule.operator is RuleOperatorKind.EVENT_SEQUENCE and provenance.ordered_observation_ids:
+        ordered_observation_ids = list(provenance.ordered_observation_ids)
     identity_body = _candidate_identity_body(
         source_tenant_id=source_tenant_id,
         detection_scope_id=detection_scope_id,
@@ -389,6 +418,7 @@ def build_candidate_detection(
         rule=rule,
         cutoff_at=cutoff_at,
         group_key=group_key,
+        ordered_observation_ids=ordered_observation_ids,
     )
     identity_hash = hashlib.sha256(_canonical_bytes(identity_body)).hexdigest()
     body = {

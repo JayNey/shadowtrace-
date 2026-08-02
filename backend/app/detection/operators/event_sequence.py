@@ -15,8 +15,18 @@ from app.detection.operators.base import (
     observation_matches_criteria,
     should_process_observation,
 )
+from app.detection.sequences.releases import (
+    GEO_SENSITIVE_SEQUENCE_V1,
+    IDENTITY_EXFIL_SEQUENCE_V1,
+    SequenceRelease,
+)
 from app.models.behavior_observation import BehaviorObservation
 from app.models.detection_rule import DetectionRuleDefinition, RuleOperatorKind
+
+_KNOWN_SEQUENCE_RELEASES: dict[str, SequenceRelease] = {
+    IDENTITY_EXFIL_SEQUENCE_V1.sequence_id: IDENTITY_EXFIL_SEQUENCE_V1,
+    GEO_SENSITIVE_SEQUENCE_V1.sequence_id: GEO_SENSITIVE_SEQUENCE_V1,
+}
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -38,9 +48,7 @@ def _dedupe_observations(observations: list[BehaviorObservation]) -> list[Behavi
     return deduped
 
 
-def _resolve_sequence_steps(
-    rule: DetectionRuleDefinition,
-) -> tuple[str, list[dict[str, object]], int | None]:
+def _resolve_sequence_release(rule: DetectionRuleDefinition) -> tuple[SequenceRelease, int]:
     criteria = rule.match_criteria
     sequence_id = criteria.get("sequence_id")
     if not isinstance(sequence_id, str) or not sequence_id:
@@ -48,55 +56,45 @@ def _resolve_sequence_steps(
             "event_sequence requires sequence_id in match_criteria",
             details={"rule_id": rule.rule_id},
         )
-    raw_steps = criteria.get("sequence_steps")
-    if not isinstance(raw_steps, list) or len(raw_steps) < 2:
+    release = _KNOWN_SEQUENCE_RELEASES.get(sequence_id)
+    if release is None:
         raise ValidationError(
-            "event_sequence requires at least two sequence_steps",
+            "unsupported sequence package",
             details={"rule_id": rule.rule_id, "sequence_id": sequence_id},
         )
-    steps: list[dict[str, object]] = []
-    for index, step in enumerate(raw_steps):
-        if not isinstance(step, dict) or not step:
-            raise ValidationError(
-                "sequence step must be a non-empty object",
-                details={"rule_id": rule.rule_id, "step_index": index},
-            )
-        steps.append(dict(step))
 
-    expected_hash = criteria.get("sequence_hash")
-    if isinstance(expected_hash, str) and expected_hash:
-        from app.detection.sequences.releases import (
-            GEO_SENSITIVE_SEQUENCE_V1,
-            IDENTITY_EXFIL_SEQUENCE_V1,
+    sequence_hash = criteria.get("sequence_hash")
+    if not isinstance(sequence_hash, str) or not sequence_hash:
+        raise ValidationError(
+            "event_sequence requires sequence_hash in match_criteria",
+            details={"rule_id": rule.rule_id, "sequence_id": sequence_id},
+        )
+    if sequence_hash != release.sequence_hash:
+        raise ValidationError(
+            "sequence package hash mismatch",
+            details={
+                "rule_id": rule.rule_id,
+                "sequence_id": sequence_id,
+                "expected_sequence_hash": sequence_hash,
+            },
         )
 
-        known = {
-            IDENTITY_EXFIL_SEQUENCE_V1.sequence_id: IDENTITY_EXFIL_SEQUENCE_V1.sequence_hash,
-            GEO_SENSITIVE_SEQUENCE_V1.sequence_id: GEO_SENSITIVE_SEQUENCE_V1.sequence_hash,
-        }
-        actual = known.get(sequence_id)
-        if actual is None or actual != expected_hash:
-            raise ValidationError(
-                "sequence package hash mismatch",
-                details={
-                    "rule_id": rule.rule_id,
-                    "sequence_id": sequence_id,
-                    "expected_sequence_hash": expected_hash,
-                },
-            )
-
     max_gap_raw = criteria.get("max_step_gap_seconds")
-    max_gap: int | None
-    if max_gap_raw is None:
-        max_gap = None
-    elif isinstance(max_gap_raw, int) and max_gap_raw > 0:
-        max_gap = max_gap_raw
-    else:
+    if not isinstance(max_gap_raw, int) or max_gap_raw <= 0:
         raise ValidationError(
             "max_step_gap_seconds must be a positive integer",
             details={"rule_id": rule.rule_id, "max_step_gap_seconds": max_gap_raw},
         )
-    return sequence_id, steps, max_gap
+    if max_gap_raw != release.max_step_gap_seconds:
+        raise ValidationError(
+            "max_step_gap_seconds must match frozen sequence release",
+            details={
+                "rule_id": rule.rule_id,
+                "sequence_id": sequence_id,
+                "expected_max_step_gap_seconds": release.max_step_gap_seconds,
+            },
+        )
+    return release, max_gap_raw
 
 
 def find_ordered_sequence_match(
@@ -142,6 +140,7 @@ def _build_step_match_records(
             {
                 "step_index": index,
                 "observation_id": observation.observation_id,
+                "source_revision": observation.source_ref.source_revision,
                 "action": observation.action,
                 "category": observation.category,
                 "observed_at": _ensure_utc(observation.observed_at).isoformat(),
@@ -168,7 +167,8 @@ class EventSequenceOperator:
             context.observations,
             max_scan=rule.max_observation_scan,
         )
-        sequence_id, steps, max_step_gap_seconds = _resolve_sequence_steps(rule)
+        release, max_step_gap_seconds = _resolve_sequence_release(rule)
+        steps = [dict(step) for step in release.sequence_steps]
 
         grouped: dict[tuple[tuple[str, str], ...], list[BehaviorObservation]] = {}
         for observation in observations:
@@ -193,22 +193,25 @@ class EventSequenceOperator:
             )
             if matched_observations is None:
                 continue
+            matched_value = float(len(matched_observations))
+            if matched_value < rule.threshold:
+                continue
             ordered_ids = [obs.observation_id for obs in matched_observations]
             step_records = _build_step_match_records(matched_observations, steps)
             matches.append(
                 OperatorMatch(
                     group_key=dict(key_tuple),
-                    matched_value=float(len(matched_observations)),
+                    matched_value=matched_value,
                     observation_ids=ordered_ids,
                     snapshot_ids=[],
                     window_start=context.window_start,
                     window_end=context.window_end,
                     sequence_provenance={
-                        "sequence_id": sequence_id,
+                        "sequence_id": release.sequence_id,
                         "ordered_observation_ids": ordered_ids,
                         "sequence_step_matches": step_records,
                         "match_explanation": _build_match_explanation(
-                            sequence_id,
+                            release.sequence_id,
                             matched_observations,
                         ),
                     },

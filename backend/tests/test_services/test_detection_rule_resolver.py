@@ -201,6 +201,58 @@ def test_compile_event_sequence_accepts_identity_exfil() -> None:
     assert compiled.match_criteria["sequence_id"] == IDENTITY_EXFIL_SEQUENCE_V1.sequence_id
 
 
+def test_compile_event_sequence_requires_sequence_hash() -> None:
+    criteria = IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria()
+    criteria.pop("sequence_hash")
+    rule = _event_sequence_rule(match_criteria=criteria)
+    with pytest.raises(ValidationError, match="requires sequence_hash"):
+        compile_rule_definition(rule)
+
+
+def test_compile_event_sequence_rejects_tampered_steps_with_valid_hash() -> None:
+    criteria = IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria()
+    criteria["sequence_steps"] = [
+        {"action": "login", "category": "identity"},
+        {"action": "login", "category": "identity"},
+    ]
+    rule = _event_sequence_rule(match_criteria=criteria)
+    with pytest.raises(ValidationError, match="sequence_steps must match frozen sequence release"):
+        compile_rule_definition(rule)
+
+
+def test_compile_event_sequence_rejects_tampered_steps_without_hash() -> None:
+    criteria = {
+        "sequence_id": IDENTITY_EXFIL_SEQUENCE_V1.sequence_id,
+        "sequence_steps": [
+            {"action": "foo", "category": "bar"},
+            {"action": "baz", "category": "qux"},
+        ],
+        "max_step_gap_seconds": IDENTITY_EXFIL_SEQUENCE_V1.max_step_gap_seconds,
+    }
+    rule = _event_sequence_rule(match_criteria=criteria)
+    with pytest.raises(ValidationError, match="requires sequence_hash"):
+        compile_rule_definition(rule)
+
+
+def test_compile_event_sequence_rejects_unsupported_step_key() -> None:
+    criteria = IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria()
+    criteria["sequence_steps"] = [
+        {"action": "login", "category": "identity", "extra": "nope"},
+        {"action": "privilege_change", "category": "identity"},
+    ]
+    rule = _event_sequence_rule(match_criteria=criteria)
+    with pytest.raises(ValidationError, match="unsupported sequence step key"):
+        compile_rule_definition(rule)
+
+
+def test_compile_event_sequence_rejects_mismatched_max_step_gap() -> None:
+    criteria = IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria()
+    criteria["max_step_gap_seconds"] = 3600
+    rule = _event_sequence_rule(match_criteria=criteria)
+    with pytest.raises(ValidationError, match="max_step_gap_seconds must match frozen sequence release"):
+        compile_rule_definition(rule)
+
+
 def _mad_snapshot_and_baseline() -> tuple[FeatureSnapshot, DetectionFeatureBaseline]:
     cutoff = datetime(2026, 8, 3, 15, 30, 0, tzinfo=UTC)
     snapshot = FeatureSnapshot(
