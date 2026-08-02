@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -117,6 +117,55 @@ def test_duplicate_delivery_is_idempotent(
 
 
 @pytest.mark.asyncio
+async def test_execute_investigation_records_workflow_path_when_full_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded: dict[str, object] = {}
+
+    async def _record(
+        _factory: object,
+        event_id: str,
+        *,
+        workflow_path: str,
+        include_response_execution: bool,
+    ) -> None:
+        recorded["event_id"] = event_id
+        recorded["workflow_path"] = workflow_path
+        recorded["include_response_execution"] = include_response_execution
+
+    async def _investigate(event_id: str, **kwargs: object) -> None:
+        recorded["investigate_kwargs"] = kwargs
+
+    async def _fake_super_agent() -> object:
+        agent = MagicMock()
+        agent.investigate = _investigate
+        return agent
+
+    monkeypatch.setattr(
+        "app.services.investigation_guidance.record_investigation_workflow_path",
+        _record,
+    )
+    monkeypatch.setattr("app.api.v1.deps.get_super_agent", _fake_super_agent)
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.evidence_projection.bind_evidence_projection",
+        lambda _projection: _null_context(),
+    )
+    monkeypatch.setattr(
+        "app.services.evidence_projection.EvidenceProjection",
+        lambda _factory: MagicMock(),
+    )
+
+    result = await tasks.execute_investigation(
+        "evt-workflow-trace",
+        include_response_execution=True,
+    )
+    assert result == {"status": "completed", "event_id": "evt-workflow-trace"}
+    assert recorded["workflow_path"] == "full_loop"
+    assert recorded["include_response_execution"] is True
+
+
+@pytest.mark.asyncio
 async def test_execute_investigation_forwards_include_response_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -132,6 +181,11 @@ async def test_execute_investigation_forwards_include_response_execution(
         return agent
 
     monkeypatch.setattr("app.api.v1.deps.get_super_agent", _fake_super_agent)
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.investigation_guidance.record_investigation_workflow_path",
+        AsyncMock(),
+    )
     monkeypatch.setattr(
         "app.services.evidence_projection.bind_evidence_projection",
         lambda _projection: _null_context(),

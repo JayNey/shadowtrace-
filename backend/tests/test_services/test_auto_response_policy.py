@@ -131,6 +131,32 @@ def test_auto_response_blocks_provisional_link_role() -> None:
     assert decision.reason == "provisional_hold"
 
 
+def test_auto_response_blocks_unknown_link_role() -> None:
+    policy = AutoResponsePolicyService(
+        Settings(
+            AUTO_RESPONSE_ENABLED=True,
+            SOURCE_MODE="mock_xdr",
+            TOOL_MODE="mock",
+            DISPOSITION_MODE="mock_xdr",
+        )
+    )
+    decision = policy.evaluate(_event(), link_role="unknown", source_product="mock_xdr")
+    assert decision.eligible is False
+    assert decision.reason == "link_role_not_primary"
+
+
+def test_format_auto_response_audit_reason_skipped() -> None:
+    from app.services.auto_response_policy import (
+        AutoResponseDecision,
+        format_auto_response_audit_reason,
+    )
+
+    reason = format_auto_response_audit_reason(
+        AutoResponseDecision(False, "below_min_severity"),
+    )
+    assert reason == "auto_response:skipped_below_min_severity"
+
+
 def test_auto_response_rejects_untrusted_provenance() -> None:
     policy = AutoResponsePolicyService(
         Settings(

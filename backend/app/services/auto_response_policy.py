@@ -7,11 +7,10 @@ from dataclasses import dataclass
 from app.core.config import Settings, get_settings
 from app.db import models as orm
 from app.models.enums import ActionLevel, EventStatus, Severity
+from app.models.investigation_intent import PRIMARY_LINK_ROLE, PROVISIONAL_LINK_ROLE
 from app.models.workflow import AUTO_APPROVABLE_ACTION_LEVELS, parse_action_level_label
 from app.services.action_approval_policy import APPROVAL_POLICY_VERSION
 from app.services.investigation_guidance import full_loop_available
-
-_PROVISIONAL_LINK_ROLE = "provisional"
 
 _SEVERITY_RANK: dict[Severity, int] = {
     Severity.LOW: 0,
@@ -75,8 +74,10 @@ class AutoResponsePolicyService:
             return AutoResponseDecision(False, "tool_mode_not_mock")
         if "mock" not in self._settings.disposition_mode.strip().lower():
             return AutoResponseDecision(False, "disposition_mode_not_mock")
-        if link_role == _PROVISIONAL_LINK_ROLE:
+        if link_role == PROVISIONAL_LINK_ROLE:
             return AutoResponseDecision(False, "provisional_hold")
+        if link_role != PRIMARY_LINK_ROLE:
+            return AutoResponseDecision(False, "link_role_not_primary")
         if event.status != EventStatus.NEW.value:
             return AutoResponseDecision(False, "status_not_new")
         if not _trusted_mock_provenance(event, source_product=source_product):
@@ -115,4 +116,11 @@ def _trusted_mock_provenance(
     return any("mock" in product for product in products)
 
 
-__all__ = ["AutoResponseDecision", "AutoResponsePolicyService"]
+def format_auto_response_audit_reason(decision: AutoResponseDecision) -> str:
+    """Map policy outcomes to ISSUE-109 audit reason strings."""
+    if decision.eligible:
+        return decision.reason
+    return f"auto_response:skipped_{decision.reason}"
+
+
+__all__ = ["AutoResponseDecision", "AutoResponsePolicyService", "format_auto_response_audit_reason"]

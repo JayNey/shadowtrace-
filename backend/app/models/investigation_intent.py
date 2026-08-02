@@ -11,6 +11,7 @@ INTENT_KIND_AUTO_INVESTIGATE = "auto_investigate"
 INTENT_VERSION_ISSUE108_V1 = "issue108_v1"
 PROVISIONAL_LINK_ROLE = "provisional"
 PRIMARY_LINK_ROLE = "primary"
+UNKNOWN_LINK_ROLE = "unknown"
 
 
 class IntentDeliveryAdmission(StrEnum):

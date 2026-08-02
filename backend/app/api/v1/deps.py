@@ -261,14 +261,25 @@ async def _get_workflow_runtime() -> Any:
 
 
 async def _resume_investigation(event_id: str) -> None:
-    """Resume graph orchestration after terminal writeback (ISSUE-059 P0 hook)."""
+    """Resume graph orchestration after approval or writeback (ISSUE-059 / #613)."""
     settings = get_settings()
     mode = (settings.orchestration_mode or "graph").strip().lower()
     if mode != "graph":
         return
     try:
+        from app.services.investigation_guidance import (
+            resolve_include_response_execution_for_resume,
+        )
+
+        include_response = await resolve_include_response_execution_for_resume(
+            _get_session_factory(),
+            event_id,
+        )
         agent = await get_super_agent()
-        await agent.investigate(event_id)
+        await agent.investigate(
+            event_id,
+            include_response_execution=include_response,
+        )
     except Exception:
         logger.exception("resume_investigation failed event=%s", event_id)
 

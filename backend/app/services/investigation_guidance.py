@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.db import models as orm
 from app.models.enums import (
     DispositionPolicy,
     EventStatus,
@@ -25,6 +27,17 @@ _ANALYSIS_STATUSES = frozenset(
         EventStatus.COLLECTING_EVIDENCE,
         EventStatus.ANALYZING,
         EventStatus.SCORING,
+    }
+)
+
+_RESPONSE_RESUME_STATUSES = frozenset(
+    {
+        EventStatus.PLANNING_RESPONSE,
+        EventStatus.WAITING_APPROVAL,
+        EventStatus.EXECUTING_RESPONSE,
+        EventStatus.VERIFYING,
+        EventStatus.REPLANNING,
+        EventStatus.CONTAINED,
     }
 )
 
@@ -189,11 +202,41 @@ async def record_investigation_workflow_path(
     )
 
 
+async def resolve_include_response_execution_for_resume(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> bool:
+    """Infer full-loop resume semantics for approval/writeback hooks (#613)."""
+    async with session_factory() as session:
+        intent_flag = await session.scalar(
+            select(orm.InvestigationIntent.include_response_execution)
+            .where(
+                orm.InvestigationIntent.event_id == event_id,
+                orm.InvestigationIntent.include_response_execution.is_(True),
+            )
+            .order_by(orm.InvestigationIntent.created_at.desc())
+            .limit(1)
+        )
+        if intent_flag is True:
+            return True
+        status_raw = await session.scalar(
+            select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
+        )
+    if status_raw is None:
+        return False
+    try:
+        status = EventStatus(status_raw)
+    except ValueError:
+        return False
+    return status in _RESPONSE_RESUME_STATUSES
+
+
 __all__ = [
     "InvestigationGuidance",
     "WorkflowPath",
     "derive_investigation_guidance",
     "full_loop_available",
     "record_investigation_workflow_path",
+    "resolve_include_response_execution_for_resume",
     "workflow_path_from_request",
 ]

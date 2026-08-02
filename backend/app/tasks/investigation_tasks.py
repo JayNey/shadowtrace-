@@ -94,10 +94,20 @@ async def execute_investigation(
     """Run SuperAgent investigation (called from Celery worker via ``asyncio.run``)."""
     from app.api.v1.deps import _get_session_factory, get_super_agent
     from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
+    from app.services.investigation_guidance import record_investigation_workflow_path
+
+    session_factory = _get_session_factory()
+    if include_response_execution:
+        await record_investigation_workflow_path(
+            session_factory,
+            event_id,
+            workflow_path="full_loop",
+            include_response_execution=True,
+        )
 
     try:
         agent = await get_super_agent()
-        projection = EvidenceProjection(_get_session_factory())
+        projection = EvidenceProjection(session_factory)
         with bind_evidence_projection(projection):
             await agent.investigate(
                 event_id,

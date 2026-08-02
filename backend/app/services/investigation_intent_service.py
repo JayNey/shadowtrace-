@@ -22,11 +22,15 @@ from app.models.investigation_intent import (
     PRIMARY_LINK_ROLE,
     PROVISIONAL_LINK_ROLE,
     TERMINAL_INTENT_STATUSES,
+    UNKNOWN_LINK_ROLE,
     IntentDeliveryAdmission,
     validate_intent_transition,
 )
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
-from app.services.auto_response_policy import AutoResponsePolicyService
+from app.services.auto_response_policy import (
+    AutoResponsePolicyService,
+    format_auto_response_audit_reason,
+)
 from app.services.degraded_flag_service import DegradedFlagService
 
 logger = logging.getLogger(__name__)
@@ -83,7 +87,7 @@ async def _resolve_response_link_role(
         return PROVISIONAL_LINK_ROLE
     if PRIMARY_LINK_ROLE in role_set:
         return PRIMARY_LINK_ROLE
-    return PRIMARY_LINK_ROLE
+    return UNKNOWN_LINK_ROLE
 
 
 class _EnqueuedPublishTarget(NamedTuple):
@@ -586,14 +590,14 @@ class InvestigationIntentService:
                 )
                 include_response = response_decision.eligible
                 row.include_response_execution = include_response
-                if include_response:
+                if self._auto_response.enabled:
                     session.add(
                         orm.EventAuditLog(
                             event_id=event.event_id,
                             from_status=event.status,
                             to_status=event.status,
                             operator="AutoResponsePolicyService",
-                            reason=response_decision.reason,
+                            reason=format_auto_response_audit_reason(response_decision),
                         )
                     )
                 task_id = deterministic_investigation_task_id(row.intent_id, int(row.revision))
@@ -714,6 +718,8 @@ class InvestigationIntentService:
                 exc_info=True,
             )
             await self._revert_enqueued_after_unexpected_failure(target.intent_id, exc)
+            if target.include_response_execution:
+                await self._set_auto_response_dispatch_degraded(target.event_id)
             return False
         return True
 
