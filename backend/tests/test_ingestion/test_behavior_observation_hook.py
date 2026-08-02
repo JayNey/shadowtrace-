@@ -27,7 +27,6 @@ from app.models.source import SourceConnector, SourceLog, SourceReference
 from app.services.behavior_observation_projection import BehaviorObservationProjection
 from app.services.behavior_observation_service import BehaviorObservationService
 from app.services.detection_scope_service import DetectionScopeService
-from app.services.event_service import EventService
 from tests.test_ingestion.test_source_ingester import FakePagedAdapter
 
 
@@ -40,6 +39,7 @@ async def clean_hook_tables(
             await session.execute(delete(orm.BehaviorObservationProjectionFailure))
             await session.execute(delete(orm.BehaviorObservation))
             await session.execute(delete(orm.DetectionScopeRevision))
+            # disposition_outbox.source_record_id FK → source_object (delete first)
             await session.execute(delete(orm.DispositionOutbox))
             await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
@@ -52,6 +52,7 @@ async def clean_hook_tables(
             await session.execute(delete(orm.BehaviorObservationProjectionFailure))
             await session.execute(delete(orm.BehaviorObservation))
             await session.execute(delete(orm.DetectionScopeRevision))
+            # disposition_outbox.source_record_id FK → source_object (delete first)
             await session.execute(delete(orm.DispositionOutbox))
             await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
@@ -122,7 +123,7 @@ def _log_item(suffix: str, connector_id: str, tenant_id: str) -> SourceLog:
 @pytest.mark.asyncio
 async def test_source_ingester_projects_behavior_observation_for_supporting_object(
     session_factory: async_sessionmaker[AsyncSession],
-    ingestion_event_service: EventService,
+    ingestion_source_ingester: SourceIngester,
 ) -> None:
     suffix = _suffix()
     tenant_id = f"tenant-{suffix}"
@@ -141,8 +142,7 @@ async def test_source_ingester_projects_behavior_observation_for_supporting_obje
         },
         connectors=[connector],
     )
-    ingester = SourceIngester(ingestion_event_service, session_factory)
-    summary = await ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.LOG],
         batch_size=10,
@@ -163,7 +163,7 @@ async def test_source_ingester_projects_behavior_observation_for_supporting_obje
 @pytest.mark.asyncio
 async def test_poll_uses_registered_detection_scope_when_available(
     session_factory: async_sessionmaker[AsyncSession],
-    ingestion_event_service: EventService,
+    ingestion_source_ingester: SourceIngester,
 ) -> None:
     suffix = _suffix()
     tenant_id = f"tenant-{suffix}"
@@ -214,8 +214,7 @@ async def test_poll_uses_registered_detection_scope_when_available(
         },
         connectors=[connector],
     )
-    ingester = SourceIngester(ingestion_event_service, session_factory)
-    summary = await ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.LOG],
         batch_size=10,
@@ -232,8 +231,7 @@ async def test_poll_uses_registered_detection_scope_when_available(
 
 @pytest.mark.asyncio
 async def test_poll_marks_degraded_when_behavior_projection_fails(
-    session_factory: async_sessionmaker[AsyncSession],
-    ingestion_event_service: EventService,
+    ingestion_source_ingester: SourceIngester,
 ) -> None:
     suffix = _suffix()
     tenant_id = f"tenant-{suffix}"
@@ -252,18 +250,17 @@ async def test_poll_marks_degraded_when_behavior_projection_fails(
         },
         connectors=[connector],
     )
-    ingester = SourceIngester(ingestion_event_service, session_factory)
-    assert ingester._behavior_observation is not None
+    assert ingestion_source_ingester._behavior_observation is not None
 
     async def _projection_failed(_record_id: str) -> bool:
         return False
 
     with patch.object(
-        ingester._behavior_observation,
+        ingestion_source_ingester._behavior_observation,
         "on_source_record_persisted",
         side_effect=_projection_failed,
     ):
-        summary = await ingester.poll(
+        summary = await ingestion_source_ingester.poll(
             adapter,
             [SourceObjectKind.LOG],
             batch_size=10,
@@ -352,22 +349,20 @@ async def test_hook_records_failure_without_rolling_back_source(
 
 @pytest.mark.asyncio
 async def test_ingest_telemetry_reports_behavior_projection_degraded(
-    session_factory: async_sessionmaker[AsyncSession],
-    ingestion_event_service: EventService,
+    ingestion_source_ingester: SourceIngester,
 ) -> None:
     suffix = _suffix()
-    ingester = SourceIngester(ingestion_event_service, session_factory)
-    assert ingester._behavior_observation is not None
+    assert ingestion_source_ingester._behavior_observation is not None
 
     async def _projection_failed(_record_id: str) -> bool:
         return False
 
     with patch.object(
-        ingester._behavior_observation,
+        ingestion_source_ingester._behavior_observation,
         "on_source_record_persisted",
         side_effect=_projection_failed,
     ):
-        inserted, degraded = await ingester.ingest_telemetry(
+        inserted, degraded = await ingestion_source_ingester.ingest_telemetry(
             {
                 "log": [
                     {

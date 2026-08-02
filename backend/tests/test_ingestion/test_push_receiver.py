@@ -42,16 +42,12 @@ def _incident_payload(connector_id: str, object_id: str) -> dict:
 @pytest.mark.asyncio
 async def test_push_partial_acceptance_delivery_and_object_idempotency(
     ingestion_event_service: EventService,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-push-{suffix}"
-    ingester = SourceIngester(
-        ingestion_event_service,
-        session_factory,
-        source_mode="mock_xdr",
-    )
-    receiver = PushReceiver(ingester, ingestion_event_service, session_factory)
+    receiver = PushReceiver(ingestion_source_ingester, ingestion_event_service, session_factory)
     valid = _incident_payload(connector_id, f"INC-{suffix}")
     envelope = PushBatchEnvelope(
         connector_id=connector_id,
@@ -114,16 +110,12 @@ async def test_push_partial_acceptance_delivery_and_object_idempotency(
 @pytest.mark.asyncio
 async def test_push_rejects_schema_incompatible_object_but_marks_delivery(
     ingestion_event_service: EventService,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-push-schema-{suffix}"
-    ingester = SourceIngester(
-        ingestion_event_service,
-        session_factory,
-        source_mode="mock_xdr",
-    )
-    receiver = PushReceiver(ingester, ingestion_event_service, session_factory)
+    receiver = PushReceiver(ingestion_source_ingester, ingestion_event_service, session_factory)
     payload = _incident_payload(connector_id, f"INC-{suffix}")
     payload["reference"]["schema_version"] = "99"
     envelope = PushBatchEnvelope(
@@ -149,17 +141,13 @@ async def test_push_rejects_schema_incompatible_object_but_marks_delivery(
 @pytest.mark.asyncio
 async def test_push_projects_behavior_observation_for_incident(
     ingestion_event_service: EventService,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
     connector_id = f"conn-push-bobs-{suffix}"
     tenant_id = f"tenant-push-{suffix}"
-    ingester = SourceIngester(
-        ingestion_event_service,
-        session_factory,
-        source_mode="mock_xdr",
-    )
-    receiver = PushReceiver(ingester, ingestion_event_service, session_factory)
+    receiver = PushReceiver(ingestion_source_ingester, ingestion_event_service, session_factory)
     payload = _incident_payload(connector_id, f"INC-{suffix}")
     payload["reference"]["source_tenant_id"] = tenant_id
     envelope = PushBatchEnvelope(

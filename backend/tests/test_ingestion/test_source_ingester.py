@@ -320,7 +320,7 @@ async def test_out_of_order_alert_and_incident_merge_to_one_event(
 
 @pytest.mark.asyncio
 async def test_unsupported_schema_rejected_without_watermark_advance(
-    ingestion_event_service,
+    ingestion_source_ingester: SourceIngester,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = _suffix()
@@ -339,11 +339,6 @@ async def test_unsupported_schema_rejected_without_watermark_advance(
                 )
             )
 
-    ingester = SourceIngester(
-        ingestion_event_service,
-        session_factory,
-        source_mode="mock_xdr",
-    )
     adapter = FakePagedAdapter(
         adapter_name,
         {
@@ -356,7 +351,7 @@ async def test_unsupported_schema_rejected_without_watermark_advance(
             )
         },
     )
-    summary = await ingester.poll(
+    summary = await ingestion_source_ingester.poll(
         adapter,
         [SourceObjectKind.INCIDENT],
         batch_size=10,
