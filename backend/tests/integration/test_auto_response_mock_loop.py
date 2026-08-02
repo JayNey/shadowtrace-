@@ -95,10 +95,28 @@ def test_mock_response_phase_l1_auto_l3_human_after_policy_entry() -> None:
 
     l1 = _response_action(level=ActionLevel.L1, action_id="act-l1-auto")
     l3 = _response_action(level=ActionLevel.L3, action_id="act-l3-human")
-    l1_decision = evaluate_level_rules(l1, confidence=0.99, severity=Severity.CRITICAL)
+    cap = policy.max_auto_level()
+    l1_decision = evaluate_level_rules(
+        l1,
+        confidence=0.99,
+        severity=Severity.CRITICAL,
+        max_auto_level=cap,
+    )
     l3_decision = evaluate_level_rules(l3, confidence=0.99, severity=Severity.CRITICAL)
     assert l1_decision.decision is ApprovalDecisionKind.AUTO_APPROVE
     assert l3_decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
+
+
+def test_l1_requires_approval_when_max_auto_level_l0() -> None:
+    action = _response_action(level=ActionLevel.L1, action_id="act-l1-cap")
+    decision = evaluate_level_rules(
+        action,
+        confidence=0.99,
+        severity=Severity.CRITICAL,
+        max_auto_level=ActionLevel.L0,
+    )
+    assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
+    assert decision.rule_applied == "level_exceeds_auto_cap"
 
 
 @pytest.mark.asyncio

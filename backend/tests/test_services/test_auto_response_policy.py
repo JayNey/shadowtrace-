@@ -211,3 +211,25 @@ def test_settings_reject_l2_max_auto_level_when_auto_response_enabled() -> None:
             DISPOSITION_MODE="mock_xdr",
             AUTO_RESPONSE_MAX_AUTO_LEVEL="L2",
         )
+
+
+def test_resolve_runtime_max_auto_level_none_when_disabled() -> None:
+    from app.models.enums import ActionLevel
+    from app.services.action_approval_policy import resolve_runtime_max_auto_level
+
+    settings = Settings(AUTO_RESPONSE_ENABLED=False)
+    assert resolve_runtime_max_auto_level(settings) is None
+
+
+def test_resolve_runtime_max_auto_level_l0_when_configured() -> None:
+    from app.models.enums import ActionLevel
+    from app.services.action_approval_policy import resolve_runtime_max_auto_level
+
+    settings = Settings(
+        AUTO_RESPONSE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        TOOL_MODE="mock",
+        DISPOSITION_MODE="mock_xdr",
+        AUTO_RESPONSE_MAX_AUTO_LEVEL="L0",
+    )
+    assert resolve_runtime_max_auto_level(settings) is ActionLevel.L0

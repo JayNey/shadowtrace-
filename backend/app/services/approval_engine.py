@@ -38,7 +38,12 @@ from app.models.workflow import (
     AUTO_APPROVABLE_ACTION_LEVELS,
     validate_action_status_transition,
 )
-from app.services.action_approval_policy import APPROVAL_POLICY_SOURCE, APPROVAL_POLICY_VERSION
+from app.services.action_approval_policy import (
+    APPROVAL_POLICY_SOURCE,
+    APPROVAL_POLICY_VERSION,
+    action_level_rank,
+    resolve_runtime_max_auto_level,
+)
 from app.services.action_mapper import action_from_orm as _action_from_orm
 from app.services.state_machine_service import StateMachineService
 
@@ -121,6 +126,7 @@ def evaluate_level_rules(
     *,
     confidence: float,
     severity: Severity,
+    max_auto_level: ActionLevel | None = None,
 ) -> ApprovalDecision:
     """Apply ActionLevel rules after hard gates pass.
 
@@ -131,10 +137,23 @@ def evaluate_level_rules(
     side-effecting actions execute in the Mock full loop with no human
     evidence. ``confidence``/``severity`` are retained for signature
     compatibility and audit context only; they never unlock auto-approval.
+
+    When ``max_auto_level`` is set (mock auto-response enabled), L0/L1 above
+    the configured cap require human approval even after hard gates pass.
     """
     level = action.action_level
 
     if level in AUTO_APPROVABLE_ACTION_LEVELS:
+        cap = max_auto_level if max_auto_level is not None else ActionLevel.L1
+        if action_level_rank(level) > action_level_rank(cap):
+            return ApprovalDecision(
+                decision=ApprovalDecisionKind.REQUIRE_APPROVAL,
+                rule_applied="level_exceeds_auto_cap",
+                reason=(
+                    f"{level.value} exceeds configured auto-approve cap "
+                    f"{cap.value} (ISSUE-109)"
+                ),
+            )
         return ApprovalDecision(
             decision=ApprovalDecisionKind.AUTO_APPROVE,
             rule_applied="level_l0_l1",
@@ -274,7 +293,13 @@ class ApprovalEngine:
                 risk_assessment,
                 disposition_confidence=disposition_confidence,
             )
-            decision = evaluate_level_rules(action, confidence=confidence, severity=severity)
+            max_auto_level = resolve_runtime_max_auto_level(get_settings())
+            decision = evaluate_level_rules(
+                action,
+                confidence=confidence,
+                severity=severity,
+                max_auto_level=max_auto_level,
+            )
 
         await self._persist_evaluation(action, decision, approval_cycle)
         await self._apply_evaluation(action, decision, advance_plan=advance_plan)

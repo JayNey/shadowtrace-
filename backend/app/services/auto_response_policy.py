@@ -48,6 +48,11 @@ class AutoResponsePolicyService:
             return Severity.HIGH
 
     def max_auto_level(self) -> ActionLevel:
+        """Configured auto-approve ceiling for mock auto-response (#613).
+
+        Used both to validate policy entry and as the runtime ApprovalEngine cap
+        while ``AUTO_RESPONSE_ENABLED`` is true.
+        """
         raw = self._settings.auto_response_max_auto_level or "L1"
         return parse_action_level_label(raw) or ActionLevel.L1
 

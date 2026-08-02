@@ -307,6 +307,30 @@ def test_evaluate_level_rules_l0_auto_approve() -> None:
     assert decision.rule_applied == "level_l0_l1"
 
 
+def test_evaluate_level_rules_l1_blocked_when_max_auto_level_l0() -> None:
+    action = _action_model(action_level=ActionLevel.L1)
+    decision = evaluate_level_rules(
+        action,
+        confidence=0.99,
+        severity=Severity.CRITICAL,
+        max_auto_level=ActionLevel.L0,
+    )
+    assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
+    assert decision.rule_applied == "level_exceeds_auto_cap"
+
+
+def test_evaluate_level_rules_l0_allowed_when_max_auto_level_l0() -> None:
+    action = _action_model(action_level=ActionLevel.L0)
+    decision = evaluate_level_rules(
+        action,
+        confidence=0.99,
+        severity=Severity.CRITICAL,
+        max_auto_level=ActionLevel.L0,
+    )
+    assert decision.decision is ApprovalDecisionKind.AUTO_APPROVE
+    assert decision.rule_applied == "level_l0_l1"
+
+
 def test_evaluate_level_rules_l2_always_requires_approval() -> None:
     action = _action_model(action_level=ActionLevel.L2)
     decision = evaluate_level_rules(action, confidence=0.5, severity=Severity.MEDIUM)
@@ -371,6 +395,47 @@ async def test_l0_auto_approve_without_approval_required(
         assert row.status == ActionStatus.APPROVED.value
 
     assert not any(msg_type == "approval_required" for _, msg_type, _ in fake_bus.published)
+
+
+@pytest.mark.asyncio
+async def test_l1_requires_approval_when_auto_response_max_level_l0(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    state_machine: StateMachineService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import Settings
+
+    settings = Settings(
+        AUTO_RESPONSE_ENABLED=True,
+        AUTO_RESPONSE_MAX_AUTO_LEVEL="L0",
+        SOURCE_MODE="mock_xdr",
+        TOOL_MODE="mock",
+        DISPOSITION_MODE="mock_xdr",
+    )
+    monkeypatch.setattr("app.services.approval_engine.get_settings", lambda: settings)
+    engine = ApprovalEngine(
+        session_factory,
+        event_bus=fake_bus,  # type: ignore[arg-type]
+        state_machine=state_machine,
+        context_store=store,
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L1),
+    )
+    decision = await engine.evaluate(action, _risk(), approval_cycle=0)
+    assert decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
+    assert decision.rule_applied == "level_exceeds_auto_cap"
+
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action.action_id)
+        assert row is not None
+        assert row.status == ActionStatus.PENDING.value
 
 
 @pytest.mark.asyncio

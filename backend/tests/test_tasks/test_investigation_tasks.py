@@ -228,6 +228,31 @@ async def test_dispatch_investigation_passes_include_response_flag(
     assert captured["kwargs"] == {"include_response_execution": True}
 
 
+def test_publish_investigation_for_intent_forwards_include_response_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_apply_async(*_args: Any, **kwargs: Any) -> MagicMock:
+        captured.update(kwargs)
+        return MagicMock(id=kwargs["task_id"])
+
+    monkeypatch.setattr(tasks.run_investigation, "apply_async", _fake_apply_async)
+
+    tasks.publish_investigation_for_intent(
+        event_id="evt-intent-include",
+        task_id="task-intent-include",
+        intent_id="iin-intent-include",
+        include_response_execution=True,
+    )
+    assert captured["args"] == ["evt-intent-include"]
+    assert captured["kwargs"] == {
+        "include_response_execution": True,
+        "intent_id": "iin-intent-include",
+    }
+    assert captured["task_id"] == "task-intent-include"
+
+
 @pytest.mark.asyncio
 async def test_dispatch_investigation_returns_celery_task_id(
     monkeypatch: pytest.MonkeyPatch,
