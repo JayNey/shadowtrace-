@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import orjson
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
+from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE
 from app.evaluation.detection.fixture_loader import (
+    DetectionFeatureSnapshotFixture,
+    DetectionFixtureIndex,
     DetectionObservationFixture,
     DetectionReplayFixture,
 )
@@ -18,12 +23,15 @@ from app.models.behavior_observation import (
     BehaviorObservationProvenance,
     BehaviorObservationSourceRef,
 )
-from app.models.detection_rule import DetectionRuleRuntimeState
+from app.models.detection_rule import DetectionRuleRuntimeState, RuleOperatorKind
 from app.models.detection_scope import DetectionScopeIdentity, UpstreamConnectorMember
+from app.models.feature_snapshot import DEFAULT_ALLOWED_LATENESS, FeatureWindowKind
 from app.services.detection_rule_resolver import compile_rule_package
 from app.services.detection_rule_service import DetectionRuleService
 from app.services.detection_scope_service import DetectionScopeService
+from app.services.feature_snapshot_resolver import compute_window_bounds
 from app.models.detection_rule import DetectionRulePackageProvenance
+from app.models.detection_evaluation import DetectionCandidateRefs
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +109,60 @@ async def _insert_observation_row(
     )
 
 
+async def _insert_feature_snapshot_row(
+    session: AsyncSession,
+    *,
+    fixture: DetectionFeatureSnapshotFixture,
+    source_tenant_id: str,
+    detection_scope_id: str,
+) -> None:
+    existing = await session.get(orm.FeatureSnapshot, fixture.snapshot_id)
+    if existing is not None:
+        return
+    window_start, window_end = compute_window_bounds(
+        cutoff_at=fixture.cutoff_at,
+        window_kind=fixture.window_kind,
+    )
+    allowed_lateness = DEFAULT_ALLOWED_LATENESS
+    source_watermark = fixture.cutoff_at - allowed_lateness
+    features = dict(fixture.features)
+    content_hash = hashlib.sha256(
+        orjson.dumps(features, option=orjson.OPT_SORT_KEYS),
+    ).hexdigest()
+    cache_key = (
+        f"{source_tenant_id}:{detection_scope_id}:{fixture.entity_type}:"
+        f"{fixture.entity_id}:{fixture.window_kind.value}:{fixture.cutoff_at.isoformat()}"
+    )
+    session.add(
+        orm.FeatureSnapshot(
+            snapshot_id=fixture.snapshot_id,
+            source_tenant_id=source_tenant_id,
+            detection_scope_id=detection_scope_id,
+            entity_type=fixture.entity_type,
+            entity_id=fixture.entity_id,
+            feature_contract_version="1.0",
+            window_kind=fixture.window_kind.value,
+            window_start=window_start,
+            window_end=window_end,
+            cutoff_at=fixture.cutoff_at,
+            allowed_lateness_seconds=int(allowed_lateness.total_seconds()),
+            source_watermark=source_watermark,
+            status=fixture.status.value,
+            features=features,
+            provenance={
+                "observation_ids": [],
+                "observation_count": int(features.get("observation_count", 3)),
+            },
+            revision=1,
+            supersedes_snapshot_id=None,
+            content_hash=content_hash,
+            cache_key=cache_key,
+            idempotency_key=f"idem-{fixture.snapshot_id}",
+            schema_version="1.0",
+        )
+    )
+
+
 async def seed_detection_replay_fixture(
     session_factory: async_sessionmaker[AsyncSession],
     replay: DetectionReplayFixture,
@@ -144,7 +206,11 @@ async def seed_detection_replay_fixture(
 
     async with session_factory() as session:
         async with session.begin():
+            seen_observation_ids: set[str] = set()
             for obs in replay.observations:
+                if obs.observation_id in seen_observation_ids:
+                    continue
+                seen_observation_ids.add(obs.observation_id)
                 obs_fixture = DetectionObservationFixture(
                     observation_id=obs.observation_id,
                     source_tenant_id=obs.source_tenant_id,
@@ -161,6 +227,13 @@ async def seed_detection_replay_fixture(
                     observation_hash=obs.observation_hash,
                 )
                 await _insert_observation_row(session, obs_fixture)
+            for snapshot in replay.feature_snapshots:
+                await _insert_feature_snapshot_row(
+                    session,
+                    fixture=snapshot,
+                    source_tenant_id=replay.source_tenant_id,
+                    detection_scope_id=scope_id,
+                )
 
     existing = await rule_service.get_package(
         source_tenant_id=replay.source_tenant_id,
@@ -225,14 +298,26 @@ async def clear_detection_tables(session_factory: async_sessionmaker[AsyncSessio
             await session.execute(delete(orm.DetectionScopeRevision))
 
 
-async def derive_candidate_refs(
-    session_factory: async_sessionmaker[AsyncSession],
+def build_candidate_refs(
     replay: DetectionReplayFixture,
+    seeded: SeededDetectionContext,
 ) -> DetectionCandidateRefs:
-    from app.models.detection_evaluation import DetectionCandidateRefs
-
-    seeded = await seed_detection_replay_fixture(session_factory, replay)
     rule_ids = [rule.rule_id for rule in replay.rules]
+    model_release_id: str | None = None
+    model_release_hash: str | None = None
+    for rule in replay.rules:
+        if rule.operator is RuleOperatorKind.STATISTICAL_ANOMALY:
+            criteria = rule.match_criteria or {}
+            model_release_id = str(
+                criteria.get("model_release_id") or MOCK_ACCOUNT_MAD_RELEASE.release_id
+            )
+            raw_hash = criteria.get("model_release_hash")
+            model_release_hash = (
+                str(raw_hash)
+                if isinstance(raw_hash, str) and raw_hash.strip()
+                else MOCK_ACCOUNT_MAD_RELEASE.release_hash
+            )
+            break
     return DetectionCandidateRefs(
         package_id=seeded.package_id,
         package_version=replay.package_version,
@@ -241,12 +326,55 @@ async def derive_candidate_refs(
         feature_contract_version=seeded.feature_contract_version,
         detection_scope_id=seeded.detection_scope_id,
         scope_revision_id=seeded.scope_revision_id,
+        model_release_id=model_release_id,
+        model_release_hash=model_release_hash,
     )
+
+
+def compute_candidate_set_hash(entries: list[DetectionCandidateRefs]) -> str:
+    payloads = sorted(
+        [entry.model_dump(mode="json") for entry in entries],
+        key=lambda item: (item["package_id"], item.get("scope_revision_id") or ""),
+    )
+    return hashlib.sha256(orjson.dumps(payloads, option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+async def derive_candidate_refs(
+    session_factory: async_sessionmaker[AsyncSession],
+    replay: DetectionReplayFixture,
+) -> DetectionCandidateRefs:
+    seeded = await seed_detection_replay_fixture(session_factory, replay)
+    return build_candidate_refs(replay, seeded)
+
+
+async def derive_all_candidate_refs(
+    session_factory: async_sessionmaker[AsyncSession],
+    fixture_index: DetectionFixtureIndex,
+) -> tuple[list[DetectionCandidateRefs], str]:
+    """Derive unique candidate refs for every replay package in a dataset."""
+    entries_by_key: dict[tuple[str, str, str], DetectionCandidateRefs] = {}
+    for replay in fixture_index.by_case_id.values():
+        key = (
+            replay.source_tenant_id,
+            replay.scope_seed.integration_instance_id,
+            replay.package_id,
+        )
+        if key in entries_by_key:
+            continue
+        entries_by_key[key] = await derive_candidate_refs(session_factory, replay)
+    entries = sorted(
+        entries_by_key.values(),
+        key=lambda item: (item.package_id, item.detection_scope_id),
+    )
+    return entries, compute_candidate_set_hash(entries)
 
 
 __all__ = [
     "SeededDetectionContext",
+    "build_candidate_refs",
     "clear_detection_tables",
+    "compute_candidate_set_hash",
+    "derive_all_candidate_refs",
     "derive_candidate_refs",
     "seed_detection_replay_fixture",
 ]

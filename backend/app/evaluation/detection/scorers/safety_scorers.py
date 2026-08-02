@@ -74,6 +74,14 @@ class ResourceBudgetScorer:
     ) -> EvaluationScorerResult:
         if ctx.max_observations_scanned is None:
             return _skipped(self.scorer_id, "not_applicable", "no resource budget configured")
+        for error in observation.runtime_errors:
+            message = (error.error_message or "").lower()
+            if "scan cost limit" in message or "scan budget" in message:
+                return _fail(
+                    self.scorer_id,
+                    "scan_budget_exceeded",
+                    error.error_message[:256],
+                )
         scanned = observation.resource_metrics.observations_scanned
         if scanned > ctx.max_observations_scanned:
             return _fail(

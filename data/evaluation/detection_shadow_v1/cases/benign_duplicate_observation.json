@@ -1,0 +1,64 @@
+{
+  "case_id": "benign_duplicate_observation",
+  "case_version": 1,
+  "source_tenant_id": "tenant-det-dup",
+  "source_product": "mock_xdr",
+  "connector_id": "conn-dup-001",
+  "slice_expectation": {
+    "slice_type": "benign",
+    "schema_version": "1.1",
+    "expected_case_label": "false_positive",
+    "expected_final_verdict": "false_positive"
+  },
+  "label_provenance": {
+    "adjudicator": "detection-eval-curator",
+    "adjudicated_at": "2026-08-01T08:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "Duplicate observation_id must not inflate event_count to a false positive."
+  },
+  "detection_replay": {
+    "source_tenant_id": "tenant-det-dup",
+    "cutoff_at": "2026-08-01T15:30:00+00:00",
+    "scope_seed": {
+      "integration_instance_id": "inst-dup-001",
+      "connector_id": "conn-dup-001"
+    },
+    "package_id": "drpkg-det-dup-v1",
+    "package_version": 1,
+    "rules": [
+      {
+        "rule_id": "rule-dup-count",
+        "rule_version": 1,
+        "operator": "event_count",
+        "feature_contract_version": "1.0",
+        "detection_scope_id": "scope-placeholder",
+        "window_kind": "1h",
+        "group_key_fields": ["entity_type", "entity_id"],
+        "threshold": 2.0,
+        "severity": "medium",
+        "match_criteria": {}
+      }
+    ],
+    "observations": [
+      {
+        "observation_id": "obs-dup-shared",
+        "observed_at": "2026-08-01T15:05:00+00:00",
+        "action": "create_process",
+        "category": "process_create",
+        "entity": {"entity_type": "host", "entity_id": "host-dup-001"},
+        "connector_id": "conn-dup-001",
+        "source_object_id": "log-dup-001"
+      },
+      {
+        "observation_id": "obs-dup-shared",
+        "observed_at": "2026-08-01T15:06:00+00:00",
+        "action": "create_process",
+        "category": "process_create",
+        "entity": {"entity_type": "host", "entity_id": "host-dup-001"},
+        "connector_id": "conn-dup-001",
+        "source_object_id": "log-dup-001"
+      }
+    ]
+  },
+  "retention_policy": "evaluation_standard"
+}

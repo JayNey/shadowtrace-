@@ -190,7 +190,10 @@ class DetectionEvaluationRunRequest:
     seed: int
     code_sha: str
     cutoff_at: datetime
+    effective_cutoff_at: datetime
     candidate_refs: DetectionCandidateRefs
+    candidate_refs_entries: list[DetectionCandidateRefs]
+    candidate_set_hash: str
     fixture_index: DetectionFixtureIndex
     release_refs: EvaluationReleaseRefs = field(default_factory=EvaluationReleaseRefs)
     scorer_ids: list[str] | None = None
@@ -324,6 +327,8 @@ class DetectionEvaluationRunner:
             if probe is not None:
                 tenant_probes.append(probe)
 
+            case_candidate_refs = await self._replayer.candidate_refs_for(replay)
+
             ctx = DetectionScorerContext(
                 seed=request.seed,
                 dataset_id=request.dataset_id,
@@ -389,6 +394,7 @@ class DetectionEvaluationRunner:
                         if isinstance(truth.slice_expectation, UnevaluableSliceExpectation)
                         else None
                     ),
+                    candidate_refs=case_candidate_refs,
                 )
             )
 
@@ -420,9 +426,12 @@ class DetectionEvaluationRunner:
         config = DetectionEvaluationConfig(
             seed=request.seed,
             cutoff_at=request.cutoff_at,
+            effective_cutoff_at=request.effective_cutoff_at,
             replay_mode=self._replayer.replay_mode,
             replay_fidelity=self._replayer.replay_fidelity,
             candidate_refs=request.candidate_refs,
+            candidate_refs_entries=request.candidate_refs_entries,
+            candidate_set_hash=request.candidate_set_hash,
             scorer_ids=scorer_ids,
         )
 
@@ -510,6 +519,9 @@ async def run_fixture_detection_evaluation(
     code_sha: str,
     cutoff_at: datetime,
     candidate_refs: DetectionCandidateRefs,
+    candidate_refs_entries: list[DetectionCandidateRefs] | None = None,
+    candidate_set_hash: str = "",
+    effective_cutoff_at: datetime | None = None,
     release_refs: EvaluationReleaseRefs | None = None,
     threshold_manifest_path: Path | None = None,
     registry: DetectionScorerRegistry | None = None,
@@ -535,7 +547,10 @@ async def run_fixture_detection_evaluation(
             seed=seed,
             code_sha=code_sha,
             cutoff_at=cutoff_at,
+            effective_cutoff_at=effective_cutoff_at or cutoff_at,
             candidate_refs=candidate_refs,
+            candidate_refs_entries=candidate_refs_entries or [candidate_refs],
+            candidate_set_hash=candidate_set_hash,
             fixture_index=fixture_index,
             release_refs=release_refs or EvaluationReleaseRefs(),
             threshold_manifest=threshold,

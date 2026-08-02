@@ -82,8 +82,11 @@ async def _run(args: argparse.Namespace) -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.evaluation.detection.diff import diff_detection_against_baseline
-    from app.evaluation.detection.fixture_loader import load_detection_fixture_index
-    from app.evaluation.detection.fixture_seeder import derive_candidate_refs
+    from app.evaluation.detection.fixture_loader import (
+        load_detection_fixture_index,
+        resolve_effective_cutoff_at,
+    )
+    from app.evaluation.detection.fixture_seeder import derive_all_candidate_refs
     from app.evaluation.detection.runner import run_fixture_detection_evaluation
     from app.evaluation.fixture_loader import load_fixture_manifest
     from app.models.detection_evaluation import DetectionEvaluationArtifact
@@ -120,8 +123,15 @@ async def _run(args: argparse.Namespace) -> int:
     if not fixture_index.by_case_id:
         raise ValueError("detection fixture index is empty; cases need detection_replay blocks")
 
-    first_replay = next(iter(fixture_index.by_case_id.values()))
-    candidate_refs = await derive_candidate_refs(session_factory, first_replay)
+    effective_cutoff_at = resolve_effective_cutoff_at(
+        fixture_index,
+        default_cutoff_at=cutoff_at,
+    )
+    candidate_refs_entries, candidate_set_hash = await derive_all_candidate_refs(
+        session_factory,
+        fixture_index,
+    )
+    candidate_refs = candidate_refs_entries[0]
 
     artifact = await run_fixture_detection_evaluation(
         truth_service,
@@ -131,7 +141,10 @@ async def _run(args: argparse.Namespace) -> int:
         seed=args.seed,
         code_sha=resolve_code_sha(args.code_sha),
         cutoff_at=cutoff_at,
+        effective_cutoff_at=effective_cutoff_at,
         candidate_refs=candidate_refs,
+        candidate_refs_entries=candidate_refs_entries,
+        candidate_set_hash=candidate_set_hash,
         release_refs=EvaluationReleaseRefs(config_profile=args.config_profile),
         threshold_manifest_path=threshold_path,
     )
@@ -154,6 +167,8 @@ async def _run(args: argparse.Namespace) -> int:
                 "gate_verdict": artifact.gate.verdict.value if artifact.gate else None,
                 "tenant_safety_pass": artifact.tenant_safety.pass_count,
                 "replay_fidelity": artifact.config.replay_fidelity,
+                "candidate_set_hash": artifact.config.candidate_set_hash,
+                "total_replay_duration_ms": artifact.resource_summary.total_replay_duration_ms,
                 "quality_metrics": {
                     metric.metric_id: metric.value
                     for metric in (artifact.quality_report.metrics if artifact.quality_report else [])

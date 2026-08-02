@@ -572,6 +572,19 @@
           "title": "Observation Available",
           "type": "boolean"
         },
+        "replay_cutoff_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replay Cutoff At"
+        },
         "replay_notes": {
           "default": "",
           "maxLength": 512,
@@ -638,6 +651,17 @@
           ],
           "default": null,
           "title": "Unevaluable Reason"
+        },
+        "candidate_refs": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DetectionCandidateRefs"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -666,6 +690,20 @@
           "title": "Cutoff At",
           "type": "string"
         },
+        "effective_cutoff_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Max per-case replay cutoff bound into the artifact (>= manifest default).",
+          "title": "Effective Cutoff At"
+        },
         "replay_mode": {
           "default": "detection_shadow",
           "minLength": 1,
@@ -681,6 +719,20 @@
         },
         "candidate_refs": {
           "$ref": "#/$defs/DetectionCandidateRefs"
+        },
+        "candidate_refs_entries": {
+          "items": {
+            "$ref": "#/$defs/DetectionCandidateRefs"
+          },
+          "title": "Candidate Refs Entries",
+          "type": "array"
+        },
+        "candidate_set_hash": {
+          "default": "",
+          "maxLength": 64,
+          "minLength": 0,
+          "title": "Candidate Set Hash",
+          "type": "string"
         },
         "scorer_ids": {
           "items": {
@@ -730,6 +782,12 @@
           "minimum": 0,
           "title": "Candidate Count",
           "type": "integer"
+        },
+        "replay_duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Replay Duration Ms",
+          "type": "integer"
         }
       },
       "title": "DetectionResourceMetrics",
@@ -767,6 +825,18 @@
           "default": 0,
           "minimum": 0,
           "title": "Max Observations Scanned Per Case",
+          "type": "integer"
+        },
+        "total_replay_duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total Replay Duration Ms",
+          "type": "integer"
+        },
+        "max_replay_duration_ms_per_case": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Max Replay Duration Ms Per Case",
           "type": "integer"
         }
       },

@@ -31,6 +31,18 @@
       "minimum": 0,
       "title": "Max Observations Scanned Per Case",
       "type": "integer"
+    },
+    "total_replay_duration_ms": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Total Replay Duration Ms",
+      "type": "integer"
+    },
+    "max_replay_duration_ms_per_case": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Max Replay Duration Ms Per Case",
+      "type": "integer"
     }
   },
   "title": "DetectionResourceSummary",

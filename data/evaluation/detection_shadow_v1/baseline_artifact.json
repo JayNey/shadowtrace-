@@ -1,27 +1,103 @@
 {
   "aggregates": {
-    "case_count": 4,
+    "case_count": 5,
     "error_count": 0,
     "fail_count": 0,
-    "pass_count": 3,
+    "pass_count": 4,
     "pass_rate": 1.0,
     "required_scorer_error_count": 0,
     "unevaluable_count": 1
   },
   "approval_note": "Not a governance approval; consume via #630 only.",
-  "artifact_hash": "110c02c011b566ddc021fdfd4e93a8abdd50c4d6ad81a12f09a6498e3ef0d197",
+  "artifact_hash": "3751cce68c747a37932dedbbc98461d8abab6d89c548a8dac5dc9828c0a86f98",
   "case_results": [
     {
+      "candidate_refs": {
+        "detection_scope_id": "dscope-a7a69f0ecc3d",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "fdb4fca7c42c22a06a57abca13e319a12b43a6a90da7ae4665bd93aebfb7309c",
+        "package_id": "drpkg-det-dup-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-dup-count"
+        ],
+        "scope_revision_id": "dscope-rev-dfb089c7"
+      },
+      "case_id": "benign_duplicate_observation",
+      "case_status": "completed",
+      "observation": {
+        "candidates": [],
+        "case_id": "benign_duplicate_observation",
+        "observation_available": true,
+        "replay_cutoff_at": "2026-08-01T15:30:00Z",
+        "replay_notes": "shadow_runtime_v1;seed=42;n=a44931c4",
+        "resource_metrics": {
+          "candidate_count": 0,
+          "observations_scanned": 0,
+          "replay_duration_ms": 6,
+          "rules_evaluated": 1,
+          "runtime_error_count": 0
+        },
+        "runtime_errors": [],
+        "slice_type": "benign"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "benign silence satisfied",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "benign_detection"
+        },
+        {
+          "details": {},
+          "message": "tenant isolation satisfied",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "tenant_isolation"
+        },
+        {
+          "details": {},
+          "message": "no resource budget configured",
+          "outcome": "skipped",
+          "reason_code": "not_applicable",
+          "scorer_id": "resource_budget"
+        }
+      ],
+      "slice_type": "benign",
+      "truth_content_hash": "e79acd8a8b9f1f55291882f200190da261d24df33c66f3c50280a9f4ade9e2e5",
+      "truth_id": "truth-a042efb5fa32",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "candidate_refs": {
+        "detection_scope_id": "dscope-3a6f79858c7a",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "23cba8cf9812a7ffe8db4fc6fe3c7a275e3d390b284a61eaefb1d0b796f1bd53",
+        "package_id": "drpkg-det-benign-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-exfil-match"
+        ],
+        "scope_revision_id": "dscope-rev-4f6b7339"
+      },
       "case_id": "benign_hard_negative",
       "case_status": "completed",
       "observation": {
         "candidates": [],
         "case_id": "benign_hard_negative",
         "observation_available": true,
+        "replay_cutoff_at": "2026-08-01T15:30:00Z",
         "replay_notes": "shadow_runtime_v1;seed=42;n=d68f581d",
         "resource_metrics": {
           "candidate_count": 0,
           "observations_scanned": 0,
+          "replay_duration_ms": 4,
           "rules_evaluated": 1,
           "runtime_error_count": 0
         },
@@ -58,16 +134,31 @@
       "unevaluable_reason": null
     },
     {
+      "candidate_refs": {
+        "detection_scope_id": "dscope-40b1c2d5f162",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "8150dcc053c0e6a7837fd01dd302e7a0b9386519800f8f10040334d392215a3f",
+        "package_id": "drpkg-det-late-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-late-match"
+        ],
+        "scope_revision_id": "dscope-rev-220ca70d"
+      },
       "case_id": "benign_late_observation",
       "case_status": "completed",
       "observation": {
         "candidates": [],
         "case_id": "benign_late_observation",
         "observation_available": true,
+        "replay_cutoff_at": "2026-08-01T15:30:00Z",
         "replay_notes": "shadow_runtime_v1;seed=42;n=ef093a22",
         "resource_metrics": {
           "candidate_count": 0,
           "observations_scanned": 0,
+          "replay_duration_ms": 4,
           "rules_evaluated": 1,
           "runtime_error_count": 0
         },
@@ -104,6 +195,19 @@
       "unevaluable_reason": null
     },
     {
+      "candidate_refs": {
+        "detection_scope_id": "dscope-3cc9a352b046",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "3fb2a6e9728fa73af51ded6250dac1cc7b86d1bdfd1af6a2ebc8b5e445bf643c",
+        "package_id": "drpkg-det-threat-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-event-match"
+        ],
+        "scope_revision_id": "dscope-rev-cb07b54a"
+      },
       "case_id": "threat_event_match",
       "case_status": "completed",
       "observation": {
@@ -111,7 +215,7 @@
           {
             "candidate_detection_id": "dcand-7c8ed30dac68",
             "content_hash": "692ae098aa89c87d5d10b08fbd6e3ae383006a57b239771eb70d066f38c7f6bf",
-            "created_at": "2026-08-02T16:02:58.734476Z",
+            "created_at": "2026-08-02T23:43:24.196569Z",
             "cutoff_at": "2026-08-01T15:30:00Z",
             "detection_scope_id": "dscope-3cc9a352b046",
             "group_key": {
@@ -160,10 +264,12 @@
         ],
         "case_id": "threat_event_match",
         "observation_available": true,
+        "replay_cutoff_at": "2026-08-01T15:30:00Z",
         "replay_notes": "shadow_runtime_v1;seed=42;n=5a171d9",
         "resource_metrics": {
           "candidate_count": 1,
           "observations_scanned": 1,
+          "replay_duration_ms": 6,
           "rules_evaluated": 1,
           "runtime_error_count": 0
         },
@@ -200,16 +306,31 @@
       "unevaluable_reason": null
     },
     {
+      "candidate_refs": {
+        "detection_scope_id": "dscope-82fd0e12bbed",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "fa5820a250c84a1cb79782e4692dc43d012f1f8c12a57120a8de0918b998d4b5",
+        "package_id": "drpkg-det-unknown-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-placeholder"
+        ],
+        "scope_revision_id": "dscope-rev-467cecc1"
+      },
       "case_id": "unevaluable_partial_telemetry",
       "case_status": "unevaluable",
       "observation": {
         "candidates": [],
         "case_id": "unevaluable_partial_telemetry",
         "observation_available": false,
+        "replay_cutoff_at": "2026-08-01T15:30:00Z",
         "replay_notes": "unevaluable:partial_telemetry;seed=42;n=dc2d0c35",
         "resource_metrics": {
           "candidate_count": 0,
           "observations_scanned": 0,
+          "replay_duration_ms": 1,
           "rules_evaluated": 0,
           "runtime_error_count": 0
         },
@@ -233,7 +354,7 @@
     }
   ],
   "code_sha": "baseline0001",
-  "completed_at": "2026-08-02T16:02:58.756458Z",
+  "completed_at": "2026-08-02T23:43:48.012344Z",
   "config": {
     "candidate_refs": {
       "detection_scope_id": "dscope-3a6f79858c7a",
@@ -248,7 +369,76 @@
       ],
       "scope_revision_id": "dscope-rev-4f6b7339"
     },
+    "candidate_refs_entries": [
+      {
+        "detection_scope_id": "dscope-3a6f79858c7a",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "23cba8cf9812a7ffe8db4fc6fe3c7a275e3d390b284a61eaefb1d0b796f1bd53",
+        "package_id": "drpkg-det-benign-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-exfil-match"
+        ],
+        "scope_revision_id": "dscope-rev-4f6b7339"
+      },
+      {
+        "detection_scope_id": "dscope-a7a69f0ecc3d",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "fdb4fca7c42c22a06a57abca13e319a12b43a6a90da7ae4665bd93aebfb7309c",
+        "package_id": "drpkg-det-dup-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-dup-count"
+        ],
+        "scope_revision_id": "dscope-rev-dfb089c7"
+      },
+      {
+        "detection_scope_id": "dscope-40b1c2d5f162",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "8150dcc053c0e6a7837fd01dd302e7a0b9386519800f8f10040334d392215a3f",
+        "package_id": "drpkg-det-late-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-late-match"
+        ],
+        "scope_revision_id": "dscope-rev-220ca70d"
+      },
+      {
+        "detection_scope_id": "dscope-3cc9a352b046",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "3fb2a6e9728fa73af51ded6250dac1cc7b86d1bdfd1af6a2ebc8b5e445bf643c",
+        "package_id": "drpkg-det-threat-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-event-match"
+        ],
+        "scope_revision_id": "dscope-rev-cb07b54a"
+      },
+      {
+        "detection_scope_id": "dscope-82fd0e12bbed",
+        "feature_contract_version": "1.0",
+        "model_release_hash": null,
+        "model_release_id": null,
+        "package_content_hash": "fa5820a250c84a1cb79782e4692dc43d012f1f8c12a57120a8de0918b998d4b5",
+        "package_id": "drpkg-det-unknown-v1",
+        "package_version": 1,
+        "rule_ids": [
+          "rule-placeholder"
+        ],
+        "scope_revision_id": "dscope-rev-467cecc1"
+      }
+    ],
+    "candidate_set_hash": "5290a369ef867a7d7062c8950569c5ac50c9c6e8d969173cf2c6692cb4f9be07",
     "cutoff_at": "2026-08-01T15:30:00Z",
+    "effective_cutoff_at": "2026-08-01T15:30:00Z",
     "extra": {},
     "replay_fidelity": "shadow_runtime_v1",
     "replay_mode": "detection_shadow",
@@ -261,11 +451,11 @@
     ],
     "seed": 42
   },
-  "dataset_content_hash": "4c5b58bff3c5da00cb79ff3c3d8af2fd51b78ce515f69405ef3f2885e4c03d37",
+  "dataset_content_hash": "055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d",
   "dataset_id": "detection_shadow_v1",
   "dataset_version": "2026.08.02",
   "errors": [],
-  "evaluation_id": "det-eval-9c1a2c70-7361-4086-ba3f-df0eb625a58d",
+  "evaluation_id": "det-eval-a284586c-f11d-4907-b538-fbea0a6d5755",
   "gate": {
     "diffs": [],
     "manifest_path": "data/evaluation/detection_shadow_v1/threshold_manifest.json",
@@ -275,7 +465,7 @@
   },
   "quality_report": {
     "code_sha": "baseline0001",
-    "dataset_content_hash": "4c5b58bff3c5da00cb79ff3c3d8af2fd51b78ce515f69405ef3f2885e4c03d37",
+    "dataset_content_hash": "055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d",
     "dataset_id": "detection_shadow_v1",
     "dataset_version": "2026.08.02",
     "grouping_scorer_summaries": [],
@@ -319,15 +509,15 @@
       {
         "confidence_interval": {
           "level": 0.95,
-          "lower": 0.10923136242121712,
+          "lower": 0.295269586297756,
           "method": "wilson",
           "upper": 1.0
         },
         "denominator": {
-          "denominator": 2,
+          "denominator": 3,
           "error_count": 0,
           "missing_truth_count": 0,
-          "numerator": 2
+          "numerator": 3
         },
         "metric_id": "benign_specificity",
         "reason": "",
@@ -339,10 +529,10 @@
           "level": 0.95,
           "lower": 0.0,
           "method": "wilson",
-          "upper": 0.8907686375787829
+          "upper": 0.704730413702244
         },
         "denominator": {
-          "denominator": 2,
+          "denominator": 3,
           "error_count": 0,
           "missing_truth_count": 0,
           "numerator": 0
@@ -379,22 +569,24 @@
       "rule_release_id": null
     },
     "sample_counts": {
-      "benign": 2,
+      "benign": 3,
       "threat": 1,
-      "total": 4,
+      "total": 5,
       "unevaluable": 1
     },
     "schema_version": "1.0"
   },
   "resource_summary": {
     "max_observations_scanned_per_case": 1,
+    "max_replay_duration_ms_per_case": 6,
     "total_candidates": 1,
     "total_observations_scanned": 1,
-    "total_rules_evaluated": 3,
+    "total_replay_duration_ms": 21,
+    "total_rules_evaluated": 4,
     "total_runtime_errors": 0
   },
   "schema_version": "1.0",
-  "started_at": "2026-08-02T16:02:58.676833Z",
+  "started_at": "2026-08-02T23:43:47.980695Z",
   "status": "completed",
   "tenant_id": "tenant-detection-eval",
   "tenant_safety": {

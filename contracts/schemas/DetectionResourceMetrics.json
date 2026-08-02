@@ -25,6 +25,12 @@
       "minimum": 0,
       "title": "Candidate Count",
       "type": "integer"
+    },
+    "replay_duration_ms": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Replay Duration Ms",
+      "type": "integer"
     }
   },
   "title": "DetectionResourceMetrics",

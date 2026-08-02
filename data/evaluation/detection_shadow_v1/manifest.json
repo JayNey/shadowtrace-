@@ -4,5 +4,5 @@
   "tenant_id": "tenant-detection-eval",
   "schema_version": "1.0",
   "default_cutoff_at": "2026-08-01T15:30:00+00:00",
-  "content_hash": "4c5b58bff3c5da00cb79ff3c3d8af2fd51b78ce515f69405ef3f2885e4c03d37"
+  "content_hash": "055fe62e8bb3c0e6f12c60dbadc20f4b235045c8eb216c720c392488fe9e631d"
 }

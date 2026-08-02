@@ -409,6 +409,97 @@
       "title": "CandidateDetectionProvenance",
       "type": "object"
     },
+    "DetectionCandidateRefs": {
+      "additionalProperties": false,
+      "description": "Pinned candidate package/model/rule identity bound into the artifact.",
+      "properties": {
+        "package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Package Id",
+          "type": "string"
+        },
+        "package_version": {
+          "minimum": 1,
+          "title": "Package Version",
+          "type": "integer"
+        },
+        "package_content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Package Content Hash",
+          "type": "string"
+        },
+        "rule_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Rule Ids",
+          "type": "array"
+        },
+        "feature_contract_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Feature Contract Version",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "scope_revision_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope Revision Id"
+        },
+        "model_release_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Id"
+        },
+        "model_release_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Hash"
+        }
+      },
+      "required": [
+        "package_id",
+        "package_version",
+        "package_content_hash",
+        "feature_contract_version",
+        "detection_scope_id"
+      ],
+      "title": "DetectionCandidateRefs",
+      "type": "object"
+    },
     "DetectionCaseObservation": {
       "additionalProperties": false,
       "description": "Shadow replay observation for one detection evaluation case.",
@@ -442,6 +533,19 @@
           "default": true,
           "title": "Observation Available",
           "type": "boolean"
+        },
+        "replay_cutoff_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Replay Cutoff At"
         },
         "replay_notes": {
           "default": "",
@@ -483,6 +587,12 @@
           "default": 0,
           "minimum": 0,
           "title": "Candidate Count",
+          "type": "integer"
+        },
+        "replay_duration_ms": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Replay Duration Ms",
           "type": "integer"
         }
       },
@@ -697,6 +807,17 @@
       ],
       "default": null,
       "title": "Unevaluable Reason"
+    },
+    "candidate_refs": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DetectionCandidateRefs"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

@@ -228,6 +228,7 @@ def build_detection_quality_report(
 
 def build_resource_summary(case_results: list[DetectionCaseResult]) -> DetectionResourceSummary:
     total_rules = total_scanned = total_errors = total_candidates = max_scanned = 0
+    total_duration = max_duration = 0
     for case in case_results:
         metrics = case.observation.resource_metrics
         total_rules += metrics.rules_evaluated
@@ -235,12 +236,16 @@ def build_resource_summary(case_results: list[DetectionCaseResult]) -> Detection
         total_errors += metrics.runtime_error_count
         total_candidates += metrics.candidate_count
         max_scanned = max(max_scanned, metrics.observations_scanned)
+        total_duration += metrics.replay_duration_ms
+        max_duration = max(max_duration, metrics.replay_duration_ms)
     return DetectionResourceSummary(
         total_rules_evaluated=total_rules,
         total_observations_scanned=total_scanned,
         total_runtime_errors=total_errors,
         total_candidates=total_candidates,
         max_observations_scanned_per_case=max_scanned,
+        total_replay_duration_ms=total_duration,
+        max_replay_duration_ms_per_case=max_duration,
     )
 
 

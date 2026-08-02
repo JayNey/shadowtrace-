@@ -29,6 +29,21 @@ def _canonical_payload(artifact: DetectionEvaluationArtifact) -> dict[str, Any]:
     gate = canonical.get("gate")
     if isinstance(gate, dict):
         canonical["gate"] = {key: value for key, value in gate.items() if key != "manifest_path"}
+    for case in canonical.get("case_results", []):
+        if not isinstance(case, dict):
+            continue
+        observation = case.get("observation")
+        if isinstance(observation, dict):
+            metrics = observation.get("resource_metrics")
+            if isinstance(metrics, dict):
+                metrics.pop("replay_duration_ms", None)
+            for candidate in observation.get("candidates", []):
+                if isinstance(candidate, dict):
+                    candidate.pop("created_at", None)
+    resource_summary = canonical.get("resource_summary")
+    if isinstance(resource_summary, dict):
+        resource_summary.pop("total_replay_duration_ms", None)
+        resource_summary.pop("max_replay_duration_ms_per_case", None)
     return canonical
 
 

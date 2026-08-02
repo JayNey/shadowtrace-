@@ -7,6 +7,18 @@ from datetime import datetime
 from typing import Any
 
 from app.models.detection_rule import DetectionRuleDefinition
+from app.models.feature_snapshot import FeatureSnapshotStatus, FeatureWindowKind
+
+
+@dataclass(frozen=True, slots=True)
+class DetectionFeatureSnapshotFixture:
+    snapshot_id: str
+    entity_type: str
+    entity_id: str
+    window_kind: FeatureWindowKind
+    cutoff_at: datetime
+    status: FeatureSnapshotStatus = FeatureSnapshotStatus.READY
+    features: dict[str, float | int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +67,7 @@ class DetectionReplayFixture:
     max_observations_scanned: int | None = None
     skip_shadow_execute: bool = False
     force_runtime_error: bool = False
+    feature_snapshots: tuple[DetectionFeatureSnapshotFixture, ...] = ()
 
 
 @dataclass
@@ -115,6 +128,24 @@ def parse_detection_replay_fixture(case_payload: dict[str, Any]) -> DetectionRep
             probe_tenant_id=str(probe_raw["probe_tenant_id"]),
         )
     max_scan = replay_raw.get("max_observations_scanned")
+    snapshots_raw = replay_raw.get("feature_snapshots") or []
+    feature_snapshots = tuple(
+        DetectionFeatureSnapshotFixture(
+            snapshot_id=str(item["snapshot_id"]),
+            entity_type=str(item.get("entity_type", "account")),
+            entity_id=str(item.get("entity_id", "acct-cold-001")),
+            window_kind=FeatureWindowKind(str(item.get("window_kind", "1h"))),
+            cutoff_at=datetime.fromisoformat(str(item.get("cutoff_at", replay_raw["cutoff_at"]))),
+            status=FeatureSnapshotStatus(str(item.get("status", FeatureSnapshotStatus.READY.value))),
+            features={
+                str(key): value
+                for key, value in (item.get("features") or {}).items()
+                if isinstance(value, (int, float))
+            },
+        )
+        for item in snapshots_raw
+        if isinstance(item, dict)
+    )
     return DetectionReplayFixture(
         source_tenant_id=source_tenant_id,
         cutoff_at=cutoff_at,
@@ -128,6 +159,7 @@ def parse_detection_replay_fixture(case_payload: dict[str, Any]) -> DetectionRep
         max_observations_scanned=int(max_scan) if max_scan is not None else None,
         skip_shadow_execute=bool(replay_raw.get("skip_shadow_execute", False)),
         force_runtime_error=bool(replay_raw.get("force_runtime_error", False)),
+        feature_snapshots=feature_snapshots,
     )
 
 
@@ -143,7 +175,20 @@ def load_detection_fixture_index(dataset_dir) -> DetectionFixtureIndex:
     return index
 
 
+def resolve_effective_cutoff_at(
+    fixture_index: DetectionFixtureIndex,
+    *,
+    default_cutoff_at: datetime,
+) -> datetime:
+    """Return the latest per-case replay cutoff for artifact binding."""
+    cutoffs = [replay.cutoff_at for replay in fixture_index.by_case_id.values()]
+    if not cutoffs:
+        return default_cutoff_at
+    return max([default_cutoff_at, *cutoffs])
+
+
 __all__ = [
+    "DetectionFeatureSnapshotFixture",
     "DetectionFixtureIndex",
     "DetectionObservationFixture",
     "DetectionReplayFixture",

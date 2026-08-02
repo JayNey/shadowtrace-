@@ -34,7 +34,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
+.PHONY: up down down-v bootstrap smoke-bootstrap llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -444,6 +444,34 @@ evaluation-test:
 	DATABASE_URL="$(CI_DATABASE_URL)" $(PYTHON) -m alembic upgrade head; \
 	DATABASE_URL="$(CI_DATABASE_URL)" \
 		$(PYTHON) -m pytest tests/evaluation/ -m evaluation -v --tb=short
+
+# --- ISSUE-126 detection shadow evaluation (artifact-only; mock-only replay) --- #
+detection-evaluation-run:
+	@set -eu; \
+	project="$(INTEGRATION_PROJECT_NAME)"; \
+	compose() { \
+		COMPOSE_PROJECT_NAME="$$project" \
+		POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \
+		BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
+		docker compose --project-name "$$project" \
+			-f "$(COMPOSE_FILE)" "$$@"; \
+	}; \
+	cleanup() { \
+		status=$$?; \
+		trap - EXIT INT TERM; \
+		compose down --volumes --remove-orphans || true; \
+		exit "$$status"; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	compose up -d --wait --wait-timeout 120 postgres; \
+	cd "$(CURDIR)/backend"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" $(PYTHON) -m alembic upgrade head; \
+	DATABASE_URL="$(CI_DATABASE_URL)" $(PYTHON) -m scripts.run_detection_evaluation \
+		--output "$(CURDIR)/artifacts/evaluation/detection_latest_run.json" \
+		--code-sha "$$(git -C "$(CURDIR)" rev-parse HEAD)" \
+		--seed 42 \
+		--threshold-manifest "$(CURDIR)/data/evaluation/detection_shadow_v1/threshold_manifest.json" \
+		--compare-baseline "$(CURDIR)/data/evaluation/detection_shadow_v1/baseline_artifact.json"
 
 # --- ISSUE-009 local / CI parity gates ------------------------------------ #
 ci-lint:

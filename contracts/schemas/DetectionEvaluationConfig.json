@@ -105,6 +105,20 @@
       "title": "Cutoff At",
       "type": "string"
     },
+    "effective_cutoff_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Max per-case replay cutoff bound into the artifact (>= manifest default).",
+      "title": "Effective Cutoff At"
+    },
     "replay_mode": {
       "default": "detection_shadow",
       "minLength": 1,
@@ -120,6 +134,20 @@
     },
     "candidate_refs": {
       "$ref": "#/$defs/DetectionCandidateRefs"
+    },
+    "candidate_refs_entries": {
+      "items": {
+        "$ref": "#/$defs/DetectionCandidateRefs"
+      },
+      "title": "Candidate Refs Entries",
+      "type": "array"
+    },
+    "candidate_set_hash": {
+      "default": "",
+      "maxLength": 64,
+      "minLength": 0,
+      "title": "Candidate Set Hash",
+      "type": "string"
     },
     "scorer_ids": {
       "items": {

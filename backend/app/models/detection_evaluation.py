@@ -52,6 +52,7 @@ class DetectionResourceMetrics(BaseModel):
     observations_scanned: int = Field(default=0, ge=0)
     runtime_error_count: int = Field(default=0, ge=0)
     candidate_count: int = Field(default=0, ge=0)
+    replay_duration_ms: int = Field(default=0, ge=0)
 
 
 class DetectionCaseObservation(BaseModel):
@@ -65,6 +66,7 @@ class DetectionCaseObservation(BaseModel):
     runtime_errors: list[DetectionRuleRuntimeError] = Field(default_factory=list)
     resource_metrics: DetectionResourceMetrics = Field(default_factory=DetectionResourceMetrics)
     observation_available: bool = True
+    replay_cutoff_at: datetime | None = None
     replay_notes: str = Field(default="", max_length=512)
 
 
@@ -82,6 +84,7 @@ class DetectionCaseResult(BaseModel):
     scorer_results: list[EvaluationScorerResult] = Field(default_factory=list)
     case_status: EvaluationRunStatus
     unevaluable_reason: str | None = None
+    candidate_refs: DetectionCandidateRefs | None = None
 
 
 class DetectionResourceSummary(BaseModel):
@@ -94,6 +97,8 @@ class DetectionResourceSummary(BaseModel):
     total_runtime_errors: int = Field(default=0, ge=0)
     total_candidates: int = Field(default=0, ge=0)
     max_observations_scanned_per_case: int = Field(default=0, ge=0)
+    total_replay_duration_ms: int = Field(default=0, ge=0)
+    max_replay_duration_ms_per_case: int = Field(default=0, ge=0)
 
 
 class DetectionTenantSafetyProbe(BaseModel):
@@ -127,6 +132,10 @@ class DetectionEvaluationConfig(BaseModel):
 
     seed: int = Field(..., ge=0)
     cutoff_at: datetime
+    effective_cutoff_at: datetime | None = Field(
+        default=None,
+        description="Max per-case replay cutoff bound into the artifact (>= manifest default).",
+    )
     replay_mode: str = Field(default="detection_shadow", min_length=1)
     replay_fidelity: str = Field(
         default="shadow_runtime_v1",
@@ -137,6 +146,8 @@ class DetectionEvaluationConfig(BaseModel):
         ),
     )
     candidate_refs: DetectionCandidateRefs
+    candidate_refs_entries: list[DetectionCandidateRefs] = Field(default_factory=list)
+    candidate_set_hash: str = Field(default="", min_length=0, max_length=64)
     scorer_ids: list[str] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)
 
