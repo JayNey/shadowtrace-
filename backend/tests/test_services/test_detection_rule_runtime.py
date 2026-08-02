@@ -19,7 +19,11 @@ from sqlalchemy.pool import NullPool
 from app.core.errors import ValidationError
 from app.db import models as orm
 from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE
-from app.detection.sequences.releases import GEO_SENSITIVE_SEQUENCE_V1, IDENTITY_EXFIL_SEQUENCE_V1
+from app.detection.sequences.releases import (
+    GEO_SENSITIVE_SEQUENCE_V1,
+    IDENTITY_EXFIL_SEQUENCE_V1,
+    sequence_match_threshold,
+)
 from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
@@ -1387,7 +1391,7 @@ async def test_event_sequence_identity_exfil_produces_shadow_candidate(
         detection_scope_id=scope_id,
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
         severity="high",
         match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
     )
@@ -1409,6 +1413,7 @@ async def test_event_sequence_identity_exfil_produces_shadow_candidate(
     assert candidate.operator is RuleOperatorKind.EVENT_SEQUENCE
     assert candidate.shadow_only is True
     assert candidate.provenance.sequence_id == IDENTITY_EXFIL_SEQUENCE_V1.sequence_id
+    assert candidate.provenance.sequence_hash == IDENTITY_EXFIL_SEQUENCE_V1.sequence_hash
     assert len(candidate.provenance.ordered_observation_ids) == 4
     assert candidate.provenance.observation_ids == candidate.provenance.ordered_observation_ids
     assert candidate.provenance.sequence_step_matches
@@ -1454,7 +1459,7 @@ async def test_event_sequence_benign_partial_sequence_no_candidate(
         detection_scope_id=scope_id,
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
         severity="high",
         match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
     )
@@ -1508,7 +1513,7 @@ async def test_event_sequence_out_of_order_observations_still_matches(
         detection_scope_id=scope_id,
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
         severity="high",
         match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
     )
@@ -1545,7 +1550,7 @@ async def test_event_sequence_tenant_isolation(
         detection_scope_id=scope_a,
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
         severity="high",
         match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
     )
@@ -1595,7 +1600,7 @@ async def test_geo_sensitive_sequence_produces_shadow_candidate(
         detection_scope_id=scope_id,
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(GEO_SENSITIVE_SEQUENCE_V1),
         severity="medium",
         match_criteria=GEO_SENSITIVE_SEQUENCE_V1.as_match_criteria(),
     )
@@ -1648,7 +1653,7 @@ async def test_event_sequence_late_step_completes_sequence(
         detection_scope_id=scope_id,
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
         severity="high",
         match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
     )
@@ -1690,7 +1695,7 @@ async def test_event_sequence_late_step_completes_sequence(
 
 
 @pytest.mark.asyncio
-async def test_event_sequence_duplicate_observation_id_at_runtime(
+async def test_event_sequence_duplicate_step_action_at_runtime(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
@@ -1742,7 +1747,7 @@ async def test_event_sequence_duplicate_observation_id_at_runtime(
         detection_scope_id=scope_id,
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(GEO_SENSITIVE_SEQUENCE_V1),
         severity="medium",
         match_criteria=GEO_SENSITIVE_SEQUENCE_V1.as_match_criteria(),
     )
@@ -1764,6 +1769,58 @@ async def test_event_sequence_duplicate_observation_id_at_runtime(
 
 
 @pytest.mark.asyncio
+async def test_event_sequence_scope_isolation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_a = await _seed_scope(session_factory, suffix=f"a-{suffix}", tenant_id=tenant_id)
+    scope_b = await _seed_scope(session_factory, suffix=f"b-{suffix}", tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    entity_type = "user"
+    entity_id = f"account-{suffix}"
+    for index, step in enumerate(IDENTITY_EXFIL_SEQUENCE_V1.sequence_steps):
+        await _insert_sequence_observation(
+            session_factory,
+            suffix=f"{suffix}-scope-b-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_b,
+            observed_at=cutoff - timedelta(minutes=55 - index * 5),
+            action=step["action"],
+            category=step["category"],
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-scope-iso",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_SEQUENCE,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_a,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
+        severity="high",
+        match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_a,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert result.candidates == []
+    assert result.errors == []
+
+
+@pytest.mark.asyncio
 async def test_event_sequence_cold_start_no_candidate(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1779,58 +1836,7 @@ async def test_event_sequence_cold_start_no_candidate(
         detection_scope_id=scope_id,
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
-        severity="high",
-        match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
-    )
-    package_id = await _register_shadow_package(
-        session_factory,
-        tenant_id=tenant_id,
-        scope_id=scope_id,
-        rule=rule,
-    )
-    runtime = DetectionRuleRuntimeService(session_factory)
-    result = await runtime.execute_shadow(
-        source_tenant_id=tenant_id,
-        cutoff_at=cutoff,
-        package_id=package_id,
-    )
-    assert result.candidates == []
-    assert result.errors == []
-
-
-@pytest.mark.asyncio
-async def test_event_sequence_respects_threshold(
-    session_factory: async_sessionmaker[AsyncSession],
-) -> None:
-    suffix = uuid.uuid4().hex[:8]
-    tenant_id = f"tenant-{suffix}"
-    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
-    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
-    entity_type = "user"
-    entity_id = f"account-{suffix}"
-    for index, step in enumerate(IDENTITY_EXFIL_SEQUENCE_V1.sequence_steps):
-        await _insert_sequence_observation(
-            session_factory,
-            suffix=f"{suffix}-thr-{index}",
-            tenant_id=tenant_id,
-            scope_id=scope_id,
-            observed_at=cutoff - timedelta(minutes=55 - index * 5),
-            action=step["action"],
-            category=step["category"],
-            entity_type=entity_type,
-            entity_id=entity_id,
-        )
-
-    rule = DetectionRuleDefinition(
-        rule_id="rule-threshold-seq",
-        rule_version=1,
-        operator=RuleOperatorKind.EVENT_SEQUENCE,
-        feature_contract_version=FEATURE_CONTRACT_VERSION,
-        detection_scope_id=scope_id,
-        window_kind=FeatureWindowKind.ONE_HOUR.value,
-        group_key_fields=["entity_type", "entity_id"],
-        threshold=5.0,
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
         severity="high",
         match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
     )

@@ -208,6 +208,8 @@ class EventSequenceOperator:
                     window_end=context.window_end,
                     sequence_provenance={
                         "sequence_id": release.sequence_id,
+                        "sequence_hash": release.sequence_hash,
+                        "max_step_gap_seconds": release.max_step_gap_seconds,
                         "ordered_observation_ids": ordered_ids,
                         "sequence_step_matches": step_records,
                         "match_explanation": _build_match_explanation(

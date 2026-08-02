@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import orjson
 
 IDENTITY_EXFIL_SEQUENCE_ID = "identity-exfil-v1"
 GEO_SENSITIVE_SEQUENCE_ID = "geo-sensitive-v1"
 
+# Upper bound for inter-step gap; runtime window_kind still caps observable span.
 DEFAULT_MAX_STEP_GAP_SECONDS = 86_400
 
 
@@ -24,7 +25,7 @@ class SequenceRelease:
 
     sequence_id: str
     sequence_hash: str
-    sequence_steps: tuple[dict[str, str], ...]
+    sequence_steps: tuple[dict[str, object], ...]
     max_step_gap_seconds: int
     description: str
 
@@ -37,12 +38,17 @@ class SequenceRelease:
         }
 
 
+def sequence_match_threshold(release: SequenceRelease) -> float:
+    """All-or-nothing matcher requires threshold == frozen step count."""
+    return float(len(release.sequence_steps))
+
+
 def _build_sequence_hash(material: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_bytes(material)).hexdigest()
 
 
 def build_identity_exfil_sequence_v1() -> SequenceRelease:
-    steps = (
+    steps: tuple[dict[str, object], ...] = (
         {"action": "login", "category": "identity"},
         {"action": "privilege_change", "category": "identity"},
         {"action": "bulk_read", "category": "data_access"},
@@ -65,9 +71,12 @@ def build_identity_exfil_sequence_v1() -> SequenceRelease:
 
 
 def build_geo_sensitive_sequence_v1() -> SequenceRelease:
-    steps = (
-        {"action": "anomalous_login", "category": "identity"},
-        {"action": "sensitive_access", "category": "data_access"},
+    steps = cast(
+        tuple[dict[str, object], ...],
+        (
+            {"action": "anomalous_login", "category": "identity"},
+            {"action": "sensitive_access", "category": "data_access"},
+        ),
     )
     description = "new device/geo anomaly → sensitive access"
     material: dict[str, Any] = {

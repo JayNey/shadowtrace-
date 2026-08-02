@@ -210,6 +210,32 @@
       "default": null,
       "title": "Sequence Id"
     },
+    "sequence_hash": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sequence Hash"
+    },
+    "max_step_gap_seconds": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Max Step Gap Seconds"
+    },
     "ordered_observation_ids": {
       "items": {
         "type": "string"

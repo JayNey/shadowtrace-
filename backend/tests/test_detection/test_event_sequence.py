@@ -12,7 +12,7 @@ from app.detection.operators.event_sequence import (
     EventSequenceOperator,
     find_ordered_sequence_match,
 )
-from app.detection.sequences.releases import GEO_SENSITIVE_SEQUENCE_V1, IDENTITY_EXFIL_SEQUENCE_V1
+from app.detection.sequences.releases import GEO_SENSITIVE_SEQUENCE_V1, IDENTITY_EXFIL_SEQUENCE_V1, sequence_match_threshold
 from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
@@ -67,7 +67,7 @@ def _identity_exfil_rule(**criteria_overrides: object) -> DetectionRuleDefinitio
         detection_scope_id="dscope-test",
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
         severity="high",
         match_criteria=criteria,
     )
@@ -267,6 +267,7 @@ def test_event_sequence_operator_emits_typed_provenance() -> None:
     match = matches[0]
     assert match.observation_ids == ["o1", "o2", "o3", "o4"]
     assert match.sequence_provenance["sequence_id"] == IDENTITY_EXFIL_SEQUENCE_V1.sequence_id
+    assert match.sequence_provenance["sequence_hash"] == IDENTITY_EXFIL_SEQUENCE_V1.sequence_hash
     assert match.sequence_provenance["ordered_observation_ids"] == ["o1", "o2", "o3", "o4"]
     assert len(match.sequence_provenance["sequence_step_matches"]) == 4
     assert "login→privilege_change→bulk_read→egress" in match.sequence_provenance["match_explanation"]
@@ -284,48 +285,6 @@ def test_event_sequence_operator_hash_mismatch_fail_closed() -> None:
                 snapshots=[],
             ),
         )
-
-
-def test_event_sequence_operator_respects_threshold() -> None:
-    base = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
-    observations = [
-        _observation(
-            obs_id="o1",
-            observed_at=base - timedelta(minutes=50),
-            action="login",
-            category="identity",
-        ),
-        _observation(
-            obs_id="o2",
-            observed_at=base - timedelta(minutes=40),
-            action="privilege_change",
-            category="identity",
-        ),
-        _observation(
-            obs_id="o3",
-            observed_at=base - timedelta(minutes=30),
-            action="bulk_read",
-            category="data_access",
-        ),
-        _observation(
-            obs_id="o4",
-            observed_at=base - timedelta(minutes=20),
-            action="egress",
-            category="data_exfiltration",
-        ),
-    ]
-    rule = _identity_exfil_rule()
-    rule = rule.model_copy(update={"threshold": 5.0})
-    matches = EventSequenceOperator().evaluate(
-        rule,
-        OperatorExecutionContext(
-            source_tenant_id="tenant-a",
-            cutoff_at=base,
-            observations=observations,
-            snapshots=[],
-        ),
-    )
-    assert matches == []
 
 
 def test_event_sequence_operator_step_matches_include_source_revision() -> None:
@@ -353,7 +312,7 @@ def test_event_sequence_operator_step_matches_include_source_revision() -> None:
         detection_scope_id="dscope-test",
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(GEO_SENSITIVE_SEQUENCE_V1),
         severity="high",
         match_criteria=criteria,
     )

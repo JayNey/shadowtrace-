@@ -130,6 +130,8 @@ class CandidateDetectionProvenance(BaseModel):
     snapshot_revision: int | None = Field(default=None, ge=1)
     contributing_features: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
     sequence_id: str | None = Field(default=None, max_length=128)
+    sequence_hash: str | None = Field(default=None, max_length=64)
+    max_step_gap_seconds: int | None = Field(default=None, ge=1)
     ordered_observation_ids: list[str] = Field(default_factory=list, max_length=256)
     sequence_step_matches: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
     match_explanation: str | None = Field(default=None, max_length=512)

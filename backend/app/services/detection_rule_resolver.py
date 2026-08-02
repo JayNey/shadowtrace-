@@ -11,7 +11,11 @@ import orjson
 from app.core.errors import ValidationError
 from app.detection.operators import default_operator_registry
 from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE, MOCK_ACCOUNT_MAD_RELEASE_ID
-from app.detection.sequences.releases import GEO_SENSITIVE_SEQUENCE_V1, IDENTITY_EXFIL_SEQUENCE_V1
+from app.detection.sequences.releases import (
+    GEO_SENSITIVE_SEQUENCE_V1,
+    IDENTITY_EXFIL_SEQUENCE_V1,
+    sequence_match_threshold,
+)
 from app.models.detection_rule import (
     CANDIDATE_DETECTION_SCHEMA_VERSION,
     DETECTION_RULE_SCHEMA_VERSION,
@@ -274,6 +278,17 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
                     "expected_max_step_gap_seconds": release.max_step_gap_seconds,
                 },
             )
+        expected_threshold = sequence_match_threshold(release)
+        if rule.threshold != expected_threshold:
+            raise ValidationError(
+                "event_sequence threshold must equal frozen sequence step count",
+                details={
+                    "rule_id": rule.rule_id,
+                    "sequence_id": sequence_id,
+                    "expected_threshold": expected_threshold,
+                    "threshold": rule.threshold,
+                },
+            )
 
     return rule
 
@@ -358,12 +373,34 @@ def build_candidate_idempotency_key(
     rule_version: int,
     cutoff_at: datetime,
     group_key: dict[str, str],
+    ordered_observation_refs: list[dict[str, int | str]] | None = None,
 ) -> str:
     cutoff_iso = ensure_utc(cutoff_at).isoformat()
     group_material = "|".join(f"{key}={group_key[key]}" for key in sorted(group_key))
-    return (
+    base = (
         f"{source_tenant_id}:{package_id}:{rule_id}:v{rule_version}:{cutoff_iso}:{group_material}"
     )
+    if ordered_observation_refs:
+        ref_material = "|".join(
+            f"{item['observation_id']}@{item['source_revision']}"
+            for item in ordered_observation_refs
+        )
+        return f"{base}:{ref_material}"
+    return base
+
+
+def _sequence_observation_refs(
+    provenance: CandidateDetectionProvenance,
+) -> list[dict[str, int | str]] | None:
+    if not provenance.sequence_step_matches:
+        return None
+    refs: list[dict[str, int | str]] = []
+    for record in provenance.sequence_step_matches:
+        obs_id = record.get("observation_id")
+        revision = record.get("source_revision")
+        if isinstance(obs_id, str) and isinstance(revision, int):
+            refs.append({"observation_id": obs_id, "source_revision": revision})
+    return refs or None
 
 
 def _candidate_identity_body(
@@ -374,7 +411,7 @@ def _candidate_identity_body(
     rule: DetectionRuleDefinition,
     cutoff_at: datetime,
     group_key: dict[str, str],
-    ordered_observation_ids: list[str] | None = None,
+    ordered_observation_refs: list[dict[str, int | str]] | None = None,
 ) -> dict[str, Any]:
     """Stable identity material — excludes mutable evidence except sequence refs."""
     body: dict[str, Any] = {
@@ -392,8 +429,8 @@ def _candidate_identity_body(
         "shadow_only": True,
         "schema_version": CANDIDATE_DETECTION_SCHEMA_VERSION,
     }
-    if ordered_observation_ids is not None:
-        body["ordered_observation_ids"] = ordered_observation_ids
+    if ordered_observation_refs is not None:
+        body["ordered_observation_refs"] = ordered_observation_refs
     return body
 
 
@@ -408,9 +445,9 @@ def build_candidate_detection(
     matched_value: float,
     provenance: CandidateDetectionProvenance,
 ) -> CandidateDetection:
-    ordered_observation_ids: list[str] | None = None
-    if rule.operator is RuleOperatorKind.EVENT_SEQUENCE and provenance.ordered_observation_ids:
-        ordered_observation_ids = list(provenance.ordered_observation_ids)
+    ordered_observation_refs: list[dict[str, int | str]] | None = None
+    if rule.operator is RuleOperatorKind.EVENT_SEQUENCE:
+        ordered_observation_refs = _sequence_observation_refs(provenance)
     identity_body = _candidate_identity_body(
         source_tenant_id=source_tenant_id,
         detection_scope_id=detection_scope_id,
@@ -418,7 +455,7 @@ def build_candidate_detection(
         rule=rule,
         cutoff_at=cutoff_at,
         group_key=group_key,
-        ordered_observation_ids=ordered_observation_ids,
+        ordered_observation_refs=ordered_observation_refs,
     )
     identity_hash = hashlib.sha256(_canonical_bytes(identity_body)).hexdigest()
     body = {
@@ -451,6 +488,7 @@ def build_candidate_detection(
             rule_version=rule.rule_version,
             cutoff_at=cutoff_at,
             group_key=group_key,
+            ordered_observation_refs=ordered_observation_refs,
         ),
     )
 

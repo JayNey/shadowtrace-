@@ -14,7 +14,10 @@ from app.detection.operators.event_match import EventMatchOperator
 from app.detection.operators.statistical_anomaly import StatisticalAnomalyOperator
 from app.detection.operators.value_count import ValueCountOperator
 from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE, MOCK_ACCOUNT_MAD_RELEASE_ID
-from app.detection.sequences.releases import IDENTITY_EXFIL_SEQUENCE_V1
+from app.detection.sequences.releases import (
+    IDENTITY_EXFIL_SEQUENCE_V1,
+    sequence_match_threshold,
+)
 from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
@@ -173,7 +176,7 @@ def _event_sequence_rule(
         detection_scope_id="dscope-test",
         window_kind=FeatureWindowKind.ONE_HOUR.value,
         group_key_fields=["entity_type", "entity_id"],
-        threshold=1.0,
+        threshold=sequence_match_threshold(IDENTITY_EXFIL_SEQUENCE_V1),
         severity="high",
         missing_data_policy=MissingDataPolicy.SKIP,
         match_criteria=match_criteria or IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
@@ -243,6 +246,123 @@ def test_compile_event_sequence_rejects_unsupported_step_key() -> None:
     rule = _event_sequence_rule(match_criteria=criteria)
     with pytest.raises(ValidationError, match="unsupported sequence step key"):
         compile_rule_definition(rule)
+
+
+def test_compile_event_sequence_rejects_mismatched_threshold() -> None:
+    rule = _event_sequence_rule().model_copy(update={"threshold": 5.0})
+    with pytest.raises(ValidationError, match="threshold must equal frozen sequence step count"):
+        compile_rule_definition(rule)
+
+
+def test_event_sequence_candidate_idempotency_includes_observation_refs() -> None:
+    base = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    package = compile_rule_package(
+        source_tenant_id="tenant-a",
+        package_version=1,
+        runtime_state=DetectionRuleRuntimeState.SHADOW_ACTIVE,
+        rules=[_event_sequence_rule()],
+        provenance=DetectionRulePackageProvenance(author="tester"),
+    )
+    group_key = {"entity_type": "user", "entity_id": "account-1"}
+    provenance_a = CandidateDetectionProvenance(
+        observation_ids=["o1", "o2", "o3", "o4"],
+        ordered_observation_ids=["o1", "o2", "o3", "o4"],
+        sequence_id=IDENTITY_EXFIL_SEQUENCE_V1.sequence_id,
+        sequence_hash=IDENTITY_EXFIL_SEQUENCE_V1.sequence_hash,
+        sequence_step_matches=[
+            {"observation_id": "o1", "source_revision": 1, "step_index": 0},
+            {"observation_id": "o2", "source_revision": 1, "step_index": 1},
+            {"observation_id": "o3", "source_revision": 1, "step_index": 2},
+            {"observation_id": "o4", "source_revision": 1, "step_index": 3},
+        ],
+    )
+    provenance_b = provenance_a.model_copy(
+        update={
+            "observation_ids": ["o1", "o2", "o3", "o5"],
+            "ordered_observation_ids": ["o1", "o2", "o3", "o5"],
+            "sequence_step_matches": [
+                {"observation_id": "o1", "source_revision": 1, "step_index": 0},
+                {"observation_id": "o2", "source_revision": 1, "step_index": 1},
+                {"observation_id": "o3", "source_revision": 1, "step_index": 2},
+                {"observation_id": "o5", "source_revision": 1, "step_index": 3},
+            ],
+        }
+    )
+    first = build_candidate_detection(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        package=package,
+        rule=package.rules[0],
+        cutoff_at=base,
+        group_key=group_key,
+        matched_value=4.0,
+        provenance=provenance_a,
+    )
+    second = build_candidate_detection(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        package=package,
+        rule=package.rules[0],
+        cutoff_at=base,
+        group_key=group_key,
+        matched_value=4.0,
+        provenance=provenance_b,
+    )
+    assert first.idempotency_key != second.idempotency_key
+    assert first.candidate_detection_id != second.candidate_detection_id
+
+
+def test_event_sequence_identity_changes_when_source_revision_changes() -> None:
+    base = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    package = compile_rule_package(
+        source_tenant_id="tenant-a",
+        package_version=1,
+        runtime_state=DetectionRuleRuntimeState.SHADOW_ACTIVE,
+        rules=[_event_sequence_rule()],
+        provenance=DetectionRulePackageProvenance(author="tester"),
+    )
+    group_key = {"entity_type": "user", "entity_id": "account-1"}
+    base_steps = [
+        {"observation_id": "o1", "source_revision": 1, "step_index": 0},
+        {"observation_id": "o2", "source_revision": 1, "step_index": 1},
+        {"observation_id": "o3", "source_revision": 1, "step_index": 2},
+        {"observation_id": "o4", "source_revision": 1, "step_index": 3},
+    ]
+    provenance_v1 = CandidateDetectionProvenance(
+        observation_ids=["o1", "o2", "o3", "o4"],
+        ordered_observation_ids=["o1", "o2", "o3", "o4"],
+        sequence_step_matches=base_steps,
+    )
+    provenance_v2 = provenance_v1.model_copy(
+        update={
+            "sequence_step_matches": [
+                *base_steps[:3],
+                {"observation_id": "o4", "source_revision": 2, "step_index": 3},
+            ]
+        }
+    )
+    first = build_candidate_detection(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        package=package,
+        rule=package.rules[0],
+        cutoff_at=base,
+        group_key=group_key,
+        matched_value=4.0,
+        provenance=provenance_v1,
+    )
+    second = build_candidate_detection(
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        package=package,
+        rule=package.rules[0],
+        cutoff_at=base,
+        group_key=group_key,
+        matched_value=4.0,
+        provenance=provenance_v2,
+    )
+    assert first.candidate_detection_id != second.candidate_detection_id
+    assert first.idempotency_key != second.idempotency_key
 
 
 def test_compile_event_sequence_rejects_mismatched_max_step_gap() -> None:
