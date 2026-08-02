@@ -318,6 +318,24 @@ class GuardrailViolationError(ShadowTraceError):
     default_retryable = False
 
 
+class ToolCallGrantDeniedError(ShadowTraceError):
+    """Dynamic tool call rejected by grant mediation (ISSUE-134)."""
+
+    status_code = 403
+    default_error_code = "tool_call_grant_denied"
+    default_category = ErrorCategory.GUARDRAIL
+    default_retryable = False
+
+
+class ToolCallGrantUnavailableError(ShadowTraceError):
+    """Grant service unavailable — dynamic calls fail closed (ISSUE-134)."""
+
+    status_code = 503
+    default_error_code = "tool_call_grant_unavailable"
+    default_category = ErrorCategory.TRANSIENT
+    default_retryable = True
+
+
 class DependencyUnavailableError(ShadowTraceError):
     """Downstream dependency temporarily unavailable."""
 

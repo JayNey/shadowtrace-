@@ -53,6 +53,7 @@ _graph_sync_service: Any = None  # GraphSyncService (ISSUE-082)
 _neo4j_client: Any = None  # Neo4jClient (ISSUE-082)
 _memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
 _decision_record_service: Any = None  # DecisionRecordService (ISSUE-131)
+_tool_call_grant_service: Any = None  # ToolCallGrantService (ISSUE-134)
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -95,6 +96,19 @@ def _get_decision_record_service() -> Any:
             degraded_flag_service=_get_degraded_flags(),
         )
     return _decision_record_service
+
+
+def _get_tool_call_grant_service() -> Any:
+    global _tool_call_grant_service
+    if _tool_call_grant_service is None:
+        from app.services.tool_call_budget_reservation import ToolCallBudgetReservationService
+        from app.services.tool_call_grant_service import ToolCallGrantService
+
+        _tool_call_grant_service = ToolCallGrantService(
+            _get_session_factory(),
+            budget_reservation=ToolCallBudgetReservationService(_get_redis()),
+        )
+    return _tool_call_grant_service
 
 
 def _get_audit_log() -> Any:
@@ -826,7 +840,7 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
-    global _memory_governance, _decision_record_service
+    global _memory_governance, _decision_record_service, _tool_call_grant_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
     from app.rag.resources import reset_loaded_retrieval_resources
@@ -863,3 +877,4 @@ def reset_deps() -> None:
     _neo4j_client = None
     _memory_governance = None
     _decision_record_service = None
+    _tool_call_grant_service = None

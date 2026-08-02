@@ -108,6 +108,25 @@ class Settings(BaseSettings):
         description="When true, attack_kb retrieval requires an active knowledge release",
     )
 
+    tool_call_compatibility_path_enabled: bool = Field(
+        default=True,
+        alias="TOOL_CALL_COMPATIBILITY_PATH_ENABLED",
+        description="Enable named compatibility path for fixed Evidence queries",
+    )
+    tool_call_grant_required: bool = Field(
+        default=False,
+        alias="TOOL_CALL_GRANT_REQUIRED",
+        description="When true, ReAct dynamic tool calls require BoundToolExecutor",
+    )
+    tool_call_grant_policy_version: str = Field(
+        default="tool-grant-v1",
+        alias="TOOL_CALL_GRANT_POLICY_VERSION",
+    )
+    tool_call_compatibility_sunset: str = Field(
+        default="2026-12-31",
+        alias="TOOL_CALL_COMPATIBILITY_SUNSET",
+    )
+
     budget_enabled: bool = Field(default=True, alias="BUDGET_ENABLED")
     global_token_budget: int = Field(default=1_000_000, alias="GLOBAL_TOKEN_BUDGET")
     event_token_budget: int = Field(default=100_000, alias="EVENT_TOKEN_BUDGET")

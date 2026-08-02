@@ -1114,6 +1114,70 @@ class KnowledgeStixObjectORM(Base):
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
 
 
+class ToolCallGrantORM(Base):
+    """Authoritative ToolCallGrant ledger (ISSUE-134 / #640)."""
+
+    __tablename__ = "tool_call_grant"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_tool_call_grant_idempotency_key"),
+        Index("ix_tool_call_grant_event_id", "event_id"),
+        Index("ix_tool_call_grant_namespace_key", "namespace_key"),
+        Index("ix_tool_call_grant_mode_namespace", "mode", "namespace_key"),
+    )
+
+    grant_id: Mapped[str] = mapped_column(String, primary_key=True)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    namespace_key: Mapped[str] = mapped_column(String, nullable=False)
+    shadow_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    event_id: Mapped[str] = mapped_column(String, nullable=False)
+    plan_step_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False)
+    scope: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    execution_principal: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    max_calls: Mapped[int] = mapped_column(Integer, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    valid_from: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    grant_token_hash: Mapped[str] = mapped_column(String, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class ToolCallAttemptORM(Base):
+    """Grant-bound attempt / audit ledger with shadow namespace isolation."""
+
+    __tablename__ = "tool_call_attempt"
+    __table_args__ = (
+        UniqueConstraint("grant_id", "attempt_seq", name="uq_tool_call_attempt_grant_seq"),
+        Index("ix_tool_call_attempt_grant_id", "grant_id"),
+        Index("ix_tool_call_attempt_namespace_key", "namespace_key"),
+        Index("ix_tool_call_attempt_event_id", "event_id"),
+    )
+
+    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
+    grant_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("tool_call_grant.grant_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    namespace_key: Mapped[str] = mapped_column(String, nullable=False)
+    shadow_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    event_id: Mapped[str] = mapped_column(String, nullable=False)
+    tool_name: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    denial_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    params_hash: Mapped[str] = mapped_column(String, nullable=False)
+    result_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    projection_hash: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
 from app.db.orm.approval import ApprovalRecordORM  # noqa: E402,F401
 from app.db.orm.memory_review import MemoryReviewORM  # noqa: E402,F401
 from app.db.orm.profile import EntityProfileORM  # noqa: E402,F401

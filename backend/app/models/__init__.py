@@ -136,6 +136,13 @@ from app.models.embedding import (
     VectorRecordIdentity,
 )
 from app.models.knowledge_release import KnowledgeQueryPlan, KnowledgeRelease
+from app.models.tool_call_grant import (
+    BoundExecutionPrincipal,
+    SafeToolProjection,
+    ToolCallAttemptRecord,
+    ToolCallGrant,
+    ToolCallGrantScope,
+)
 from app.models.llm_provider import (
     LLMCallLogAggregate,
     LLMProbeStatus,
@@ -364,6 +371,12 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "VectorQueryContext": VectorQueryContext,
     "EmbeddingProviderHealth": EmbeddingProviderHealth,
     "VectorImportUpsert": VectorImportUpsert,
+    # tool call grant (ISSUE-134)
+    "ToolCallGrant": ToolCallGrant,
+    "ToolCallGrantScope": ToolCallGrantScope,
+    "BoundExecutionPrincipal": BoundExecutionPrincipal,
+    "ToolCallAttemptRecord": ToolCallAttemptRecord,
+    "SafeToolProjection": SafeToolProjection,
     # knowledge release registry (ISSUE-128)
     "KnowledgeRelease": KnowledgeRelease,
     "KnowledgeQueryPlan": KnowledgeQueryPlan,

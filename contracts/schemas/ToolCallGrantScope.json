@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "description": "Minimal typed scope bound to a grant.",
+  "properties": {
+    "allowed_tools": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Tools",
+      "type": "array"
+    },
+    "allowed_domains": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Domains",
+      "type": "array"
+    },
+    "allowed_entities": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Entities",
+      "type": "array"
+    },
+    "connector_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Connector Ids",
+      "type": "array"
+    }
+  },
+  "title": "ToolCallGrantScope",
+  "type": "object"
+}

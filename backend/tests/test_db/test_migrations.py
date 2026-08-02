@@ -68,6 +68,8 @@ CORE_TABLES = {
     "source_connector",
     "source_event_link",
     "source_object",
+    "tool_call_attempt",
+    "tool_call_grant",
     "tool_call_log",
 }
 

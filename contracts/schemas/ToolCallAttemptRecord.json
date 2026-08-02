@@ -1,0 +1,132 @@
+{
+  "$defs": {
+    "ToolCallAttemptStatus": {
+      "description": "Lifecycle of one grant-bound tool attempt.",
+      "enum": [
+        "reserved",
+        "denied",
+        "success",
+        "failed",
+        "timeout"
+      ],
+      "title": "ToolCallAttemptStatus",
+      "type": "string"
+    },
+    "ToolCallMode": {
+      "description": "Execution namespace for tool-call grants.",
+      "enum": [
+        "production",
+        "shadow",
+        "compatibility"
+      ],
+      "title": "ToolCallMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One auditable attempt row bound to a grant.",
+  "properties": {
+    "attempt_id": {
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "grant_id": {
+      "title": "Grant Id",
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/ToolCallMode"
+    },
+    "namespace_key": {
+      "title": "Namespace Key",
+      "type": "string"
+    },
+    "shadow_run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Shadow Run Id"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "tool_name": {
+      "title": "Tool Name",
+      "type": "string"
+    },
+    "attempt_seq": {
+      "minimum": 1,
+      "title": "Attempt Seq",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/ToolCallAttemptStatus"
+    },
+    "denial_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Denial Reason"
+    },
+    "params_hash": {
+      "title": "Params Hash",
+      "type": "string"
+    },
+    "result_status": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Result Status"
+    },
+    "projection_hash": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Projection Hash"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "attempt_id",
+    "grant_id",
+    "mode",
+    "namespace_key",
+    "event_id",
+    "tool_name",
+    "attempt_seq",
+    "status",
+    "params_hash",
+    "created_at"
+  ],
+  "title": "ToolCallAttemptRecord",
+  "type": "object"
+}

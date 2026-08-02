@@ -44,7 +44,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
-from app.core.errors import LLMError
+from app.core.config import get_settings
+from app.core.errors import LLMError, ToolCallGrantDeniedError, ToolCallGrantUnavailableError
 from app.core.llm.base import BaseLLMClient, LLMMessage, LLMProviderError
 from app.models.enums import ToolCategory
 from app.models.react import (
@@ -61,6 +62,7 @@ from app.models.react import (
 from app.models.tool_meta import ToolResultStatus
 from app.models.workflow import CONFIDENCE_THRESHOLD
 from app.orchestration.convergence_guard import ConvergenceGuard
+from app.tools.bound_tool_executor import BoundToolExecutor
 from app.tools.executor import ToolExecutor
 from app.tools.registry import ToolNotFoundError
 
@@ -175,7 +177,7 @@ class ReadOnlyReActExecutor:
 
     def __init__(
         self,
-        tool_executor: ToolExecutor,
+        tool_executor: ToolExecutor | BoundToolExecutor,
         *,
         event_id: str,
         allowed_agents: Mapping[str, ReadOnlyAgentCallable] | None = None,
@@ -184,6 +186,8 @@ class ReadOnlyReActExecutor:
         if not event_id.strip():
             raise ValueError("event_id must not be empty")
         self._tool_executor = tool_executor
+        self._bound_executor = tool_executor if isinstance(tool_executor, BoundToolExecutor) else None
+        self._plain_executor = tool_executor if self._bound_executor is None else tool_executor.inner
         self._event_id = event_id
         self._allowed_agents: dict[str, ReadOnlyAgentCallable] = dict(allowed_agents or {})
         self._agent_name = agent_name
@@ -206,8 +210,11 @@ class ReadOnlyReActExecutor:
         """Catalog of legal targets for the think prompt (query tools + agents)."""
         query_tools = sorted(
             meta.tool_name
-            for meta in self._tool_executor.registry.list_tools(category=ToolCategory.QUERY)
+            for meta in self._plain_executor.registry.list_tools(category=ToolCategory.QUERY)
         )
+        if self._bound_executor is not None:
+            allowed = set(self._bound_executor.grant.scope.allowed_tools)
+            query_tools = sorted(set(query_tools) & allowed)
         return {
             "query_tools": query_tools,
             "read_only_agents": sorted(self._allowed_agents),
@@ -215,8 +222,17 @@ class ReadOnlyReActExecutor:
 
     async def _execute_tool(self, action: ReActAction) -> dict[str, Any]:
         name = action.target_name
+        settings = get_settings()
+        if settings.tool_call_grant_required and self._bound_executor is None:
+            raise ReActActionDenied(
+                "dynamic tool calls require BoundToolExecutor grant",
+                action_type=action.action_type.value,
+                target_name=name,
+            )
+        if self._bound_executor is not None:
+            return await self._execute_bound_tool(action)
         try:
-            registered = self._tool_executor.registry.get_tool(name)
+            registered = self._plain_executor.registry.get_tool(name)
         except ToolNotFoundError as exc:
             raise ReActActionDenied(
                 f"unknown tool target_name={name!r}",
@@ -231,7 +247,7 @@ class ReadOnlyReActExecutor:
                 action_type=action.action_type.value,
                 target_name=name,
             )
-        result = await self._tool_executor.call(
+        result = await self._plain_executor.call(
             name,
             dict(action.params),
             self._event_id,
@@ -243,6 +259,40 @@ class ReadOnlyReActExecutor:
             "provider_name": result.provider_name,
             "data": result.data,
             "error_detail": result.error_detail,
+        }
+
+    async def _execute_bound_tool(self, action: ReActAction) -> dict[str, Any]:
+        name = action.target_name
+        assert self._bound_executor is not None
+        try:
+            bound = await self._bound_executor.call(
+                name,
+                dict(action.params),
+                self._event_id,
+                agent_name=action.params.get("_forged_agent_name", self._agent_name),
+            )
+        except ToolCallGrantDeniedError as exc:
+            raise ReActActionDenied(
+                str(exc),
+                action_type=action.action_type.value,
+                target_name=name,
+            ) from exc
+        except ToolCallGrantUnavailableError as exc:
+            raise ReActActionDenied(
+                str(exc),
+                action_type=action.action_type.value,
+                target_name=name,
+            ) from exc
+        projection = bound.projection
+        return {
+            "status": bound.result.status.value,
+            "tool_name": name,
+            "provider_name": bound.result.provider_name,
+            "data": projection.data,
+            "error_detail": bound.result.error_detail,
+            "projection_hash": projection.projection_hash,
+            "trust_level": projection.trust_level,
+            "taint_flags": projection.taint_flags,
         }
 
     async def _execute_agent(self, action: ReActAction) -> dict[str, Any]:

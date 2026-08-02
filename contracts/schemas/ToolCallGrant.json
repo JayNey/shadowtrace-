@@ -1,0 +1,211 @@
+{
+  "$defs": {
+    "BoundExecutionPrincipal": {
+      "additionalProperties": false,
+      "description": "Server-issued trusted execution identity; never derived from LLM params.",
+      "properties": {
+        "principal_id": {
+          "maxLength": 128,
+          "minLength": 8,
+          "title": "Principal Id",
+          "type": "string"
+        },
+        "agent_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Agent Name",
+          "type": "string"
+        },
+        "actor_type": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Actor Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "principal_id",
+        "agent_name",
+        "actor_type"
+      ],
+      "title": "BoundExecutionPrincipal",
+      "type": "object"
+    },
+    "ToolCallGrantScope": {
+      "additionalProperties": false,
+      "description": "Minimal typed scope bound to a grant.",
+      "properties": {
+        "allowed_tools": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Tools",
+          "type": "array"
+        },
+        "allowed_domains": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Domains",
+          "type": "array"
+        },
+        "allowed_entities": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Entities",
+          "type": "array"
+        },
+        "connector_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Connector Ids",
+          "type": "array"
+        }
+      },
+      "title": "ToolCallGrantScope",
+      "type": "object"
+    },
+    "ToolCallMode": {
+      "description": "Execution namespace for tool-call grants.",
+      "enum": [
+        "production",
+        "shadow",
+        "compatibility"
+      ],
+      "title": "ToolCallMode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Authoritative server-side grant contract (opaque token validated separately).",
+  "properties": {
+    "grant_id": {
+      "title": "Grant Id",
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/ToolCallMode"
+    },
+    "namespace_key": {
+      "title": "Namespace Key",
+      "type": "string"
+    },
+    "shadow_run_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Shadow Run Id"
+    },
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "plan_step_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Plan Step Id"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Id"
+    },
+    "tenant_id": {
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "scope": {
+      "$ref": "#/$defs/ToolCallGrantScope"
+    },
+    "execution_principal": {
+      "$ref": "#/$defs/BoundExecutionPrincipal"
+    },
+    "max_calls": {
+      "maximum": 10000,
+      "minimum": 1,
+      "title": "Max Calls",
+      "type": "integer"
+    },
+    "attempt_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Attempt Count",
+      "type": "integer"
+    },
+    "valid_from": {
+      "format": "date-time",
+      "title": "Valid From",
+      "type": "string"
+    },
+    "expires_at": {
+      "format": "date-time",
+      "title": "Expires At",
+      "type": "string"
+    },
+    "policy_version": {
+      "title": "Policy Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "revoked_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Revoked At"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "grant_id",
+    "mode",
+    "namespace_key",
+    "event_id",
+    "tenant_id",
+    "scope",
+    "execution_principal",
+    "max_calls",
+    "valid_from",
+    "expires_at",
+    "policy_version",
+    "created_at"
+  ],
+  "title": "ToolCallGrant",
+  "type": "object"
+}

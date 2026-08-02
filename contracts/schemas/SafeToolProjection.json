@@ -1,0 +1,47 @@
+{
+  "additionalProperties": false,
+  "description": "Typed, sanitized tool output safe for LLM consumption.",
+  "properties": {
+    "tool_name": {
+      "title": "Tool Name",
+      "type": "string"
+    },
+    "status": {
+      "title": "Status",
+      "type": "string"
+    },
+    "data": {
+      "additionalProperties": true,
+      "title": "Data",
+      "type": "object"
+    },
+    "provenance": {
+      "additionalProperties": true,
+      "title": "Provenance",
+      "type": "object"
+    },
+    "trust_level": {
+      "default": "untrusted",
+      "title": "Trust Level",
+      "type": "string"
+    },
+    "taint_flags": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Taint Flags",
+      "type": "array"
+    },
+    "projection_hash": {
+      "title": "Projection Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "tool_name",
+    "status",
+    "projection_hash"
+  ],
+  "title": "SafeToolProjection",
+  "type": "object"
+}
