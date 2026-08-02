@@ -107,26 +107,34 @@ def validate_scope_params(
 
     if scope.connector_ids:
         connector = params.get("connector_id")
-        if isinstance(connector, str) and connector.strip():
-            if connector.strip() not in scope.connector_ids:
-                return "connector_id not in grant scope"
         source_connector = params.get("source_connector_id")
-        if isinstance(source_connector, str) and source_connector.strip():
-            if source_connector.strip() not in scope.connector_ids:
-                return "source_connector_id not in grant scope"
+        resolved: str | None = None
+        if isinstance(connector, str) and connector.strip():
+            resolved = connector.strip()
+        elif isinstance(source_connector, str) and source_connector.strip():
+            resolved = source_connector.strip()
+        if resolved is None:
+            return "connector scope requires explicit connector_id or source_connector_id"
+        if resolved not in scope.connector_ids:
+            return "connector_id not in grant scope"
 
     if scope.allowed_domains:
         domain = params.get("domain")
-        if isinstance(domain, str) and domain.strip():
-            if domain.strip() not in scope.allowed_domains:
-                return "domain not in grant scope"
+        if not isinstance(domain, str) or not domain.strip():
+            return "domain scope requires explicit domain parameter"
+        if domain.strip() not in scope.allowed_domains:
+            return "domain not in grant scope"
 
     if scope.allowed_entities:
+        matched = False
         for key in ("entity_id", "account", "host", "ip", "process_name"):
             value = params.get(key)
             if isinstance(value, str) and value.strip():
                 if value.strip() not in scope.allowed_entities:
                     return f"{key} not in grant scope"
+                matched = True
+        if not matched:
+            return "entity scope requires explicit scoped entity parameter"
     return None
 
 

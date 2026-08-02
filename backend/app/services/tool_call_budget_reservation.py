@@ -95,6 +95,44 @@ class ToolCallBudgetReservationService:
             raise ValueError("grant max_calls exhausted")
         return seq_int
 
+    async def release(
+        self,
+        *,
+        mode: ToolCallMode,
+        namespace_key: str,
+        grant_id: str,
+        count: int = 1,
+    ) -> None:
+        """Release reserved attempt slots (e.g. when PG authoritative reserve fails)."""
+
+        if count < 1:
+            return
+        key = budget_reservation_key(mode, namespace_key=namespace_key, grant_id=grant_id)
+        client = await self._redis_client()
+        if client is None:
+            counter = self._memory.counters.setdefault(key, _GrantBudgetCounter())
+            counter.reserved = max(0, counter.reserved - count)
+            return
+
+        script = """
+        local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+        local dec = tonumber(ARGV[1])
+        if current <= 0 then
+            return 0
+        end
+        local actual = dec
+        if current < dec then
+            actual = current
+        end
+        return redis.call('DECRBY', KEYS[1], actual)
+        """
+        try:
+            await client.eval(script, 1, key, str(count))
+        except Exception:  # noqa: BLE001
+            self._mark_redis_degraded("release", grant_id)
+            counter = self._memory.counters.setdefault(key, _GrantBudgetCounter())
+            counter.reserved = max(0, counter.reserved - count)
+
     async def get_reserved_count(
         self,
         *,

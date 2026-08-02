@@ -113,3 +113,17 @@ def test_event_chat_can_be_disabled_independently() -> None:
     settings = Settings(APP_ENV="development", EVENT_CHAT_ENABLED=False)
 
     assert settings.event_chat_enabled is False
+
+
+def test_production_rejects_react_without_tool_call_grant() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(**_base_kwargs(REACT_ENABLED=True, TOOL_CALL_GRANT_REQUIRED=False))
+    violations = exc_info.value.details["violations"]
+    assert any("tool_call_grant_required" in v for v in violations)
+
+
+def test_production_accepts_react_with_tool_call_grant() -> None:
+    settings = Settings(**_base_kwargs(REACT_ENABLED=True, TOOL_CALL_GRANT_REQUIRED=True))
+    assert settings.react_enabled is True
+    assert settings.tool_call_grant_required is True
+    assert settings.production_fail_closed_violations() == []

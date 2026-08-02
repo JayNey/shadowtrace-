@@ -291,6 +291,8 @@ class Settings(BaseSettings):
             violations.append(f"embedding_mode={self.embedding_mode}")
         if self.retrieval_fixture_fallback:
             violations.append("retrieval_fixture_fallback=true")
+        if self.react_enabled and not self.tool_call_grant_required:
+            violations.append("react_enabled=true requires tool_call_grant_required=true")
         return violations
 
 

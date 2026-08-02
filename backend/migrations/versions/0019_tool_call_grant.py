@@ -11,6 +11,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision: str = "0019_tool_call_grant"
 down_revision: str | None = "0018_knowledge_release"
@@ -29,8 +30,12 @@ def upgrade() -> None:
         sa.Column("plan_step_id", sa.String(), nullable=True),
         sa.Column("task_id", sa.String(), nullable=True),
         sa.Column("tenant_id", sa.String(), nullable=False),
-        sa.Column("scope", sa.JSON(), nullable=False),
-        sa.Column("execution_principal", sa.JSON(), nullable=False),
+        sa.Column("scope", postgresql.JSONB(astext_type=sa.Text()), nullable=False),
+        sa.Column(
+            "execution_principal",
+            postgresql.JSONB(astext_type=sa.Text()),
+            nullable=False,
+        ),
         sa.Column("max_calls", sa.Integer(), nullable=False),
         sa.Column("attempt_count", sa.Integer(), server_default="0", nullable=False),
         sa.Column("valid_from", sa.DateTime(timezone=True), nullable=False),

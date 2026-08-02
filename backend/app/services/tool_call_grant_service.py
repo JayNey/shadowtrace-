@@ -207,36 +207,60 @@ class ToolCallGrantService:
             params_hash=params_fingerprint(params),
         )
 
-        async with self._session_factory() as session:
-            updated = await session.execute(
-                update(orm.ToolCallGrantORM)
-                .where(
-                    orm.ToolCallGrantORM.grant_id == grant.grant_id,
-                    orm.ToolCallGrantORM.revoked_at.is_(None),
-                    orm.ToolCallGrantORM.expires_at > datetime.now(tz=UTC),
-                    orm.ToolCallGrantORM.valid_from <= datetime.now(tz=UTC),
-                    orm.ToolCallGrantORM.attempt_count < orm.ToolCallGrantORM.max_calls,
+        try:
+            async with self._session_factory() as session:
+                updated = await session.execute(
+                    update(orm.ToolCallGrantORM)
+                    .where(
+                        orm.ToolCallGrantORM.grant_id == grant.grant_id,
+                        orm.ToolCallGrantORM.revoked_at.is_(None),
+                        orm.ToolCallGrantORM.expires_at > datetime.now(tz=UTC),
+                        orm.ToolCallGrantORM.valid_from <= datetime.now(tz=UTC),
+                        orm.ToolCallGrantORM.attempt_count < orm.ToolCallGrantORM.max_calls,
+                    )
+                    .values(attempt_count=orm.ToolCallGrantORM.attempt_count + 1)
+                    .returning(orm.ToolCallGrantORM.attempt_count)
                 )
-                .values(attempt_count=orm.ToolCallGrantORM.attempt_count + 1)
-                .returning(orm.ToolCallGrantORM.attempt_count)
+                attempt_seq = updated.scalar_one_or_none()
+                if attempt_seq is None:
+                    raise ToolCallGrantDeniedError(
+                        "grant max_calls exhausted",
+                        details={"grant_id": grant.grant_id, "max_calls": grant.max_calls},
+                    )
+                if int(attempt_seq) != int(reserved_seq):
+                    overshoot = int(reserved_seq) - int(attempt_seq)
+                    if overshoot > 0:
+                        await self._budget_reservation.release(
+                            mode=grant.mode,
+                            namespace_key=grant.namespace_key,
+                            grant_id=grant.grant_id,
+                            count=overshoot,
+                        )
+                    logger.error(
+                        "grant budget seq mismatch grant_id=%s redis=%s pg=%s overshoot=%s",
+                        grant.grant_id,
+                        reserved_seq,
+                        attempt_seq,
+                        overshoot,
+                    )
+                record.attempt_seq = int(attempt_seq)
+                session.add(record)
+                await session.commit()
+                await session.refresh(record)
+        except ToolCallGrantDeniedError:
+            await self._budget_reservation.release(
+                mode=grant.mode,
+                namespace_key=grant.namespace_key,
+                grant_id=grant.grant_id,
             )
-            attempt_seq = updated.scalar_one_or_none()
-            if attempt_seq is None:
-                raise ToolCallGrantDeniedError(
-                    "grant max_calls exhausted",
-                    details={"grant_id": grant.grant_id, "max_calls": grant.max_calls},
-                )
-            if int(attempt_seq) != int(reserved_seq):
-                logger.warning(
-                    "grant budget seq mismatch grant_id=%s redis=%s pg=%s",
-                    grant.grant_id,
-                    reserved_seq,
-                    attempt_seq,
-                )
-            record.attempt_seq = int(attempt_seq)
-            session.add(record)
-            await session.commit()
-            await session.refresh(record)
+            raise
+        except Exception:
+            await self._budget_reservation.release(
+                mode=grant.mode,
+                namespace_key=grant.namespace_key,
+                grant_id=grant.grant_id,
+            )
+            raise
 
         return ToolCallAttemptRecord(
             attempt_id=record.attempt_id,

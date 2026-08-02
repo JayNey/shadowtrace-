@@ -258,6 +258,40 @@ async def test_forged_agent_name_ignored(
 
 
 @pytest.mark.asyncio
+async def test_connector_scope_denied_when_param_missing(
+    grant_service: ToolCallGrantService,
+    executor: ToolExecutor,
+    registry: ToolRegistry,
+) -> None:
+    sfx = _sfx()
+    event_id = f"evt-bound-{sfx}"
+    issued = await grant_service.issue_grant(
+        build_react_grant_request(
+            event_id=event_id,
+            tenant_id="tenant-a",
+            allowed_tools=["query_dns"],
+            connector_ids=["fixture-evidence"],
+            max_calls=3,
+        )
+    )
+    grant = await grant_service.load_grant(issued.grant.grant_id, grant_token=issued.grant_token)
+    bound = BoundToolExecutor(
+        inner=executor,
+        grant=grant,
+        grant_service=grant_service,
+        registry=registry,
+        projection_service=SafeToolProjectionService(registry),
+        grant_token=issued.grant_token,
+    )
+    with pytest.raises(ToolCallGrantDeniedError, match="connector scope"):
+        await bound.call(
+            "query_dns",
+            {"domain": "example.com", "time_range": WINDOW},
+            event_id,
+        )
+
+
+@pytest.mark.asyncio
 async def test_inner_executor_failure_finalizes_attempt(
     grant_service: ToolCallGrantService,
     registry: ToolRegistry,
@@ -277,5 +311,9 @@ async def test_inner_executor_failure_finalizes_attempt(
         event_id=event_id,
     )
     with pytest.raises(RuntimeError, match="provider crashed"):
-        await bound.call("query_dns", {"domain": "example.com"}, event_id)
+        await bound.call(
+            "query_dns",
+            {"domain": "example.com", "time_range": WINDOW},
+            event_id,
+        )
     assert await grant_service.count_attempts(bound.grant.grant_id) == 1
