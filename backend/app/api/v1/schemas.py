@@ -179,6 +179,17 @@ class InvestigateResponse(BaseModel):
     full_loop_available: bool = True
 
 
+class InvestigationHealthConfig(BaseModel):
+    """GET /health → investigation block (ISSUE-109 Phase 0 contract)."""
+
+    orchestration_mode: str
+    full_loop_available: bool
+    task_mode: str
+    auto_investigate_enabled: bool
+    auto_response_enabled: bool
+    approval_policy_version: str
+
+
 class InvestigationIntentDispatchResponse(BaseModel):
     claimed: int
     published: int

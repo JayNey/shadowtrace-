@@ -107,6 +107,43 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_health_investigation_block_matches_contract(client: AsyncClient) -> None:
+    from app.api.v1 import schemas as s
+    from app.services.action_approval_policy import APPROVAL_POLICY_VERSION
+
+    settings = Settings(
+        DATABASE_URL="postgresql+asyncpg://u:p@localhost:5432/db",
+        REDIS_URL="redis://localhost:6379/0",
+        AUTO_RESPONSE_ENABLED=True,
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        DISPOSITION_MODE="mock_xdr",
+        TOOL_MODE="mock",
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock"},
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    investigation = response.json()["investigation"]
+    cfg = s.InvestigationHealthConfig.model_validate(investigation)
+    assert cfg.auto_response_enabled is True
+    assert cfg.auto_investigate_enabled is True
+    assert cfg.approval_policy_version == APPROVAL_POLICY_VERSION
+
+
+@pytest.mark.asyncio
 async def test_health_degraded_returns_503_when_postgres_down(client: AsyncClient) -> None:
     settings = Settings(SIMULATION_ENABLED=True)
     app.dependency_overrides[get_settings] = lambda: settings

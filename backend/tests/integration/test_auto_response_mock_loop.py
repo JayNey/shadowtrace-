@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.models.action import Action
@@ -285,3 +286,106 @@ async def test_malicious_process_generates_security_response_actions() -> None:
         and row.get("tool_name") not in {"generate_report", "update_source_event_disposition"}
     ]
     assert persisted
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_auto_response_intent_to_execute_investigation_full_loop(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ingest → ENQUEUED include_response → execute_investigation forwards full-loop (#614)."""
+    from contextlib import nullcontext
+    from typing import Any
+    from unittest.mock import AsyncMock, MagicMock
+    from uuid import uuid4
+
+    from app.db import models as orm
+    from app.services.auto_investigate_policy import AutoInvestigatePolicyService
+    from app.services.context_service import EventContextStore
+    from app.services.degraded_flag_service import DegradedFlagService
+    from app.services.event_service import EventService
+    from app.services.investigation_intent_service import InvestigationIntentService
+    from app.tasks import investigation_tasks as tasks
+    from tests.integration.test_auto_investigate_mock import _incident_source
+
+    store = EventContextStore(redis_client, session_factory)
+    degraded = DegradedFlagService(store, session_factory)
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        AUTO_RESPONSE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        TOOL_MODE="mock",
+        DISPOSITION_MODE="mock_xdr",
+    )
+    intent_service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        auto_response_policy=AutoResponsePolicyService(settings),
+        degraded_flags=degraded,
+        settings=settings,
+    )
+    events = EventService(
+        session_factory,
+        store,
+        degraded_flags=degraded,
+        investigation_intent=intent_service,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
+        lambda: None,
+    )
+
+    ingest = await events.ingest_source_object(
+        _incident_source(object_id=f"inc-auto-resp-e2e-{uuid4().hex[:8]}")
+    )
+    claimed = await intent_service._claim_batch(limit=20)
+    assert claimed
+    our_intent_id = None
+    async with session_factory() as session:
+        for intent_id in claimed:
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            if row is not None and row.event_id == ingest.event_id:
+                our_intent_id = intent_id
+                break
+    assert our_intent_id is not None
+    target = await intent_service._commit_enqueued_publish_target(our_intent_id)
+    assert target is not None
+    assert target.include_response_execution is True
+
+    seen: dict[str, Any] = {}
+
+    async def _investigate(event_id: str, **kwargs: Any) -> None:
+        seen["event_id"] = event_id
+        seen["include_response_execution"] = kwargs.get("include_response_execution")
+
+    async def _fake_super_agent() -> Any:
+        agent = MagicMock()
+        agent.investigate = _investigate
+        return agent
+
+    monkeypatch.setattr("app.api.v1.deps.get_super_agent", _fake_super_agent)
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
+    monkeypatch.setattr(
+        "app.services.investigation_guidance.record_investigation_workflow_path",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "app.services.evidence_projection.bind_evidence_projection",
+        lambda _projection: nullcontext(),
+    )
+    monkeypatch.setattr(
+        "app.services.evidence_projection.EvidenceProjection",
+        lambda _factory: MagicMock(),
+    )
+
+    result = await tasks.execute_investigation(
+        ingest.event_id,
+        include_response_execution=target.include_response_execution,
+    )
+    assert result == {"status": "completed", "event_id": ingest.event_id}
+    assert seen == {
+        "event_id": ingest.event_id,
+        "include_response_execution": True,
+    }

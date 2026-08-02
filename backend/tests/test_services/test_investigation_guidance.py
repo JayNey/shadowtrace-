@@ -135,13 +135,62 @@ async def test_resolve_include_response_for_resume_prefers_intent_flag(
 
 
 @pytest.mark.asyncio
-async def test_resolve_include_response_for_resume_from_event_status_without_intent_flag(
+async def test_resolve_include_response_for_resume_from_workflow_trace_without_intent_flag(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from datetime import UTC, datetime
+
+    event_id = f"evt-resume-trace-{uuid4().hex[:8]}"
+    await _seed_event(session_factory, event_id=event_id, status=EventStatus.WAITING_APPROVAL)
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.AgentTrace(
+                    trace_id=f"tr-resume-{uuid4().hex[:8]}",
+                    event_id=event_id,
+                    agent_name="super_agent",
+                    input_data={
+                        "workflow_path": "full_loop",
+                        "include_response_execution": True,
+                    },
+                    output_data={"workflow_path": "full_loop"},
+                    status="completed",
+                    started_at=now,
+                    completed_at=now,
+                )
+            )
+
+    assert await resolve_include_response_execution_for_resume(session_factory, event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_include_response_for_resume_from_auto_response_audit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = f"evt-resume-audit-{uuid4().hex[:8]}"
+    await _seed_event(session_factory, event_id=event_id, status=EventStatus.WAITING_APPROVAL)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.EventAuditLog(
+                    event_id=event_id,
+                    operator="AutoResponsePolicyService",
+                    reason="auto_response:policy_match",
+                )
+            )
+
+    assert await resolve_include_response_execution_for_resume(session_factory, event_id) is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_include_response_for_resume_false_for_bare_response_status(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     event_id = f"evt-resume-status-{uuid4().hex[:8]}"
     await _seed_event(session_factory, event_id=event_id, status=EventStatus.WAITING_APPROVAL)
 
-    assert await resolve_include_response_execution_for_resume(session_factory, event_id) is True
+    assert await resolve_include_response_execution_for_resume(session_factory, event_id) is False
 
 
 @pytest.mark.asyncio

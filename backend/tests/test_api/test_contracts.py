@@ -636,6 +636,20 @@ def test_investigate_response_echoes_include_response_execution() -> None:
     assert resp.full_loop_available is True
 
 
+def test_investigation_health_config_contract_fields() -> None:
+    """ISSUE-109: health.investigation exposes versioned approval policy metadata."""
+    cfg = s.InvestigationHealthConfig(
+        orchestration_mode="graph",
+        full_loop_available=True,
+        task_mode="background",
+        auto_investigate_enabled=False,
+        auto_response_enabled=False,
+        approval_policy_version="issue109_v1",
+    )
+    assert cfg.approval_policy_version == "issue109_v1"
+    assert cfg.auto_response_enabled is False
+
+
 def test_ingest_source_record_request_accepts_incident_associations() -> None:
     ref = s.example_source_reference()
     req = s.IngestSourceRecordRequest.model_validate(

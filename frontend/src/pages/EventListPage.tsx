@@ -26,7 +26,14 @@ import {
   App,
 } from "antd";
 import { ReloadOutlined, FilterOutlined } from "@ant-design/icons";
-import type { EventListItem, EventListParams, EventStatus, EventType, Severity } from "../types/event";
+import type {
+  EventListItem,
+  EventListParams,
+  EventStatus,
+  EventType,
+  InvestigationHealthConfig,
+  Severity,
+} from "../types/event";
 import { listEvents, triggerInvestigation, getHealth } from "../services/eventApi";
 import { socketClient } from "../services/socketClient";
 import { ApiError } from "../services/apiClient";
@@ -80,6 +87,9 @@ export default function EventListPage() {
   const [loading, setLoading] = useState(false);
   const [triggeringIds, setTriggeringIds] = useState<Set<string>>(new Set());
   const [fullLoopAvailable, setFullLoopAvailable] = useState(true);
+  const [investigationHealth, setInvestigationHealth] = useState<InvestigationHealthConfig | null>(
+    null,
+  );
   const [investigateModalOpen, setInvestigateModalOpen] = useState(false);
   const [pendingInvestigateEventId, setPendingInvestigateEventId] = useState<string | null>(
     null,
@@ -233,8 +243,11 @@ export default function EventListPage() {
     void (async () => {
       try {
         const res = await getHealth();
-        setFullLoopAvailable(res.data.investigation?.full_loop_available ?? true);
+        const investigation = res.data.investigation;
+        setInvestigationHealth(investigation ?? null);
+        setFullLoopAvailable(investigation?.full_loop_available ?? true);
       } catch {
+        setInvestigationHealth(null);
         setFullLoopAvailable(true);
       }
     })();
@@ -425,6 +438,16 @@ export default function EventListPage() {
             </Radio>
           </Space>
         </Radio.Group>
+        {investigationHealth?.approval_policy_version ? (
+          <Typography.Paragraph
+            type="secondary"
+            style={{ marginTop: 12, marginBottom: 0 }}
+            data-testid="investigation-policy-version"
+          >
+            审批策略版本：{investigationHealth.approval_policy_version}
+            {investigationHealth.auto_response_enabled ? " · 自动响应已启用" : ""}
+          </Typography.Paragraph>
+        ) : null}
       </Modal>
     </div>
   );

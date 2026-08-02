@@ -30,16 +30,7 @@ _ANALYSIS_STATUSES = frozenset(
     }
 )
 
-_RESPONSE_RESUME_STATUSES = frozenset(
-    {
-        EventStatus.PLANNING_RESPONSE,
-        EventStatus.WAITING_APPROVAL,
-        EventStatus.EXECUTING_RESPONSE,
-        EventStatus.VERIFYING,
-        EventStatus.REPLANNING,
-        EventStatus.CONTAINED,
-    }
-)
+_AUTO_RESPONSE_FULL_LOOP_AUDIT = "auto_response:policy_match"
 
 
 @dataclass(frozen=True)
@@ -202,11 +193,38 @@ async def record_investigation_workflow_path(
     )
 
 
+async def _has_full_loop_trace_evidence(session: AsyncSession, event_id: str) -> bool:
+    """True when durable super_agent trace shows an explicit full-loop path."""
+    traces = (
+        await session.scalars(
+            select(orm.AgentTrace)
+            .where(
+                orm.AgentTrace.event_id == event_id,
+                orm.AgentTrace.agent_name == "super_agent",
+            )
+            .order_by(orm.AgentTrace.started_at.desc())
+            .limit(5)
+        )
+    ).all()
+    for trace in traces:
+        output = trace.output_data if isinstance(trace.output_data, dict) else {}
+        if output.get("workflow_path") == "full_loop":
+            return True
+        input_data = trace.input_data if isinstance(trace.input_data, dict) else {}
+        if input_data.get("include_response_execution") is True:
+            return True
+    return False
+
+
 async def resolve_include_response_execution_for_resume(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
 ) -> bool:
-    """Infer full-loop resume semantics for approval/writeback hooks (#613)."""
+    """Infer full-loop resume semantics for approval/writeback hooks (#613).
+
+    Fail-closed: only explicit intent flags, super_agent workflow traces, or
+    auto-response audit markers may re-enter the response execution path.
+    """
     async with session_factory() as session:
         intent_flag = await session.scalar(
             select(orm.InvestigationIntent.include_response_execution)
@@ -219,16 +237,17 @@ async def resolve_include_response_execution_for_resume(
         )
         if intent_flag is True:
             return True
-        status_raw = await session.scalar(
-            select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
+        if await _has_full_loop_trace_evidence(session, event_id):
+            return True
+        audit_match = await session.scalar(
+            select(orm.EventAuditLog.reason)
+            .where(
+                orm.EventAuditLog.event_id == event_id,
+                orm.EventAuditLog.reason == _AUTO_RESPONSE_FULL_LOOP_AUDIT,
+            )
+            .limit(1)
         )
-    if status_raw is None:
-        return False
-    try:
-        status = EventStatus(status_raw)
-    except ValueError:
-        return False
-    return status in _RESPONSE_RESUME_STATUSES
+        return audit_match is not None
 
 
 __all__ = [

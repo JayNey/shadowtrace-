@@ -384,6 +384,31 @@ describe("EventListPage", () => {
     expect(fullLoop).toBeDisabled();
   });
 
+  it("shows approval policy version in investigate modal", async () => {
+    mockGetHealth.mockResolvedValue({
+      data: {
+        investigation: {
+          orchestration_mode: "graph",
+          full_loop_available: true,
+          approval_policy_version: "issue109_v1",
+          auto_response_enabled: true,
+        },
+      },
+    });
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    expect(await screen.findByTestId("investigate-mode-modal")).toBeInTheDocument();
+    expect(screen.getByTestId("investigation-policy-version")).toHaveTextContent(
+      "issue109_v1",
+    );
+    expect(screen.getByTestId("investigation-policy-version")).toHaveTextContent(
+      "自动响应已启用",
+    );
+  });
+
   it("disables trigger button when event already in-progress", async () => {
     const item = makeItem({ status: "triaging" });
     mockListEvents.mockResolvedValue({ data: listResponse([item]) });

@@ -605,6 +605,10 @@ export interface EventDetailResponse {
 export interface InvestigationHealthConfig {
   orchestration_mode: string;
   full_loop_available: boolean;
+  task_mode?: string;
+  auto_investigate_enabled?: boolean;
+  auto_response_enabled?: boolean;
+  approval_policy_version?: string;
 }
 
 export interface InvestigationResult {

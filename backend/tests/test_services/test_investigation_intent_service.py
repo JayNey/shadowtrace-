@@ -13,6 +13,7 @@ from app.core.config import Settings
 from app.db import models as orm
 from app.models.enums import EventStatus, InvestigationIntentStatus, Severity, SourceObjectKind
 from app.models.investigation_intent import (
+    PRIMARY_LINK_ROLE,
     PROVISIONAL_LINK_ROLE,
     IntentDeliveryAdmission,
     InvestigationIntentTransitionError,
@@ -1283,6 +1284,43 @@ def _auto_response_settings(**overrides: object) -> Settings:
     return Settings(**base)
 
 
+async def _seed_primary_source_link(
+    session: AsyncSession,
+    *,
+    event_id: str,
+    connector_id: str = "conn-mock",
+) -> str:
+    source_record_id = f"src-primary-{uuid4().hex[:8]}"
+    if await session.get(orm.SourceConnector, connector_id) is None:
+        session.add(
+            orm.SourceConnector(
+                connector_id=connector_id,
+                source_product="mock_xdr",
+                display_name="Mock XDR",
+            )
+        )
+    session.add(
+        orm.SourceObject(
+            source_record_id=source_record_id,
+            source_product="mock_xdr",
+            source_tenant_id="tenant-demo",
+            connector_id=connector_id,
+            source_kind=SourceObjectKind.INCIDENT.value,
+            source_object_id=f"INC-{uuid4().hex[:8]}",
+            next_outbox_sequence=0,
+        )
+    )
+    await session.flush()
+    session.add(
+        orm.SourceEventLink(
+            source_record_id=source_record_id,
+            event_id=event_id,
+            role=PRIMARY_LINK_ROLE,
+        )
+    )
+    return source_record_id
+
+
 @pytest.mark.asyncio
 async def test_commit_enqueued_sets_include_response_when_policy_matches(
     session_factory: async_sessionmaker[AsyncSession],
@@ -1315,6 +1353,7 @@ async def test_commit_enqueued_sets_include_response_when_policy_matches(
                 )
             )
             await session.flush()
+            await _seed_primary_source_link(session, event_id=event_id)
             session.add(
                 orm.InvestigationIntent(
                     intent_id=intent_id,
@@ -1465,6 +1504,7 @@ async def test_publish_forwards_include_response_execution_flag(
                 )
             )
             await session.flush()
+            await _seed_primary_source_link(session, event_id=event_id)
             session.add(
                 orm.InvestigationIntent(
                     intent_id=intent_id,
@@ -1541,6 +1581,7 @@ async def test_auto_response_broker_failure_sets_degraded_flag(
                 )
             )
             await session.flush()
+            await _seed_primary_source_link(session, event_id=event_id)
             session.add(
                 orm.InvestigationIntent(
                     intent_id=intent_id,
@@ -1678,6 +1719,7 @@ async def test_commit_enqueued_audit_logs_policy_skip_reason(
                 )
             )
             await session.flush()
+            await _seed_primary_source_link(session, event_id=event_id)
             session.add(
                 orm.InvestigationIntent(
                     intent_id=intent_id,
@@ -1746,6 +1788,7 @@ async def test_auto_response_unexpected_publish_failure_sets_degraded_flag(
                 )
             )
             await session.flush()
+            await _seed_primary_source_link(session, event_id=event_id)
             session.add(
                 orm.InvestigationIntent(
                     intent_id=intent_id,
