@@ -148,6 +148,32 @@ async def test_health_llm_required_degraded_returns_503(client: AsyncClient) -> 
 
 
 @pytest.mark.asyncio
+async def test_health_llm_required_ok_returns_200(client: AsyncClient) -> None:
+    settings = Settings(SIMULATION_ENABLED=True, LLM_REQUIRED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock"},
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_payload(status="ok"),
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json()["llm"]["status"] == "ok"
+
+
+@pytest.mark.asyncio
 async def test_health_openai_probe_wiring_end_to_end(client: AsyncClient) -> None:
     """Exercise real check_llm_provider wiring (not mocked) with respx."""
     settings = Settings(

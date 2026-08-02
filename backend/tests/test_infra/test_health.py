@@ -184,6 +184,11 @@ async def test_health_degraded_returns_503_when_postgres_down(client: AsyncClien
     with (
         patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="error"),
         patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
     ):
         response = await client.get("/api/v1/health")
 
@@ -201,6 +206,11 @@ async def test_health_degraded_returns_503_when_redis_down(client: AsyncClient) 
     with (
         patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
         patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="error"),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
     ):
         response = await client.get("/api/v1/health")
 
@@ -235,6 +245,11 @@ async def test_health_degraded_returns_503_when_embedding_degraded(client: Async
                 "error_code": "embedding_provider_unavailable",
                 "latency_ms": 1.0,
             },
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
         ),
     ):
         response = await client.get("/api/v1/health")

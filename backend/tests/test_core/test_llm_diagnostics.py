@@ -317,6 +317,39 @@ async def test_probe_cache_invalidates_on_config_change() -> None:
 
 
 @pytest.mark.asyncio
+async def test_probe_cache_invalidates_on_api_key_change() -> None:
+    from app.models.llm_provider import LLMProbeStatus
+
+    base = dict(
+        LLM_MODE="openai_compatible",
+        LLM_API_BASE_URL="https://llm.example/v1",
+        LLM_PRIMARY_MODEL="primary-model",
+        LLM_PROBE_ENABLED=True,
+        LLM_PROBE_TTL_SECONDS=300,
+    )
+    settings_a = Settings(**base, LLM_API_KEY="key-a")
+    settings_b = Settings(**base, LLM_API_KEY="key-b")
+    ok_status = LLMProbeStatus(status="ok", probe_method="chat", latency_ms=1.0)
+    error_status = LLMProbeStatus(
+        status="error",
+        probe_method="chat",
+        error_class="auth",
+        error_code="llm_auth_error",
+        latency_ms=1.0,
+    )
+    with patch(
+        "app.core.llm.diagnostics._run_openai_probe",
+        new_callable=AsyncMock,
+        side_effect=[ok_status, error_status],
+    ) as run_probe:
+        first = await probe_llm_provider(settings_a, force=True)
+        second = await probe_llm_provider(settings_b, force=False)
+    assert run_probe.await_count == 2
+    assert first.status == "ok"
+    assert second.status == "error"
+
+
+@pytest.mark.asyncio
 async def test_probe_cache_respects_ttl() -> None:
     from app.models.llm_provider import LLMProbeStatus
 
@@ -392,6 +425,23 @@ async def test_build_llm_provider_health_openai_missing_config_is_degraded() -> 
     assert health.mode == "openai_compatible"
     assert health.last_probe_status.status == "error"
     assert health.last_probe_status.error_code == "llm_config_error"
+
+
+@pytest.mark.asyncio
+async def test_build_llm_provider_health_custom_mode_is_degraded() -> None:
+    settings = Settings(LLM_MODE=LLMProviderMode.CUSTOM.value)
+    session_factory = AsyncMock()
+
+    async def _aggregate(*_args: Any, **_kwargs: Any) -> LLMCallLogAggregate:
+        return LLMCallLogAggregate(window_minutes=60, total_calls=0, success_calls=0)
+
+    with patch("app.core.llm.diagnostics._aggregate_llm_call_log", side_effect=_aggregate):
+        health = await build_llm_provider_health(settings, session_factory)
+
+    assert health.status == "degraded"
+    assert health.mode == "custom"
+    assert health.last_probe_status.status == "skipped"
+    assert health.last_probe_status.error_code == "llm_custom_not_probed"
 
 
 @respx.mock

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,13 @@ logger = logging.getLogger(__name__)
 _PROBE_CACHE: dict[str, tuple[float, LLMProbeStatus]] = {}
 
 
+def _api_key_fingerprint(api_key: str) -> str:
+    raw = (api_key or "").strip()
+    if not raw:
+        return "none"
+    return hashlib.sha256(raw.encode()).hexdigest()[:8]
+
+
 def _probe_cache_key(settings: Settings) -> str:
     method = (settings.llm_probe_method or "chat").strip().lower()
     return "|".join(
@@ -40,6 +48,7 @@ def _probe_cache_key(settings: Settings) -> str:
             normalize_llm_base_url(settings.llm_api_base_url),
             (settings.llm_primary_model or "").strip(),
             method,
+            _api_key_fingerprint(settings.llm_api_key),
         ]
     )
 
