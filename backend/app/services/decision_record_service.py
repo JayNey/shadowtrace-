@@ -7,7 +7,7 @@ import logging
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import orjson
 from pydantic import BaseModel
@@ -113,14 +113,15 @@ def _collect_input_refs(input_data: Any) -> tuple[list[dict[str, str]], list[str
     evidence_refs = input_data.get("evidence_refs")
     if isinstance(evidence_refs, list):
         for item in evidence_refs[:50]:
-            ref_id = None
+            evidence_ref_id: str | None = None
             if isinstance(item, str):
-                ref_id = item
+                evidence_ref_id = item
             elif isinstance(item, dict):
-                ref_id = item.get("evidence_id")
-            if not isinstance(ref_id, str) or not ref_id.strip():
+                raw_ref_id = item.get("evidence_id")
+                evidence_ref_id = raw_ref_id if isinstance(raw_ref_id, str) else None
+            if not isinstance(evidence_ref_id, str) or not evidence_ref_id.strip():
                 continue
-            ref_id = ref_id.strip()
+            ref_id = evidence_ref_id.strip()
             if _validate_ref_id(ref_id):
                 refs.append({"ref_type": "evidence_id", "ref_id": ref_id})
             else:
@@ -689,11 +690,14 @@ class DecisionRecordService:
 
     async def get_by_trace_ref(self, trace_id: str) -> orm.DecisionRecord | None:
         async with self._session_factory() as session:
-            return await session.scalar(
-                select(orm.DecisionRecord)
-                .where(orm.DecisionRecord.trace_ref == trace_id)
-                .order_by(orm.DecisionRecord.created_at.desc())
-                .limit(1)
+            return cast(
+                orm.DecisionRecord | None,
+                await session.scalar(
+                    select(orm.DecisionRecord)
+                    .where(orm.DecisionRecord.trace_ref == trace_id)
+                    .order_by(orm.DecisionRecord.created_at.desc())
+                    .limit(1)
+                ),
             )
 
     @staticmethod

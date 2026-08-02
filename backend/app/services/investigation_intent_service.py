@@ -6,7 +6,7 @@ import hashlib
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
-from typing import NamedTuple
+from typing import NamedTuple, cast
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -449,22 +449,29 @@ class InvestigationIntentService:
 
     async def lookup_by_broker_task_id(self, broker_task_id: str) -> orm.InvestigationIntent | None:
         async with self._session_factory() as session:
-            return await session.scalar(
-                select(orm.InvestigationIntent).where(
-                    orm.InvestigationIntent.broker_task_id == broker_task_id
-                )
+            return cast(
+                orm.InvestigationIntent | None,
+                await session.scalar(
+                    select(orm.InvestigationIntent).where(
+                        orm.InvestigationIntent.broker_task_id == broker_task_id
+                    )
+                ),
             )
 
     async def lookup_active_for_event(self, event_id: str) -> orm.InvestigationIntent | None:
         async with self._session_factory() as session:
-            return await session.scalar(
-                select(orm.InvestigationIntent)
-                .where(
-                    orm.InvestigationIntent.event_id == event_id,
-                    orm.InvestigationIntent.intent_kind == INTENT_KIND_AUTO_INVESTIGATE,
-                    orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE108_V1,
-                )
-                .order_by(orm.InvestigationIntent.created_at.desc())
+            return cast(
+                orm.InvestigationIntent | None,
+                await session.scalar(
+                    select(orm.InvestigationIntent)
+                    .where(
+                        orm.InvestigationIntent.event_id == event_id,
+                        orm.InvestigationIntent.intent_kind == INTENT_KIND_AUTO_INVESTIGATE,
+                        orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE108_V1,
+                    )
+                    .order_by(orm.InvestigationIntent.created_at.desc())
+                    .limit(1)
+                ),
             )
 
     async def _claim_batch(self, *, limit: int) -> list[str]:

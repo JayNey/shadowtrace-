@@ -61,15 +61,15 @@ class MockDeterministicReplayer:
             )
 
         if isinstance(truth.slice_expectation, BenignSliceExpectation):
-            expectation = truth.slice_expectation
+            benign_expectation = truth.slice_expectation
             return CaseObservation(
                 case_id=truth.case_id,
                 slice_type=slice_type,
-                observed_case_label=expectation.expected_case_label.value,
-                observed_final_verdict=expectation.expected_final_verdict.value,
-                observed_risk_score=expectation.expected_risk_score,
-                observed_attack_techniques=list(expectation.expected_attack_techniques),
-                observed_incident_group_id=expectation.expected_incident_group_id,
+                observed_case_label=benign_expectation.expected_case_label.value,
+                observed_final_verdict=benign_expectation.expected_final_verdict.value,
+                observed_risk_score=benign_expectation.expected_risk_score,
+                observed_attack_techniques=list(benign_expectation.expected_attack_techniques),
+                observed_incident_group_id=benign_expectation.expected_incident_group_id,
                 observation_available=True,
                 replay_notes=f"mock_deterministic:benign;seed={seed};n={nonce:x}",
             )

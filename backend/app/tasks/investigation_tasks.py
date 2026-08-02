@@ -18,6 +18,7 @@ from app.core.celery_delivery import (
 )
 from app.core.errors import DependencyUnavailableError, InvestigationInProgressError
 from app.core.redis_client import RedisClient
+from app.models.investigation_intent import IntentDeliveryAdmission
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +178,7 @@ def publish_investigation_for_intent(
     )
 
 
-async def _admit_intent_delivery(intent_id: str, broker_task_id: str):
+async def _admit_intent_delivery(intent_id: str, broker_task_id: str) -> IntentDeliveryAdmission:
     from app.db.session import get_session_factory
     from app.services.investigation_intent_service import InvestigationIntentService
 

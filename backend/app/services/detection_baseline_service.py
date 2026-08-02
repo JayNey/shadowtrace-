@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import cast
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +16,7 @@ from app.models.feature_snapshot import (
     DetectionFeatureBaseline,
     DetectionFeatureBaselineListResult,
     DetectionFeatureBaselineQuery,
+    FeatureSnapshot,
     FeatureWindowKind,
 )
 from app.services.feature_snapshot_resolver import (
@@ -106,7 +108,7 @@ class DetectionBaselineService:
         entity_id: str,
         window_kind: FeatureWindowKind,
         cutoff_at: datetime,
-    ) -> list:
+    ) -> list[FeatureSnapshot]:
         rows = list(
             await session.scalars(
                 select(orm.FeatureSnapshot)
@@ -136,20 +138,23 @@ class DetectionBaselineService:
         window_kind: FeatureWindowKind,
         cutoff_at: datetime,
     ) -> orm.DetectionFeatureBaseline | None:
-        return await session.scalar(
-            select(orm.DetectionFeatureBaseline)
-            .where(
-                and_(
-                    orm.DetectionFeatureBaseline.source_tenant_id == source_tenant_id,
-                    orm.DetectionFeatureBaseline.detection_scope_id == detection_scope_id,
-                    orm.DetectionFeatureBaseline.entity_type == entity_type,
-                    orm.DetectionFeatureBaseline.entity_id == entity_id,
-                    orm.DetectionFeatureBaseline.window_kind == window_kind.value,
-                    orm.DetectionFeatureBaseline.cutoff_at == ensure_utc(cutoff_at),
+        return cast(
+            orm.DetectionFeatureBaseline | None,
+            await session.scalar(
+                select(orm.DetectionFeatureBaseline)
+                .where(
+                    and_(
+                        orm.DetectionFeatureBaseline.source_tenant_id == source_tenant_id,
+                        orm.DetectionFeatureBaseline.detection_scope_id == detection_scope_id,
+                        orm.DetectionFeatureBaseline.entity_type == entity_type,
+                        orm.DetectionFeatureBaseline.entity_id == entity_id,
+                        orm.DetectionFeatureBaseline.window_kind == window_kind.value,
+                        orm.DetectionFeatureBaseline.cutoff_at == ensure_utc(cutoff_at),
+                    )
                 )
-            )
-            .order_by(orm.DetectionFeatureBaseline.revision.desc())
-            .limit(1)
+                .order_by(orm.DetectionFeatureBaseline.revision.desc())
+                .limit(1)
+            ),
         )
 
     async def materialize_baseline(

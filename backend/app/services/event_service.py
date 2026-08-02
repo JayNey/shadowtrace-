@@ -11,7 +11,7 @@ import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import orjson
 from pydantic import BaseModel, ConfigDict, Field
@@ -365,12 +365,15 @@ class EventService:
         if self._investigation_intent is None:
             return None
         ref = source.reference
-        return await self._investigation_intent.maybe_create_pending_in_session(
-            session,
-            event,
-            link_role=link_role,
-            source_product=ref.source_product,
-            created_or_promoted=created_or_promoted,
+        return cast(
+            str | None,
+            await self._investigation_intent.maybe_create_pending_in_session(
+                session,
+                event,
+                link_role=link_role,
+                source_product=ref.source_product,
+                created_or_promoted=created_or_promoted,
+            ),
         )
 
     # ------------------------------------------------------------------ #

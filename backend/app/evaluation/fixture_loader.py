@@ -6,6 +6,7 @@ Test/evaluation harness only — never import from runtime Agent or API paths.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,10 @@ from app.services.evaluation_truth_service import (
     compute_dataset_manifest_hash,
 )
 
-_SLICE_BUILDERS = {
+_SLICE_BUILDERS: dict[
+    str,
+    Callable[[Any], ThreatSliceExpectation | BenignSliceExpectation | UnevaluableSliceExpectation],
+] = {
     SliceType.THREAT.value: ThreatSliceExpectation.model_validate,
     SliceType.BENIGN.value: BenignSliceExpectation.model_validate,
     SliceType.UNEVALUABLE.value: UnevaluableSliceExpectation.model_validate,

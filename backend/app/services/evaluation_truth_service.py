@@ -22,6 +22,7 @@ from app.core.sanitization import redact_sensitive_text
 from app.db import models as orm
 from app.models.evaluation_truth import (
     EVALUATION_TRUTH_SCHEMA_VERSION,
+    BenignSliceExpectation,
     EvaluationCaseTruth,
     EvaluationDatasetManifest,
     EvaluationTruthListResult,
@@ -32,6 +33,7 @@ from app.models.evaluation_truth import (
     SliceType,
     ThreatSliceExpectation,
     TruthObservationRef,
+    UnevaluableSliceExpectation,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,20 +107,18 @@ def _to_mapping(value: Any) -> dict[str, Any]:
 
 
 def _parse_slice_expectation(raw: Any) -> SliceExpectation:
-    if isinstance(raw, BaseModel):
-        return raw  # type: ignore[return-value]
+    if isinstance(
+        raw, (ThreatSliceExpectation, BenignSliceExpectation, UnevaluableSliceExpectation)
+    ):
+        return raw
     if not isinstance(raw, dict):
         raise ValidationError("slice_expectation must be an object")
     slice_type = raw.get("slice_type")
     if slice_type == SliceType.THREAT.value:
         return ThreatSliceExpectation.model_validate(raw)
     if slice_type == SliceType.BENIGN.value:
-        from app.models.evaluation_truth import BenignSliceExpectation
-
         return BenignSliceExpectation.model_validate(raw)
     if slice_type == SliceType.UNEVALUABLE.value:
-        from app.models.evaluation_truth import UnevaluableSliceExpectation
-
         return UnevaluableSliceExpectation.model_validate(raw)
     raise ValidationError(f"unsupported slice_type: {slice_type!r}")
 
@@ -149,15 +149,25 @@ def build_evaluation_case_truth(
 ) -> EvaluationCaseTruth:
     provenance = _sanitize_provenance(label_provenance)
     refs = observation_refs or []
-    payload = {
-        "tenant_id": tenant_id.strip(),
+    normalized_tenant_id = tenant_id.strip()
+    normalized_dataset_id = dataset_id.strip()
+    normalized_dataset_version = dataset_version.strip()
+    normalized_case_id = case_id.strip()
+    normalized_case_version = max(1, case_version)
+    normalized_revision = max(1, revision)
+    sanitized_correction_reason = (
+        redact_sensitive_text(correction_reason)[:512] if correction_reason else None
+    )
+    created_at = datetime.now(UTC)
+    payload: dict[str, Any] = {
+        "tenant_id": normalized_tenant_id,
         "source_tenant_id": source_tenant_id,
         "source_product": source_product,
         "connector_id": connector_id,
-        "dataset_id": dataset_id.strip(),
-        "dataset_version": dataset_version.strip(),
-        "case_id": case_id.strip(),
-        "case_version": max(1, case_version),
+        "dataset_id": normalized_dataset_id,
+        "dataset_version": normalized_dataset_version,
+        "case_id": normalized_case_id,
+        "case_version": normalized_case_version,
         "observation_refs": [item.model_dump(mode="json") for item in refs[:100]],
         "slice_expectation": _to_mapping(slice_expectation),
         "label_provenance": provenance.model_dump(mode="json"),
@@ -166,18 +176,16 @@ def build_evaluation_case_truth(
         ),
         "retention_policy": retention_policy,
         "schema_version": EVALUATION_TRUTH_SCHEMA_VERSION,
-        "revision": max(1, revision),
+        "revision": normalized_revision,
         "supersedes_truth_id": supersedes_truth_id,
-        "correction_reason": (
-            redact_sensitive_text(correction_reason)[:512] if correction_reason else None
-        ),
+        "correction_reason": sanitized_correction_reason,
     }
     content_hash = compute_content_hash(payload)
     idempotency_key = build_idempotency_key(
-        tenant_id=payload["tenant_id"],
-        dataset_id=payload["dataset_id"],
-        case_id=payload["case_id"],
-        revision=payload["revision"],
+        tenant_id=normalized_tenant_id,
+        dataset_id=normalized_dataset_id,
+        case_id=normalized_case_id,
+        revision=normalized_revision,
     )
     truth_id = f"truth-{hashlib.sha256(idempotency_key.encode()).hexdigest()[:12]}"
     payload.update(
@@ -185,33 +193,33 @@ def build_evaluation_case_truth(
             "truth_id": truth_id,
             "content_hash": content_hash,
             "idempotency_key": idempotency_key,
-            "created_at": datetime.now(UTC),
+            "created_at": created_at,
         }
     )
     truth_hash = compute_truth_hash(payload)
     return EvaluationCaseTruth(
         truth_id=truth_id,
-        tenant_id=payload["tenant_id"],
-        source_tenant_id=payload["source_tenant_id"],
-        source_product=payload["source_product"],
-        connector_id=payload["connector_id"],
-        dataset_id=payload["dataset_id"],
-        dataset_version=payload["dataset_version"],
-        case_id=payload["case_id"],
-        case_version=payload["case_version"],
+        tenant_id=normalized_tenant_id,
+        source_tenant_id=source_tenant_id,
+        source_product=source_product,
+        connector_id=connector_id,
+        dataset_id=normalized_dataset_id,
+        dataset_version=normalized_dataset_version,
+        case_id=normalized_case_id,
+        case_version=normalized_case_version,
         content_hash=content_hash,
         observation_refs=refs,
-        slice_expectation=_parse_slice_expectation(payload["slice_expectation"]),
+        slice_expectation=slice_expectation,
         label_provenance=provenance,
         operational_mapping=operational_mapping,
-        revision=payload["revision"],
-        supersedes_truth_id=payload["supersedes_truth_id"],
-        correction_reason=payload["correction_reason"],
-        retention_policy=payload["retention_policy"],
-        schema_version=payload["schema_version"],
+        revision=normalized_revision,
+        supersedes_truth_id=supersedes_truth_id,
+        correction_reason=sanitized_correction_reason,
+        retention_policy=retention_policy,
+        schema_version=EVALUATION_TRUTH_SCHEMA_VERSION,
         truth_hash=truth_hash,
         idempotency_key=idempotency_key,
-        created_at=payload["created_at"],
+        created_at=created_at,
     )
 
 

@@ -102,7 +102,7 @@ class VectorRecordIdentity(BaseModel):
         default=1, ge=1, description="Monotonic revision on content/release change"
     )
 
-    @computed_field  # type: ignore[prop-decorator]
+    @computed_field
     def idempotency_key(self) -> str:
         """Unique upsert key exported to contract consumers (#634)."""
         return (

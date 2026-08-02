@@ -13,7 +13,7 @@ from app.services.behavior_observation_service import BehaviorObservationService
 
 logger = logging.getLogger(__name__)
 
-OnPersistedCallback = Callable[[str], Awaitable[None]]
+OnPersistedCallback = Callable[[str], Awaitable[bool]]
 
 
 class BehaviorObservationProjection:

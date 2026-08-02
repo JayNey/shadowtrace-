@@ -120,6 +120,7 @@ def _merge_layer(
         ("files", _merge_files),
     ):
         existing: list[Any] = list(getattr(result, category))
+        additions: list[Any]
         if category == "ips":
             host_ips = {(h.ip or "").strip() for h in result.hosts if (h.ip or "").strip()}
             additions, cat_conflicts = _merge_ips(

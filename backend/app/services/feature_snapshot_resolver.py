@@ -350,7 +350,7 @@ def _primary_category_from_features(features: dict[str, Any]) -> str | None:
     counts = features.get("category_counts")
     if not isinstance(counts, dict) or not counts:
         return None
-    return max(counts.items(), key=lambda item: (item[1], item[0]))[0]
+    return str(max(counts.items(), key=lambda item: (item[1], item[0]))[0])
 
 
 def compute_baseline_content_hash(payload: dict[str, Any]) -> str:

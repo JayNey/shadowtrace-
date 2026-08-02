@@ -59,7 +59,8 @@ def row_to_candidate_detection(row: orm.CandidateDetection) -> CandidateDetectio
         window_kind=row.window_kind,
         matched_value=float(row.matched_value),
         severity=row.severity,
-        shadow_only=bool(row.shadow_only),
+        # CandidateDetection.shadow_only is Literal[True]; shadow runtime never emits live alerts.
+        shadow_only=True,
         provenance=CandidateDetectionProvenance.model_validate(row.provenance),
         content_hash=row.content_hash,
         idempotency_key=row.idempotency_key,

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -58,7 +59,7 @@ def _row_to_revision(row: orm.DetectionScopeRevision) -> DetectionScopeRevision:
     )
 
 
-def _integration_boundary_filters(row: orm.DetectionScopeRevision) -> tuple:
+def _integration_boundary_filters(row: orm.DetectionScopeRevision) -> tuple[Any, ...]:
     return (
         orm.DetectionScopeRevision.source_tenant_id == row.source_tenant_id,
         orm.DetectionScopeRevision.source_product == row.source_product,
@@ -66,7 +67,7 @@ def _integration_boundary_filters(row: orm.DetectionScopeRevision) -> tuple:
     )
 
 
-def _identity_boundary_filters(identity: DetectionScopeIdentity) -> tuple:
+def _identity_boundary_filters(identity: DetectionScopeIdentity) -> tuple[Any, ...]:
     return (
         orm.DetectionScopeRevision.source_tenant_id == identity.source_tenant_id,
         orm.DetectionScopeRevision.source_product == identity.source_product,

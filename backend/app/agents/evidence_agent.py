@@ -27,7 +27,11 @@ from app.agents.evidence_parser import (
     truncate_timestamp_to_second,
 )
 from app.agents.evidence_tools import EVIDENCE_QUERY_ORDER
-from app.agents.rules.entity_validation import EntityValidationResult, validate_entity_set
+from app.agents.rules.entity_validation import (
+    EntityRejection,
+    EntityValidationResult,
+    validate_entity_set,
+)
 from app.db import models as orm
 from app.models.agent_io import CollectionStatus, EvidenceAgentInput, EvidenceOutput, TriageResult
 from app.models.entities import (
@@ -121,7 +125,7 @@ def _validate_entities_for_evidence(
     alert_text: str = "",
 ) -> EntityValidationResult:
     """Validate triage entities per-entity provenance before tool calls (ISSUE-100)."""
-    rejections = []
+    rejections: list[EntityRejection] = []
     accounts: list[AccountEntity] = []
     hosts: list[HostEntity] = []
     ips: list[IPEntity] = []
@@ -878,10 +882,10 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                         "dedupe_key": pending_tasks_dedupe.get(completed_task),
                     }
                 else:
-                    dedupe_key = pending_tasks_dedupe.get(completed_task)
-                    if dedupe_key:
-                        outcome.setdefault("dedupe_key", dedupe_key)
-                        dedupe_cache.setdefault(dedupe_key, dict(outcome))
+                    completed_dedupe_key = pending_tasks_dedupe.get(completed_task)
+                    if completed_dedupe_key:
+                        outcome.setdefault("dedupe_key", completed_dedupe_key)
+                        dedupe_cache.setdefault(completed_dedupe_key, dict(outcome))
                 await self._merge_outcome(
                     outcome,
                     collected=collected,
@@ -1373,10 +1377,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         registry = getattr(self.tool_executor, "registry", None)
         if registry is None:
             return None
-        available = {
-            meta.tool_name
-            for meta in registry.list_available_tools(ToolCategory.QUERY)
-        }
+        available = {meta.tool_name for meta in registry.list_available_tools(ToolCategory.QUERY)}
         return allowlisted_query_tools_from_manifest(available)
 
     async def _resolve_snapshot_cutoff(self, event_id: str) -> str:

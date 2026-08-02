@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import datetime, timedelta
+from typing import cast
 
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -158,21 +159,24 @@ class FeatureSnapshotService:
         window_end: datetime,
         cutoff_at: datetime,
     ) -> orm.FeatureSnapshot | None:
-        return await session.scalar(
-            select(orm.FeatureSnapshot)
-            .where(
-                and_(
-                    orm.FeatureSnapshot.source_tenant_id == source_tenant_id,
-                    orm.FeatureSnapshot.detection_scope_id == detection_scope_id,
-                    orm.FeatureSnapshot.entity_type == entity_type,
-                    orm.FeatureSnapshot.entity_id == entity_id,
-                    orm.FeatureSnapshot.window_kind == window_kind.value,
-                    orm.FeatureSnapshot.window_end == ensure_utc(window_end),
-                    orm.FeatureSnapshot.cutoff_at == ensure_utc(cutoff_at),
+        return cast(
+            orm.FeatureSnapshot | None,
+            await session.scalar(
+                select(orm.FeatureSnapshot)
+                .where(
+                    and_(
+                        orm.FeatureSnapshot.source_tenant_id == source_tenant_id,
+                        orm.FeatureSnapshot.detection_scope_id == detection_scope_id,
+                        orm.FeatureSnapshot.entity_type == entity_type,
+                        orm.FeatureSnapshot.entity_id == entity_id,
+                        orm.FeatureSnapshot.window_kind == window_kind.value,
+                        orm.FeatureSnapshot.window_end == ensure_utc(window_end),
+                        orm.FeatureSnapshot.cutoff_at == ensure_utc(cutoff_at),
+                    )
                 )
-            )
-            .order_by(orm.FeatureSnapshot.revision.desc())
-            .limit(1)
+                .order_by(orm.FeatureSnapshot.revision.desc())
+                .limit(1)
+            ),
         )
 
     async def materialize_or_recompute(
