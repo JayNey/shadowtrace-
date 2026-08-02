@@ -41,6 +41,7 @@ from app.services.evidence_projection import (
     bind_evidence_projection,
     bind_evidence_query_scope,
 )
+from app.services.evidence_query_plan_service import build_query_dedupe_key
 from tests.test_tools.tool_system_fixtures import (
     DEFAULT_SCOPE,
     WINDOW,
@@ -1210,3 +1211,113 @@ async def test_run_one_query_deduped_reuses_cached_outcome(
     assert first.get("dedupe_reused") is not True
     assert second.get("dedupe_reused") is True
     assert first.get("dedupe_key") == second.get("dedupe_key")
+
+
+async def test_agent_honors_budget_from_execution_plan_input(
+    tool_executor: Any,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+    evidence_projection: EvidenceProjection,
+) -> None:
+    """ISSUE-115: budget cap applies when execution_plan is passed via input."""
+    from app.models.agent_io import ExecutionPlan, PlanBudget, PlanStep
+
+    event_id = f"evt-evd-budget-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    agent = _build_agent(tool_executor=tool_executor, wm=wm, evidence_repo=evidence_repo)
+    triage = _main_scenario_triage()
+    execution_plan = ExecutionPlan(
+        plan_id="pln-budget",
+        event_id=event_id,
+        steps=[
+            PlanStep(
+                step_order=1,
+                step_goal="collect all",
+                assigned_agent="evidence_agent",
+                required_tools=list(EVIDENCE_QUERY_ORDER),
+                success_criteria="ok",
+            )
+        ],
+        budget=PlanBudget(max_tool_calls=3),
+        revision=0,
+    )
+    agent_input = EvidenceAgentInput(
+        event_id=event_id,
+        triage_result=triage,
+        execution_plan=execution_plan.model_dump(mode="json"),
+    )
+
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            await agent.execute(agent_input)
+
+    assert agent.last_query_plan is not None
+    assert len(agent.last_query_plan.tools) == 3
+    assert "budget_trimmed_optional_queries" in agent.last_query_plan.degraded_reasons
+
+
+async def test_dedupe_key_uses_source_snapshot_cutoff(
+    tool_executor: Any,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    event_id = f"evt-evd-snap-{new_sfx()}"
+    await wm.write(event_id, "source_snapshot", {"snapshot_id": "snap-test-001"})
+    agent = _build_agent(tool_executor=tool_executor, wm=wm, evidence_repo=evidence_repo)
+    triage = _main_scenario_triage()
+    time_range = dict(WINDOW)
+    scope = DEFAULT_SCOPE
+    params = agent._build_params(
+        "query_threat_intel",
+        triage.entities,
+        time_range,
+        ioc_list=triage.ioc_list,
+    )
+    assert params is not None
+    await agent._resolve_snapshot_cutoff(event_id)
+    agent.last_snapshot_cutoff = await agent._resolve_snapshot_cutoff(event_id)
+    key = build_query_dedupe_key(
+        "query_threat_intel",
+        params,
+        time_range,
+        scope,
+        snapshot_cutoff=agent.last_snapshot_cutoff,
+    )
+    key_without = build_query_dedupe_key(
+        "query_threat_intel",
+        params,
+        time_range,
+        scope,
+    )
+    assert agent.last_snapshot_cutoff == "snap-test-001"
+    assert key != key_without
+
+
+async def test_agent_trace_payload_includes_query_plan(
+    tool_executor: Any,
+    evidence_projection: EvidenceProjection,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+    trace_service: _RecordingTraceService,
+) -> None:
+    event_id = f"evt-evd-plan-trace-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    agent = _build_agent(
+        tool_executor=tool_executor,
+        wm=wm,
+        evidence_repo=evidence_repo,
+        trace_service=trace_service,
+    )
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            await agent.execute(
+                EvidenceAgentInput(
+                    event_id=event_id,
+                    triage_result=_main_scenario_triage(),
+                    plan_step_goal="collect baseline evidence",
+                )
+            )
+    payload = trace_service.traces[0]["output_data"]
+    assert "query_plan" in payload
+    assert payload["query_plan"]["tools"]
+    assert payload.get("plan_step_goal") == "collect baseline evidence"

@@ -660,6 +660,7 @@ class EvidenceAgentInput(AgentInput):
     alert_text: str = ""
     plan_step_goal: str = ""
     required_tools: list[str] = Field(default_factory=list)
+    execution_plan: dict[str, Any] | None = None
 
 
 class GraphAgentInput(AgentInput):

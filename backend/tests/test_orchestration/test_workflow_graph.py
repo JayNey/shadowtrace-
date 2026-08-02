@@ -13,7 +13,11 @@ from app.core.errors import InvalidStateTransitionError
 from app.models.agent_io import (
     CollectionStatus,
     EffectStatus,
+    EvidenceAgentInput,
     EvidenceOutput,
+    ExecutionPlan,
+    PlanBudget,
+    PlanStep,
     ReportAgentInput,
     RiskAssessment,
     ScoringMode,
@@ -112,6 +116,67 @@ class StubAgent:
     async def execute(self, input: Any) -> Any:
         self.calls.append(input)
         return self.result
+
+
+class FixedEvidencePlanPlanner:
+    """Planner stub that returns a deterministic evidence subset plan."""
+
+    async def execute(self, input: Any) -> ExecutionPlan:
+        event_id = getattr(input, "event_id", "evt-graph-001")
+        return ExecutionPlan(
+            plan_id="pln-graph-evidence",
+            event_id=event_id,
+            steps=[
+                PlanStep(
+                    step_order=1,
+                    step_goal="dns only",
+                    assigned_agent="evidence_agent",
+                    required_tools=["query_dns"],
+                    success_criteria="ok",
+                ),
+                PlanStep(
+                    step_order=2,
+                    step_goal="risk",
+                    assigned_agent="risk_agent",
+                    required_tools=[],
+                    success_criteria="ok",
+                ),
+                PlanStep(
+                    step_order=3,
+                    step_goal="response",
+                    assigned_agent="response_agent",
+                    required_tools=[],
+                    success_criteria="ok",
+                ),
+                PlanStep(
+                    step_order=4,
+                    step_goal="report",
+                    assigned_agent="report_agent",
+                    required_tools=[],
+                    success_criteria="ok",
+                ),
+            ],
+            budget=PlanBudget(max_tool_calls=30),
+            revision=0,
+        )
+
+    async def plan_disposition_only(self, event_context: EventContext) -> ExecutionPlan:
+        event_id = event_context.event.event_id if event_context.event else "evt-graph-001"
+        return ExecutionPlan(
+            plan_id="pln-disposition-only",
+            event_id=event_id,
+            steps=[],
+            revision=0,
+        )
+
+
+class CapturingEvidenceAgent:
+    def __init__(self) -> None:
+        self.calls: list[EvidenceAgentInput] = []
+
+    async def execute(self, input: EvidenceAgentInput) -> EvidenceOutput:
+        self.calls.append(input)
+        return EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
 
 
 class ReplanOnceVerifyAgent:
@@ -620,6 +685,35 @@ async def test_not_required_short_circuit_from_new_reaches_closed() -> None:
     assert final["node_trace"] == ["triage_node", NODE_CLOSE]
     assert machine.status is EventStatus.CLOSED
     assert (event_id, EventStatus.TRIAGING, "investigation:triage_start") in machine.transitions
+
+
+@pytest.mark.asyncio
+async def test_evidence_node_passes_execution_plan_required_tools() -> None:
+    """ISSUE-115: workflow evidence_node wires plan tools into EvidenceAgentInput."""
+    capturing = CapturingEvidenceAgent()
+    triage = TriageResult(
+        event_type=EventType.SUSPICIOUS_DOMAIN,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        reasoning="workflow plan wiring",
+    )
+    agents = _agents(triage=triage)
+    agents["planner_agent"] = FixedEvidencePlanPlanner()
+    agents["evidence_agent"] = capturing
+    final = await build_investigation_graph(agents, _services()).ainvoke(
+        _base_state(
+            triage_result=triage.model_dump(mode="json"),
+            defer_response_execution=True,
+        ),
+        {"configurable": {"thread_id": "evt-graph-evidence-plan"}},
+    )
+    assert "evidence_node" in final["node_trace"]
+    assert capturing.calls
+    call = capturing.calls[0]
+    assert "query_dns" in call.required_tools
+    assert call.plan_step_goal == "dns only"
+    assert isinstance(call.execution_plan, dict)
+    assert call.execution_plan.get("plan_id") == "pln-graph-evidence"
 
 
 @pytest.mark.asyncio

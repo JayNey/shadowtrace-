@@ -830,6 +830,9 @@ def build_investigation_graph(
                 alert_text=_alert_text_from_state(state),
                 required_tools=planned_tools,
                 plan_step_goal=plan_step_goal,
+                execution_plan=(
+                    execution_plan_data if isinstance(execution_plan_data, dict) else None
+                ),
             )
         )
         if not isinstance(result, EvidenceOutput):

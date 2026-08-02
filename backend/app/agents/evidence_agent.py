@@ -21,12 +21,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
 from app.agents.conflict_detector import ConflictDetector
-from app.agents.evidence_tools import EVIDENCE_QUERY_ORDER
 from app.agents.evidence_parser import (
     TOOL_SOURCE_MAP,
     EvidenceParser,
     truncate_timestamp_to_second,
 )
+from app.agents.evidence_tools import EVIDENCE_QUERY_ORDER
 from app.agents.rules.entity_validation import EntityValidationResult, validate_entity_set
 from app.db import models as orm
 from app.models.agent_io import CollectionStatus, EvidenceAgentInput, EvidenceOutput, TriageResult
@@ -39,7 +39,7 @@ from app.models.entities import (
     IPEntity,
     ProcessEntity,
 )
-from app.models.enums import EvidenceSource
+from app.models.enums import EvidenceSource, ToolCategory
 from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.models.workflow import GLOBAL_EVIDENCE_TIMEOUT_S, SINGLE_SOURCE_TIMEOUT_S
@@ -49,13 +49,16 @@ from app.services.evidence_projection import (
 )
 from app.services.evidence_query_plan_service import (
     EvidenceQueryPlan,
+    allowlisted_query_tools_from_manifest,
     build_query_dedupe_key,
     resolve_evidence_query_plan,
+    snapshot_cutoff_from_source,
 )
 
 logger = logging.getLogger(__name__)
 
 # Re-export for existing imports (planner/default plans/tests).
+__all__ = ["EVIDENCE_QUERY_ORDER", "EvidenceAgent", "EvidenceRepository"]
 
 # Default window when TriageResult has no explicit time range (ISSUE-005 has none).
 DEFAULT_TIME_RANGE: dict[str, str] = {
@@ -554,6 +557,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         self.last_query_plan: EvidenceQueryPlan | None = None
         self.last_persist_error: str | None = None
         self.last_collection_elapsed_s: float | None = None
+        self.last_snapshot_cutoff: str = ""
 
     async def _run(self, input: EvidenceAgentInput) -> EvidenceOutput:
         if self.tool_executor is None:
@@ -563,6 +567,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         self.last_query_plan = None
         self.last_persist_error = None
         self.last_collection_elapsed_s = None
+        self.last_snapshot_cutoff = ""
         time_range = await self._resolve_time_range(input)
 
         scope = await self._resolve_scope(input.event_id)
@@ -572,11 +577,17 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "evidence queries require a trusted EventService scope"
             )
 
-        execution_plan = await self._read_execution_plan(input.event_id)
+        execution_plan = self._execution_plan_from_input(input)
+        if execution_plan is None:
+            execution_plan = await self._read_execution_plan(input.event_id)
+        snapshot_cutoff = await self._resolve_snapshot_cutoff(input.event_id)
+        self.last_snapshot_cutoff = snapshot_cutoff
+        allowlisted = self._available_query_tools()
         query_plan = resolve_evidence_query_plan(
             input.triage_result,
             planned_tools=list(input.required_tools),
             execution_plan=execution_plan,
+            allowlisted=allowlisted,
         )
         self.last_query_plan = query_plan
         query_tools = tuple(query_plan.tools)
@@ -795,11 +806,21 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                     gaps=gaps,
                 )
                 continue
-            dedupe_key = build_query_dedupe_key(tool_name, params, time_range, scope)
+            dedupe_key = build_query_dedupe_key(
+                tool_name,
+                params,
+                time_range,
+                scope,
+                snapshot_cutoff=self.last_snapshot_cutoff,
+            )
             cached = dedupe_cache.get(dedupe_key)
             if cached is not None:
                 await self._merge_outcome(
-                    {**cached, "tool_name": tool_name},
+                    {
+                        **cached,
+                        "tool_name": tool_name,
+                        "dedupe_reused": True,
+                    },
                     collected=collected,
                     success_sources=success_sources,
                     failed_sources=failed_sources,
@@ -949,7 +970,13 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         time_range: dict[str, str],
         dedupe_cache: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        dedupe_key = build_query_dedupe_key(tool_name, params, time_range, scope)
+        dedupe_key = build_query_dedupe_key(
+            tool_name,
+            params,
+            time_range,
+            scope,
+            snapshot_cutoff=self.last_snapshot_cutoff,
+        )
         cached = dedupe_cache.get(dedupe_key)
         if cached is not None:
             return {
@@ -1292,6 +1319,11 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             }
             if self.last_query_plan is not None:
                 envelope["query_plan"] = self.last_query_plan.model_dump(mode="json")
+            if self.last_snapshot_cutoff:
+                envelope["snapshot_cutoff"] = self.last_snapshot_cutoff
+            plan_step_goal = getattr(input, "plan_step_goal", "")
+            if isinstance(plan_step_goal, str) and plan_step_goal.strip():
+                envelope["plan_step_goal"] = plan_step_goal.strip()
             if self.last_persist_error is not None:
                 envelope["persist_error"] = self.last_persist_error
         else:
@@ -1302,6 +1334,11 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             }
             if self.last_query_plan is not None:
                 envelope["query_plan"] = self.last_query_plan.model_dump(mode="json")
+            if self.last_snapshot_cutoff:
+                envelope["snapshot_cutoff"] = self.last_snapshot_cutoff
+            plan_step_goal = getattr(input, "plan_step_goal", "")
+            if isinstance(plan_step_goal, str) and plan_step_goal.strip():
+                envelope["plan_step_goal"] = plan_step_goal.strip()
         try:
             await self.trace_service.log_trace(
                 event_id=input.event_id,
@@ -1324,6 +1361,37 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 self.agent_name,
                 exc_info=True,
             )
+
+    @staticmethod
+    def _execution_plan_from_input(input: EvidenceAgentInput) -> dict[str, Any] | None:
+        plan = input.execution_plan
+        return plan if isinstance(plan, dict) else None
+
+    def _available_query_tools(self) -> frozenset[str] | None:
+        if self.tool_executor is None:
+            return None
+        registry = getattr(self.tool_executor, "registry", None)
+        if registry is None:
+            return None
+        available = {
+            meta.tool_name
+            for meta in registry.list_available_tools(ToolCategory.QUERY)
+        }
+        return allowlisted_query_tools_from_manifest(available)
+
+    async def _resolve_snapshot_cutoff(self, event_id: str) -> str:
+        if self.working_memory is None:
+            return ""
+        try:
+            blob = await self.working_memory.read(event_id, "source_snapshot")
+        except Exception:
+            logger.debug(
+                "failed to read source_snapshot for evidence dedupe event=%s",
+                event_id,
+                exc_info=True,
+            )
+            return ""
+        return snapshot_cutoff_from_source(blob if isinstance(blob, dict) else None)
 
     async def _read_execution_plan(self, event_id: str) -> dict[str, Any] | None:
         if self.working_memory is None:

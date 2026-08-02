@@ -75,6 +75,14 @@ def allowlisted_query_tools_from_manifest(
     )
 
 
+def resolve_event_type_floor(triage: TriageResult) -> frozenset[str]:
+    """Event-type mandatory floor independent of entity extraction."""
+    floor = _EVENT_TYPE_MANDATORY_FLOOR.get(triage.event_type)
+    if floor is None:
+        return frozenset()
+    return frozenset(floor & _ALLOWED_EVIDENCE_QUERY_TOOLS)
+
+
 def resolve_mandatory_baseline(triage: TriageResult) -> frozenset[str]:
     """Server-owned mandatory tools from triage entities and event type."""
     mandatory: set[str] = set()
@@ -91,10 +99,7 @@ def resolve_mandatory_baseline(triage: TriageResult) -> frozenset[str]:
     ):
         mandatory.update({"query_dns", "query_threat_intel"})
 
-    floor = _EVENT_TYPE_MANDATORY_FLOOR.get(triage.event_type)
-    if floor is not None:
-        mandatory.update(floor)
-
+    mandatory.update(resolve_event_type_floor(triage))
     return frozenset(mandatory & _ALLOWED_EVIDENCE_QUERY_TOOLS)
 
 
@@ -164,29 +169,41 @@ def apply_query_budget(
     ordered_tools: list[str],
     *,
     mandatory_tools: frozenset[str],
+    floor_tools: frozenset[str] | None = None,
     max_tool_calls: int | None,
 ) -> tuple[list[str], list[str]]:
-    """Trim optional tools first when budget is exceeded; keep mandatory in plan order."""
+    """Trim optional tools first; preserve event floor before entity mandatory."""
     if max_tool_calls is None or max_tool_calls <= 0 or len(ordered_tools) <= max_tool_calls:
         return ordered_tools, []
 
-    mandatory_in_order = [tool for tool in ordered_tools if tool in mandatory_tools]
+    floor = floor_tools or frozenset()
+    floor_in_order = [tool for tool in ordered_tools if tool in floor]
+    entity_mandatory_in_order = [
+        tool for tool in ordered_tools if tool in mandatory_tools and tool not in floor
+    ]
     optional_in_order = [tool for tool in ordered_tools if tool not in mandatory_tools]
 
-    if len(mandatory_in_order) >= max_tool_calls:
-        kept = mandatory_in_order[:max_tool_calls]
-        trimmed = mandatory_in_order[max_tool_calls:] + optional_in_order
-        return kept, trimmed
-
-    remaining = max_tool_calls - len(mandatory_in_order)
-    kept = mandatory_in_order + optional_in_order[:remaining]
-    trimmed = optional_in_order[remaining:]
+    prioritized = floor_in_order + entity_mandatory_in_order + optional_in_order
+    kept_set = set(prioritized[:max_tool_calls])
+    kept = [tool for tool in ordered_tools if tool in kept_set]
+    trimmed = [tool for tool in ordered_tools if tool not in kept_set]
     return kept, trimmed
 
 
 def order_tools(tools: frozenset[str]) -> list[str]:
     """Stable canonical order for evidence queries."""
     return [tool for tool in EVIDENCE_QUERY_ORDER if tool in tools]
+
+
+def snapshot_cutoff_from_source(source_snapshot: dict[str, Any] | None) -> str:
+    """Stable snapshot/cutoff token for dedupe keys from frozen source_snapshot."""
+    if not isinstance(source_snapshot, dict):
+        return ""
+    for key in ("snapshot_id", "data_cutoff", "cutoff_at", "frozen_at_event_id"):
+        value = source_snapshot.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
 
 
 def build_query_dedupe_key(
@@ -221,6 +238,7 @@ def resolve_evidence_query_plan(
 ) -> EvidenceQueryPlan:
     """Merge mandatory baseline with validated planner tools; fail-safe to seven-source baseline."""
     mandatory = resolve_mandatory_baseline(triage)
+    floor_tools = resolve_event_type_floor(triage)
     allowset = allowlisted or _ALLOWED_EVIDENCE_QUERY_TOOLS
 
     extracted_tools: list[str] = []
@@ -257,6 +275,12 @@ def resolve_evidence_query_plan(
             degraded.append("rejected_non_query_tools")
 
     ordered = order_tools(merged)
+    manifest_disabled = [tool for tool in ordered if tool not in allowset]
+    if manifest_disabled:
+        degraded.append("manifest_disabled_tools")
+        rejected.extend(manifest_disabled)
+        ordered = [tool for tool in ordered if tool in allowset]
+
     budget_cap = max_tool_calls
     if budget_cap is None and plan_budget is not None:
         budget_cap = plan_budget.max_tool_calls
@@ -264,6 +288,7 @@ def resolve_evidence_query_plan(
     final_tools, trimmed = apply_query_budget(
         ordered,
         mandatory_tools=mandatory,
+        floor_tools=floor_tools,
         max_tool_calls=budget_cap,
     )
     if trimmed:
@@ -289,7 +314,9 @@ __all__ = [
     "build_query_dedupe_key",
     "extract_evidence_plan_inputs",
     "order_tools",
+    "resolve_event_type_floor",
     "resolve_evidence_query_plan",
     "resolve_mandatory_baseline",
     "sanitize_planned_tools",
+    "snapshot_cutoff_from_source",
 ]
