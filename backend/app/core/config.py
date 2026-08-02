@@ -102,6 +102,11 @@ class Settings(BaseSettings):
 
     retrieval_default_tenant_id: str = Field(default="local", alias="RETRIEVAL_DEFAULT_TENANT_ID")
     retrieval_fixture_fallback: bool = Field(default=False, alias="RETRIEVAL_FIXTURE_FALLBACK")
+    knowledge_release_require_active: bool = Field(
+        default=False,
+        alias="KNOWLEDGE_RELEASE_REQUIRE_ACTIVE",
+        description="When true, attack_kb retrieval requires an active knowledge release",
+    )
 
     budget_enabled: bool = Field(default=True, alias="BUDGET_ENABLED")
     global_token_budget: int = Field(default=1_000_000, alias="GLOBAL_TOKEN_BUDGET")

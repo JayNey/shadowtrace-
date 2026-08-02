@@ -18,6 +18,7 @@ from app.core.errors import (
     GuardrailViolationError,
     ShadowTraceError,
 )
+from app.core.config import Settings, get_settings
 from app.models.agent_io import (
     AttackTechniqueMatch,
     Citation,
@@ -28,12 +29,22 @@ from app.models.agent_io import (
 )
 from app.models.enums import EventType, FinalVerdict
 from app.models.knowledge import RetrievalResult
+from app.models.knowledge_release import KnowledgeQueryPlan
 from app.rag.context import RetrievalContext
+from app.services.knowledge_query_plan_service import resolve_active_knowledge_query_plan
+from app.services.knowledge_release_service import KnowledgeReleaseService
 
 logger = logging.getLogger(__name__)
 
 _KB_NAMES = ["attack_kb", "fp_case_kb", "history_case_kb", "playbook_kb"]
 _TOP_K = 5
+_NO_ACTIVE_RELEASE = "no_active_knowledge_release"
+
+
+def _require_active_knowledge_release(settings: Settings) -> bool:
+    if settings.knowledge_release_require_active:
+        return True
+    return settings.app_env.strip().lower() == "production"
 
 
 class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
@@ -58,6 +69,8 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         audit_service: Any | None = None,
         event_bus: Any | None = None,
         pipeline: Any | None = None,
+        knowledge_release_service: KnowledgeReleaseService | None = None,
+        settings: Settings | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -70,6 +83,8 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             event_bus=event_bus,
         )
         self._pipeline = pipeline
+        self._knowledge_release_service = knowledge_release_service
+        self._settings = settings
 
     # ------------------------------------------------------------------ #
     # _run
@@ -84,14 +99,25 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             await self._write_rag_output(input, output)
             return output
 
-        context = RetrievalContext.from_rag_input(input)
+        cfg = self._settings or get_settings()
+        context = RetrievalContext.from_rag_input(
+            input,
+            settings=cfg,
+            query_plan=await self._resolve_query_plan(input),
+        )
+        attack_kb_blocked = (
+            self._knowledge_release_service is not None
+            and context.query_plan is None
+            and _require_active_knowledge_release(cfg)
+        )
         retrieve_outcomes = await asyncio.gather(
             *(
-                self._retrieve_safe(
+                self._retrieve_for_kb(
                     kb_name,
                     queries.get(kb_name, ""),
                     top_k=_TOP_K,
                     context=context,
+                    blocked=kb_name == "attack_kb" and attack_kb_blocked,
                 )
                 for kb_name in _KB_NAMES
             ),
@@ -107,12 +133,16 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         citations = _aggregate_citations(results)
 
         all_failed = all(r is None for r in results.values())
+        plan_payload = (
+            context.query_plan.model_dump(mode="json") if context.query_plan is not None else None
+        )
         output = RAGOutput(
             attack_techniques=attack_techniques,
             fp_similarity=fp_similarity,
             similar_cases=similar_cases,
             playbook_refs=playbook_refs,
             citations=citations,
+            knowledge_query_plan=plan_payload,
             degraded=all_failed,
         )
 
@@ -124,6 +154,38 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
     # ------------------------------------------------------------------ #
     # Helpers
     # ------------------------------------------------------------------ #
+
+    async def _resolve_query_plan(self, input: RAGAgentInput) -> KnowledgeQueryPlan | None:
+        if self._knowledge_release_service is None:
+            return None
+        cfg = self._settings or get_settings()
+        trace_id = (input.trace_id or f"evt:{input.event_id}").strip()
+        return await resolve_active_knowledge_query_plan(
+            self._knowledge_release_service,
+            cfg,
+            trace_id=trace_id,
+        )
+
+    async def _retrieve_for_kb(
+        self,
+        kb_name: str,
+        query: str,
+        top_k: int = 5,
+        *,
+        context: RetrievalContext,
+        blocked: bool = False,
+    ) -> RetrievalResult | None:
+        if blocked:
+            return RetrievalResult(
+                query=query,
+                degraded_steps=[_NO_ACTIVE_RELEASE],
+                knowledge_query_plan=(
+                    context.query_plan.model_dump(mode="json")
+                    if context.query_plan is not None
+                    else None
+                ),
+            )
+        return await self._retrieve_safe(kb_name, query, top_k=top_k, context=context)
 
     async def _retrieve_safe(
         self,
@@ -341,6 +403,9 @@ def _aggregate_citations(
                     kb_name=c.kb_name,
                     quoted_text=c.quoted_text,
                     relevance_score=max(0.0, min(1.0, c.relevance_score)),
+                    corpus_id=c.corpus_id,
+                    release_id=c.release_id,
+                    object_id=c.object_id,
                 )
             )
     return aggregated

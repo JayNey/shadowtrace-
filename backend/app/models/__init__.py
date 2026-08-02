@@ -135,6 +135,7 @@ from app.models.embedding import (
     VectorQueryFilter,
     VectorRecordIdentity,
 )
+from app.models.knowledge_release import KnowledgeQueryPlan, KnowledgeRelease
 from app.models.llm_provider import (
     LLMCallLogAggregate,
     LLMProbeStatus,
@@ -363,6 +364,9 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "VectorQueryContext": VectorQueryContext,
     "EmbeddingProviderHealth": EmbeddingProviderHealth,
     "VectorImportUpsert": VectorImportUpsert,
+    # knowledge release registry (ISSUE-128)
+    "KnowledgeRelease": KnowledgeRelease,
+    "KnowledgeQueryPlan": KnowledgeQueryPlan,
     # llm provider health (ISSUE-106 / #609)
     "LLMProviderHealth": LLMProviderHealth,
     "LLMProbeStatus": LLMProbeStatus,

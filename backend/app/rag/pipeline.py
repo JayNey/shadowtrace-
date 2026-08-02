@@ -50,6 +50,12 @@ class RetrievalPipeline:
             principal=context.principal,
             event_id=context.event_id,
             trace_id=context.trace_id,
+            knowledge_release_id=(
+                context.query_plan.active_release_id if context.query_plan else None
+            ),
+            embedding_release_id=(
+                context.query_plan.embedding_release_id if context.query_plan else None
+            ),
         ):
             return await self._retrieve_impl(
                 query, kb_names, top_k, context=context, degraded=degraded
@@ -82,12 +88,18 @@ class RetrievalPipeline:
 
         # If all lists are empty, return empty
         if not any(result_lists):
+            plan_payload = (
+                context.query_plan.model_dump(mode="json")
+                if context.query_plan is not None
+                else None
+            )
             return RetrievalResult(
                 query=query,
                 rewritten_queries=rewritten,
                 chunks=[],
                 citations=[],
                 degraded_steps=degraded,
+                knowledge_query_plan=plan_payload,
             )
 
         # Step 3: RRF fusion
@@ -107,12 +119,17 @@ class RetrievalPipeline:
         # Step 5: Citations
         citations = CitationTracer.generate(query, reranked)
 
+        plan_payload = (
+            context.query_plan.model_dump(mode="json") if context.query_plan is not None else None
+        )
+
         return RetrievalResult(
             query=query,
             rewritten_queries=rewritten,
             chunks=reranked,
             citations=citations,
             degraded_steps=degraded,
+            knowledge_query_plan=plan_payload,
         )
 
 

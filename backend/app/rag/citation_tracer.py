@@ -24,6 +24,9 @@ class CitationTracer:
                     kb_name=chunk.kb_name,
                     quoted_text=quoted_text,
                     relevance_score=chunk.score,
+                    corpus_id=chunk.metadata.get("corpus_id"),
+                    release_id=chunk.metadata.get("release_id"),
+                    object_id=chunk.metadata.get("object_id") or chunk.metadata.get("technique_id"),
                 )
             )
         return citations

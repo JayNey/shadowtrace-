@@ -424,6 +424,43 @@ class TestPipelineDegradation:
         assert "reranker" in result.degraded_steps
         assert len(result.chunks) == 1
 
+    @pytest.mark.asyncio
+    async def test_includes_knowledge_query_plan_from_context(self) -> None:
+        from datetime import UTC, datetime
+
+        from app.models.knowledge_release import (
+            ATTACK_CORPUS_ID,
+            KnowledgeQueryPlan,
+        )
+
+        plan = KnowledgeQueryPlan(
+            corpus_id=ATTACK_CORPUS_ID,
+            kb_name="attack_kb",
+            active_release_id="krel-plan-test",
+            embedding_release_id="emb-plan-test",
+            trace_id="trace-plan-test",
+            pinned_at=datetime.now(UTC),
+        )
+        context = RetrievalContext(
+            tenant_id="local",
+            principal="investigation:test",
+            event_id="evt-plan",
+            trace_id="trace-plan-test",
+            query_plan=plan,
+        )
+        chunks = [_make_chunk("chk-plan", "attack_kb", "Valid Accounts technique", score=0.9)]
+        pipeline = RetrievalPipeline(
+            rewriter=QueryRewriter(
+                MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+                agent_name="test",
+            ),
+            retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+        )
+        result = await pipeline.retrieve("accounts", ["attack_kb"], top_k=1, context=context)
+        assert result.knowledge_query_plan is not None
+        assert result.knowledge_query_plan["active_release_id"] == "krel-plan-test"
+
 
 # ============================================================================
 # Full pipeline integration tests (requires PostgreSQL)

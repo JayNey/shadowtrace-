@@ -48,13 +48,22 @@ class HybridRetriever:
         )
 
         async def _search(query: str, kb: str, method: str) -> list[RetrievedChunk]:
+            release_id = context.release_id_for_kb(kb)
             if method == "vector":
                 vec = await self._embed.embed_query(query)
                 return await self._store.vector_search(
-                    kb, vec, top_k=fetch_k, tenant_id=tenant_id
+                    kb,
+                    vec,
+                    top_k=fetch_k,
+                    tenant_id=tenant_id,
+                    release_id=release_id,
                 )
             return await self._store.keyword_search(
-                kb, query, top_k=fetch_k, tenant_id=tenant_id
+                kb,
+                query,
+                top_k=fetch_k,
+                tenant_id=tenant_id,
+                release_id=release_id,
             )
 
         tasks: list[asyncio.Task[list[RetrievedChunk]]] = []

@@ -58,6 +58,8 @@ CORE_TABLES = {
     "graph_node",
     "investigation_intent",
     "knowledge_chunk",
+    "knowledge_release",
+    "knowledge_stix_object",
     "llm_call_log",
     "memory_review",
     "report",

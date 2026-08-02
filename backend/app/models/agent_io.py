@@ -310,6 +310,9 @@ class Citation(BaseModel):
     kb_name: str
     quoted_text: str
     relevance_score: float = Field(ge=0.0, le=1.0)
+    corpus_id: str | None = None
+    release_id: str | None = None
+    object_id: str | None = None
 
 
 class RAGOutput(BaseModel):
@@ -320,6 +323,10 @@ class RAGOutput(BaseModel):
     similar_cases: list[SimilarCaseSummary] = Field(default_factory=list)
     playbook_refs: list[str] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
+    knowledge_query_plan: dict[str, Any] | None = Field(
+        default=None,
+        description="Pinned knowledge + embedding release ids for this request (ISSUE-128)",
+    )
     degraded: bool = False
 
 

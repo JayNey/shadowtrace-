@@ -1150,6 +1150,134 @@ class TestRAGAgentTrace:
             await agent.execute(input_)  # type: ignore[arg-type]
 
 
+def _make_active_release(
+    release_id: str = "krel-aaaaaaaaaaaaaaaa",
+    *,
+    vector_ready: bool = False,
+    embedding_release_id: str | None = None,
+) -> "KnowledgeRelease":
+    from datetime import UTC, datetime
+
+    from app.models.knowledge_release import (
+        ATTACK_CORPUS_ID,
+        ATTACK_SOURCE_ID,
+        KnowledgeImportStatus,
+        KnowledgeRelease,
+        KnowledgeReleaseLifecycleState,
+        KnowledgeReleaseProvenance,
+    )
+
+    return KnowledgeRelease(
+        release_id=release_id,
+        corpus_id=ATTACK_CORPUS_ID,
+        source_id=ATTACK_SOURCE_ID,
+        release_version="v15.1",
+        content_hash="a" * 64,
+        provenance=KnowledgeReleaseProvenance(source_path="fixture://test"),
+        import_status=KnowledgeImportStatus.VALIDATED,
+        lifecycle_state=KnowledgeReleaseLifecycleState.ACTIVE,
+        vector_ready=vector_ready,
+        embedding_release_id=embedding_release_id,
+        idempotency_key=f"{ATTACK_CORPUS_ID}:{'a' * 64}",
+        activated_at=datetime.now(UTC),
+    )
+
+
+class TestRAGAgentReleasePinning:
+    @pytest.mark.asyncio
+    async def test_pins_query_plan_in_output_and_trace_context(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+
+        release = _make_active_release("krel-pin-test01")
+        release_service = MagicMock()
+        release_service.get_active_release = AsyncMock(return_value=release)
+
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        pipeline = _MockPipeline(results=results)
+        settings = Settings(
+            APP_ENV="development",
+            EMBEDDING_MODE="mock",
+            EMBEDDING_RELEASE_ID="emb-test-release",
+        )
+        agent = RAGAgent(
+            working_memory=wm,
+            pipeline=pipeline,
+            knowledge_release_service=release_service,
+            settings=settings,
+        )
+
+        output = await agent._run(_make_input())
+
+        assert output.knowledge_query_plan is not None
+        assert output.knowledge_query_plan["active_release_id"] == "krel-pin-test01"
+        assert output.knowledge_query_plan["embedding_release_id"] == "emb-test-release"
+        attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
+        assert attack_calls
+        assert attack_calls[0]["context"].query_plan is not None
+        assert attack_calls[0]["context"].query_plan.active_release_id == "krel-pin-test01"
+
+    @pytest.mark.asyncio
+    async def test_blocks_attack_kb_without_active_release_when_required(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+
+        release_service = MagicMock()
+        release_service.get_active_release = AsyncMock(return_value=None)
+
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        pipeline = _MockPipeline(results=results)
+        settings = Settings(
+            APP_ENV="development",
+            EMBEDDING_MODE="mock",
+            KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+        )
+        agent = RAGAgent(
+            working_memory=wm,
+            pipeline=pipeline,
+            knowledge_release_service=release_service,
+            settings=settings,
+        )
+
+        output = await agent._run(_make_input())
+
+        assert output.attack_techniques == []
+        attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
+        assert attack_calls == []
+        assert len([c for c in pipeline.calls if c["kb_names"] != ["attack_kb"]]) == 3
+
+    @pytest.mark.asyncio
+    async def test_dev_allows_unpinned_attack_kb_when_no_active_release(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+
+        release_service = MagicMock()
+        release_service.get_active_release = AsyncMock(return_value=None)
+
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        pipeline = _MockPipeline(results=results)
+        settings = Settings(APP_ENV="development", EMBEDDING_MODE="mock")
+        agent = RAGAgent(
+            working_memory=wm,
+            pipeline=pipeline,
+            knowledge_release_service=release_service,
+            settings=settings,
+        )
+
+        output = await agent._run(_make_input())
+
+        assert len(output.attack_techniques) >= 2
+        attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
+        assert len(attack_calls) == 1
+        assert attack_calls[0]["context"].query_plan is None
+
+
 class TestRAGAgentInputValidation:
     def test_rag_agent_input_accepts_none_evidence(self):
         """RAGAgentInput should accept evidence_output=None."""
@@ -1179,6 +1307,7 @@ class TestRAGOutputSchema:
         assert output.similar_cases == []
         assert output.playbook_refs == []
         assert output.citations == []
+        assert output.knowledge_query_plan is None
 
     def test_fp_similarity_score_bounds(self):
         with pytest.raises(pydantic.ValidationError):

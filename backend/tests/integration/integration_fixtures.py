@@ -46,6 +46,7 @@ from app.services.event_service import EventService
 from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
 from app.services.false_positive_matcher import FalsePositiveMatcher
 from app.services.knowledge_store import KnowledgeStore
+from app.services.knowledge_release_service import KnowledgeReleaseService
 from app.services.state_machine_service import StateMachineService
 from app.services.working_memory import WorkingMemory
 from tests.test_tools.tool_system_fixtures import new_sfx
@@ -410,6 +411,11 @@ def build_analysis_pipeline(
         knowledge_store = KnowledgeStore(session_factory, embed_service)
         case_kb_service = CaseKBService(knowledge_store, session_factory)
         fp_matcher = FalsePositiveMatcher(case_kb_service)
+        knowledge_release_service = KnowledgeReleaseService(
+            session_factory,
+            store=knowledge_store,
+            settings=e2e_settings,
+        )
 
         triage = TriageAgent(
             llm_client=effective_llm,
@@ -438,6 +444,8 @@ def build_analysis_pipeline(
             budget_service=budget_service,
             output_guard=output_guard,
             trace_service=agent_trace_service,
+            knowledge_release_service=knowledge_release_service,
+            settings=e2e_settings,
         )
         risk = RiskAgent(
             llm_client=effective_llm,
@@ -513,6 +521,11 @@ def build_super_agent(
         knowledge_store = KnowledgeStore(session_factory, embed_service)
         case_kb_service = CaseKBService(knowledge_store, session_factory)
         fp_matcher = FalsePositiveMatcher(case_kb_service)
+        knowledge_release_service = KnowledgeReleaseService(
+            session_factory,
+            store=knowledge_store,
+            settings=e2e_settings,
+        )
 
         triage = TriageAgent(
             llm_client=effective_llm,
@@ -547,6 +560,8 @@ def build_super_agent(
             budget_service=budget_service,
             output_guard=output_guard,
             trace_service=agent_trace_service,
+            knowledge_release_service=knowledge_release_service,
+            settings=e2e_settings,
         )
         risk = RiskAgent(
             llm_client=effective_llm,

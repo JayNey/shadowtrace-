@@ -85,3 +85,4 @@ async def test_build_investigation_agents_wires_retrieval_pipeline(
     rag = stack["rag"]
     assert isinstance(rag, RAGAgent)
     assert rag._pipeline is not None
+    assert rag._knowledge_release_service is not None

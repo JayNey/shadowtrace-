@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "description": "Request-scoped knowledge + embedding release pinning for retrieval.",
+  "properties": {
+    "corpus_id": {
+      "minLength": 1,
+      "title": "Corpus Id",
+      "type": "string"
+    },
+    "kb_name": {
+      "minLength": 1,
+      "title": "Kb Name",
+      "type": "string"
+    },
+    "active_release_id": {
+      "minLength": 1,
+      "title": "Active Release Id",
+      "type": "string"
+    },
+    "embedding_release_id": {
+      "minLength": 1,
+      "title": "Embedding Release Id",
+      "type": "string"
+    },
+    "trace_id": {
+      "minLength": 1,
+      "title": "Trace Id",
+      "type": "string"
+    },
+    "pinned_at": {
+      "format": "date-time",
+      "title": "Pinned At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "corpus_id",
+    "kb_name",
+    "active_release_id",
+    "embedding_release_id",
+    "trace_id",
+    "pinned_at"
+  ],
+  "title": "KnowledgeQueryPlan",
+  "type": "object"
+}

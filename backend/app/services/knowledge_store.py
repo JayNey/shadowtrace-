@@ -72,6 +72,13 @@ class KnowledgeStore:
             )
         return clause, {"tenant_id": tenant_id}
 
+    @staticmethod
+    def _release_filter_clause(release_id: str | None) -> tuple[str, dict[str, str]]:
+        if release_id is None:
+            return "", {}
+        clause = " AND metadata->>'release_id' = :release_id"
+        return clause, {"release_id": release_id}
+
     @property
     def semantic_search_enabled(self) -> bool:
         """Whether callers should prefer pure vector search over hybrid keyword fallback."""
@@ -140,24 +147,27 @@ class KnowledgeStore:
         top_k: int = 10,
         *,
         tenant_id: str | None = None,
+        release_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Cosine-similarity search across vectors in *kb_name*."""
         tenant_clause, tenant_params = self._tenant_filter_clause(
             tenant_id,
             tenant_isolation_strict=self._tenant_isolation_strict,
         )
+        release_clause, release_params = self._release_filter_clause(release_id)
         params: dict[str, object] = {
             "kb_name": kb_name,
             "q": query_embedding,
             "top_k": top_k,
             **tenant_params,
+            **release_params,
         }
         sql = text(
             f"""
             SELECT chunk_id, kb_name, content, metadata,
                    1.0 - (embedding <=> :q) AS score
             FROM knowledge_chunk
-            WHERE kb_name = :kb_name{tenant_clause}
+            WHERE kb_name = :kb_name{tenant_clause}{release_clause}
             ORDER BY embedding <=> :q
             LIMIT :top_k
             """
@@ -188,10 +198,14 @@ class KnowledgeStore:
         kb_name: str,
         query_text: str,
         top_k: int = 10,
+        *,
+        release_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Embed *query_text* and run cosine-similarity search (ISSUE-522)."""
         query_vec = await self._embed.embed_query(query_text)
-        return await self.vector_search(kb_name, query_vec, top_k=top_k)
+        return await self.vector_search(
+            kb_name, query_vec, top_k=top_k, release_id=release_id
+        )
 
     async def keyword_search(
         self,
@@ -200,17 +214,20 @@ class KnowledgeStore:
         top_k: int = 10,
         *,
         tenant_id: str | None = None,
+        release_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """PostgreSQL full-text search across chunks in *kb_name*."""
         tenant_clause, tenant_params = self._tenant_filter_clause(
             tenant_id,
             tenant_isolation_strict=self._tenant_isolation_strict,
         )
+        release_clause, release_params = self._release_filter_clause(release_id)
         params: dict[str, object] = {
             "kb_name": kb_name,
             "q": query_text,
             "top_k": top_k,
             **tenant_params,
+            **release_params,
         }
         sql = text(
             f"""
@@ -222,7 +239,7 @@ class KnowledgeStore:
                    ) AS score
             FROM knowledge_chunk
             WHERE kb_name = :kb_name
-              AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q){tenant_clause}
+              AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q){tenant_clause}{release_clause}
             ORDER BY ts_rank(to_tsvector('simple', content),
                              plainto_tsquery('simple', :q)) DESC
             LIMIT :top_k
@@ -252,14 +269,18 @@ class KnowledgeStore:
         *,
         keyword_query: str | None = None,
         top_k: int = 10,
+        release_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Vector search plus keyword fallback, merged by chunk_id."""
         query_vec = await self._embed.embed_query(query_text)
-        vector_hits = await self.vector_search(kb_name, query_vec, top_k=top_k)
+        vector_hits = await self.vector_search(
+            kb_name, query_vec, top_k=top_k, release_id=release_id
+        )
         keyword_hits = await self.keyword_search(
             kb_name,
             keyword_query if keyword_query is not None else query_text,
             top_k=top_k,
+            release_id=release_id,
         )
         return _merge_hybrid_results(vector_hits, keyword_hits, top_k)
 

@@ -29,13 +29,16 @@ class RetrievedChunk(BaseModel):
 
 
 class Citation(BaseModel):
-    """A citation referencing a retrieved chunk (ISSUE-045)."""
+    """A citation referencing a retrieved chunk (ISSUE-045, ISSUE-128)."""
 
     citation_id: str = Field(..., pattern=r"^cit-[0-9a-fA-F]{8}$", description="cit-{8 hex}")
     chunk_id: str
     kb_name: str
     quoted_text: str = Field(..., description="Relevant excerpt, max 200 chars")
     relevance_score: float
+    corpus_id: str | None = Field(default=None, description="Knowledge corpus id when release-scoped")
+    release_id: str | None = Field(default=None, description="Pinned knowledge release id")
+    object_id: str | None = Field(default=None, description="Stable object id within release")
 
 
 class RetrievalResult(BaseModel):
@@ -46,3 +49,7 @@ class RetrievalResult(BaseModel):
     chunks: list[RetrievedChunk] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
     degraded_steps: list[str] = Field(default_factory=list)
+    knowledge_query_plan: dict[str, Any] | None = Field(
+        default=None,
+        description="Pinned release ids written to trace/decision artifacts",
+    )

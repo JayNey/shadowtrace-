@@ -130,6 +130,42 @@
           "minimum": 0.0,
           "title": "Relevance Score",
           "type": "number"
+        },
+        "corpus_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Corpus Id"
+        },
+        "release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Release Id"
+        },
+        "object_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Object Id"
         }
       },
       "required": [
@@ -1113,6 +1149,20 @@
           },
           "title": "Citations",
           "type": "array"
+        },
+        "knowledge_query_plan": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pinned knowledge + embedding release ids for this request (ISSUE-128)",
+          "title": "Knowledge Query Plan"
         },
         "degraded": {
           "default": false,

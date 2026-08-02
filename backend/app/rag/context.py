@@ -13,6 +13,7 @@ from opentelemetry import trace
 
 from app.core.config import Settings, get_settings
 from app.models.agent_io import RAGAgentInput
+from app.models.knowledge_release import KnowledgeQueryPlan
 from app.services.tenant_resolution import resolve_tenant_id
 
 _NIL_UUID = "00000000-0000-0000-0000-000000000000"
@@ -42,6 +43,7 @@ class RetrievalContext:
     principal: str
     event_id: str
     trace_id: str
+    query_plan: KnowledgeQueryPlan | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tenant_id", _validate_identifier("tenant_id", self.tenant_id))
@@ -49,12 +51,20 @@ class RetrievalContext:
         object.__setattr__(self, "event_id", _validate_identifier("event_id", self.event_id))
         object.__setattr__(self, "trace_id", _validate_identifier("trace_id", self.trace_id))
 
+    def release_id_for_kb(self, kb_name: str) -> str | None:
+        if self.query_plan is None:
+            return None
+        if self.query_plan.kb_name != kb_name:
+            return None
+        return self.query_plan.active_release_id
+
     @classmethod
     def from_rag_input(
         cls,
         input: RAGAgentInput,
         *,
         settings: Settings | None = None,
+        query_plan: KnowledgeQueryPlan | None = None,
     ) -> RetrievalContext:
         cfg = settings or get_settings()
         raw_tenant = (input.tenant_id or "").strip()
@@ -69,6 +79,7 @@ class RetrievalContext:
             principal=principal,
             event_id=input.event_id,
             trace_id=trace_id,
+            query_plan=query_plan,
         )
 
     @classmethod
@@ -81,6 +92,7 @@ class RetrievalContext:
         principal: str | None = None,
         trace_id: str | None = None,
         settings: Settings | None = None,
+        query_plan: KnowledgeQueryPlan | None = None,
     ) -> RetrievalContext:
         """Build context for workflow/pipeline callers with explicit tenant resolution."""
         cfg = settings or get_settings()
@@ -96,6 +108,7 @@ class RetrievalContext:
             principal=resolved_principal,
             event_id=event_id,
             trace_id=resolved_trace,
+            query_plan=query_plan,
         )
 
 

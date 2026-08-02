@@ -1039,6 +1039,81 @@ class InvestigationIntent(Base):
     )
 
 
+class KnowledgeReleaseORM(Base):
+    """ATT&CK STIX knowledge release registry (ISSUE-128 / #634)."""
+
+    __tablename__ = "knowledge_release"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_knowledge_release_idempotency_key"),
+        Index("ix_knowledge_release_corpus_lifecycle", "corpus_id", "lifecycle_state"),
+        Index(
+            "uq_knowledge_release_one_active_per_corpus",
+            "corpus_id",
+            unique=True,
+            postgresql_where=text("lifecycle_state = 'active'"),
+        ),
+    )
+
+    release_id: Mapped[str] = mapped_column(String, primary_key=True)
+    corpus_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    source_id: Mapped[str] = mapped_column(String, nullable=False)
+    release_version: Mapped[str] = mapped_column(String, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    import_status: Mapped[str] = mapped_column(String, nullable=False)
+    lifecycle_state: Mapped[str] = mapped_column(String, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    supersedes_release_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("knowledge_release.release_id"),
+        nullable=True,
+    )
+    object_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    relationship_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    vector_ready: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    embedding_release_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    activated_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    retired_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class KnowledgeStixObjectORM(Base):
+    """Immutable STIX object rows bound to one knowledge release."""
+
+    __tablename__ = "knowledge_stix_object"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "stix_id",
+            name="uq_knowledge_stix_object_release_stix_id",
+        ),
+        Index(
+            "uq_knowledge_stix_object_release_external_id",
+            "release_id",
+            "external_id",
+            unique=True,
+            postgresql_where=text("external_id IS NOT NULL"),
+        ),
+    )
+
+    object_row_id: Mapped[str] = mapped_column(String, primary_key=True)
+    release_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("knowledge_release.release_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    stix_id: Mapped[str] = mapped_column(String, nullable=False)
+    stix_type: Mapped[str] = mapped_column(String, nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    object_hash: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
 from app.db.orm.approval import ApprovalRecordORM  # noqa: E402,F401
 from app.db.orm.memory_review import MemoryReviewORM  # noqa: E402,F401
 from app.db.orm.profile import EntityProfileORM  # noqa: E402,F401

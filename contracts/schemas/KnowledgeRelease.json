@@ -1,0 +1,224 @@
+{
+  "$defs": {
+    "KnowledgeImportStatus": {
+      "description": "Staged import validation outcome.",
+      "enum": [
+        "pending",
+        "validated",
+        "failed"
+      ],
+      "title": "KnowledgeImportStatus",
+      "type": "string"
+    },
+    "KnowledgeReleaseLifecycleState": {
+      "description": "Release lifecycle — activation/retirement are server-owned transitions.",
+      "enum": [
+        "draft",
+        "staged",
+        "active",
+        "retired",
+        "failed"
+      ],
+      "title": "KnowledgeReleaseLifecycleState",
+      "type": "string"
+    },
+    "KnowledgeReleaseProvenance": {
+      "additionalProperties": false,
+      "description": "Offline import provenance — no runtime network dependency.",
+      "properties": {
+        "source_path": {
+          "description": "Local bundle path or fixture id",
+          "minLength": 1,
+          "title": "Source Path",
+          "type": "string"
+        },
+        "imported_by": {
+          "default": "system",
+          "minLength": 1,
+          "title": "Imported By",
+          "type": "string"
+        },
+        "import_kind": {
+          "default": "stix_bundle",
+          "minLength": 1,
+          "title": "Import Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_path"
+      ],
+      "title": "KnowledgeReleaseProvenance",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Immutable ATT&CK STIX release descriptor with lifecycle metadata.",
+  "properties": {
+    "release_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Release Id",
+      "type": "string"
+    },
+    "corpus_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Corpus Id",
+      "type": "string"
+    },
+    "source_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "release_version": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Release Version",
+      "type": "string"
+    },
+    "content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "provenance": {
+      "$ref": "#/$defs/KnowledgeReleaseProvenance"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "import_status": {
+      "$ref": "#/$defs/KnowledgeImportStatus",
+      "default": "pending"
+    },
+    "lifecycle_state": {
+      "$ref": "#/$defs/KnowledgeReleaseLifecycleState",
+      "default": "draft"
+    },
+    "revision": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "supersedes_release_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Supersedes Release Id"
+    },
+    "object_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Object Count",
+      "type": "integer"
+    },
+    "relationship_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Relationship Count",
+      "type": "integer"
+    },
+    "vector_ready": {
+      "default": false,
+      "description": "True only when vectors were imported under a compatible EmbeddingRelease",
+      "title": "Vector Ready",
+      "type": "boolean"
+    },
+    "embedding_release_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Embedding Release Id"
+    },
+    "idempotency_key": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Idempotency Key",
+      "type": "string"
+    },
+    "activated_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Activated At"
+    },
+    "retired_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Retired At"
+    },
+    "created_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created At"
+    },
+    "failure_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Reason"
+    }
+  },
+  "required": [
+    "release_id",
+    "corpus_id",
+    "source_id",
+    "release_version",
+    "content_hash",
+    "provenance",
+    "idempotency_key"
+  ],
+  "title": "KnowledgeRelease",
+  "type": "object"
+}

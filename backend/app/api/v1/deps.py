@@ -624,6 +624,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         session_factory=session_factory,
     )
     from app.rag.resources import get_loaded_retrieval_resources
+    from app.services.knowledge_release_service import KnowledgeReleaseService
 
     retrieval_resources = get_loaded_retrieval_resources(
         settings=settings,
@@ -640,6 +641,11 @@ async def _build_investigation_agents() -> dict[str, Any]:
                 "mode": retrieval_resources.mode,
             },
         )
+    knowledge_release_service = KnowledgeReleaseService(
+        session_factory,
+        store=knowledge_store,
+        settings=settings,
+    )
     rag = RAGAgent(
         working_memory=wm.for_writer("RAGAgent"),
         pipeline=retrieval_resources.pipeline,
@@ -647,6 +653,8 @@ async def _build_investigation_agents() -> dict[str, Any]:
         output_guard=output_guard,
         trace_service=trace_service,
         event_bus=event_bus,
+        knowledge_release_service=knowledge_release_service,
+        settings=settings,
     )
     risk = RiskAgent(
         llm_client=llm_client,
