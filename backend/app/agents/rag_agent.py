@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, cast
 
 from app.agents.base import BaseAgent
 from app.agents.rag_query_builder import RAGQueryBuilder
@@ -28,6 +28,7 @@ from app.models.agent_io import (
 )
 from app.models.enums import EventType, FinalVerdict
 from app.models.knowledge import RetrievalResult
+from app.rag.context import RetrievalContext
 
 logger = logging.getLogger(__name__)
 
@@ -83,9 +84,15 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             await self._write_rag_output(input, output)
             return output
 
+        context = RetrievalContext.from_rag_input(input)
         retrieve_outcomes = await asyncio.gather(
             *(
-                self._retrieve_safe(kb_name, queries.get(kb_name, ""), top_k=_TOP_K)
+                self._retrieve_safe(
+                    kb_name,
+                    queries.get(kb_name, ""),
+                    top_k=_TOP_K,
+                    context=context,
+                )
                 for kb_name in _KB_NAMES
             ),
             return_exceptions=False,
@@ -119,13 +126,26 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
     # ------------------------------------------------------------------ #
 
     async def _retrieve_safe(
-        self, kb_name: str, query: str, top_k: int = 5
+        self,
+        kb_name: str,
+        query: str,
+        top_k: int = 5,
+        *,
+        context: RetrievalContext,
     ) -> RetrievalResult | None:
         """Call pipeline.retrieve, returning None on failure."""
         if self._pipeline is None:
             return None
         try:
-            return await self._pipeline.retrieve(query, [kb_name], top_k=top_k)  # type: ignore[no-any-return]
+            return cast(
+                RetrievalResult,
+                await self._pipeline.retrieve(
+                    query,
+                    [kb_name],
+                    top_k=top_k,
+                    context=context,
+                ),
+            )
         except Exception as exc:
             logger.warning(
                 "RAG retrieval failed for kb=%s query=%.100s: %s",

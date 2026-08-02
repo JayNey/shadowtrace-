@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.core.errors import LLMError
 from app.core.llm.base import BaseLLMClient, LLMMessage
+from app.rag.context import RetrievalContext
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +33,12 @@ class QueryRewriter:
         self,
         llm_client: BaseLLMClient,
         *,
-        event_id: str = "rag-pipeline",
         agent_name: str = "RAGAgent",
     ) -> None:
         self._llm = llm_client
-        self._event_id = event_id
         self._agent_name = agent_name
 
-    async def rewrite(self, query: str) -> list[str]:
+    async def rewrite(self, query: str, *, context: RetrievalContext) -> list[str]:
         """Return original query plus up to 2 rewritten variants."""
         try:
             response = await self._llm.chat(
@@ -57,7 +56,7 @@ class QueryRewriter:
                         content=f"Rewrite this query for hybrid search: {query}",
                     ),
                 ],
-                event_id=self._event_id,
+                event_id=context.event_id,
                 agent_name=self._agent_name,
                 prompt_key="query_rewrite",
                 temperature=0.3,

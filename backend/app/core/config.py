@@ -100,6 +100,9 @@ class Settings(BaseSettings):
 
     rerank_mode: str = Field(default="mock", alias="RERANK_MODE")
 
+    retrieval_default_tenant_id: str = Field(default="local", alias="RETRIEVAL_DEFAULT_TENANT_ID")
+    retrieval_fixture_fallback: bool = Field(default=False, alias="RETRIEVAL_FIXTURE_FALLBACK")
+
     budget_enabled: bool = Field(default=True, alias="BUDGET_ENABLED")
     global_token_budget: int = Field(default=1_000_000, alias="GLOBAL_TOKEN_BUDGET")
     event_token_budget: int = Field(default=100_000, alias="EVENT_TOKEN_BUDGET")
@@ -262,6 +265,8 @@ class Settings(BaseSettings):
             violations.append(f"llm_mode={self.llm_mode}")
         if _looks_mock(self.embedding_mode):
             violations.append(f"embedding_mode={self.embedding_mode}")
+        if self.retrieval_fixture_fallback:
+            violations.append("retrieval_fixture_fallback=true")
         return violations
 
 

@@ -249,15 +249,25 @@ def test_init_worker_telemetry_uses_worker_provider_engine(
     assert get_session_provider().engine() is engine
 
 
-def test_shutdown_worker_session_provider_disposes(
+def test_shutdown_worker_resources_disposes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dispose_mock = AsyncMock()
-    monkeypatch.setattr("app.db.session_provider.dispose_session_provider", dispose_mock)
-    from app.core.celery_app import shutdown_worker_session_provider
+    close_mock = AsyncMock()
+    reset_mock = MagicMock()
 
-    shutdown_worker_session_provider(sender=None)
+    async def _close() -> None:
+        await close_mock()
+
+    monkeypatch.setattr("app.db.session_provider.dispose_session_provider", dispose_mock)
+    monkeypatch.setattr("app.core.embedding.factory.close_embedding_client", _close)
+    monkeypatch.setattr("app.rag.resources.reset_loaded_retrieval_resources", reset_mock)
+    from app.core.celery_app import shutdown_worker_resources
+
+    shutdown_worker_resources(sender=None)
     dispose_mock.assert_awaited_once()
+    close_mock.assert_awaited_once()
+    reset_mock.assert_called_once()
 
 
 def test_check_postgres_uses_provider_when_url_matches(

@@ -71,6 +71,13 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
             logger.warning("OpenSearch index initialization failed", exc_info=True)
 
     try:
+        from app.rag.resources import warmup_retrieval_resources
+
+        warmup_retrieval_resources()
+    except Exception:
+        logger.warning("Retrieval resource warmup failed", exc_info=True)
+
+    try:
         yield
     finally:
         scan_task.cancel()
@@ -81,10 +88,12 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         await dispose_session_provider()
         try:
             from app.core.embedding.factory import close_embedding_client
+            from app.rag.resources import reset_loaded_retrieval_resources
 
             await close_embedding_client()
+            reset_loaded_retrieval_resources()
         except Exception:
-            logger.warning("Embedding client shutdown failed", exc_info=True)
+            logger.warning("Retrieval resource shutdown failed", exc_info=True)
         try:
             from app.api.v1.deps import shutdown_neo4j_client
 

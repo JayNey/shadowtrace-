@@ -623,9 +623,17 @@ async def _build_investigation_agents() -> dict[str, Any]:
         event_service=event_service,
         session_factory=session_factory,
     )
+    from app.rag.resources import get_loaded_retrieval_resources
+
+    retrieval_resources = get_loaded_retrieval_resources(
+        settings=settings,
+        session_factory=session_factory,
+        llm_client=llm_client,
+        embed_service=embed_service,
+    )
     rag = RAGAgent(
         working_memory=wm.for_writer("RAGAgent"),
-        pipeline=None,
+        pipeline=retrieval_resources.pipeline,
         budget_service=budget_service,
         output_guard=output_guard,
         trace_service=trace_service,
@@ -782,6 +790,14 @@ async def get_super_agent() -> Any:
     return _super_agent
 
 
+def reset_investigation_stack_cache() -> None:
+    """Drop cached investigation wiring without tearing down infrastructure."""
+    global _pipeline, _super_agent, _investigation_stack
+    _pipeline = None
+    _super_agent = None
+    _investigation_stack = None
+
+
 def reset_deps() -> None:
     """Reset all lazy singletons (for tests)."""
     global _redis_client, _context_store, _degraded_flags
@@ -796,9 +812,11 @@ def reset_deps() -> None:
     global _memory_governance, _decision_record_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
+    from app.rag.resources import reset_loaded_retrieval_resources
     from app.services.evidence_projection import reset_evidence_projection_default
 
     reset_embedding_client()
+    reset_loaded_retrieval_resources()
     reset_evidence_projection_default()
     _redis_client = None
     _context_store = None

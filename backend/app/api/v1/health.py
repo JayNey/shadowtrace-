@@ -64,6 +64,13 @@ async def check_llm_provider(settings: Settings | None = None) -> dict[str, obje
     return await _check_llm(settings)
 
 
+async def _check_loaded_resources(settings: Settings | None = None) -> dict[str, object]:
+    """Return sanitized retrieval resource readiness (ISSUE-138)."""
+    from app.rag.resources import check_loaded_resources
+
+    return await check_loaded_resources(settings)
+
+
 async def check_postgres(database_url: str) -> str:
     """Return 'ok' if SELECT 1 succeeds, else 'error'."""
     try:
@@ -111,6 +118,7 @@ async def health(
     redis_status = await check_redis(settings.redis_url)
     embedding_provider = await check_embedding_provider()
     llm_provider = await check_llm_provider(settings)
+    loaded_resources = await _check_loaded_resources(settings)
 
     # NOTE: capability values below are UNVERIFIED placeholders for the Mock
     # phase. Once real adapters land they must be replaced with actual
@@ -159,6 +167,7 @@ async def health(
     hard_deps_ok = postgres == "ok" and redis_status == "ok"
     embedding_ok = embedding_provider.get("status") == "ok"
     llm_ok = llm_provider.get("status") == "ok"
+    loaded_ok = loaded_resources.get("status") == "ready"
     llm_required = bool(settings.llm_required)
     celery_task_mode = str(celery_health.get("task_mode", "background"))
     celery_broker_status = str(celery_health.get("broker", "error"))
@@ -166,6 +175,8 @@ async def health(
 
     overall = "ok"
     if not hard_deps_ok or not embedding_ok:
+        overall = "degraded"
+    elif not loaded_ok:
         overall = "degraded"
     elif llm_required and not llm_ok:
         overall = "degraded"
@@ -184,6 +195,7 @@ async def health(
         "postgres": postgres,
         "redis": redis_status,
         "embedding_provider": embedding_provider,
+        "loaded_resources": loaded_resources,
         "llm": llm_provider,
         "celery": celery_health,
         "source_adapter": source_adapter,

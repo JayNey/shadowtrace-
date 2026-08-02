@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 
+from app.core.telemetry import traced_operation
 from app.models.knowledge import RetrievalResult, RetrievedChunk
 from app.rag.citation_tracer import CitationTracer
+from app.rag.context import RetrievalContext
 from app.rag.hybrid_retriever import HybridRetriever
 from app.rag.query_rewriter import QueryRewriter
 from app.rag.reranker import Reranker
@@ -32,13 +34,40 @@ class RetrievalPipeline:
         self._retriever = retriever
         self._reranker = reranker
 
-    async def retrieve(self, query: str, kb_names: list[str], top_k: int = 5) -> RetrievalResult:
+    async def retrieve(
+        self,
+        query: str,
+        kb_names: list[str],
+        top_k: int = 5,
+        *,
+        context: RetrievalContext,
+    ) -> RetrievalResult:
         degraded: list[str] = []
 
+        with traced_operation(
+            "retrieval_pipeline.retrieve",
+            tenant_id=context.tenant_id,
+            principal=context.principal,
+            event_id=context.event_id,
+            trace_id=context.trace_id,
+        ):
+            return await self._retrieve_impl(
+                query, kb_names, top_k, context=context, degraded=degraded
+            )
+
+    async def _retrieve_impl(
+        self,
+        query: str,
+        kb_names: list[str],
+        top_k: int,
+        *,
+        context: RetrievalContext,
+        degraded: list[str],
+    ) -> RetrievalResult:
         # Step 1: Query rewriting
         rewritten: list[str]
         try:
-            rewritten = await self._rewriter.rewrite(query)
+            rewritten = await self._rewriter.rewrite(query, context=context)
         except Exception as exc:
             logger.warning("Query rewriting failed: %s", exc)
             degraded.append("query_rewriter")
@@ -47,7 +76,9 @@ class RetrievalPipeline:
         # Step 2: Hybrid retrieval (per query, per kb, vector + keyword).
         # Per-path failures are swallowed inside HybridRetriever as empty lists;
         # an all-empty outcome is handled below without marking retrieval degraded.
-        result_lists = await self._retriever.retrieve(rewritten, kb_names, top_k=top_k)
+        result_lists = await self._retriever.retrieve(
+            rewritten, kb_names, top_k=top_k, context=context
+        )
 
         # If all lists are empty, return empty
         if not any(result_lists):

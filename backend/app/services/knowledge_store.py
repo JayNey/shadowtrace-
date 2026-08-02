@@ -115,15 +115,31 @@ class KnowledgeStore:
             await session.execute(stmt)
 
     async def vector_search(
-        self, kb_name: str, query_embedding: list[float], top_k: int = 10
+        self,
+        kb_name: str,
+        query_embedding: list[float],
+        top_k: int = 10,
+        *,
+        tenant_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Cosine-similarity search across vectors in *kb_name*."""
+        tenant_clause = ""
+        params: dict[str, object] = {
+            "kb_name": kb_name,
+            "q": query_embedding,
+            "top_k": top_k,
+        }
+        if tenant_id is not None:
+            tenant_clause = (
+                " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
+            )
+            params["tenant_id"] = tenant_id
         sql = text(
-            """
+            f"""
             SELECT chunk_id, kb_name, content, metadata,
                    1.0 - (embedding <=> :q) AS score
             FROM knowledge_chunk
-            WHERE kb_name = :kb_name
+            WHERE kb_name = :kb_name{tenant_clause}
             ORDER BY embedding <=> :q
             LIMIT :top_k
             """
@@ -135,7 +151,7 @@ class KnowledgeStore:
         async with self._session_factory() as session:
             result = await session.execute(
                 sql,
-                {"kb_name": kb_name, "q": query_embedding, "top_k": top_k},
+                params,
             )
             return [
                 RetrievedChunk(
@@ -160,11 +176,27 @@ class KnowledgeStore:
         return await self.vector_search(kb_name, query_vec, top_k=top_k)
 
     async def keyword_search(
-        self, kb_name: str, query_text: str, top_k: int = 10
+        self,
+        kb_name: str,
+        query_text: str,
+        top_k: int = 10,
+        *,
+        tenant_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """PostgreSQL full-text search across chunks in *kb_name*."""
+        tenant_clause = ""
+        params: dict[str, object] = {
+            "kb_name": kb_name,
+            "q": query_text,
+            "top_k": top_k,
+        }
+        if tenant_id is not None:
+            tenant_clause = (
+                " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
+            )
+            params["tenant_id"] = tenant_id
         sql = text(
-            """
+            f"""
             SELECT chunk_id, kb_name, content, metadata,
                    GREATEST(
                        ts_rank(to_tsvector('simple', content),
@@ -173,7 +205,7 @@ class KnowledgeStore:
                    ) AS score
             FROM knowledge_chunk
             WHERE kb_name = :kb_name
-              AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q)
+              AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q){tenant_clause}
             ORDER BY ts_rank(to_tsvector('simple', content),
                              plainto_tsquery('simple', :q)) DESC
             LIMIT :top_k
@@ -182,7 +214,7 @@ class KnowledgeStore:
         async with self._session_factory() as session:
             result = await session.execute(
                 sql,
-                {"kb_name": kb_name, "q": query_text, "top_k": top_k},
+                params,
             )
             return [
                 RetrievedChunk(

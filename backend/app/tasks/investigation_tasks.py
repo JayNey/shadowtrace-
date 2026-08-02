@@ -28,6 +28,17 @@ TASK_META_PREFIX = "shadowtrace:celery:task:"
 TASK_META_TTL_SECONDS = 86_400
 
 
+def _release_celery_task_loop_resources() -> None:
+    """Strategy B (#623): drop loop-bound clients after each asyncio.run task."""
+    from app.api.v1.deps import reset_investigation_stack_cache
+    from app.core.embedding.factory import reset_embedding_client
+    from app.rag.resources import reset_loaded_retrieval_resources
+
+    reset_investigation_stack_cache()
+    reset_loaded_retrieval_resources()
+    reset_embedding_client()
+
+
 def _task_meta_key(task_id: str) -> str:
     return f"{TASK_META_PREFIX}{task_id}"
 
@@ -296,17 +307,20 @@ def run_investigation(
             )
             return _skipped_delivery_result(event_id, reason=reason)
     try:
-        result = asyncio.run(
-            _run_investigation_body(
-                event_id,
-                include_response_execution=bool(include_response_execution),
-                owner_id=owner_id,
-                redelivered=redelivered,
+        try:
+            result = asyncio.run(
+                _run_investigation_body(
+                    event_id,
+                    include_response_execution=bool(include_response_execution),
+                    owner_id=owner_id,
+                    redelivered=redelivered,
+                )
             )
-        )
-        if intent_id:
-            asyncio.run(_finalize_intent_from_result(intent_id, result))
-        return result
+            if intent_id:
+                asyncio.run(_finalize_intent_from_result(intent_id, result))
+            return result
+        finally:
+            _release_celery_task_loop_resources()
     except SoftTimeLimitExceeded:
         logger.warning("run_investigation soft time limit exceeded for event=%s", event_id)
         if intent_id:

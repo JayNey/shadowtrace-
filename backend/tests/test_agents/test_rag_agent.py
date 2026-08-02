@@ -114,8 +114,17 @@ class _MockPipeline:
         self._results = results or {}
         self.calls: list[dict] = []
 
-    async def retrieve(self, query: str, kb_names: list[str], top_k: int = 5) -> RetrievalResult:
-        self.calls.append({"query": query, "kb_names": kb_names, "top_k": top_k})
+    async def retrieve(
+        self,
+        query: str,
+        kb_names: list[str],
+        top_k: int = 5,
+        *,
+        context: object | None = None,
+    ) -> RetrievalResult:
+        self.calls.append(
+            {"query": query, "kb_names": kb_names, "top_k": top_k, "context": context}
+        )
         kb_name = kb_names[0] if kb_names else "unknown"
         if kb_name in self._results:
             item = self._results[kb_name]
@@ -817,6 +826,29 @@ class TestRAGAgentBasic:
             "playbook_kb",
         }
 
+    @pytest.mark.asyncio
+    async def test_run_propagates_retrieval_context(self):
+        """RetrievalContext carries event/tenant/principal/trace into pipeline calls."""
+        wm = _MockBoundWorkingMemory()
+        pipeline = _MockPipeline(results=_make_full_results())
+        agent = RAGAgent(working_memory=wm, pipeline=pipeline)
+
+        input_ = _make_input().model_copy(
+            update={
+                "tenant_id": "tenant-alpha",
+                "principal": "investigation:super_agent",
+                "trace_id": "trace-xyz",
+            }
+        )
+        await agent._run(input_)
+
+        contexts = [call["context"] for call in pipeline.calls]
+        assert len(contexts) == 4
+        assert all(ctx.event_id == "evt-001" for ctx in contexts)
+        assert all(ctx.tenant_id == "tenant-alpha" for ctx in contexts)
+        assert all(ctx.principal == "investigation:super_agent" for ctx in contexts)
+        assert all(ctx.trace_id == "trace-xyz" for ctx in contexts)
+
 
 class TestRAGAgentDegraded:
     @pytest.mark.asyncio
@@ -879,6 +911,25 @@ class TestRAGAgentDegraded:
         output = await agent._run(input_)
 
         assert output.degraded is True
+
+    @pytest.mark.asyncio
+    async def test_fixture_fallback_wiring_never_calls_pipeline(self):
+        """Fixture-loaded resources attach pipeline=None; RAGAgent must not retrieve."""
+        from app.core.config import Settings
+        from app.rag.resources import get_loaded_retrieval_resources, reset_loaded_retrieval_resources
+
+        reset_loaded_retrieval_resources()
+        settings = Settings(app_env="development", retrieval_fixture_fallback=True)
+        loaded = get_loaded_retrieval_resources(settings=settings)
+        assert loaded.pipeline is None
+
+        wm = _MockBoundWorkingMemory()
+        spy_pipeline = _MockPipeline(results=_make_full_results())
+        agent = RAGAgent(working_memory=wm, pipeline=loaded.pipeline)
+        output = await agent._run(_make_input())
+
+        assert output.degraded is True
+        assert len(spy_pipeline.calls) == 0
 
 
 class TestRAGAgentPersistence:

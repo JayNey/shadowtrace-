@@ -676,6 +676,9 @@ class RAGAgentInput(AgentInput):
     event_id: str
     triage_result: TriageResult
     evidence_output: EvidenceOutput | None = None
+    tenant_id: str | None = None
+    principal: str | None = None
+    trace_id: str | None = None
 
 
 class RiskAgentInput(AgentInput):

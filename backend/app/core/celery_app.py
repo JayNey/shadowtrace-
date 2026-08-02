@@ -34,17 +34,26 @@ def init_worker_telemetry(**kwargs: object) -> None:
     logger.debug("Celery worker session provider + telemetry initialized")
 
 
-def shutdown_worker_session_provider(**kwargs: object) -> None:
-    """Dispose the worker child SessionProvider on process shutdown (ISSUE-118)."""
+def shutdown_worker_resources(**kwargs: object) -> None:
+    """Dispose loop-bound worker resources on process shutdown (ISSUE-118/138)."""
     del kwargs
+    from app.core.embedding.factory import close_embedding_client
     from app.db.session_provider import dispose_session_provider
+    from app.rag.resources import reset_loaded_retrieval_resources
 
     asyncio.run(dispose_session_provider())
-    logger.debug("Celery worker session provider disposed")
+    asyncio.run(close_embedding_client())
+    reset_loaded_retrieval_resources()
+    logger.debug("Celery worker session provider + retrieval resources disposed")
+
+
+def shutdown_worker_session_provider(**kwargs: object) -> None:
+    """Backward-compatible alias for worker shutdown hook."""
+    shutdown_worker_resources(**kwargs)
 
 
 worker_process_init.connect(init_worker_telemetry, weak=False)
-worker_process_shutdown.connect(shutdown_worker_session_provider, weak=False)
+worker_process_shutdown.connect(shutdown_worker_resources, weak=False)
 
 celery_app = Celery("shadowtrace")
 
@@ -110,5 +119,6 @@ celery_app.conf.update(
 __all__ = [
     "celery_app",
     "init_worker_telemetry",
+    "shutdown_worker_resources",
     "shutdown_worker_session_provider",
 ]

@@ -29,6 +29,7 @@ from app.core.llm.base import InMemoryLLMCallAuditRecorder
 from app.core.llm.mock_client import MockLLMClient
 from app.models.knowledge import KnowledgeChunk, RetrievalResult, RetrievedChunk
 from app.rag.citation_tracer import CitationTracer
+from app.rag.context import RetrievalContext
 from app.rag.hybrid_retriever import HybridRetriever
 from app.rag.pipeline import RetrievalPipeline
 from app.rag.query_rewriter import QueryRewriter
@@ -41,6 +42,15 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace",
 )
+
+
+def _ctx(event_id: str = "test-event") -> RetrievalContext:
+    return RetrievalContext(
+        tenant_id="local",
+        principal="investigation:test",
+        event_id=event_id,
+        trace_id=f"evt:{event_id}",
+    )
 
 
 def _alembic_config() -> Config:
@@ -271,7 +281,7 @@ class TestCitationTracer:
 
 
 class _FailingRewriter:
-    async def rewrite(self, query: str) -> list[str]:
+    async def rewrite(self, query: str, *, context: RetrievalContext) -> list[str]:
         raise LLMError("simulated LLM failure", error_code="llm_test_error")
 
 
@@ -292,7 +302,12 @@ class _ConstantRetriever:
         self._results = result_lists
 
     async def retrieve(
-        self, queries: list[str], kb_names: list[str], top_k: int = 5
+        self,
+        queries: list[str],
+        kb_names: list[str],
+        top_k: int = 5,
+        *,
+        context: RetrievalContext,
     ) -> list[list[RetrievedChunk]]:
         return self._results
 
@@ -314,7 +329,9 @@ class TestPipelineDegradation:
             retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
             reranker=MockReranker(),
         )
-        result = await pipeline.retrieve("ransomware attack", ["attack_kb"], top_k=2)
+        result = await pipeline.retrieve(
+            "ransomware attack", ["attack_kb"], top_k=2, context=_ctx()
+        )
         assert "query_rewriter" in result.degraded_steps
         assert result.query == "ransomware attack"
         assert result.rewritten_queries == ["ransomware attack"]
@@ -326,11 +343,13 @@ class TestPipelineDegradation:
         """Real QueryRewriter surfaces LLM failures to degraded_steps via pipeline."""
         chunks = [_make_chunk("chk-01", "attack_kb", "ransomware on corporate network", score=0.9)]
         pipeline = RetrievalPipeline(
-            rewriter=QueryRewriter(_BrokenLLM(), event_id="test", agent_name="test"),  # type: ignore[arg-type]
+            rewriter=QueryRewriter(_BrokenLLM(), agent_name="test"),  # type: ignore[arg-type]
             retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
             reranker=MockReranker(),
         )
-        result = await pipeline.retrieve("ransomware attack", ["attack_kb"], top_k=1)
+        result = await pipeline.retrieve(
+            "ransomware attack", ["attack_kb"], top_k=1, context=_ctx()
+        )
         assert "query_rewriter" in result.degraded_steps
         assert result.rewritten_queries == ["ransomware attack"]
         assert len(result.chunks) == 1
@@ -344,13 +363,12 @@ class TestPipelineDegradation:
         pipeline = RetrievalPipeline(
             rewriter=QueryRewriter(
                 MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
-                event_id="test",
                 agent_name="test",
             ),
             retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
             reranker=Reranker(Settings(rerank_mode="remote")),
         )
-        result = await pipeline.retrieve("test query", ["kb1"], top_k=2)
+        result = await pipeline.retrieve("test query", ["kb1"], top_k=2, context=_ctx())
         assert "reranker" in result.degraded_steps
         assert [c.chunk_id for c in result.chunks] == ["chk-a", "chk-b"]
 
@@ -365,13 +383,12 @@ class TestPipelineDegradation:
         pipeline = RetrievalPipeline(
             rewriter=QueryRewriter(
                 MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
-                event_id="test",
                 agent_name="test",
             ),
             retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
             reranker=_FailingReranker(),  # type: ignore[arg-type]
         )
-        result = await pipeline.retrieve("test query", ["kb1"], top_k=3)
+        result = await pipeline.retrieve("test query", ["kb1"], top_k=3, context=_ctx())
         assert "reranker" in result.degraded_steps
         assert len(result.chunks) == 3
         assert result.chunks[0].chunk_id == "chk-a"
@@ -384,13 +401,12 @@ class TestPipelineDegradation:
         pipeline = RetrievalPipeline(
             rewriter=QueryRewriter(
                 MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
-                event_id="test",
                 agent_name="test",
             ),
             retriever=_ConstantRetriever([]),  # type: ignore[arg-type]
             reranker=MockReranker(),
         )
-        result = await pipeline.retrieve("empty", ["kb1"], top_k=5)
+        result = await pipeline.retrieve("empty", ["kb1"], top_k=5, context=_ctx())
         assert result.chunks == []
         assert result.citations == []
 
@@ -403,7 +419,7 @@ class TestPipelineDegradation:
             retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
             reranker=_FailingReranker(),  # type: ignore[arg-type]
         )
-        result = await pipeline.retrieve("test", ["kb1"], top_k=1)
+        result = await pipeline.retrieve("test", ["kb1"], top_k=1, context=_ctx())
         assert "query_rewriter" in result.degraded_steps
         assert "reranker" in result.degraded_steps
         assert len(result.chunks) == 1
@@ -460,7 +476,7 @@ def _build_pipeline(
     llm: MockLLMClient,
 ) -> RetrievalPipeline:
     return RetrievalPipeline(
-        rewriter=QueryRewriter(llm, event_id="test-event", agent_name="RAGAgent"),
+        rewriter=QueryRewriter(llm, agent_name="RAGAgent"),
         retriever=HybridRetriever(store, embed_service),
         reranker=MockReranker(),
     )
@@ -526,8 +542,12 @@ class TestFullPipelineIntegration:
         """Acceptance criterion: same query twice -> identical results in mock mode."""
         pipeline = _build_pipeline(seeded_store, embed_service, mock_llm)
 
-        result1 = await pipeline.retrieve("phishing attack on executives", ["attack_kb"], top_k=3)
-        result2 = await pipeline.retrieve("phishing attack on executives", ["attack_kb"], top_k=3)
+        result1 = await pipeline.retrieve(
+            "phishing attack on executives", ["attack_kb"], top_k=3, context=_ctx()
+        )
+        result2 = await pipeline.retrieve(
+            "phishing attack on executives", ["attack_kb"], top_k=3, context=_ctx()
+        )
 
         assert [c.chunk_id for c in result1.chunks] == [c.chunk_id for c in result2.chunks]
         assert [c.score for c in result1.chunks] == [c.score for c in result2.chunks]
@@ -551,6 +571,7 @@ class TestFullPipelineIntegration:
             "incident response and threat detection",
             ["attack_kb", "playbook_kb"],
             top_k=5,
+            context=_ctx(),
         )
         assert len(result.chunks) > 0
         kbs = {c.kb_name for c in result.chunks}
@@ -567,7 +588,9 @@ class TestFullPipelineIntegration:
         """Acceptance criterion: each final chunk has a citation with quoted_text."""
         pipeline = _build_pipeline(seeded_store, embed_service, mock_llm)
 
-        result = await pipeline.retrieve("ransomware lateral movement", ["attack_kb"], top_k=3)
+        result = await pipeline.retrieve(
+            "ransomware lateral movement", ["attack_kb"], top_k=3, context=_ctx()
+        )
         assert len(result.citations) == len(result.chunks)
 
         for cit in result.citations:
@@ -587,7 +610,9 @@ class TestFullPipelineIntegration:
         """Acceptance criterion: each quoted_text can be traced back to its chunk."""
         pipeline = _build_pipeline(seeded_store, embed_service, mock_llm)
 
-        result = await pipeline.retrieve("credential dumping mimikatz", ["attack_kb"], top_k=3)
+        result = await pipeline.retrieve(
+            "credential dumping mimikatz", ["attack_kb"], top_k=3, context=_ctx()
+        )
 
         chunk_by_id = {c.chunk_id: c.content for c in result.chunks}
         for cit in result.citations:
@@ -606,7 +631,7 @@ class TestFullPipelineIntegration:
         """Querying an empty KB returns empty but valid RetrievalResult."""
         pipeline = _build_pipeline(knowledge_store, embed_service, mock_llm)
 
-        result = await pipeline.retrieve("anything", ["attack_kb"], top_k=5)
+        result = await pipeline.retrieve("anything", ["attack_kb"], top_k=5, context=_ctx())
         assert isinstance(result, RetrievalResult)
         assert result.chunks == []
         assert result.citations == []
