@@ -94,6 +94,17 @@ jobs:
       - name: Run celery worker smoke script
         run: bash scripts/celery_worker_smoke.sh
 
+      - name: ISSUE-110 autonomous mock E2E (worker-gated)
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@127.0.0.1:5432/shadowtrace
+          REDIS_URL: redis://127.0.0.1:6379/0
+          TASK_MODE: celery
+          CELERY_BROKER_URL: redis://127.0.0.1:6379/0
+        run: >
+          uv run --frozen pytest tests/integration/autonomous_e2e/
+          -m autonomous_mock_e2e -v --tb=short
+
       - name: Tear down stack
         if: always()
         run: |

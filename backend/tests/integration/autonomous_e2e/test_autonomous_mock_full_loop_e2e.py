@@ -499,6 +499,36 @@ async def test_scenario_a_worker_completes_enqueued_intent(
     assert snap.intent_broker_task_ids[0] is not None
     assert snap.event_status is not None
     assert snap.audit_log_count >= 1
+    assert snap.agent_trace_count >= 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scenario_full_loop_ingest_execute_investigation_produces_agent_trace(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ingest → production execute_investigation (mock SuperAgent) → AgentTrace + status advance."""
+    events, _intent_service, _store = build_autonomous_stack(session_factory, redis_client)
+    ingest = await events.ingest_source_object(
+        incident_source(object_id=unique_id("inc-full-loop"))
+    )
+    async with session_factory() as session:
+        before = await session.get(orm.SecurityEvent, ingest.event_id)
+    assert before is not None
+    initial_status = before.status
+
+    patch_production_session_factory(monkeypatch, session_factory)
+
+    result = await tasks.execute_investigation(ingest.event_id)
+    assert result["status"] == "completed"
+
+    snap = await collect_observability(session_factory, ingest.event_id)
+    assert snap.agent_trace_count >= 1
+    assert snap.event_status is not None
+    assert snap.event_status != initial_status
+    assert snap.audit_log_count >= 1
 
 
 # --------------------------------------------------------------------------- #
@@ -1242,6 +1272,7 @@ async def test_scenario_c_unknown_action_requires_manual_resolve(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.integration
 def test_scenario_d_auto_response_rejects_live_disposition_at_startup() -> None:
     """AUTO_RESPONSE with live disposition adapter must fail closed at startup."""
     with pytest.raises(ConfigurationError):
@@ -1253,6 +1284,7 @@ def test_scenario_d_auto_response_rejects_live_disposition_at_startup() -> None:
         )
 
 
+@pytest.mark.integration
 def test_scenario_d_auto_response_rejects_live_source_at_startup() -> None:
     """AUTO_RESPONSE with live source must fail closed at Settings construction."""
     with pytest.raises(ConfigurationError):
@@ -1264,6 +1296,7 @@ def test_scenario_d_auto_response_rejects_live_source_at_startup() -> None:
         )
 
 
+@pytest.mark.integration
 def test_scenario_d_production_rejects_mock_runtime_at_startup() -> None:
     with pytest.raises(ConfigurationError):
         Settings(
@@ -1328,6 +1361,76 @@ async def test_scenario_d_celery_health_broker_down_reports_error(
     )
     assert health["broker"] == "error"
     assert health["worker"]["status"] == "degraded"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_scenario_d_broker_down_publish_marks_retry_and_degraded(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broker publish failure reverts ENQUEUED intent to RETRY and sets degraded flag (#622)."""
+    from kombu.exceptions import OperationalError
+
+    settings = mock_autonomous_settings(AUTO_INVESTIGATE_CLAIM_LEASE_S=30)
+    _events, intent_service, _store = build_autonomous_stack(
+        session_factory,
+        redis_client,
+        settings=settings,
+    )
+    event_id = unique_id("evt-d-broker-down")
+    intent_id = unique_id("iin-d-broker-down")
+    await _seed_security_event(
+        session_factory,
+        event_id=event_id,
+        status=EventStatus.NEW,
+        object_id=f"inc-{event_id}",
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.CLAIMED.value,
+                    revision=1,
+                    attempt=0,
+                    claim_owner="iss110-test",
+                )
+            )
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _broker_down(**_kwargs: object) -> None:
+        raise OperationalError("broker unavailable")
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _broker_down,
+    )
+
+    published = await intent_service._publish_claimed_intent(intent_id)
+    assert published is False
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        event = await session.get(orm.SecurityEvent, event_id)
+    assert row is not None
+    assert event is not None
+    assert row.status == InvestigationIntentStatus.RETRY.value
+    assert row.last_error is not None
+    assert any(
+        flag.startswith("auto_investigate_dispatch_unavailable=")
+        for flag in event.degraded_flags
+    )
 
 
 @pytest.mark.integration
@@ -1435,6 +1538,7 @@ async def test_scenario_d_worker_recovery_completes_queued_task(
     assert snap.intent_broker_task_ids[0] is not None
     assert snap.event_status is not None
     assert snap.audit_log_count >= 1
+    assert snap.agent_trace_count >= 1
 
 
 @pytest.mark.integration
