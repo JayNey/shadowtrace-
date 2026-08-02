@@ -8,6 +8,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.core.errors import ToolCallGrantUnavailableError
+from app.models.agent_io import PlanStep
 from app.models.enums import ToolCategory
 from app.models.tool_meta import RoutingKind
 from app.models.tool_call_grant import ToolCallGrantScope
@@ -51,6 +52,38 @@ def list_dynamic_query_tools(registry: ToolRegistry) -> list[str]:
     )
 
 
+def resolve_react_grant_tools(
+    registry: ToolRegistry,
+    required_tools: list[str] | None,
+) -> list[str]:
+    """Intersect plan-step required_tools with registry; fall back when plan is empty."""
+
+    if required_tools:
+        narrowed = sorted(
+            resolve_effective_query_tools(
+                ToolCallGrantScope(allowed_tools=required_tools),
+                registry,
+            )
+        )
+        if narrowed:
+            return narrowed
+        logger.warning(
+            "react plan required_tools produced empty grant scope; falling back to registry query tools"
+        )
+    return sorted(
+        resolve_effective_query_tools(
+            ToolCallGrantScope(allowed_tools=list_dynamic_query_tools(registry)),
+            registry,
+        )
+    )
+
+
+def plan_step_binding_id(step: PlanStep | None) -> str | None:
+    if step is None:
+        return None
+    return f"react-step-{step.step_order}"
+
+
 @dataclass
 class ReactToolExecutorFactory:
     """Mint grant-bound executors per investigation event for ReAct dynamic calls."""
@@ -70,6 +103,7 @@ class ReactToolExecutorFactory:
         *,
         tenant_id: str | None = None,
         source_snapshot: dict[str, Any] | None = None,
+        plan_step: PlanStep | None = None,
     ) -> ReadOnlyReActExecutor:
         resolved_tenant = (tenant_id or resolve_tenant_id(source_snapshot) or "").strip()
         if not resolved_tenant:
@@ -84,13 +118,11 @@ class ReactToolExecutorFactory:
                 details={"event_id": event_id},
             )
 
-        allowed_tools = list_dynamic_query_tools(self.registry)
-        scope_tools = sorted(
-            resolve_effective_query_tools(
-                ToolCallGrantScope(allowed_tools=allowed_tools),
-                self.registry,
-            )
+        scope_tools = resolve_react_grant_tools(
+            self.registry,
+            list(plan_step.required_tools) if plan_step is not None else None,
         )
+        step_id = plan_step_binding_id(plan_step)
         issued = await self.grant_service.issue_grant(
             build_react_grant_request(
                 event_id=event_id,
@@ -98,6 +130,7 @@ class ReactToolExecutorFactory:
                 allowed_tools=scope_tools,
                 max_calls=max(1, DEFAULT_TOOL_CALL_BUDGET),
                 policy_version=self.settings.tool_call_grant_policy_version,
+                plan_step_id=step_id,
             )
         )
         if issued.grant_token:
@@ -127,4 +160,6 @@ __all__ = [
     "ReactToolExecutorFactory",
     "build_evidence_query_executor",
     "list_dynamic_query_tools",
+    "plan_step_binding_id",
+    "resolve_react_grant_tools",
 ]

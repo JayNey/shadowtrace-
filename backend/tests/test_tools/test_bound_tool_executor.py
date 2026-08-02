@@ -20,6 +20,7 @@ from sqlalchemy.pool import NullPool
 from app.core.errors import ToolCallGrantDeniedError
 from app.db import models as orm
 from app.models.enums import ActionCategory, ToolCategory
+from app.models.tool_call_grant import ToolCallMode
 from app.models.tool_meta import RoutingKind, SideEffectLevel, ToolMeta, ToolResultStatus
 from app.providers.tools.mock_provider import MockToolProvider, bind_mock_tool_provider
 from app.services.evidence_projection import (
@@ -159,6 +160,8 @@ async def _bound_executor(
     event_id: str,
     allowed_tools: list[str] | None = None,
     max_calls: int = 5,
+    mode: ToolCallMode = ToolCallMode.PRODUCTION,
+    shadow_run_id: str | None = None,
 ) -> BoundToolExecutor:
     issued = await grant_service.issue_grant(
         build_react_grant_request(
@@ -166,6 +169,8 @@ async def _bound_executor(
             tenant_id="tenant-a",
             allowed_tools=allowed_tools or ["query_dns"],
             max_calls=max_calls,
+            mode=mode,
+            shadow_run_id=shadow_run_id,
         )
     )
     grant = await grant_service.load_grant(issued.grant.grant_id, grant_token=issued.grant_token)
@@ -317,3 +322,48 @@ async def test_inner_executor_failure_finalizes_attempt(
             event_id,
         )
     assert await grant_service.count_attempts(bound.grant.grant_id) == 1
+
+
+class _CountingBudgetService:
+    def __init__(self) -> None:
+        self.charges = 0
+
+    async def check(self, event_id: str, agent_name: str) -> None:
+        return None
+
+    async def charge_tool(self, event_id: str, agent_name: str, tool_name: str) -> None:
+        self.charges += 1
+
+
+@pytest.mark.asyncio
+async def test_shadow_bound_call_does_not_increment_production_budget(
+    grant_service: ToolCallGrantService,
+    registry: ToolRegistry,
+    evidence_projection: EvidenceProjection,
+    mock_provider: MockToolProvider,
+) -> None:
+    counting_budget = _CountingBudgetService()
+    executor = ToolExecutor(
+        registry=registry,
+        breaker_registry=CircuitBreakerRegistry(),
+        provider_context=lambda: bind_mock_tool_provider(mock_provider),
+        budget_service=counting_budget,  # type: ignore[arg-type]
+    )
+    sfx = _sfx()
+    event_id = f"evt-shadow-budget-{sfx}"
+    shadow_run_id = f"shadow-{sfx}"
+    bound = await _bound_executor(
+        grant_service,
+        executor,
+        registry,
+        event_id=event_id,
+        mode=ToolCallMode.SHADOW,
+        shadow_run_id=shadow_run_id,
+    )
+    with _bound_evidence_scope(evidence_projection):
+        await bound.call(
+            "query_dns",
+            {"domain": "unknown-upload-example.com", "time_range": WINDOW},
+            event_id,
+        )
+    assert counting_budget.charges == 0

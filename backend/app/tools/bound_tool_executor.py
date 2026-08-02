@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from app.core.errors import ToolCallGrantDeniedError
@@ -22,7 +22,7 @@ from app.services.tool_call_grant_resolver import (
     validate_scope_params,
 )
 from app.services.tool_call_grant_service import ToolCallGrantService
-from app.tools.executor import ToolExecutor
+from app.tools.executor import NoopBudgetService, ToolExecutor
 from app.tools.registry import ToolRegistry, ToolValidationError
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,13 @@ class BoundToolExecutor:
     def trusted_agent_name(self) -> str:
         return self.grant.execution_principal.agent_name
 
+    def _dispatch_executor(self) -> ToolExecutor:
+        """Shadow grants must not charge production BudgetService ledgers."""
+
+        if self.grant.mode is ToolCallMode.SHADOW:
+            return replace(self.inner, budget_service=NoopBudgetService())
+        return self.inner
+
     async def call(
         self,
         tool_name: str,
@@ -67,8 +74,8 @@ class BoundToolExecutor:
     ) -> BoundToolCallResult:
         del agent_name  # never trust caller-supplied identity
         params = dict(params)
-        attempt = await self.grant_service.reserve_attempt(
-            self.grant,
+        attempt, self.grant = await self.grant_service.reserve_attempt(
+            self.grant.grant_id,
             tool_name=tool_name,
             params=params,
             event_id=event_id,
@@ -104,7 +111,7 @@ class BoundToolExecutor:
             ) from exc
 
         try:
-            result = await self.inner.call(
+            result = await self._dispatch_executor().call(
                 tool_name,
                 params,
                 event_id,
@@ -157,9 +164,11 @@ class BoundToolExecutor:
     ) -> str | None:
         if self.grant.event_id != event_id:
             return "cross-event grant reuse denied"
-        if self.grant.tenant_id and params.get("tenant_id"):
-            if str(params["tenant_id"]) != self.grant.tenant_id:
-                return "tenant mismatch"
+        if self.grant.tenant_id:
+            param_tenant = params.get("tenant_id")
+            if param_tenant is not None and str(param_tenant).strip():
+                if str(param_tenant) != self.grant.tenant_id:
+                    return "tenant mismatch"
         if is_non_query_dynamic_tool(self.registry, tool_name):
             return "dynamic non-query tools are forbidden"
         if not is_tool_allowed_by_grant(

@@ -1058,6 +1058,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             logger.warning("SuperAgent: ReAct skipped — react_llm_client not wired")
             return
 
+        from app.core.errors import ToolCallGrantUnavailableError
         from app.orchestration.react_engine import ReActEngine
         from app.services.tenant_resolution import resolve_tenant_id
 
@@ -1065,14 +1066,23 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         goal = (step.step_goal or "补全调查证据缺口").strip()
         logger.info("SuperAgent: ReAct step for event=%s goal=%r", event_id, goal)
 
+        react_exec = self.react_executor
         if self.react_executor_factory is not None:
-            react_exec = await self.react_executor_factory.for_event(
-                event_id,
-                tenant_id=resolve_tenant_id(ec.source_snapshot),
-                source_snapshot=ec.source_snapshot,
-            )
-        else:
-            react_exec = self.react_executor
+            try:
+                react_exec = await self.react_executor_factory.for_event(
+                    event_id,
+                    tenant_id=resolve_tenant_id(ec.source_snapshot),
+                    source_snapshot=ec.source_snapshot,
+                    plan_step=step,
+                )
+            except ToolCallGrantUnavailableError:
+                logger.warning(
+                    "SuperAgent: ReAct skipped — tool call grant unavailable event=%s",
+                    event_id,
+                )
+                return
+        elif react_exec is None:
+            return
 
         context: dict[str, Any] = {
             "event_id": event_id,
