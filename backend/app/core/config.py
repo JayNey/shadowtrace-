@@ -6,6 +6,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.errors import ConfigurationError
+from app.models.workflow import AUTO_APPROVABLE_ACTION_LEVELS, parse_action_level_label
 
 
 def _looks_mock(value: str) -> bool:
@@ -141,6 +142,17 @@ class Settings(BaseSettings):
         ge=1,
     )
 
+    auto_response_enabled: bool = Field(default=False, alias="AUTO_RESPONSE_ENABLED")
+    auto_response_min_severity: str = Field(
+        default="high",
+        alias="AUTO_RESPONSE_MIN_SEVERITY",
+    )
+    auto_response_max_auto_level: str = Field(
+        default="L1",
+        alias="AUTO_RESPONSE_MAX_AUTO_LEVEL",
+    )
+    auto_response_event_types: str = Field(default="", alias="AUTO_RESPONSE_EVENT_TYPES")
+
     neo4j_enabled: bool = Field(default=False, alias="NEO4J_ENABLED")
     neo4j_uri: str = Field(default="bolt://localhost:7687", alias="NEO4J_URI")
     neo4j_user: str = Field(default="neo4j", alias="NEO4J_USER")
@@ -156,6 +168,14 @@ class Settings(BaseSettings):
     def model_post_init(self, __context: object) -> None:
         if not (self.celery_broker_url or "").strip():
             object.__setattr__(self, "celery_broker_url", self.redis_url)
+        auto_response_violations = self.auto_response_fail_closed_violations()
+        if auto_response_violations:
+            raise ConfigurationError(
+                "AUTO_RESPONSE_ENABLED requires mock-only runtime modes: "
+                + ", ".join(auto_response_violations),
+                error_code="configuration_error",
+                details={"violations": auto_response_violations},
+            )
         violations = self.production_fail_closed_violations()
         if violations:
             raise ConfigurationError(
@@ -164,6 +184,29 @@ class Settings(BaseSettings):
                 error_code="configuration_error",
                 details={"app_env": self.app_env, "violations": violations},
             )
+
+    def auto_response_fail_closed_violations(self) -> list[str]:
+        """Reject live connector/provider combinations when auto-response is on."""
+        if not self.auto_response_enabled:
+            return []
+        violations: list[str] = []
+        if self.source_mode.strip().lower() != "mock_xdr":
+            violations.append(f"source_mode={self.source_mode}")
+        if not _looks_mock(self.tool_mode):
+            violations.append(f"tool_mode={self.tool_mode}")
+        if not _looks_mock(self.disposition_mode):
+            violations.append(f"disposition_mode={self.disposition_mode}")
+        if not _looks_mock(self.disposition_adapter_kind):
+            violations.append(f"disposition_adapter_kind={self.disposition_adapter_kind}")
+        raw_level = (self.auto_response_max_auto_level or "L1").strip()
+        level = parse_action_level_label(raw_level)
+        if level is None:
+            violations.append(f"auto_response_max_auto_level={raw_level}")
+        elif level not in AUTO_APPROVABLE_ACTION_LEVELS:
+            violations.append(
+                f"auto_response_max_auto_level={level.value} exceeds L1 auto-approve gate"
+            )
+        return violations
 
     def production_fail_closed_violations(self) -> list[str]:
         """Runtime modes that must never be active when ``app_env=production``.

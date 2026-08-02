@@ -26,6 +26,7 @@ from app.models.investigation_intent import (
     validate_intent_transition,
 )
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
+from app.services.auto_response_policy import AutoResponsePolicyService
 from app.services.degraded_flag_service import DegradedFlagService
 
 logger = logging.getLogger(__name__)
@@ -62,10 +63,34 @@ def deterministic_investigation_task_id(intent_id: str, revision: int) -> str:
     return hashlib.sha256(f"{intent_id}:{revision}".encode()).hexdigest()
 
 
+async def _resolve_response_link_role(
+    session: AsyncSession,
+    event_id: str,
+) -> str:
+    """Resolve source link role for auto-response gating (fail closed on provisional)."""
+    roles = (
+        await session.scalars(
+            select(orm.SourceEventLink.role).where(
+                orm.SourceEventLink.event_id == event_id,
+                orm.SourceEventLink.role.in_(
+                    (PROVISIONAL_LINK_ROLE, PRIMARY_LINK_ROLE),
+                ),
+            )
+        )
+    ).all()
+    role_set = {str(role) for role in roles}
+    if PROVISIONAL_LINK_ROLE in role_set:
+        return PROVISIONAL_LINK_ROLE
+    if PRIMARY_LINK_ROLE in role_set:
+        return PRIMARY_LINK_ROLE
+    return PRIMARY_LINK_ROLE
+
+
 class _EnqueuedPublishTarget(NamedTuple):
     event_id: str
     task_id: str
     intent_id: str
+    include_response_execution: bool
 
 
 class InvestigationIntentService:
@@ -76,12 +101,14 @@ class InvestigationIntentService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         policy: AutoInvestigatePolicyService | None = None,
+        auto_response_policy: AutoResponsePolicyService | None = None,
         degraded_flags: DegradedFlagService | None = None,
         settings: Settings | None = None,
         worker_id: str = _DISPATCH_WORKER_ID,
     ) -> None:
         self._session_factory = session_factory
         self._policy = policy or AutoInvestigatePolicyService(settings)
+        self._auto_response = auto_response_policy or AutoResponsePolicyService(settings)
         self._degraded = degraded_flags
         self._settings = settings or get_settings()
         self._worker_id = worker_id
@@ -89,6 +116,10 @@ class InvestigationIntentService:
     @property
     def policy(self) -> AutoInvestigatePolicyService:
         return self._policy
+
+    @property
+    def auto_response_policy(self) -> AutoResponsePolicyService:
+        return self._auto_response
 
     async def maybe_create_pending_in_session(
         self,
@@ -506,6 +537,15 @@ class InvestigationIntentService:
                 writer="InvestigationIntentService",
             )
 
+    async def _set_auto_response_dispatch_degraded(self, event_id: str) -> None:
+        if self._degraded is not None:
+            await self._degraded.set_flag(
+                event_id,
+                "auto_response_dispatch_unavailable",
+                True,
+                writer="InvestigationIntentService",
+            )
+
     async def _commit_enqueued_publish_target(
         self,
         intent_id: str,
@@ -533,6 +573,29 @@ class InvestigationIntentService:
                         skip_reason="event_not_new",
                     )
                     return None
+                source_product = None
+                if event.creation_source_ref:
+                    raw = event.creation_source_ref.get("source_product")
+                    if isinstance(raw, str):
+                        source_product = raw
+                link_role = await _resolve_response_link_role(session, event.event_id)
+                response_decision = self._auto_response.evaluate(
+                    event,
+                    link_role=link_role,
+                    source_product=source_product,
+                )
+                include_response = response_decision.eligible
+                row.include_response_execution = include_response
+                if include_response:
+                    session.add(
+                        orm.EventAuditLog(
+                            event_id=event.event_id,
+                            from_status=event.status,
+                            to_status=event.status,
+                            operator="AutoResponsePolicyService",
+                            reason=response_decision.reason,
+                        )
+                    )
                 task_id = deterministic_investigation_task_id(row.intent_id, int(row.revision))
                 validate_intent_transition(
                     InvestigationIntentStatus.CLAIMED,
@@ -543,7 +606,12 @@ class InvestigationIntentService:
                 row.claim_owner = None
                 row.claim_expires_at = None
                 row.last_error = None
-                return _EnqueuedPublishTarget(row.event_id, task_id, row.intent_id)
+                return _EnqueuedPublishTarget(
+                    row.event_id,
+                    task_id,
+                    row.intent_id,
+                    include_response,
+                )
 
     async def _revert_enqueued_after_publish_failure(
         self,
@@ -598,6 +666,7 @@ class InvestigationIntentService:
                 event_id=target.event_id,
                 task_id=target.task_id,
                 intent_id=target.intent_id,
+                include_response_execution=target.include_response_execution,
             )
         except DependencyUnavailableError as exc:
             await delete_task_metadata(target.task_id)
@@ -608,6 +677,8 @@ class InvestigationIntentService:
                 exc_info=True,
             )
             await self._revert_enqueued_after_publish_failure(target.intent_id, exc)
+            if target.include_response_execution:
+                await self._set_auto_response_dispatch_degraded(target.event_id)
             if strict:
                 raise
             return False
@@ -621,6 +692,8 @@ class InvestigationIntentService:
                 exc_info=True,
             )
             await self._revert_enqueued_after_publish_failure(target.intent_id, exc)
+            if target.include_response_execution:
+                await self._set_auto_response_dispatch_degraded(target.event_id)
             if strict:
                 raise DependencyUnavailableError(
                     message="celery broker unavailable",

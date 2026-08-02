@@ -374,6 +374,36 @@ async def test_l0_auto_approve_without_approval_required(
 
 
 @pytest.mark.asyncio
+async def test_auto_approve_record_includes_policy_version(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    fake_bus: FakeEventBus,
+    engine: ApprovalEngine,
+) -> None:
+    from app.services.action_approval_policy import APPROVAL_POLICY_SOURCE, APPROVAL_POLICY_VERSION
+
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L1),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+
+    async with session_factory() as session:
+        record = await session.scalar(
+            select(ApprovalRecordORM).where(
+                ApprovalRecordORM.action_id == action.action_id,
+                ApprovalRecordORM.approval_cycle == 0,
+            )
+        )
+    assert record is not None
+    detail = record.detail or {}
+    assert detail.get("policy_version") == APPROVAL_POLICY_VERSION
+    assert detail.get("policy_source") == APPROVAL_POLICY_SOURCE
+
+
+@pytest.mark.asyncio
 async def test_l4_waiting_approval_publishes_once(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,

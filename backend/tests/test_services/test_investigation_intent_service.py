@@ -11,13 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
 from app.db import models as orm
-from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+from app.models.enums import EventStatus, InvestigationIntentStatus, Severity, SourceObjectKind
 from app.models.investigation_intent import (
     IntentDeliveryAdmission,
     InvestigationIntentTransitionError,
+    PROVISIONAL_LINK_ROLE,
     validate_intent_transition,
 )
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
+from app.services.auto_response_policy import AutoResponsePolicyService
+from app.services.context_service import EventContextStore
+from app.services.degraded_flag_service import DegradedFlagService
 from app.services.investigation_intent_service import (
     InvestigationIntentService,
     deterministic_investigation_task_id,
@@ -1265,3 +1269,312 @@ async def test_skip_active_intents_for_event_in_session(
         assert row is not None
         assert row.status == InvestigationIntentStatus.SKIPPED.value
         assert row.skip_reason == "event_merged"
+
+
+def _auto_response_settings(**overrides: object) -> Settings:
+    base = {
+        "AUTO_INVESTIGATE_ENABLED": True,
+        "AUTO_RESPONSE_ENABLED": True,
+        "SOURCE_MODE": "mock_xdr",
+        "TOOL_MODE": "mock",
+        "DISPOSITION_MODE": "mock_xdr",
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+@pytest.mark.asyncio
+async def test_commit_enqueued_sets_include_response_when_policy_matches(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _auto_response_settings()
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        auto_response_policy=AutoResponsePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-response-{uuid4().hex[:8]}"
+    event_id = f"evt-response-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.CLAIMED.value,
+                    revision=1,
+                    attempt=0,
+                    include_response_execution=False,
+                    claim_owner="test",
+                )
+            )
+
+    target = await service._commit_enqueued_publish_target(intent_id)
+    assert target is not None
+    assert target.include_response_execution is True
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.include_response_execution is True
+        audit = (
+            await session.scalars(
+                select(orm.EventAuditLog).where(
+                    orm.EventAuditLog.event_id == event_id,
+                    orm.EventAuditLog.operator == "AutoResponsePolicyService",
+                )
+            )
+        ).all()
+    assert len(audit) == 1
+    assert audit[0].reason == "auto_response:policy_match"
+
+
+@pytest.mark.asyncio
+async def test_commit_enqueued_skips_response_for_provisional_link(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = _auto_response_settings()
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        auto_response_policy=AutoResponsePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-prov-{uuid4().hex[:8]}"
+    event_id = f"evt-prov-{uuid4().hex[:8]}"
+    source_record_id = f"src-prov-{uuid4().hex[:8]}"
+    connector_id = "conn-mock"
+    async with session_factory() as session:
+        async with session.begin():
+            if await session.get(orm.SourceConnector, connector_id) is None:
+                session.add(
+                    orm.SourceConnector(
+                        connector_id=connector_id,
+                        source_product="mock_xdr",
+                        display_name="Mock XDR",
+                    )
+                )
+            session.add(
+                orm.SourceObject(
+                    source_record_id=source_record_id,
+                    source_product="mock_xdr",
+                    source_tenant_id="tenant-demo",
+                    connector_id=connector_id,
+                    source_kind=SourceObjectKind.INCIDENT.value,
+                    source_object_id=f"INC-{uuid4().hex[:8]}",
+                    next_outbox_sequence=0,
+                )
+            )
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            session.add(
+                orm.SourceEventLink(
+                    source_record_id=source_record_id,
+                    event_id=event_id,
+                    role=PROVISIONAL_LINK_ROLE,
+                )
+            )
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.CLAIMED.value,
+                    revision=1,
+                    attempt=0,
+                    include_response_execution=False,
+                    claim_owner="test",
+                )
+            )
+
+    target = await service._commit_enqueued_publish_target(intent_id)
+    assert target is not None
+    assert target.include_response_execution is False
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.include_response_execution is False
+
+
+@pytest.mark.asyncio
+async def test_publish_forwards_include_response_execution_flag(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _auto_response_settings()
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        auto_response_policy=AutoResponsePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-publish-{uuid4().hex[:8]}"
+    event_id = f"evt-publish-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.CLAIMED.value,
+                    revision=1,
+                    attempt=0,
+                    include_response_execution=False,
+                    claim_owner="test",
+                )
+            )
+
+    captured: dict[str, object] = {}
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _apply_async(**kwargs: object) -> None:
+        captured["kwargs"] = kwargs.get("kwargs")
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _apply_async,
+    )
+
+    published = await service._publish_claimed_intent(intent_id)
+    assert published is True
+    assert captured["kwargs"] == {
+        "include_response_execution": True,
+        "intent_id": intent_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_response_broker_failure_sets_degraded_flag(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = EventContextStore(redis_client, session_factory)
+    degraded = DegradedFlagService(store, session_factory)
+    settings = _auto_response_settings()
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        auto_response_policy=AutoResponsePolicyService(settings),
+        degraded_flags=degraded,
+        settings=settings,
+    )
+    intent_id = f"iin-degraded-{uuid4().hex[:8]}"
+    event_id = f"evt-degraded-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Suspicious process",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.CLAIMED.value,
+                    revision=1,
+                    attempt=0,
+                    include_response_execution=False,
+                    claim_owner="test",
+                    claim_expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                )
+            )
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _boom(**_kwargs: object) -> None:
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _boom,
+    )
+
+    published = await service._publish_claimed_intent(intent_id)
+    assert published is False
+
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, event_id)
+    assert event is not None
+    assert any(flag.startswith("auto_response_dispatch_unavailable=") for flag in event.degraded_flags)

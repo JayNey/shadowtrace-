@@ -147,18 +147,19 @@ def publish_investigation_for_intent(
     event_id: str,
     task_id: str,
     intent_id: str,
+    include_response_execution: bool = False,
 ) -> None:
     """Publish a deterministic Celery task for a claimed investigation intent.
 
-    Response execution is owned by #613 policy inside SuperAgent; auto-investigate
-    never sets ``include_response_execution`` here.
+    ``include_response_execution`` is resolved by AutoResponsePolicyService at
+    ENQUEUED commit time (#613); auto-investigate intent creation never sets it.
 
     Raises broker connectivity errors to the caller; ingest paths must catch.
     """
     run_investigation.apply_async(
         args=[event_id],
         kwargs={
-            "include_response_execution": False,
+            "include_response_execution": bool(include_response_execution),
             "intent_id": intent_id,
         },
         task_id=task_id,

@@ -68,6 +68,22 @@ WRITEBACK_MAX_RETRIES = 5
 # L2+ is human-in-the-loop by default; auto_execute never bypasses this for L2+.
 AUTO_APPROVABLE_ACTION_LEVELS: frozenset[ActionLevel] = frozenset({ActionLevel.L0, ActionLevel.L1})
 
+
+def parse_action_level_label(raw: str) -> ActionLevel | None:
+    """Parse config labels such as ``L1`` / ``l1`` into ``ActionLevel``."""
+    token = raw.strip()
+    if not token:
+        return None
+    try:
+        return ActionLevel(token.lower())
+    except ValueError:
+        pass
+    try:
+        return ActionLevel[token.upper()]
+    except KeyError:
+        return None
+
+
 # Budget (§4.10) — defaults mirrored in Settings.
 GLOBAL_TOKEN_BUDGET = 1_000_000
 EVENT_TOKEN_BUDGET = 100_000

@@ -95,6 +95,8 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     assert body["version"] == "0.1.0"
     assert set(body["celery"].keys()) >= {"task_mode", "broker", "worker"}
     assert body["investigation"]["task_mode"] == "background"
+    assert body["investigation"]["auto_response_enabled"] is False
+    assert body["investigation"]["approval_policy_version"] == "issue109_v1"
 
     for key in ("source_adapter", "disposition_adapter", "tool_provider"):
         component = body[key]

@@ -38,6 +38,7 @@ from app.models.workflow import (
     AUTO_APPROVABLE_ACTION_LEVELS,
     validate_action_status_transition,
 )
+from app.services.action_approval_policy import APPROVAL_POLICY_SOURCE, APPROVAL_POLICY_VERSION
 from app.services.action_mapper import action_from_orm as _action_from_orm
 from app.services.state_machine_service import StateMachineService
 
@@ -587,6 +588,8 @@ class ApprovalEngine:
         detail = {
             "rule_applied": decision.rule_applied,
             "reason": decision.reason,
+            "policy_version": APPROVAL_POLICY_VERSION,
+            "policy_source": APPROVAL_POLICY_SOURCE,
             "impact_assessment": (
                 action.impact_assessment.model_dump(mode="json")
                 if action.impact_assessment is not None

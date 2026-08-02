@@ -10,6 +10,7 @@ from redis.asyncio import Redis
 from app.core.celery_health import build_celery_health
 from app.core.config import Settings, get_settings
 from app.db.session_provider import peek_session_provider, ping_postgres_url
+from app.services.action_approval_policy import APPROVAL_POLICY_VERSION
 
 router = APIRouter(tags=["health"])
 
@@ -181,5 +182,7 @@ async def health(
             "full_loop_available": settings.orchestration_mode.strip().lower() != "analysis_only",
             "task_mode": (settings.task_mode or "background").strip().lower(),
             "auto_investigate_enabled": settings.auto_investigate_enabled,
+            "auto_response_enabled": settings.auto_response_enabled,
+            "approval_policy_version": APPROVAL_POLICY_VERSION,
         },
     }

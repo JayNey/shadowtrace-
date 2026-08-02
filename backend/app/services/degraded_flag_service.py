@@ -30,6 +30,7 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         # ISSUE-131 decision audit degradation
         "decision_audit_degraded",
         "auto_investigate_dispatch_unavailable",
+        "auto_response_dispatch_unavailable",
     }
 )
 
