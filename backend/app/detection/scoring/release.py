@@ -53,6 +53,7 @@ class AnomalyScorerRelease:
                     "expected_release_hash": expected_hash,
                     "actual_release_hash": self.release_hash,
                     "release_id": self.release_id,
+                    "category": "artifact_hash_mismatch",
                 },
             )
 

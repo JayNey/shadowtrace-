@@ -89,21 +89,16 @@ class StatisticalAnomalyOperator:
                 )
                 continue
 
-            try:
-                scored = score_snapshot(
-                    snapshot=snapshot,
-                    baseline=baseline,
-                    release=release,
-                    robust_z_threshold=robust_z_threshold,
-                    expected_release_hash=(
-                        expected_release_hash if isinstance(expected_release_hash, str) else None
-                    ),
-                    expected_baseline_content_hash=expected_baseline_hash,
-                )
-            except ValidationError:
-                if rule.missing_data_policy is MissingDataPolicy.SKIP:
-                    continue
-                raise
+            scored = score_snapshot(
+                snapshot=snapshot,
+                baseline=baseline,
+                release=release,
+                robust_z_threshold=robust_z_threshold,
+                expected_release_hash=(
+                    expected_release_hash if isinstance(expected_release_hash, str) else None
+                ),
+                expected_baseline_content_hash=expected_baseline_hash,
+            )
 
             if not scored.is_anomaly:
                 continue

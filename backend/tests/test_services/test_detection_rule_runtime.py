@@ -1256,7 +1256,7 @@ async def test_statistical_anomaly_tenant_isolation(
 
 
 @pytest.mark.asyncio
-async def test_statistical_anomaly_insufficient_history_emits_no_candidate(
+async def test_statistical_anomaly_insufficient_history_records_typed_runtime_error(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     suffix = uuid.uuid4().hex[:8]
@@ -1322,4 +1322,6 @@ async def test_statistical_anomaly_insufficient_history_emits_no_candidate(
         package_id=package_id,
     )
     assert result.candidates == []
-    assert result.errors == []
+    assert len(result.errors) == 1
+    assert result.errors[0].error_category == "validation_error"
+    assert result.errors[0].detail.get("category") == "insufficient_history"

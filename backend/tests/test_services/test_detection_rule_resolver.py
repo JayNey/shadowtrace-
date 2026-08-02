@@ -8,11 +8,12 @@ import pytest
 
 from app.core.errors import ValidationError
 from app.detection.operators import default_operator_registry
-from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE, MOCK_ACCOUNT_MAD_RELEASE_ID
 from app.detection.operators.base import OperatorExecutionContext
 from app.detection.operators.event_count import EventCountOperator
 from app.detection.operators.event_match import EventMatchOperator
+from app.detection.operators.statistical_anomaly import StatisticalAnomalyOperator
 from app.detection.operators.value_count import ValueCountOperator
+from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE, MOCK_ACCOUNT_MAD_RELEASE_ID
 from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
@@ -29,6 +30,8 @@ from app.models.detection_rule import (
 )
 from app.models.feature_snapshot import (
     FEATURE_CONTRACT_VERSION,
+    DetectionBaselineStatus,
+    DetectionFeatureBaseline,
     FeatureSnapshot,
     FeatureSnapshotProvenance,
     FeatureSnapshotStatus,
@@ -144,6 +147,77 @@ def test_compile_statistical_anomaly_accepts_mock_release() -> None:
     )
     compiled = compile_rule_definition(rule)
     assert compiled.match_criteria["model_release_id"] == MOCK_ACCOUNT_MAD_RELEASE_ID
+
+
+def _mad_snapshot_and_baseline() -> tuple[FeatureSnapshot, DetectionFeatureBaseline]:
+    cutoff = datetime(2026, 8, 3, 15, 30, 0, tzinfo=UTC)
+    snapshot = FeatureSnapshot(
+        snapshot_id="fsnap-mad",
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="user",
+        entity_id="account-1",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        window_start=datetime(2026, 8, 3, 14, 30, 0, tzinfo=UTC),
+        window_end=datetime(2026, 8, 3, 15, 0, 0, tzinfo=UTC),
+        cutoff_at=cutoff,
+        source_watermark=cutoff,
+        status=FeatureSnapshotStatus.READY,
+        features={
+            "observation_count": 30.0,
+            "avg_detection_score": 90.0,
+            "unique_action_count": 8.0,
+        },
+        provenance=FeatureSnapshotProvenance(observation_count=3),
+        content_hash="a" * 64,
+        cache_key="a" * 64,
+        idempotency_key="idem-snap",
+    )
+    baseline = DetectionFeatureBaseline(
+        baseline_id="fbase-mad",
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-test",
+        entity_type="user",
+        entity_id="account-1",
+        window_kind=FeatureWindowKind.ONE_HOUR,
+        cutoff_at=cutoff,
+        status=DetectionBaselineStatus.READY,
+        stats={
+            "robust": {
+                "observation_count": {"median": 3.0, "mad": 0.5},
+                "avg_detection_score": {"median": 50.0, "mad": 2.0},
+                "unique_action_count": {"median": 2.0, "mad": 0.0},
+            },
+        },
+        content_hash="b" * 64,
+        cache_key="b" * 64,
+        idempotency_key="idem-base",
+    )
+    return snapshot, baseline
+
+
+def test_statistical_anomaly_baseline_hash_mismatch_not_swallowed_by_skip() -> None:
+    snapshot, baseline = _mad_snapshot_and_baseline()
+    rule = _statistical_anomaly_rule(
+        match_criteria={
+            "entity_type": "user",
+            "entity_id": "account-1",
+            "model_release_id": MOCK_ACCOUNT_MAD_RELEASE_ID,
+            "model_release_hash": MOCK_ACCOUNT_MAD_RELEASE.release_hash,
+            "baseline_content_hash": "deadbeef" * 8,
+        },
+    )
+    with pytest.raises(ValidationError, match="baseline content hash mismatch"):
+        StatisticalAnomalyOperator().evaluate(
+            rule,
+            OperatorExecutionContext(
+                source_tenant_id="tenant-a",
+                cutoff_at=snapshot.cutoff_at,
+                observations=[],
+                snapshots=[snapshot],
+                baselines=[baseline],
+            ),
+        )
 
 
 def test_default_operator_registry_contains_phase_a_operators() -> None:

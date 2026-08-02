@@ -214,3 +214,19 @@ def test_baseline_content_hash_mismatch_fail_closed() -> None:
             robust_z_threshold=3.5,
             expected_baseline_content_hash="deadbeef" * 8,
         )
+
+
+def test_baseline_missing_release_feature_stats_fail_closed() -> None:
+    partial_stats = {
+        "snapshot_count": 3,
+        "robust": {
+            "observation_count": {"median": 3.0, "mad": 0.5, "p25": 2.0, "p75": 4.0, "p95": 5.0},
+        },
+    }
+    with pytest.raises(ValidationError, match="baseline missing robust stats for feature"):
+        score_snapshot(
+            snapshot=_snapshot(),
+            baseline=_baseline(stats=partial_stats),
+            release=MOCK_ACCOUNT_MAD_RELEASE,
+            robust_z_threshold=3.5,
+        )

@@ -195,11 +195,23 @@ def score_snapshot(
     for feature_name in release.scored_features:
         stats = _robust_stats_for_feature(baseline, feature_name)
         if stats is None:
-            continue
+            raise ValidationError(
+                f"baseline missing robust stats for feature: {feature_name}",
+                details={
+                    "feature_name": feature_name,
+                    "category": ScorerErrorCategory.INSUFFICIENT_COVERAGE,
+                },
+            )
         center = stats.get("median")
         scale = stats.get("mad")
         if center is None or scale is None:
-            continue
+            raise ValidationError(
+                f"baseline robust stats incomplete for feature: {feature_name}",
+                details={
+                    "feature_name": feature_name,
+                    "category": ScorerErrorCategory.INSUFFICIENT_COVERAGE,
+                },
+            )
         raw_value = snapshot.features.get(feature_name)
         value = _coerce_feature_value(raw_value, feature_name=feature_name)
         z = abs(robust_z_score(value=value, center=center, scale=scale))
