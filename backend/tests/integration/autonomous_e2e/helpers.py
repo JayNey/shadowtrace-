@@ -14,6 +14,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.auth import ROLE_APPROVER, Principal
 from app.core.config import Settings
 from app.db import models as orm
 from app.db.orm.approval import ApprovalRecordORM
@@ -198,3 +199,122 @@ TERMINAL_INTENT_STATUSES = frozenset(
         InvestigationIntentStatus.DEAD.value,
     }
 )
+
+
+@dataclass(frozen=True)
+class MockExecutionStack:
+    """Minimal mock-mode ActionExecutionService wiring for ISSUE-110 scenario B/C."""
+
+    service: Any
+    recorder: Any
+    store: EventContextStore
+
+
+async def build_mock_execution_stack(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+) -> MockExecutionStack:
+    """Build mock execution stack for approved-action execution tests."""
+    import httpx
+    from httpx import ASGITransport
+
+    from app.adapters.mock_xdr import MockXDRDispositionAdapter
+    from app.adapters.registry import DispositionAdapterRegistry
+    from app.core.event_bus import EventBus
+    from app.core.guardrails import OutboundDispositionGuard
+    from app.data_generators.scenarios import build_scenario
+    from app.mock_xdr.api import create_app
+    from app.mock_xdr.state import MockXDRState
+    from app.services.action_execution_service import ActionExecutionService
+    from app.services.disposition_sync_service import DispositionSyncService
+    from app.services.event_audit_log_service import EventAuditLogService
+    from app.services.state_machine_service import StateMachineService
+    from app.tools.executor import ToolExecutor
+    from app.tools.registry import ToolRegistry
+    from tests.integration.integration_fixtures import RecordingToolExecutor
+
+    store = EventContextStore(redis_client, session_factory)
+    state = MockXDRState()
+    state.load_scenario(build_scenario("insider_data_exfiltration", seed=42))
+    mock_app = create_app(state=state)
+    client = httpx.AsyncClient(
+        transport=ASGITransport(app=mock_app),
+        base_url="http://mock-xdr",
+        timeout=30.0,
+    )
+    registry = DispositionAdapterRegistry()
+    registry.register(
+        "mock_xdr",
+        MockXDRDispositionAdapter(
+            client=client,
+            read_token="mock-read-token",
+            write_token="mock-write-token",
+        ),
+    )
+    disposition_sync = DispositionSyncService(
+        session_factory,
+        context_store=store,
+        adapter_registry=registry,
+        outbound_guard=OutboundDispositionGuard(),
+    )
+    tool_registry = ToolRegistry()
+    await tool_registry.auto_discover_for_mode(tool_mode="mock")
+    inner = ToolExecutor(registry=tool_registry)
+    recorder = RecordingToolExecutor(inner)
+    state_machine = StateMachineService(
+        session_factory,
+        store,
+        event_bus=EventBus(redis_client),
+        audit_log=EventAuditLogService(session_factory),
+        degraded_flags=DegradedFlagService(store, session_factory),
+    )
+    service = ActionExecutionService(
+        session_factory,
+        disposition_sync=disposition_sync,
+        tool_executor=recorder,
+        state_machine=state_machine,
+        context_store=store,
+    )
+    return MockExecutionStack(service=service, recorder=recorder, store=store)
+
+
+async def count_execution_jobs(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> int:
+    async with session_factory() as session:
+        return int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.ActionExecutionJob)
+                .where(orm.ActionExecutionJob.event_id == event_id)
+            )
+            or 0
+        )
+
+
+def principal_lacks_approver_role(principal: Principal) -> bool:
+    """True when *principal* cannot call production approve/reject APIs."""
+    return not principal.has_any_role([ROLE_APPROVER])
+
+
+async def build_approval_engine(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+) -> Any:
+    """Minimal ApprovalEngine wiring for ISSUE-110 scenario B."""
+    from unittest.mock import AsyncMock
+
+    from app.agents.response_agent import build_mock_capability_manifest
+    from app.services.approval_engine import ApprovalEngine
+    from app.services.state_machine_service import StateMachineService
+
+    store = EventContextStore(redis_client, session_factory)
+    state_machine = StateMachineService(session_factory, store)
+    return ApprovalEngine(
+        session_factory,
+        event_bus=AsyncMock(),
+        state_machine=state_machine,
+        context_store=store,
+        capability_manifest=build_mock_capability_manifest(),
+    )

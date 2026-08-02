@@ -6,7 +6,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND="${ROOT}/backend"
-PYTHON="${BACKEND}/.venv/bin/python"
+PYTHON="${PYTHON:-}"
+if [[ -z "${PYTHON}" ]]; then
+  if [[ -x "${BACKEND}/.venv/bin/python" ]]; then
+    PYTHON="${BACKEND}/.venv/bin/python"
+  elif command -v uv >/dev/null 2>&1 && [[ -f "${BACKEND}/uv.lock" ]]; then
+    PYTHON="uv run --frozen python"
+  else
+    PYTHON="python3"
+  fi
+fi
 RUN_WORKER=0
 
 for arg in "$@"; do

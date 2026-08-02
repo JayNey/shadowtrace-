@@ -344,6 +344,9 @@ class RecordingToolExecutor:
         self._inner = inner
         self.calls: list[tuple[str, dict[str, Any]]] = []
 
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
     async def call(
         self,
         tool_name: str,

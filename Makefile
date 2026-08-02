@@ -229,7 +229,8 @@ autonomous-mock-e2e-pytest:
 
 autonomous-mock-e2e: autonomous-mock-e2e-pytest
 	@echo "Integration scenarios A–E (no worker) passed."
-	@echo "For worker-gated scenario A, run: make up WORKER=1 && bash scripts/run_autonomous_mock_e2e.sh --worker"
+	@echo "ci-test runs the same integration subset via default pytest addopts."
+	@echo "Full ISSUE-110 gate: make autonomous-mock-e2e && make up WORKER=1 && bash scripts/run_autonomous_mock_e2e.sh --worker"
 
 # --- ISSUE-107 Mock XDR ingestion scheduler quality gate -------------------- #
 ingestion-scheduler-test:
