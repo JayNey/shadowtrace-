@@ -49,9 +49,28 @@ class KnowledgeStore:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         embed_service: EmbeddingService,
+        *,
+        tenant_isolation_strict: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._embed = embed_service
+        self._tenant_isolation_strict = tenant_isolation_strict
+
+    @staticmethod
+    def _tenant_filter_clause(
+        tenant_id: str | None,
+        *,
+        tenant_isolation_strict: bool,
+    ) -> tuple[str, dict[str, str]]:
+        if tenant_id is None:
+            return "", {}
+        if tenant_isolation_strict:
+            clause = " AND metadata->>'tenant_id' = :tenant_id"
+        else:
+            clause = (
+                " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
+            )
+        return clause, {"tenant_id": tenant_id}
 
     @property
     def semantic_search_enabled(self) -> bool:
@@ -123,17 +142,16 @@ class KnowledgeStore:
         tenant_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Cosine-similarity search across vectors in *kb_name*."""
-        tenant_clause = ""
+        tenant_clause, tenant_params = self._tenant_filter_clause(
+            tenant_id,
+            tenant_isolation_strict=self._tenant_isolation_strict,
+        )
         params: dict[str, object] = {
             "kb_name": kb_name,
             "q": query_embedding,
             "top_k": top_k,
+            **tenant_params,
         }
-        if tenant_id is not None:
-            tenant_clause = (
-                " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
-            )
-            params["tenant_id"] = tenant_id
         sql = text(
             f"""
             SELECT chunk_id, kb_name, content, metadata,
@@ -184,17 +202,16 @@ class KnowledgeStore:
         tenant_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """PostgreSQL full-text search across chunks in *kb_name*."""
-        tenant_clause = ""
+        tenant_clause, tenant_params = self._tenant_filter_clause(
+            tenant_id,
+            tenant_isolation_strict=self._tenant_isolation_strict,
+        )
         params: dict[str, object] = {
             "kb_name": kb_name,
             "q": query_text,
             "top_k": top_k,
+            **tenant_params,
         }
-        if tenant_id is not None:
-            tenant_clause = (
-                " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
-            )
-            params["tenant_id"] = tenant_id
         sql = text(
             f"""
             SELECT chunk_id, kb_name, content, metadata,

@@ -13,7 +13,7 @@ from opentelemetry import trace
 
 from app.core.config import Settings, get_settings
 from app.models.agent_io import RAGAgentInput
-from app.services.change_window_baseline_loader import resolve_tenant_id
+from app.services.tenant_resolution import resolve_tenant_id
 
 _NIL_UUID = "00000000-0000-0000-0000-000000000000"
 

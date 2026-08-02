@@ -85,7 +85,12 @@ def build_retrieval_pipeline(
     llm_client: BaseLLMClient,
     embed_service: EmbeddingService,
 ) -> RetrievalPipeline:
-    store = KnowledgeStore(session_factory, embed_service)
+    tenant_isolation_strict = settings.app_env.strip().lower() == "production"
+    store = KnowledgeStore(
+        session_factory,
+        embed_service,
+        tenant_isolation_strict=tenant_isolation_strict,
+    )
     return RetrievalPipeline(
         rewriter=QueryRewriter(llm_client, agent_name="RAGAgent"),
         retriever=HybridRetriever(store, embed_service),
@@ -159,8 +164,10 @@ def get_loaded_retrieval_resources(
         embedding_mode=cfg.embedding_mode,
         embedding_release_id=embed_release_id,
     )
-    _resources = loaded
-    _resources_key = cache_key
+    # Cache only successful builds so transient failures can reconnect (ISSUE-138).
+    if pipeline is not None:
+        _resources = loaded
+        _resources_key = cache_key
     return loaded
 
 
@@ -222,9 +229,23 @@ def warmup_retrieval_resources() -> None:
     )
 
 
+def _ensure_pipeline_probed_for_health(cfg: Settings) -> None:
+    """Best-effort lazy build when startup warmup did not attach a pipeline."""
+    if cfg.retrieval_fixture_fallback:
+        return
+    loaded = peek_loaded_retrieval_resources()
+    if loaded is not None and loaded.pipeline is not None:
+        return
+    try:
+        warmup_retrieval_resources()
+    except Exception:  # noqa: BLE001 — health must never raise
+        logger.debug("loaded_resources health probe warmup skipped", exc_info=True)
+
+
 async def check_loaded_resources(settings: Settings | None = None) -> dict[str, Any]:
     """Sanitized readiness for /health loaded_resources block."""
     cfg = settings or get_settings()
+    _ensure_pipeline_probed_for_health(cfg)
     provider = peek_session_provider()
     postgres = "error"
     session_pool = "unknown"

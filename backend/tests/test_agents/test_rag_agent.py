@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pydantic
 import pytest
 
@@ -849,6 +851,62 @@ class TestRAGAgentBasic:
         assert all(ctx.principal == "investigation:super_agent" for ctx in contexts)
         assert all(ctx.trace_id == "trace-xyz" for ctx in contexts)
 
+    @pytest.mark.asyncio
+    async def test_concurrent_runs_isolate_retrieval_context(self):
+        """Concurrent RAG invocations must not cross-contaminate tenant/trace context."""
+        wm = _MockBoundWorkingMemory()
+
+        class _RecordingPipeline:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            async def retrieve(
+                self,
+                query: str,
+                kb_names: list[str],
+                top_k: int = 5,
+                *,
+                context: object,
+            ) -> RetrievalResult:
+                self.calls.append(
+                    {
+                        "query": query,
+                        "kb_names": kb_names,
+                        "context": context,
+                    }
+                )
+                return RetrievalResult(query=query)
+
+        pipeline_a = _RecordingPipeline()
+        pipeline_b = _RecordingPipeline()
+        agent_a = RAGAgent(working_memory=wm, pipeline=pipeline_a)
+        agent_b = RAGAgent(working_memory=wm, pipeline=pipeline_b)
+
+        input_a = _make_input().model_copy(
+            update={
+                "event_id": "evt-a",
+                "tenant_id": "tenant-a",
+                "trace_id": "trace-a",
+            }
+        )
+        input_b = _make_input().model_copy(
+            update={
+                "event_id": "evt-b",
+                "tenant_id": "tenant-b",
+                "trace_id": "trace-b",
+            }
+        )
+        await asyncio.gather(agent_a._run(input_a), agent_b._run(input_b))
+
+        contexts_a = [call["context"] for call in pipeline_a.calls]
+        contexts_b = [call["context"] for call in pipeline_b.calls]
+        assert all(ctx.event_id == "evt-a" for ctx in contexts_a)
+        assert all(ctx.tenant_id == "tenant-a" for ctx in contexts_a)
+        assert all(ctx.trace_id == "trace-a" for ctx in contexts_a)
+        assert all(ctx.event_id == "evt-b" for ctx in contexts_b)
+        assert all(ctx.tenant_id == "tenant-b" for ctx in contexts_b)
+        assert all(ctx.trace_id == "trace-b" for ctx in contexts_b)
+
 
 class TestRAGAgentDegraded:
     @pytest.mark.asyncio
@@ -916,7 +974,10 @@ class TestRAGAgentDegraded:
     async def test_fixture_fallback_wiring_never_calls_pipeline(self):
         """Fixture-loaded resources attach pipeline=None; RAGAgent must not retrieve."""
         from app.core.config import Settings
-        from app.rag.resources import get_loaded_retrieval_resources, reset_loaded_retrieval_resources
+        from app.rag.resources import (
+            get_loaded_retrieval_resources,
+            reset_loaded_retrieval_resources,
+        )
 
         reset_loaded_retrieval_resources()
         settings = Settings(app_env="development", retrieval_fixture_fallback=True)

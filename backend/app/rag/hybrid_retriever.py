@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-
 import logging
 
 from app.core.embedding.service import EmbeddingService

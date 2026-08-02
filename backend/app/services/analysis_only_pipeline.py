@@ -42,7 +42,7 @@ from app.models.entities import EntitySet
 from app.models.enums import DispositionPolicy, EventStatus, FinalVerdict
 from app.models.report import InvestigationReport
 from app.models.workflow import TransitionContext
-from app.services.change_window_baseline_loader import resolve_tenant_id
+from app.services.tenant_resolution import resolve_tenant_id
 from app.services.event_service import EventService, StateMachinePort
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
@@ -310,6 +310,7 @@ class AnalysisOnlyPipeline:
                 event.creation_source_ref.source_tenant_id if event is not None else None
             ),
             principal="investigation:analysis_only_pipeline",
+            # When ``event`` is absent, resolve tenant from persisted source snapshot.
             source_snapshot=(
                 (await self._context_store.get_full_context(event_id)).source_snapshot
                 if self._context_store is not None and event is None

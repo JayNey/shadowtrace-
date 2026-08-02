@@ -17,6 +17,7 @@ from app.rag.context import RetrievalContext
 from app.rag.hybrid_retriever import HybridRetriever
 from app.rag.pipeline import RetrievalPipeline
 from app.rag.resources import (
+    build_retrieval_pipeline,
     check_loaded_resources,
     get_loaded_retrieval_resources,
     peek_loaded_retrieval_resources,
@@ -78,6 +79,87 @@ def test_missing_dependencies_mark_unavailable_without_fixture() -> None:
     assert loaded.pipeline is None
     assert loaded.status == "unavailable"
     assert "retrieval_dependencies_not_provided" in loaded.reasons
+    assert peek_loaded_retrieval_resources() is None
+
+
+def test_build_failure_is_not_cached_and_retries() -> None:
+    settings = Settings()
+    session_factory = MagicMock(spec=async_sessionmaker[AsyncSession])
+    llm = MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder())
+    embed = EmbeddingService(settings)
+    calls = {"count": 0}
+    real_build = build_retrieval_pipeline
+
+    def _flaky_build(**kwargs: object) -> RetrievalPipeline:
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("transient pipeline build failure")
+        return real_build(**kwargs)  # type: ignore[arg-type]
+
+    with patch("app.rag.resources.build_retrieval_pipeline", side_effect=_flaky_build):
+        first = get_loaded_retrieval_resources(
+            settings=settings,
+            session_factory=session_factory,
+            llm_client=llm,
+            embed_service=embed,
+        )
+        assert first.pipeline is None
+        assert peek_loaded_retrieval_resources() is None
+
+        second = get_loaded_retrieval_resources(
+            settings=settings,
+            session_factory=session_factory,
+            llm_client=llm,
+            embed_service=embed,
+        )
+    assert second.pipeline is not None
+    assert second.status == "ready"
+    assert calls["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_loaded_resources_health_probes_warmup_when_pipeline_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_loaded_retrieval_resources()
+    mock_provider = MagicMock()
+    mock_provider.pool_policy = "pooled"
+    mock_provider.ping_postgres = AsyncMock(return_value=True)
+    warmup_calls: list[bool] = []
+
+    def _warmup() -> None:
+        warmup_calls.append(True)
+        get_loaded_retrieval_resources(
+            settings=Settings(),
+            session_factory=MagicMock(spec=async_sessionmaker[AsyncSession]),
+            llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+            embed_service=EmbeddingService(Settings()),
+        )
+
+    monkeypatch.setattr("app.rag.resources.warmup_retrieval_resources", _warmup)
+    with patch(
+        "app.rag.resources.peek_session_provider",
+        return_value=mock_provider,
+    ), patch(
+        "app.rag.resources._probe_corpus_status",
+        new_callable=AsyncMock,
+        return_value="ok",
+    ), patch(
+        "app.core.embedding.factory.get_embedding_client",
+    ) as mock_embed:
+        mock_embed.return_value.health_probe = AsyncMock(
+            return_value=MagicMock(
+                model_dump=lambda *, mode: {
+                    "status": "ok",
+                    "mode": "mock",
+                    "release_id": "mock-v1",
+                }
+            )
+        )
+        payload = await check_loaded_resources(Settings())
+    assert warmup_calls == [True]
+    assert payload["pipeline_attached"] is True
+    assert payload["status"] == "ready"
 
 
 @pytest.mark.asyncio
