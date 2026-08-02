@@ -27,6 +27,10 @@ from app.models.detection_scope import (
     DetectionScopeLifecycleState,
     UpstreamConnectorMember,
 )
+from app.services.behavior_observation_resolver import (
+    SCOPE_CONNECTOR_UNBOUND_ERROR,
+    resolve_detection_scope_id,
+)
 from app.services.behavior_observation_service import BehaviorObservationService
 from app.services.detection_scope_service import DetectionScopeService
 from tests.test_services.behavior_observation_fixtures import (
@@ -422,11 +426,14 @@ async def test_unbound_connector_projects_with_unverified_fallback(
         quality = await session.scalar(
             select(orm.DataQualityError).where(
                 orm.DataQualityError.stage == "behavior_observation_projection",
-                orm.DataQualityError.error_category == "scope_connector_unbound",
+                orm.DataQualityError.error_category == SCOPE_CONNECTOR_UNBOUND_ERROR,
             )
         )
     assert quality is not None
     assert quality.detail["connector_id"] == missing_connector
+    assert quality.detail["binding_status"] == "unverified_fallback"
+    assert quality.detail["verified_detection_scope_id"] is None
+    assert quality.detail["fallback_equals_active_scope_id"] is True
     assert activated.detection_scope_id in quality.detail["active_detection_scope_ids"]
 
 
@@ -483,7 +490,7 @@ async def test_unbound_connector_quality_marker_is_idempotent(
                 .select_from(orm.DataQualityError)
                 .where(
                     orm.DataQualityError.stage == "behavior_observation_projection",
-                    orm.DataQualityError.error_category == "scope_connector_unbound",
+                    orm.DataQualityError.error_category == SCOPE_CONNECTOR_UNBOUND_ERROR,
                     orm.DataQualityError.detail["source_record_id"].as_string() == record_id,
                 )
             )
@@ -496,8 +503,6 @@ async def test_unbound_connector_quality_marker_is_idempotent(
 async def test_ambiguous_scope_binding_still_fails_closed(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    from app.services.behavior_observation_resolver import resolve_detection_scope_id
-
     suffix = uuid.uuid4().hex[:8]
     tenant_id = f"tenant-{suffix}"
     connector_id = f"conn-ambiguous-{suffix}"
@@ -624,6 +629,20 @@ async def test_scope_update_rebinds_connector_on_reprojection(
     assert verified.detection_scope_id == activated_v2.detection_scope_id
     assert verified.detection_scope_id != activated_v1.detection_scope_id
     assert verified.observation_id != unverified.observation_id
+
+    async with session_factory() as session:
+        quality = await session.scalar(
+            select(orm.DataQualityError).where(
+                orm.DataQualityError.stage == "behavior_observation_projection",
+                orm.DataQualityError.error_category == SCOPE_CONNECTOR_UNBOUND_ERROR,
+                orm.DataQualityError.detail["source_record_id"].as_string() == record_id,
+            )
+        )
+    assert quality is not None
+    assert quality.detail["binding_status"] == "verified"
+    assert quality.detail["scope_binding_unverified"] is False
+    assert quality.detail["verified_detection_scope_id"] == activated_v2.detection_scope_id
+    assert quality.detail["resolved_by_observation_id"] == verified.observation_id
 
 
 @pytest.mark.asyncio

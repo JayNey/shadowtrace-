@@ -167,6 +167,16 @@ def test_build_behavior_observation_marks_unverified_scope_binding() -> None:
     assert observation.detection_scope_id == "dscope-fallback"
 
 
+def test_content_hash_sensitive_to_scope_binding_unverified() -> None:
+    verified = build_behavior_observation(row=_source_row(), detection_scope_id="dscope-test")
+    unverified = build_behavior_observation(
+        row=_source_row(),
+        detection_scope_id="dscope-test",
+        scope_binding_unverified=True,
+    )
+    assert verified.content_hash != unverified.content_hash
+
+
 def test_connector_kind_rejected() -> None:
     with pytest.raises(ValidationError, match="connector source objects"):
         build_behavior_observation(
@@ -246,9 +256,8 @@ async def test_resolve_scope_unbound_connector_uses_metadata_fallback(
 
     assert binding.scope_binding_unverified is True
     assert binding.detection_scope_id.startswith("dscope-")
-    # Fallback scope id may equal the ACTIVE scope id when identity + connector_set_version align;
-    # unverified flag signals connector is not yet in the active connector_set.
-    assert activated.detection_scope_id in binding.active_scope_ids
+    assert binding.detection_scope_id == activated.detection_scope_id
+    assert binding.detection_scope_id in binding.active_scope_ids
     assert binding.integration_instance_id == instance_id
 
 

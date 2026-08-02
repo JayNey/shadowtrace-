@@ -228,6 +228,13 @@ class BehaviorObservationService:
                     connector_id=row.connector_id,
                     binding=binding,
                 )
+            else:
+                await self._resolve_scope_connector_unbound_quality(
+                    active_session,
+                    source_record_id=row.source_record_id,
+                    verified_observation_id=persisted.observation_id,
+                    verified_detection_scope_id=binding.detection_scope_id,
+                )
             await self._resolve_failure(active_session, source_record_id=source_record_id)
             return persisted
 
@@ -254,9 +261,15 @@ class BehaviorObservationService:
             "integration_instance_id": binding.integration_instance_id,
             "active_detection_scope_ids": list(binding.active_scope_ids),
             "fallback_detection_scope_id": binding.detection_scope_id,
+            "verified_detection_scope_id": None,
+            "binding_status": "unverified_fallback",
+            "fallback_equals_active_scope_id": (
+                binding.detection_scope_id in binding.active_scope_ids
+            ),
             "scope_binding_unverified": True,
             "runbook": (
-                "Add connector to ACTIVE DetectionScope connector_set, then retry projection"
+                "Add connector to ACTIVE DetectionScope connector_set, "
+                "then retry projection"
             ),
         }
         existing = await session.scalar(
@@ -281,6 +294,40 @@ class BehaviorObservationService:
                 detail=detail,
             )
         )
+
+    async def _resolve_scope_connector_unbound_quality(
+        self,
+        session: AsyncSession,
+        *,
+        source_record_id: str,
+        verified_observation_id: str,
+        verified_detection_scope_id: str,
+    ) -> None:
+        """Mark prior unbound scope quality marker resolved after verified binding."""
+        existing = await session.scalar(
+            select(orm.DataQualityError)
+            .where(
+                and_(
+                    orm.DataQualityError.stage == "behavior_observation_projection",
+                    orm.DataQualityError.error_category == SCOPE_CONNECTOR_UNBOUND_ERROR,
+                    orm.DataQualityError.detail["source_record_id"].as_string() == source_record_id,
+                )
+            )
+            .limit(1)
+        )
+        if existing is None:
+            return
+        detail = dict(existing.detail or {})
+        detail.update(
+            {
+                "binding_status": "verified",
+                "scope_binding_unverified": False,
+                "verified_detection_scope_id": verified_detection_scope_id,
+                "resolved_by_observation_id": verified_observation_id,
+                "resolved_at": datetime.now(UTC).isoformat(),
+            }
+        )
+        existing.detail = detail
 
     async def record_projection_failure(
         self,
