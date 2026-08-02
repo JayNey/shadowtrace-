@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -70,6 +70,7 @@ async def clean_tables(
             await session.execute(delete(orm.BehaviorObservation))
             await session.execute(delete(orm.DetectionScopeRevision))
             await session.execute(delete(orm.SourceEventLink))
+            await session.execute(delete(orm.DispositionOutbox))
             await session.execute(delete(orm.SourceObject))
             await session.execute(delete(orm.SourceConnector))
             await session.execute(delete(orm.DataQualityError))
@@ -81,6 +82,7 @@ async def clean_tables(
             await session.execute(delete(orm.BehaviorObservation))
             await session.execute(delete(orm.DetectionScopeRevision))
             await session.execute(delete(orm.SourceEventLink))
+            await session.execute(delete(orm.DispositionOutbox))
             await session.execute(delete(orm.SourceObject))
             await session.execute(delete(orm.SourceConnector))
             await session.execute(delete(orm.DataQualityError))
@@ -577,3 +579,181 @@ async def test_projection_dead_letter_after_max_attempts(
     assert failure.status == BehaviorObservationProjectionStatus.DEAD_LETTER.value
     assert failure.attempt == 5
     assert failure.next_retry_at is None
+
+
+@pytest.mark.asyncio
+async def test_query_projection_failures_filters_by_status(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.models.behavior_observation import BehaviorObservationProjectionFailureQuery
+
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    service = _observation_service(session_factory)
+    await service.record_projection_failure(
+        source_record_id=f"src-pending-{suffix}",
+        source_tenant_id=tenant_id,
+        error_category="projection_failed",
+        detail={"message": "pending"},
+    )
+    await service.record_projection_failure(
+        source_record_id=f"src-dead-{suffix}",
+        source_tenant_id=tenant_id,
+        error_category="projection_failed",
+        detail={"message": "dead"},
+        force_dead_letter=True,
+    )
+
+    pending = await service.query_projection_failures(
+        BehaviorObservationProjectionFailureQuery(
+            status=BehaviorObservationProjectionStatus.PENDING_RETRY,
+            source_tenant_id=tenant_id,
+        )
+    )
+    dead = await service.query_projection_failures(
+        BehaviorObservationProjectionFailureQuery(
+            status=BehaviorObservationProjectionStatus.DEAD_LETTER,
+            source_tenant_id=tenant_id,
+        )
+    )
+    assert pending.total == 1
+    assert pending.items[0].status == BehaviorObservationProjectionStatus.PENDING_RETRY
+    assert dead.total == 1
+    assert dead.items[0].status == BehaviorObservationProjectionStatus.DEAD_LETTER
+
+
+@pytest.mark.asyncio
+async def test_query_projection_failures_excludes_resolved_by_default(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.models.behavior_observation import BehaviorObservationProjectionFailureQuery
+
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    connector_id = f"conn-{suffix}"
+    service = _observation_service(session_factory)
+    await service.record_projection_failure(
+        source_record_id=f"src-pending-{suffix}",
+        source_tenant_id=tenant_id,
+        error_category="projection_failed",
+        detail={"message": "pending"},
+    )
+    await service.record_projection_failure(
+        source_record_id=f"src-dead-{suffix}",
+        source_tenant_id=tenant_id,
+        error_category="projection_failed",
+        detail={"message": "dead"},
+        force_dead_letter=True,
+    )
+    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
+    record_id = await _seed_source_log(
+        session_factory,
+        suffix=f"resolved-{suffix}",
+        tenant_id=tenant_id,
+        connector_id=connector_id,
+    )
+    await service.record_projection_failure(
+        source_record_id=record_id,
+        source_tenant_id=tenant_id,
+        error_category="projection_failed",
+        detail={"message": "resolved"},
+    )
+    await service.project_source_object(record_id)
+
+    open_backlog = await service.query_projection_failures(
+        BehaviorObservationProjectionFailureQuery(source_tenant_id=tenant_id)
+    )
+    assert open_backlog.total == 2
+    statuses = {item.status for item in open_backlog.items}
+    assert statuses == {
+        BehaviorObservationProjectionStatus.PENDING_RETRY,
+        BehaviorObservationProjectionStatus.DEAD_LETTER,
+    }
+
+
+@pytest.fixture
+def celery_eager() -> Iterator[None]:
+    from app.core.celery_app import celery_app
+    from app.db.session_provider import init_worker_session_provider, reset_session_provider
+
+    previous = {
+        "task_always_eager": celery_app.conf.task_always_eager,
+        "task_eager_propagates": celery_app.conf.task_eager_propagates,
+        "task_store_eager_result": celery_app.conf.task_store_eager_result,
+        "result_backend": celery_app.conf.result_backend,
+        "broker_url": celery_app.conf.broker_url,
+    }
+    celery_app.conf.task_always_eager = True
+    celery_app.conf.task_eager_propagates = True
+    celery_app.conf.task_store_eager_result = True
+    celery_app.conf.result_backend = "cache+memory://"
+    celery_app.conf.broker_url = "memory://"
+    init_worker_session_provider()
+    yield
+    reset_session_provider()
+    celery_app.conf.task_always_eager = previous["task_always_eager"]
+    celery_app.conf.task_eager_propagates = previous["task_eager_propagates"]
+    celery_app.conf.task_store_eager_result = previous["task_store_eager_result"]
+    celery_app.conf.result_backend = previous["result_backend"]
+    celery_app.conf.broker_url = previous["broker_url"]
+
+
+@pytest.mark.asyncio
+async def test_celery_retry_pending_resolves_transient_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    celery_eager: None,
+) -> None:
+    from app.tasks.behavior_observation_tasks import retry_behavior_observation_pending
+
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    connector_id = f"conn-{suffix}"
+    await _seed_connector(session_factory, connector_id=connector_id, tenant_id=tenant_id)
+    record_id = await _seed_source_log(
+        session_factory,
+        suffix=suffix,
+        tenant_id=tenant_id,
+        connector_id=connector_id,
+    )
+    service = _observation_service(session_factory)
+    with patch.object(
+        service,
+        "persist_in_session",
+        side_effect=RuntimeError("projection boom"),
+    ):
+        with pytest.raises(RuntimeError, match="projection boom"):
+            await service.project_source_object(record_id)
+
+    await service.record_projection_failure(
+        source_record_id=record_id,
+        source_tenant_id=tenant_id,
+        error_category="projection_failed",
+        detail={"message": "projection boom"},
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            failure = await session.scalar(
+                select(orm.BehaviorObservationProjectionFailure).where(
+                    orm.BehaviorObservationProjectionFailure.source_record_id == record_id
+                )
+            )
+            assert failure is not None
+            failure.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    result = retry_behavior_observation_pending.apply(args=[10]).result
+    assert result["retried"] >= 1
+
+    observations = await service.query_observations(
+        BehaviorObservationQuery(source_tenant_id=tenant_id)
+    )
+    assert observations.total == 1
+    assert observations.items[0].provenance.source_record_id == record_id
+
+    async with session_factory() as session:
+        failure = await session.scalar(
+            select(orm.BehaviorObservationProjectionFailure).where(
+                orm.BehaviorObservationProjectionFailure.source_record_id == record_id
+            )
+        )
+    assert failure is not None
+    assert failure.status == BehaviorObservationProjectionStatus.RESOLVED.value

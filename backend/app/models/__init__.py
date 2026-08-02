@@ -56,6 +56,9 @@ from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
     BehaviorObservationListResult,
+    BehaviorObservationProjectionFailureListResult,
+    BehaviorObservationProjectionFailureQuery,
+    BehaviorObservationProjectionFailureRecord,
     BehaviorObservationProvenance,
     BehaviorObservationQuery,
     BehaviorObservationSourceRef,
@@ -301,6 +304,11 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "BehaviorObservationProvenance": BehaviorObservationProvenance,
     "BehaviorObservationQuery": BehaviorObservationQuery,
     "BehaviorObservationListResult": BehaviorObservationListResult,
+    "BehaviorObservationProjectionFailureRecord": BehaviorObservationProjectionFailureRecord,
+    "BehaviorObservationProjectionFailureQuery": BehaviorObservationProjectionFailureQuery,
+    "BehaviorObservationProjectionFailureListResult": (
+        BehaviorObservationProjectionFailureListResult
+    ),
     # feature snapshot (ISSUE-120 Phase A/B)
     "FeatureSnapshot": FeatureSnapshot,
     "FeatureSnapshotProvenance": FeatureSnapshotProvenance,

@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "BehaviorObservationProjectionStatus": {
+      "description": "Retry lifecycle for semantic projection failures.",
+      "enum": [
+        "pending_retry",
+        "dead_letter",
+        "resolved"
+      ],
+      "title": "BehaviorObservationProjectionStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Read-only projection failure row for ops visibility (ISSUE-156).",
+  "properties": {
+    "failure_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Failure Id",
+      "type": "string"
+    },
+    "source_record_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Record Id",
+      "type": "string"
+    },
+    "source_tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Tenant Id",
+      "type": "string"
+    },
+    "attempt": {
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/BehaviorObservationProjectionStatus"
+    },
+    "error_category": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Error Category",
+      "type": "string"
+    },
+    "detail": {
+      "additionalProperties": true,
+      "title": "Detail",
+      "type": "object"
+    },
+    "next_retry_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Next Retry At"
+    },
+    "resolved_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Resolved At"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "failure_id",
+    "source_record_id",
+    "source_tenant_id",
+    "attempt",
+    "status",
+    "error_category",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "BehaviorObservationProjectionFailureRecord",
+  "type": "object"
+}

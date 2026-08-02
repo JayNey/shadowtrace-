@@ -69,6 +69,12 @@ def _build_beat_schedule() -> dict[str, dict[str, object]]:
             "schedule": float(settings.auto_investigate_reconcile_interval_s),
             "options": {"queue": "investigation"},
         }
+    if settings.behavior_observation_retry_enabled:
+        schedule["shadowtrace-behavior-observation-retry-pending"] = {
+            "task": "shadowtrace.behavior_observation.retry_pending",
+            "schedule": float(settings.behavior_observation_retry_interval_s),
+            "options": {"queue": "ingestion"},
+        }
     return schedule
 
 
@@ -82,6 +88,7 @@ celery_app.conf.update(
         "shadowtrace.poll_sources": {"queue": "ingestion"},
         "shadowtrace.dispatch_investigation_intents": {"queue": "investigation"},
         "shadowtrace.reconcile_investigation_intents": {"queue": "investigation"},
+        "shadowtrace.behavior_observation.retry_pending": {"queue": "ingestion"},
     },
     task_acks_late=True,
     task_reject_on_worker_lost=True,
@@ -96,6 +103,7 @@ celery_app.conf.update(
         "app.tasks.investigation_intent_tasks",
         "app.tasks.worker_tasks",
         "app.tasks.ingestion_tasks",
+        "app.tasks.behavior_observation_tasks",
     ),
 )
 

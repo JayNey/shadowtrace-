@@ -37,6 +37,7 @@ _super_agent: Any = None  # SuperAgent
 _event_lease: Any = None  # EventLease
 _investigation_stack: dict[str, Any] | None = None
 _investigation_intent_service: Any = None  # InvestigationIntentService
+_behavior_observation_service: Any = None  # BehaviorObservationService
 _approval_engine: Any = None  # ApprovalEngine
 _impact_assessment_service: Any = None  # ImpactAssessmentService
 _disposition_sync: Any = None  # DispositionSyncService
@@ -153,6 +154,15 @@ async def get_investigation_intent_service() -> Any:
             degraded_flags=_get_degraded_flags(),
         )
     return _investigation_intent_service
+
+
+async def get_behavior_observation_service() -> Any:
+    global _behavior_observation_service
+    if _behavior_observation_service is None:
+        from app.services.behavior_observation_service import BehaviorObservationService
+
+        _behavior_observation_service = BehaviorObservationService(_get_session_factory())
+    return _behavior_observation_service
 
 
 async def get_state_machine() -> Any:
@@ -777,6 +787,7 @@ def reset_deps() -> None:
     global _redis_client, _context_store, _degraded_flags
     global _audit_log, _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
     global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
+    global _behavior_observation_service
     global _disposition_sync, _action_execution, _rollback_service
     global _adapter_registry, _workflow_runtime, _event_disposition
     global _impact_assessment_service
@@ -801,6 +812,7 @@ def reset_deps() -> None:
     _event_lease = None
     _investigation_stack = None
     _investigation_intent_service = None
+    _behavior_observation_service = None
     _approval_engine = None
     _impact_assessment_service = None
     _disposition_sync = None
