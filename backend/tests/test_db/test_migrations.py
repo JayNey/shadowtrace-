@@ -29,31 +29,42 @@ from app.db import models as m
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
 CORE_TABLES = {
-    "security_event",
-    "source_object",
-    "source_event_link",
-    "source_connector",
-    "source_checkpoint",
-    "evidence",
     "action",
     "action_execution_job",
     "action_target_result",
+    "agent_trace",
+    "approval_record",
+    "behavior_observation",
+    "behavior_observation_projection_failure",
+    "candidate_detection",
+    "data_quality_error",
+    "decision_record",
+    "detection_feature_baseline",
+    "detection_rule_package",
+    "detection_rule_runtime_error",
+    "detection_scope_revision",
     "disposition_outbox",
     "disposition_receipt",
-    "report",
-    "agent_trace",
-    "event_audit_log",
-    "tool_call_log",
-    "llm_call_log",
-    "data_quality_error",
-    "event_context_journal",
-    "event_context_field_version",
-    "knowledge_chunk",
-    "graph_node",
-    "graph_edge",
-    "approval_record",
     "entity_profile",
+    "evaluation_case_truth",
+    "event_audit_log",
+    "event_context_field_version",
+    "event_context_journal",
+    "evidence",
+    "feature_snapshot",
+    "graph_edge",
+    "graph_node",
+    "investigation_intent",
+    "knowledge_chunk",
+    "llm_call_log",
     "memory_review",
+    "report",
+    "security_event",
+    "source_checkpoint",
+    "source_connector",
+    "source_event_link",
+    "source_object",
+    "tool_call_log",
 }
 
 
@@ -148,7 +159,6 @@ async def test_all_core_tables_exist(session: AsyncSession) -> None:
     )
     present = {r[0] for r in rows}
     assert CORE_TABLES <= present, {"missing": CORE_TABLES - present}
-    # The original 18 core tables plus connector/kind checkpoints.
     assert present == CORE_TABLES, {"unexpected": present - CORE_TABLES}
 
 
