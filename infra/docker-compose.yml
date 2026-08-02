@@ -238,6 +238,10 @@ services:
   #   make up SCHEDULER=1
   # Requires INGESTION_SCHEDULER_ENABLED=true (set below); does NOT use -B on
   # the investigation worker profile.
+  # BEHAVIOR_OBSERVATION_RETRY_ENABLED=true on beat schedules projection retry
+  # (ISSUE-156). scheduler-worker only consumes the ingestion queue — it does
+  # not need the retry env flag; beat owns the schedule. Restart scheduler-beat
+  # after changing BEHAVIOR_OBSERVATION_RETRY_* or related beat schedule flags.
   # --------------------------------------------------------------------------
   scheduler-beat:
     profiles: ["scheduler"]
@@ -257,6 +261,8 @@ services:
       SIMULATION_ENABLED: "true"
       INGESTION_SCHEDULER_ENABLED: "true"
       INGESTION_POLL_INTERVAL_S: ${INGESTION_POLL_INTERVAL_S:-60}
+      BEHAVIOR_OBSERVATION_RETRY_ENABLED: "true"
+      BEHAVIOR_OBSERVATION_RETRY_INTERVAL_S: ${BEHAVIOR_OBSERVATION_RETRY_INTERVAL_S:-120}
       CELERY_BROKER_URL: redis://redis:6379/0
       OTEL_ENABLED: ${OTEL_ENABLED:-false}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://host.docker.internal:4318}

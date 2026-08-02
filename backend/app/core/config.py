@@ -118,6 +118,23 @@ class Settings(BaseSettings):
     ingestion_scheduler_enabled: bool = Field(default=False, alias="INGESTION_SCHEDULER_ENABLED")
     ingestion_poll_interval_s: int = Field(default=60, alias="INGESTION_POLL_INTERVAL_S", ge=1)
 
+    behavior_observation_retry_enabled: bool = Field(
+        default=False,
+        alias="BEHAVIOR_OBSERVATION_RETRY_ENABLED",
+    )
+    behavior_observation_retry_interval_s: int = Field(
+        default=120,
+        alias="BEHAVIOR_OBSERVATION_RETRY_INTERVAL_S",
+        ge=60,
+        le=300,
+    )
+    behavior_observation_retry_batch_limit: int = Field(
+        default=50,
+        alias="BEHAVIOR_OBSERVATION_RETRY_BATCH_LIMIT",
+        ge=1,
+        le=200,
+    )
+
     auto_investigate_enabled: bool = Field(default=False, alias="AUTO_INVESTIGATE_ENABLED")
     auto_investigate_min_severity: str = Field(
         default="medium",

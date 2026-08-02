@@ -1331,6 +1331,228 @@
         }
       }
     },
+    "/api/v1/behavior-observations": {
+      "get": {
+        "tags": [
+          "behavior-observations"
+        ],
+        "summary": "List Behavior Observations",
+        "description": "Tenant-scoped read path for persisted behavior observations.",
+        "operationId": "list_behavior_observations_api_v1_behavior_observations_get",
+        "parameters": [
+          {
+            "name": "source_tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Source Tenant Id"
+            }
+          },
+          {
+            "name": "detection_scope_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Detection Scope Id"
+            }
+          },
+          {
+            "name": "connector_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Connector Id"
+            }
+          },
+          {
+            "name": "source_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 32
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Kind"
+            }
+          },
+          {
+            "name": "source_object_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Object Id"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BehaviorObservationListResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/behavior-observation-projection-failures": {
+      "get": {
+        "tags": [
+          "behavior-observations"
+        ],
+        "summary": "List Behavior Observation Projection Failures",
+        "description": "Read-only open backlog for semantic projection failures (resolved excluded by default).",
+        "operationId": "list_behavior_observation_projection_failures_api_v1_behavior_observation_projection_failures_get",
+        "parameters": [
+          {
+            "name": "source_tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Source Tenant Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/BehaviorObservationProjectionStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional filter; omit to list open backlog (pending_retry + dead_letter)",
+              "title": "Status"
+            },
+            "description": "Optional filter; omit to list open backlog (pending_retry + dead_letter)"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BehaviorObservationProjectionFailureListResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/connectors": {
       "get": {
         "tags": [
@@ -2845,6 +3067,472 @@
         },
         "type": "object",
         "title": "AuditLogsResponse"
+      },
+      "BehaviorEntityRef": {
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Entity Type"
+          },
+          "entity_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Entity Id"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "entity_type",
+          "entity_id"
+        ],
+        "title": "BehaviorEntityRef",
+        "description": "Normalized entity reference extracted from source semantics."
+      },
+      "BehaviorObservation": {
+        "properties": {
+          "observation_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Observation Id"
+          },
+          "source_tenant_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Tenant Id"
+          },
+          "detection_scope_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Detection Scope Id"
+          },
+          "source_ref": {
+            "$ref": "#/components/schemas/BehaviorObservationSourceRef"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Observed At"
+          },
+          "ingested_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ingested At"
+          },
+          "entity_refs": {
+            "items": {
+              "$ref": "#/components/schemas/BehaviorEntityRef"
+            },
+            "type": "array",
+            "title": "Entity Refs"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Action"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "normalized_attributes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Normalized Attributes"
+          },
+          "detection_score": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 100.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detection Score"
+          },
+          "schema_version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "projection_schema_version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Projection Schema Version",
+            "default": "1.0"
+          },
+          "content_hash": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Content Hash"
+          },
+          "observation_hash": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Observation Hash"
+          },
+          "idempotency_key": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Idempotency Key"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/BehaviorObservationProvenance"
+          },
+          "supersedes_observation_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Observation Id"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "observation_id",
+          "source_tenant_id",
+          "detection_scope_id",
+          "source_ref",
+          "observed_at",
+          "ingested_at",
+          "content_hash",
+          "observation_hash",
+          "idempotency_key",
+          "provenance"
+        ],
+        "title": "BehaviorObservation",
+        "description": "Immutable semantic observation derived from one source object revision."
+      },
+      "BehaviorObservationListResult": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Page Size"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BehaviorObservation"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "page_size"
+        ],
+        "title": "BehaviorObservationListResult",
+        "description": "Paginated observation query result."
+      },
+      "BehaviorObservationProjectionFailureListResult": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Page Size"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BehaviorObservationProjectionFailureRecord"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "page_size"
+        ],
+        "title": "BehaviorObservationProjectionFailureListResult",
+        "description": "Paginated projection failure query result."
+      },
+      "BehaviorObservationProjectionFailureRecord": {
+        "properties": {
+          "failure_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Failure Id"
+          },
+          "source_record_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Record Id"
+          },
+          "source_tenant_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Tenant Id"
+          },
+          "attempt": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Attempt"
+          },
+          "status": {
+            "$ref": "#/components/schemas/BehaviorObservationProjectionStatus"
+          },
+          "error_category": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Error Category"
+          },
+          "detail": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Detail"
+          },
+          "next_retry_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Retry At"
+          },
+          "resolved_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resolved At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "failure_id",
+          "source_record_id",
+          "source_tenant_id",
+          "attempt",
+          "status",
+          "error_category",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "BehaviorObservationProjectionFailureRecord",
+        "description": "Read-only projection failure row for ops visibility (ISSUE-156)."
+      },
+      "BehaviorObservationProjectionStatus": {
+        "type": "string",
+        "enum": [
+          "pending_retry",
+          "dead_letter",
+          "resolved"
+        ],
+        "title": "BehaviorObservationProjectionStatus",
+        "description": "Retry lifecycle for semantic projection failures."
+      },
+      "BehaviorObservationProvenance": {
+        "properties": {
+          "source_record_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Record Id"
+          },
+          "raw_payload_hash": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Raw Payload Hash"
+          },
+          "source_concurrency_token": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Concurrency Token"
+          },
+          "projection_engine": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Projection Engine",
+            "default": "behavior_observation_v1"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_record_id"
+        ],
+        "title": "BehaviorObservationProvenance",
+        "description": "Rebuild metadata — references durable source store, never raw payload copies."
+      },
+      "BehaviorObservationSourceRef": {
+        "properties": {
+          "source_product": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Source Product"
+          },
+          "connector_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Connector Id"
+          },
+          "source_kind": {
+            "type": "string",
+            "maxLength": 32,
+            "minLength": 1,
+            "title": "Source Kind"
+          },
+          "source_object_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Source Object Id"
+          },
+          "source_object_type": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Object Type"
+          },
+          "source_revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Source Revision"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "source_product",
+          "connector_id",
+          "source_kind",
+          "source_object_id",
+          "source_revision"
+        ],
+        "title": "BehaviorObservationSourceRef",
+        "description": "Pointer to the upstream source object revision that produced the observation."
       },
       "BusinessDisruption": {
         "type": "string",

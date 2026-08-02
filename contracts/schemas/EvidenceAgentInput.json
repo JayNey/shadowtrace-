@@ -792,6 +792,19 @@
       },
       "title": "Required Tools",
       "type": "array"
+    },
+    "execution_plan": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Execution Plan"
     }
   },
   "required": [

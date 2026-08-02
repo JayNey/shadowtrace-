@@ -111,3 +111,43 @@ class BehaviorObservationListResult(BaseModel):
     page: int = Field(..., ge=1)
     page_size: int = Field(..., ge=1)
     items: list[BehaviorObservation] = Field(default_factory=list)
+
+
+class BehaviorObservationProjectionFailureRecord(BaseModel):
+    """Read-only projection failure row for ops visibility (ISSUE-156)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    failure_id: str = Field(..., min_length=1, max_length=128)
+    source_record_id: str = Field(..., min_length=1, max_length=128)
+    source_tenant_id: str = Field(..., min_length=1, max_length=128)
+    attempt: int = Field(..., ge=1)
+    status: BehaviorObservationProjectionStatus
+    error_category: str = Field(..., min_length=1, max_length=64)
+    detail: dict[str, Any] = Field(default_factory=dict)
+    next_retry_at: datetime | None = None
+    resolved_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BehaviorObservationProjectionFailureQuery(BaseModel):
+    """Tenant-scoped read path for projection failure backlog."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_tenant_id: str = Field(..., min_length=1, max_length=128)
+    status: BehaviorObservationProjectionStatus | None = None
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=200)
+
+
+class BehaviorObservationProjectionFailureListResult(BaseModel):
+    """Paginated projection failure query result."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int = Field(..., ge=0)
+    page: int = Field(..., ge=1)
+    page_size: int = Field(..., ge=1)
+    items: list[BehaviorObservationProjectionFailureRecord] = Field(default_factory=list)

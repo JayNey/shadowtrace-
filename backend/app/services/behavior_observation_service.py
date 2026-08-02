@@ -16,6 +16,9 @@ from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
     BehaviorObservationListResult,
+    BehaviorObservationProjectionFailureListResult,
+    BehaviorObservationProjectionFailureQuery,
+    BehaviorObservationProjectionFailureRecord,
     BehaviorObservationProjectionStatus,
     BehaviorObservationProvenance,
     BehaviorObservationQuery,
@@ -30,6 +33,24 @@ logger = logging.getLogger(__name__)
 
 _MAX_PROJECTION_ATTEMPTS = 5
 _RETRY_BASE_SECONDS = 30
+
+
+def _row_to_projection_failure(
+    row: orm.BehaviorObservationProjectionFailure,
+) -> BehaviorObservationProjectionFailureRecord:
+    return BehaviorObservationProjectionFailureRecord(
+        failure_id=row.failure_id,
+        source_record_id=row.source_record_id,
+        source_tenant_id=row.source_tenant_id,
+        attempt=int(row.attempt),
+        status=BehaviorObservationProjectionStatus(row.status),
+        error_category=row.error_category,
+        detail=dict(row.detail or {}),
+        next_retry_at=row.next_retry_at,
+        resolved_at=row.resolved_at,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
 
 
 def _row_to_observation(row: orm.BehaviorObservation) -> BehaviorObservation:
@@ -403,6 +424,52 @@ class BehaviorObservationService:
             )
             items = [_row_to_observation(row) for row in rows]
             return BehaviorObservationListResult(
+                total=total,
+                page=query.page,
+                page_size=query.page_size,
+                items=items,
+            )
+
+    async def query_projection_failures(
+        self,
+        query: BehaviorObservationProjectionFailureQuery,
+    ) -> BehaviorObservationProjectionFailureListResult:
+        filters = [
+            orm.BehaviorObservationProjectionFailure.source_tenant_id == query.source_tenant_id,
+        ]
+        if query.status is not None:
+            filters.append(orm.BehaviorObservationProjectionFailure.status == query.status.value)
+        else:
+            filters.append(
+                orm.BehaviorObservationProjectionFailure.status.in_(
+                    [
+                        BehaviorObservationProjectionStatus.PENDING_RETRY.value,
+                        BehaviorObservationProjectionStatus.DEAD_LETTER.value,
+                    ]
+                )
+            )
+
+        async with self._session_factory() as session:
+            total = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(orm.BehaviorObservationProjectionFailure)
+                    .where(*filters)
+                )
+                or 0
+            )
+            rows = await session.scalars(
+                select(orm.BehaviorObservationProjectionFailure)
+                .where(*filters)
+                .order_by(
+                    orm.BehaviorObservationProjectionFailure.updated_at.desc(),
+                    orm.BehaviorObservationProjectionFailure.failure_id.desc(),
+                )
+                .offset((query.page - 1) * query.page_size)
+                .limit(query.page_size)
+            )
+            items = [_row_to_projection_failure(row) for row in rows]
+            return BehaviorObservationProjectionFailureListResult(
                 total=total,
                 page=query.page,
                 page_size=query.page_size,

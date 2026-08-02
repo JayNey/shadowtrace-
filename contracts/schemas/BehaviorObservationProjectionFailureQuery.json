@@ -1,0 +1,53 @@
+{
+  "$defs": {
+    "BehaviorObservationProjectionStatus": {
+      "description": "Retry lifecycle for semantic projection failures.",
+      "enum": [
+        "pending_retry",
+        "dead_letter",
+        "resolved"
+      ],
+      "title": "BehaviorObservationProjectionStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Tenant-scoped read path for projection failure backlog.",
+  "properties": {
+    "source_tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Tenant Id",
+      "type": "string"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BehaviorObservationProjectionStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "page": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Page",
+      "type": "integer"
+    },
+    "page_size": {
+      "default": 50,
+      "maximum": 200,
+      "minimum": 1,
+      "title": "Page Size",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "source_tenant_id"
+  ],
+  "title": "BehaviorObservationProjectionFailureQuery",
+  "type": "object"
+}
