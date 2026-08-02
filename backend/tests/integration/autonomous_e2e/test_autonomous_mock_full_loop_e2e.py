@@ -3,6 +3,9 @@
 Scenarios A–E validate production ingest→intent→worker→approval paths with
 mandatory ledger observability. Integration tests use production entry points
 without ``task_always_eager``. Worker-gated tests require ``make up WORKER=1``.
+
+OpenTelemetry correlation IDs are out of scope for this issue; defer to a
+follow-up observability issue.
 """
 
 from __future__ import annotations
@@ -67,6 +70,7 @@ from tests.integration.autonomous_e2e.helpers import (
     ISOLATED_E2E_QUEUE,
     TERMINAL_INTENT_STATUSES,
     auth_headers,
+    backdate_intent_for_claim,
     build_approval_engine,
     build_autonomous_stack,
     build_mock_execution_stack,
@@ -80,6 +84,7 @@ from tests.integration.autonomous_e2e.helpers import (
     require_celery_worker,
     run_investigation_with_request,
     seed_primary_source_link,
+    select_human_gated_action,
     unique_id,
 )
 
@@ -356,13 +361,7 @@ async def test_scenario_a_publish_skips_intent_when_event_not_new(
         )
     assert intent_row is not None
     intent_id = intent_row.intent_id
-    stale_created = datetime(2020, 1, 1, tzinfo=UTC)
-    async with session_factory() as session:
-        async with session.begin():
-            row = await session.get(orm.InvestigationIntent, intent_id)
-            assert row is not None
-            row.created_at = stale_created
-            row.updated_at = stale_created
+    await backdate_intent_for_claim(session_factory, intent_id)
 
     async with session_factory() as session:
         async with session.begin():
@@ -473,17 +472,23 @@ async def test_scenario_a_worker_completes_enqueued_intent(
     ingest = await events.ingest_source_object(
         incident_source(object_id=unique_id("inc-worker-a"))
     )
-    published = await intent_service.claim_and_publish_batch(limit=10)
-    assert published >= 1
-
     async with session_factory() as session:
-        row = await session.scalar(
+        intent_row = await session.scalar(
             select(orm.InvestigationIntent).where(
                 orm.InvestigationIntent.event_id == ingest.event_id
             )
         )
+    assert intent_row is not None
+    intent_id = intent_row.intent_id
+    await backdate_intent_for_claim(session_factory, intent_id)
+
+    await intent_service.claim_and_publish_batch(limit=10)
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
     assert row is not None
-    intent_id = row.intent_id
+    assert row.status == InvestigationIntentStatus.ENQUEUED.value
+    assert row.broker_task_id is not None
 
     async def _intent_terminal() -> str | None:
         async with session_factory() as session:
@@ -545,7 +550,7 @@ async def test_scenario_b_investigation_produces_l2_pending_then_human_executes_
     redis_client: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ingest → investigation (response) → L2+ waiting_approval → API approve → execute once."""
+    """Production slice: real execute_investigation → L2 pending → API approve → execute once."""
     reset_deps()
     get_settings.cache_clear()
     settings = mock_autonomous_settings(AUTO_RESPONSE_ENABLED=True)
@@ -574,20 +579,8 @@ async def test_scenario_b_investigation_produces_l2_pending_then_human_executes_
                 )
             )
         ).all()
-    human_gated = [
-        row
-        for row in pending_rows
-        if row.tool_name != "generate_report"
-        and row.action_level
-        in {
-            ActionLevel.L2.value,
-            ActionLevel.L3.value,
-            ActionLevel.L4.value,
-            ActionLevel.L5.value,
-        }
-    ]
-    assert human_gated, "investigation must produce L2+ waiting_approval response action"
-    target = human_gated[0]
+    target = select_human_gated_action(pending_rows, prefer_level=ActionLevel.L2)
+    assert target.action_level == ActionLevel.L2.value
     action_id = target.action_id
 
     stack = await build_mock_execution_stack(session_factory, redis_client)
@@ -729,7 +722,7 @@ async def test_scenario_b_ingest_creates_intent_then_l2_pending_human_approve_ex
     approve_api_client: Any,
     mock_execution_stack: Any,
 ) -> None:
-    """Ingest creates intent; production L2 gate → human API approve → single execute."""
+    """Contract slice: ingest + seeded L2 → API approve → single execute (no SuperAgent)."""
     engine = await build_approval_engine(session_factory, redis_client)
     stack = mock_execution_stack
     events, _intent_service, _store = build_autonomous_stack(session_factory, redis_client)
@@ -1396,7 +1389,6 @@ async def test_scenario_c_unknown_action_requires_manual_resolve(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.integration
 def test_scenario_d_auto_response_rejects_live_disposition_at_startup() -> None:
     """AUTO_RESPONSE with live disposition adapter must fail closed at startup."""
     with pytest.raises(ConfigurationError):
@@ -1408,7 +1400,6 @@ def test_scenario_d_auto_response_rejects_live_disposition_at_startup() -> None:
         )
 
 
-@pytest.mark.integration
 def test_scenario_d_auto_response_rejects_live_source_at_startup() -> None:
     """AUTO_RESPONSE with live source must fail closed at Settings construction."""
     with pytest.raises(ConfigurationError):
@@ -1420,7 +1411,6 @@ def test_scenario_d_auto_response_rejects_live_source_at_startup() -> None:
         )
 
 
-@pytest.mark.integration
 def test_scenario_d_production_rejects_mock_runtime_at_startup() -> None:
     with pytest.raises(ConfigurationError):
         Settings(
@@ -1432,7 +1422,6 @@ def test_scenario_d_production_rejects_mock_runtime_at_startup() -> None:
         )
 
 
-@pytest.mark.integration
 def test_scenario_d_unknown_capability_blocks_auto_response_at_startup() -> None:
     """AUTO_RESPONSE with non-mock disposition adapter kind must fail closed at startup."""
     with pytest.raises(ConfigurationError):
@@ -1528,13 +1517,7 @@ async def test_scenario_d_broker_down_publish_marks_retry_and_degraded(
     assert intent_row is not None
     intent_id = intent_row.intent_id
     event_id = ingest.event_id
-    stale_created = datetime(2020, 1, 1, tzinfo=UTC)
-    async with session_factory() as session:
-        async with session.begin():
-            row = await session.get(orm.InvestigationIntent, intent_id)
-            assert row is not None
-            row.created_at = stale_created
-            row.updated_at = stale_created
+    await backdate_intent_for_claim(session_factory, intent_id)
 
     async def _noop_register(*_args: object, **_kwargs: object) -> None:
         return None
@@ -1638,9 +1621,6 @@ async def test_scenario_d_worker_recovery_completes_queued_task(
     ingest = await events.ingest_source_object(
         incident_source(object_id=unique_id("inc-worker-d"))
     )
-    published = await intent_service.claim_and_publish_batch(limit=10)
-    assert published >= 1
-
     async with session_factory() as session:
         intent_row = await session.scalar(
             select(orm.InvestigationIntent).where(
@@ -1649,8 +1629,15 @@ async def test_scenario_d_worker_recovery_completes_queued_task(
         )
     assert intent_row is not None
     intent_id = intent_row.intent_id
-    assert intent_row.status == InvestigationIntentStatus.ENQUEUED.value
-    assert intent_row.broker_task_id is not None
+    await backdate_intent_for_claim(session_factory, intent_id)
+
+    await intent_service.claim_and_publish_batch(limit=10)
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+    assert row is not None
+    assert row.status == InvestigationIntentStatus.ENQUEUED.value
+    assert row.broker_task_id is not None
 
     async def _intent_terminal() -> str | None:
         async with session_factory() as session:

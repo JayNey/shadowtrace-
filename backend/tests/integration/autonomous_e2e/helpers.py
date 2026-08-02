@@ -18,7 +18,13 @@ from app.core.auth import ROLE_APPROVER, Principal
 from app.core.config import Settings
 from app.db import models as orm
 from app.db.orm.approval import ApprovalRecordORM
-from app.models.enums import EventType, InvestigationIntentStatus, Severity, SourceObjectKind
+from app.models.enums import (
+    ActionLevel,
+    EventType,
+    InvestigationIntentStatus,
+    Severity,
+    SourceObjectKind,
+)
 from app.models.investigation_intent import PRIMARY_LINK_ROLE
 from app.models.source import SourceReference
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
@@ -34,8 +40,17 @@ T = TypeVar("T")
 ISOLATED_E2E_QUEUE = "iss110-isolated-e2e"
 
 # Shared integration DB may retain intents from prior runs. Tests that call
-# ``claim_and_publish_batch(limit=1)`` backdate ``created_at`` on dedicated rows
-# so claim ordering is deterministic without truncating shared state.
+# ``claim_and_publish_batch`` backdate ``created_at`` on dedicated rows so claim
+# ordering is deterministic without truncating shared state.
+
+_HUMAN_GATED_LEVELS = frozenset(
+    {
+        ActionLevel.L2.value,
+        ActionLevel.L3.value,
+        ActionLevel.L4.value,
+        ActionLevel.L5.value,
+    }
+)
 
 DEV_AUTH_TOKENS_JSON = json.dumps(
     {
@@ -166,6 +181,41 @@ def auth_headers(role: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {role}-token"}
 
 
+async def backdate_intent_for_claim(
+    session_factory: async_sessionmaker[AsyncSession],
+    intent_id: str,
+    *,
+    created_at: datetime | None = None,
+) -> None:
+    """Make *intent_id* oldest eligible row for ``claim_and_publish_batch`` on shared DB."""
+    stale = created_at or datetime(2020, 1, 1, tzinfo=UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            if row is None:
+                raise AssertionError(f"intent not found: {intent_id}")
+            row.created_at = stale
+            row.updated_at = stale
+
+
+def select_human_gated_action(
+    rows: list[Any],
+    *,
+    prefer_level: ActionLevel = ActionLevel.L2,
+) -> Any:
+    """Pick a deterministic L2+ response action (prefer *prefer_level*, lowest revision)."""
+    human_gated = [
+        row
+        for row in rows
+        if row.tool_name != "generate_report" and row.action_level in _HUMAN_GATED_LEVELS
+    ]
+    if not human_gated:
+        raise AssertionError("expected L2+ waiting_approval response action")
+    preferred = [row for row in human_gated if row.action_level == prefer_level.value]
+    pool = preferred or human_gated
+    return min(pool, key=lambda row: (int(row.plan_revision or 0), row.action_id))
+
+
 def celery_worker_responding() -> bool:
     """True when at least one Celery worker answers inspect ping."""
     from app.core.celery_health import probe_celery_workers
@@ -189,6 +239,7 @@ class ObservabilitySnapshot:
     event_status: str | None
     intent_statuses: list[str] = field(default_factory=list)
     intent_broker_task_ids: list[str | None] = field(default_factory=list)
+    intent_claim_expires_at: list[str | None] = field(default_factory=list)
     agent_trace_count: int = 0
     agent_trace_ids: list[str] = field(default_factory=list)
     action_count: int = 0
@@ -263,6 +314,10 @@ async def collect_observability(
         event_status=str(event_status) if event_status is not None else None,
         intent_statuses=[row.status for row in intents],
         intent_broker_task_ids=[row.broker_task_id for row in intents],
+        intent_claim_expires_at=[
+            row.claim_expires_at.isoformat() if row.claim_expires_at is not None else None
+            for row in intents
+        ],
         agent_trace_count=agent_trace_count,
         agent_trace_ids=[str(trace_id) for trace_id in agent_trace_rows],
         action_count=len(actions),
