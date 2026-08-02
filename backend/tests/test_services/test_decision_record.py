@@ -234,6 +234,44 @@ async def test_risk_agent_output_enriched_into_decision_record(
 
 
 @pytest.mark.asyncio
+async def test_evidence_agent_output_enriched_into_decision_record(
+    service: DecisionRecordService,
+) -> None:
+    event_id = _event_id()
+    record_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="evidence_agent",
+        trace_id="trc-evd001",
+        input_data={"event_id": event_id},
+        output_data={
+            "collection_status": "completed",
+            "query_timings": [
+                {"tool_name": "query_dns", "dedupe_key": "dedupe-abc123"},
+            ],
+            "evidence_list": [{"evidence_id": "evd-dead0001"}],
+            "gaps": [{"missing_source": "dns", "reason": "no_records"}],
+            "query_plan": {
+                "plan_step_orders": [1],
+                "degraded_reasons": ["budget_trimmed_optional_queries"],
+            },
+        },
+    )
+    assert record_id is not None
+    row = await service.get_by_trace_ref("trc-evd001")
+    assert row is not None
+    assert row.stage == DecisionStage.EVIDENCE.value
+    assert "plan_steps:1" in (row.reason_codes or [])
+    assert "budget_trimmed_optional_queries" in (row.decision_summary or "")
+    assert (row.selected or {}).get("selected_action") == "evidence:completed"
+    candidates = row.candidates or []
+    assert any(
+        item.get("name") == "query_dns" and item.get("candidate_type") == "evidence_query"
+        for item in candidates
+        if isinstance(item, dict)
+    )
+
+
+@pytest.mark.asyncio
 async def test_blocks_auto_disposition_when_minimum_audit_missing(
     service: DecisionRecordService,
     session_factory: async_sessionmaker[AsyncSession],

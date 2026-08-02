@@ -171,23 +171,25 @@ def apply_query_budget(
     mandatory_tools: frozenset[str],
     floor_tools: frozenset[str] | None = None,
     max_tool_calls: int | None,
-) -> tuple[list[str], list[str]]:
-    """Trim optional tools first; preserve event floor before entity mandatory."""
+) -> tuple[list[str], list[str], bool]:
+    """Trim optional tools only; mandatory/floor tools are never dropped."""
+    _ = floor_tools  # floor is a subset of mandatory; ordering follows ordered_tools
     if max_tool_calls is None or max_tool_calls <= 0 or len(ordered_tools) <= max_tool_calls:
-        return ordered_tools, []
+        return ordered_tools, [], False
 
-    floor = floor_tools or frozenset()
-    floor_in_order = [tool for tool in ordered_tools if tool in floor]
-    entity_mandatory_in_order = [
-        tool for tool in ordered_tools if tool in mandatory_tools and tool not in floor
-    ]
+    mandatory_in_order = [tool for tool in ordered_tools if tool in mandatory_tools]
     optional_in_order = [tool for tool in ordered_tools if tool not in mandatory_tools]
+    budget_exceeded = len(mandatory_in_order) > max_tool_calls
 
-    prioritized = floor_in_order + entity_mandatory_in_order + optional_in_order
-    kept_set = set(prioritized[:max_tool_calls])
+    if budget_exceeded:
+        kept_set = set(mandatory_in_order)
+    else:
+        optional_slots = max_tool_calls - len(mandatory_in_order)
+        kept_set = set(mandatory_in_order) | set(optional_in_order[:optional_slots])
+
     kept = [tool for tool in ordered_tools if tool in kept_set]
     trimmed = [tool for tool in ordered_tools if tool not in kept_set]
-    return kept, trimmed
+    return kept, trimmed, budget_exceeded
 
 
 def order_tools(tools: frozenset[str]) -> list[str]:
@@ -285,14 +287,18 @@ def resolve_evidence_query_plan(
     if budget_cap is None and plan_budget is not None:
         budget_cap = plan_budget.max_tool_calls
 
-    final_tools, trimmed = apply_query_budget(
+    final_tools, trimmed, budget_exceeded = apply_query_budget(
         ordered,
         mandatory_tools=mandatory,
         floor_tools=floor_tools,
         max_tool_calls=budget_cap,
     )
     if trimmed:
-        degraded.append("budget_trimmed_optional_queries")
+        optional_trimmed = [tool for tool in trimmed if tool not in mandatory]
+        if optional_trimmed:
+            degraded.append("budget_trimmed_optional_queries")
+    if budget_exceeded:
+        degraded.append("budget_exceeded_mandatory_preserved")
 
     return EvidenceQueryPlan(
         tools=final_tools,

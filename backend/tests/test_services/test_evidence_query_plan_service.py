@@ -95,19 +95,69 @@ def test_budget_trim_keeps_mandatory_first() -> None:
     ordered = list(EVIDENCE_QUERY_ORDER)
     mandatory = frozenset({"query_account_login", "query_network_flow", "query_threat_intel"})
     floor = frozenset({"query_network_flow", "query_threat_intel"})
-    kept, trimmed = apply_query_budget(
+    kept, trimmed, budget_exceeded = apply_query_budget(
         ordered,
         mandatory_tools=mandatory,
         floor_tools=floor,
         max_tool_calls=4,
     )
     assert len(kept) == 4
+    assert mandatory.issubset(set(kept))
     assert floor.issubset(set(kept))
     assert len(trimmed) == len(ordered) - 4
+    assert budget_exceeded is False
+
+
+def test_budget_never_drops_mandatory_when_cap_tight() -> None:
+    triage = _rich_triage()
+    mandatory = resolve_mandatory_baseline(triage)
+    plan = resolve_evidence_query_plan(
+        triage,
+        execution_plan=ExecutionPlan(
+            plan_id="pln-tight",
+            event_id="evt-tight",
+            steps=[
+                PlanStep(
+                    step_order=1,
+                    step_goal="collect",
+                    assigned_agent="evidence_agent",
+                    required_tools=list(SEVEN_EVIDENCE_TOOLS),
+                    success_criteria="ok",
+                )
+            ],
+            budget=PlanBudget(max_tool_calls=2),
+            revision=0,
+        ),
+    )
+    assert set(mandatory).issubset(set(plan.tools))
+    assert len(plan.tools) >= len(mandatory)
+    assert "budget_exceeded_mandatory_preserved" in plan.degraded_reasons
+    assert "mandatory_trimmed" not in " ".join(plan.degraded_reasons)
+
+
+def test_invalid_execution_plan_dict_falls_back_to_baseline() -> None:
+    triage = _rich_triage()
+    mandatory = resolve_mandatory_baseline(triage)
+    plan = resolve_evidence_query_plan(
+        triage,
+        execution_plan={"steps": "not-a-list", "plan_id": "bad"},
+    )
+    assert plan.used_safety_baseline
+    assert "plan_missing_or_invalid" in plan.degraded_reasons
+    assert set(mandatory).issubset(set(plan.tools))
+    assert plan.tools == list(SEVEN_EVIDENCE_TOOLS)
 
 
 def test_budget_trim_preserves_event_type_floor_first() -> None:
-    triage = _rich_triage()
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(
+            hosts=[HostEntity(entity_id="h1", hostname="host-1", ip="10.0.0.5")],
+        ),
+        reasoning="test",
+    )
     floor = resolve_event_type_floor(triage)
     plan = resolve_evidence_query_plan(
         triage,
@@ -130,6 +180,7 @@ def test_budget_trim_preserves_event_type_floor_first() -> None:
     assert len(plan.tools) == 3
     assert floor.issubset(set(plan.tools))
     assert "budget_trimmed_optional_queries" in plan.degraded_reasons
+    assert "budget_exceeded_mandatory_preserved" not in plan.degraded_reasons
 
 
 def test_manifest_disabled_tool_rejected_at_runtime() -> None:
@@ -176,6 +227,7 @@ def test_snapshot_cutoff_from_source_prefers_snapshot_id() -> None:
 
 def test_execution_plan_budget_caps_optional_tools() -> None:
     triage = _rich_triage()
+    mandatory = resolve_mandatory_baseline(triage)
     execution_plan = ExecutionPlan(
         plan_id="pln-test",
         event_id="evt-test",
@@ -195,8 +247,9 @@ def test_execution_plan_budget_caps_optional_tools() -> None:
         triage,
         execution_plan=execution_plan,
     )
-    assert len(plan.tools) == 3
-    assert "budget_trimmed_optional_queries" in plan.degraded_reasons
+    assert set(mandatory).issubset(set(plan.tools))
+    assert len(plan.tools) >= len(mandatory)
+    assert "budget_exceeded_mandatory_preserved" in plan.degraded_reasons
 
 
 def test_deterministic_tool_order_for_same_inputs() -> None:

@@ -822,7 +822,8 @@ def build_investigation_graph(
         if isinstance(execution_plan_data, dict):
             for step in execution_plan_data.get("steps") or []:
                 if isinstance(step, dict) and step.get("assigned_agent") == "evidence_agent":
-                    plan_step_goal = str(step.get("step_goal") or plan_step_goal)
+                    plan_step_goal = str(step.get("step_goal") or "")
+                    break
         result = await evidence_agent.execute(
             EvidenceAgentInput(
                 event_id=state["event_id"],

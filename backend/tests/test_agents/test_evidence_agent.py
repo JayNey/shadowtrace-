@@ -1252,8 +1252,9 @@ async def test_agent_honors_budget_from_execution_plan_input(
             await agent.execute(agent_input)
 
     assert agent.last_query_plan is not None
-    assert len(agent.last_query_plan.tools) == 3
-    assert "budget_trimmed_optional_queries" in agent.last_query_plan.degraded_reasons
+    assert set(agent.last_query_plan.mandatory_tools).issubset(set(agent.last_query_plan.tools))
+    assert len(agent.last_query_plan.tools) >= len(agent.last_query_plan.mandatory_tools)
+    assert "budget_exceeded_mandatory_preserved" in agent.last_query_plan.degraded_reasons
 
 
 async def test_dedupe_key_uses_source_snapshot_cutoff(
