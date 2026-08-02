@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 from typing import Any
 
 import orjson
@@ -20,6 +21,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_FIELD_CHARS = 8_192
 DEFAULT_MAX_RECORDS = 200
 DEFAULT_MAX_TOTAL_BYTES = 256_000
+
+_INJECTION_HINT_RE = re.compile(
+    r"(?i)(ignore\s+(all\s+)?(previous|prior)\s+instructions|"
+    r"ignore\s+all\s+rules|"
+    r"disregard\s+(all\s+)?(previous|prior)\s+instructions|"
+    r"system\s*:\s*)"
+)
+
+
+def _contains_injection_hint(value: str) -> bool:
+    return bool(_INJECTION_HINT_RE.search(value))
 
 
 class SafeToolProjectionService:
@@ -57,6 +69,9 @@ class SafeToolProjectionService:
             trust_level = "untrusted"
             taint_flags.append("schema_validation_failed")
             bounded = {}
+        if self._scan_injection_hints(bounded):
+            trust_level = "untrusted"
+            taint_flags.append("prompt_injection_suspect")
         if result.status not in {
             ToolResultStatus.SUCCESS,
             ToolResultStatus.PARTIAL_SUCCESS,
@@ -141,8 +156,20 @@ class SafeToolProjectionService:
 
     def _truncate_scalar(self, value: Any) -> Any:
         if isinstance(value, str):
-            return value[: self._max_field_chars]
+            cleaned = value[: self._max_field_chars]
+            if _contains_injection_hint(cleaned):
+                return cleaned[:512]
+            return cleaned
         return value
+
+    def _scan_injection_hints(self, value: Any) -> bool:
+        if isinstance(value, str):
+            return _contains_injection_hint(value)
+        if isinstance(value, dict):
+            return any(self._scan_injection_hints(item) for item in value.values())
+        if isinstance(value, list):
+            return any(self._scan_injection_hints(item) for item in value)
+        return False
 
 
 __all__ = ["SafeToolProjectionService"]

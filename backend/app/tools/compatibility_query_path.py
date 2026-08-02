@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from typing import Any
 
 from app.core.config import Settings, get_settings
@@ -41,6 +42,26 @@ class CompatibilityQueryToolPath:
     def _settings(self) -> Settings:
         return self.settings or get_settings()
 
+    def _assert_compatibility_available(self) -> None:
+        settings = self._settings()
+        if not settings.tool_call_compatibility_path_enabled:
+            raise ToolCallGrantUnavailableError(
+                "compatibility path disabled",
+                details={"path": self.path_name},
+            )
+        sunset_raw = (settings.tool_call_compatibility_sunset or "").strip()
+        if sunset_raw:
+            try:
+                sunset = date.fromisoformat(sunset_raw)
+            except ValueError:
+                logger.warning("invalid TOOL_CALL_COMPATIBILITY_SUNSET=%s", sunset_raw)
+            else:
+                if datetime.now(tz=UTC).date() > sunset:
+                    raise ToolCallGrantUnavailableError(
+                        "compatibility path sunset elapsed",
+                        details={"path": self.path_name, "sunset": sunset_raw},
+                    )
+
     async def call(
         self,
         tool_name: str,
@@ -50,12 +71,7 @@ class CompatibilityQueryToolPath:
         agent_name: str = "evidence_agent",
         **kwargs: Any,
     ) -> ToolResult:
-        settings = self._settings()
-        if not settings.tool_call_compatibility_path_enabled:
-            raise ToolCallGrantUnavailableError(
-                "compatibility path disabled",
-                details={"path": self.path_name},
-            )
+        self._assert_compatibility_available()
 
         if tool_name not in EVIDENCE_COMPATIBILITY_QUERY_TOOLS:
             raise ToolCallGrantUnavailableError(

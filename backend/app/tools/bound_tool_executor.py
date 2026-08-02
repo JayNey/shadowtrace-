@@ -103,27 +103,35 @@ class BoundToolExecutor:
                 details={"grant_id": self.grant.grant_id, "tool_name": tool_name},
             ) from exc
 
-        result = await self.inner.call(
-            tool_name,
-            params,
-            event_id,
-            agent_name=self.trusted_agent_name,
-            **kwargs,
-        )
-        projection = self.projection_service.project(
-            tool_name,
-            result,
-            grant_id=self.grant.grant_id,
-            attempt_id=attempt.attempt_id,
-        )
+        try:
+            result = await self.inner.call(
+                tool_name,
+                params,
+                event_id,
+                agent_name=self.trusted_agent_name,
+                **kwargs,
+            )
+            projection = self.projection_service.project(
+                tool_name,
+                result,
+                grant_id=self.grant.grant_id,
+                attempt_id=attempt.attempt_id,
+            )
 
-        attempt_status = _attempt_status_for_result(result)
-        await self.grant_service.finalize_attempt(
-            attempt.attempt_id,
-            status=attempt_status,
-            result_status=result.status.value,
-            projection_hash=projection.projection_hash,
-        )
+            attempt_status = _attempt_status_for_result(result)
+            await self.grant_service.finalize_attempt(
+                attempt.attempt_id,
+                status=attempt_status,
+                result_status=result.status.value,
+                projection_hash=projection.projection_hash,
+            )
+        except Exception:
+            await self.grant_service.finalize_attempt(
+                attempt.attempt_id,
+                status=ToolCallAttemptStatus.FAILED,
+                denial_reason="inner tool executor failed",
+            )
+            raise
 
         sanitized = ToolResult(
             call_id=result.call_id,

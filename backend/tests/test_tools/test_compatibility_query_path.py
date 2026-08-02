@@ -114,3 +114,22 @@ async def test_compatibility_path_disabled_fail_closed(
 def test_compatibility_path_is_named_and_observable(compat_path: CompatibilityQueryToolPath) -> None:
     assert compat_path.path_name == COMPATIBILITY_PATH_NAME
     assert compat_path.policy_version
+
+
+@pytest.mark.asyncio
+async def test_compatibility_path_sunset_blocks_calls(
+    registry: ToolRegistry,
+    mock_provider: MockToolProvider,
+) -> None:
+    settings = Settings(
+        TOOL_CALL_COMPATIBILITY_PATH_ENABLED=True,
+        TOOL_CALL_COMPATIBILITY_SUNSET="2000-01-01",
+    )
+    inner = ToolExecutor(
+        registry=registry,
+        breaker_registry=CircuitBreakerRegistry(),
+        provider_context=lambda: bind_mock_tool_provider(mock_provider),
+    )
+    path = CompatibilityQueryToolPath(inner=inner, registry=registry, settings=settings)
+    with pytest.raises(ToolCallGrantUnavailableError, match="sunset"):
+        await path.call("query_dns", {}, "evt-compat-sunset")

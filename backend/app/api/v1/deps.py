@@ -587,6 +587,23 @@ async def _build_investigation_agents() -> dict[str, Any]:
     if isinstance(tool_executor.audit_service, NullAuditService):
         tool_executor.audit_service = _get_tool_call_log_service()
 
+    from app.services.safe_tool_projection import SafeToolProjectionService
+    from app.tools.tool_call_runtime import (
+        ReactToolExecutorFactory,
+        build_evidence_query_executor,
+    )
+
+    evidence_tool_executor = build_evidence_query_executor(
+        tool_executor,
+        settings=settings,
+    )
+    react_executor_factory = ReactToolExecutorFactory(
+        inner_executor=tool_executor,
+        grant_service=_get_tool_call_grant_service(),
+        settings=settings,
+        projection_service=SafeToolProjectionService(tool_executor.registry),
+    )
+
     # ISSUE-078: wire FalsePositiveMatcher for vector-based FP pre-filter.
     embed_service = get_embedding_client(settings=settings)
     knowledge_store = KnowledgeStore(session_factory, embed_service)
@@ -628,7 +645,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
     )
     evidence = EvidenceAgent(
         llm_client=llm_client,
-        tool_executor=tool_executor,
+        tool_executor=evidence_tool_executor,
         working_memory=wm.for_writer("EvidenceAgent"),
         budget_service=budget_service,
         output_guard=output_guard,
@@ -726,6 +743,8 @@ async def _build_investigation_agents() -> dict[str, Any]:
         "output_guard": output_guard,
         "llm_client": llm_client,
         "tool_executor": tool_executor,
+        "evidence_tool_executor": evidence_tool_executor,
+        "react_executor_factory": react_executor_factory,
     }
 
 
@@ -812,6 +831,8 @@ async def get_super_agent() -> Any:
             event_bus=_get_event_bus(),
             trace_service=stack["trace_service"],
             react_enabled=settings.react_enabled,
+            react_executor_factory=stack["react_executor_factory"],
+            react_llm_client=stack["llm_client"],
             investigation_graph=investigation_graph,
             memory_agent=stack["memory"],
             audit_service=_get_audit_log(),

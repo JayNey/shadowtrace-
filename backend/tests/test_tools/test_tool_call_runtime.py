@@ -1,0 +1,111 @@
+"""Tool call runtime wiring tests (ISSUE-134)."""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.core.config import Settings
+from app.core.errors import ToolCallGrantUnavailableError
+from app.models.tool_call_grant import ToolCallGrantIssueResult, ToolCallMode
+from app.services.safe_tool_projection import SafeToolProjectionService
+from app.tools.compatibility_query_path import COMPATIBILITY_PATH_NAME, CompatibilityQueryToolPath
+from app.tools.executor import ToolExecutor
+from app.tools.registry import ToolRegistry
+from app.tools.tool_call_runtime import ReactToolExecutorFactory, build_evidence_query_executor
+
+
+def test_build_evidence_query_executor_wraps_compatibility_path() -> None:
+    registry = ToolRegistry()
+    inner = ToolExecutor(registry=registry)
+    settings = Settings(TOOL_CALL_COMPATIBILITY_PATH_ENABLED=True)
+    wrapped = build_evidence_query_executor(inner, settings=settings)
+    assert isinstance(wrapped, CompatibilityQueryToolPath)
+    assert wrapped.path_name == COMPATIBILITY_PATH_NAME
+
+
+@pytest.mark.asyncio
+async def test_react_factory_fail_closed_when_grant_required_and_unavailable() -> None:
+    registry = ToolRegistry()
+    inner = ToolExecutor(registry=registry)
+    grant_service = MagicMock()
+    grant_service.available = False
+    factory = ReactToolExecutorFactory(
+        inner_executor=inner,
+        grant_service=grant_service,
+        settings=Settings(TOOL_CALL_GRANT_REQUIRED=True),
+        projection_service=SafeToolProjectionService(registry),
+    )
+    with pytest.raises(ToolCallGrantUnavailableError):
+        await factory.for_event("evt-react-test", tenant_id="tenant-a")
+
+
+@pytest.mark.asyncio
+async def test_react_factory_uses_plain_executor_when_grant_not_required() -> None:
+    from app.orchestration.react_engine import ReadOnlyReActExecutor
+
+    registry = ToolRegistry()
+    inner = ToolExecutor(registry=registry)
+    grant_service = MagicMock()
+    grant_service.available = True
+    factory = ReactToolExecutorFactory(
+        inner_executor=inner,
+        grant_service=grant_service,
+        settings=Settings(TOOL_CALL_GRANT_REQUIRED=False),
+        projection_service=SafeToolProjectionService(registry),
+    )
+    react_exec = await factory.for_event("evt-react-plain", tenant_id="tenant-a")
+    assert isinstance(react_exec, ReadOnlyReActExecutor)
+    grant_service.issue_grant.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_react_factory_idempotent_replay_uses_trusted_load() -> None:
+    from datetime import UTC, datetime
+
+    from app.models.tool_call_grant import (
+        BoundExecutionPrincipal,
+        ToolCallGrant,
+        ToolCallGrantScope,
+        ToolCallMode,
+    )
+    from app.orchestration.react_engine import ReadOnlyReActExecutor
+
+    registry = ToolRegistry()
+    registry.auto_discover()
+    inner = ToolExecutor(registry=registry)
+    now = datetime.now(tz=UTC)
+    grant = ToolCallGrant(
+        grant_id="tcg-replay01",
+        mode=ToolCallMode.PRODUCTION,
+        namespace_key="production:evt-react-replay",
+        event_id="evt-react-replay",
+        tenant_id="tenant-a",
+        scope=ToolCallGrantScope(allowed_tools=["query_dns"]),
+        execution_principal=BoundExecutionPrincipal(
+            principal_id="tcp-replay01",
+            agent_name="react_engine",
+            actor_type="react_engine",
+        ),
+        max_calls=5,
+        valid_from=now,
+        expires_at=now.replace(year=now.year + 1),
+        policy_version="tool-grant-v1",
+        created_at=now,
+    )
+    grant_service = MagicMock()
+    grant_service.available = True
+    grant_service.issue_grant = AsyncMock(
+        return_value=ToolCallGrantIssueResult(grant=grant, grant_token="")
+    )
+    grant_service.load_grant_trusted = AsyncMock(return_value=grant)
+    factory = ReactToolExecutorFactory(
+        inner_executor=inner,
+        grant_service=grant_service,
+        settings=Settings(TOOL_CALL_GRANT_REQUIRED=True, EMBEDDING_MODE="mock"),
+        projection_service=SafeToolProjectionService(registry),
+    )
+    react_exec = await factory.for_event("evt-react-replay", tenant_id="tenant-a")
+    assert isinstance(react_exec, ReadOnlyReActExecutor)
+    grant_service.load_grant_trusted.assert_awaited_once_with("tcg-replay01")

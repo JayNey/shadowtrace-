@@ -889,3 +889,29 @@ async def test_trace_records_real_round_duration(
     assert completed_at >= started_at
     # The 10ms executor delay must be visible in the traced round duration.
     assert (completed_at - started_at).total_seconds() >= 0.005
+
+
+@pytest.mark.asyncio
+async def test_readonly_react_executor_rejects_plain_executor_when_grant_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When TOOL_CALL_GRANT_REQUIRED=true, ReAct must use BoundToolExecutor."""
+    from app.core.config import get_settings
+    from app.orchestration.react_engine import ReActActionDenied
+
+    monkeypatch.setenv("TOOL_CALL_GRANT_REQUIRED", "true")
+    get_settings.cache_clear()
+
+    class PlainExecutor:
+        async def call(self, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
+            return {"status": "success", "data": {}}
+
+    executor = ReadOnlyReActExecutor(PlainExecutor(), event_id=EVENT_ID)  # type: ignore[arg-type]
+    action = ReActAction(
+        action_type=ReActActionType.CALL_TOOL,
+        target_name="query_threat_intel",
+        params={"domain": "example.com"},
+    )
+
+    with pytest.raises(ReActActionDenied, match="BoundToolExecutor"):
+        await executor.execute(action)

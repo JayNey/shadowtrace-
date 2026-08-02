@@ -255,3 +255,27 @@ async def test_forged_agent_name_ignored(
             agent_name="forged_agent",
         )
     assert bound.trusted_agent_name == "react_engine"
+
+
+@pytest.mark.asyncio
+async def test_inner_executor_failure_finalizes_attempt(
+    grant_service: ToolCallGrantService,
+    registry: ToolRegistry,
+) -> None:
+    class _FailingInner:
+        registry = registry
+
+        async def call(self, *args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("provider crashed")
+
+    sfx = _sfx()
+    event_id = f"evt-bound-{sfx}"
+    bound = await _bound_executor(
+        grant_service,
+        _FailingInner(),  # type: ignore[arg-type]
+        registry,
+        event_id=event_id,
+    )
+    with pytest.raises(RuntimeError, match="provider crashed"):
+        await bound.call("query_dns", {"domain": "example.com"}, event_id)
+    assert await grant_service.count_attempts(bound.grant.grant_id) == 1

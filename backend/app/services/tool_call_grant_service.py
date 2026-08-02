@@ -151,6 +151,23 @@ class ToolCallGrantService:
                 )
             return grant_from_row(row)
 
+    async def load_grant_trusted(self, grant_id: str) -> ToolCallGrant:
+        """Server-side grant reload for trusted wiring (no opaque token)."""
+
+        if not self._available:
+            raise ToolCallGrantUnavailableError(
+                "tool call grant service unavailable",
+                details={"grant_id": grant_id},
+            )
+        async with self._session_factory() as session:
+            row = await session.get(orm.ToolCallGrantORM, grant_id)
+            if row is None:
+                raise ToolCallGrantDeniedError(
+                    "unknown grant_id",
+                    details={"grant_id": grant_id},
+                )
+            return grant_from_row(row)
+
     async def reserve_attempt(
         self,
         grant: ToolCallGrant,
@@ -162,6 +179,19 @@ class ToolCallGrantService:
         """Atomic reserve — denied/failed/timeout paths must still consume attempt."""
 
         self._assert_grant_live(grant, event_id=event_id)
+
+        try:
+            reserved_seq = await self._budget_reservation.reserve(
+                mode=grant.mode,
+                namespace_key=grant.namespace_key,
+                grant_id=grant.grant_id,
+                max_calls=grant.max_calls,
+            )
+        except ValueError as exc:
+            raise ToolCallGrantDeniedError(
+                "grant max_calls exhausted",
+                details={"grant_id": grant.grant_id, "max_calls": grant.max_calls},
+            ) from exc
 
         attempt_id = build_attempt_id()
         record = orm.ToolCallAttemptORM(
@@ -195,6 +225,13 @@ class ToolCallGrantService:
                 raise ToolCallGrantDeniedError(
                     "grant max_calls exhausted",
                     details={"grant_id": grant.grant_id, "max_calls": grant.max_calls},
+                )
+            if int(attempt_seq) != int(reserved_seq):
+                logger.warning(
+                    "grant budget seq mismatch grant_id=%s redis=%s pg=%s",
+                    grant.grant_id,
+                    reserved_seq,
+                    attempt_seq,
                 )
             record.attempt_seq = int(attempt_seq)
             session.add(record)
@@ -293,9 +330,10 @@ def build_react_grant_request(
     max_calls: int = 32,
     shadow_run_id: str | None = None,
     mode: ToolCallMode = ToolCallMode.PRODUCTION,
+    policy_version: str | None = None,
 ) -> ToolCallGrantCreateRequest:
     from app.services.tool_call_grant_resolver import build_principal_id
-    from app.models.tool_call_grant import BoundExecutionPrincipal
+    from app.models.tool_call_grant import BoundExecutionPrincipal, DEFAULT_TOOL_CALL_GRANT_POLICY_VERSION
 
     principal_id = build_principal_id()
     return ToolCallGrantCreateRequest(
@@ -313,6 +351,7 @@ def build_react_grant_request(
             actor_type="react_engine",
         ),
         max_calls=max_calls,
+        policy_version=policy_version or DEFAULT_TOOL_CALL_GRANT_POLICY_VERSION,
         idempotency_key=f"react-{event_id}-{uuid.uuid4().hex[:12]}",
     )
 

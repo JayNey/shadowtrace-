@@ -223,6 +223,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         graph_agent: _AgentProtocol | None = None,
         storyline_service: Any | None = None,  # StorylineService (has .generate not .execute)
         react_executor: Any | None = None,
+        react_executor_factory: Any | None = None,
+        react_llm_client: Any | None = None,
         event_service: Any | None = None,
         context_store: Any | None = None,
         lease: EventLease | None = None,
@@ -250,6 +252,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         self.graph_agent = graph_agent
         self.storyline_service = storyline_service
         self.react_executor = react_executor
+        self.react_executor_factory = react_executor_factory
+        self.react_llm_client = react_llm_client
         self.event_service = event_service
         self.context_store = context_store
         self.lease = lease
@@ -1044,30 +1048,65 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             )
 
     async def _run_react_step(self, ec: EventContext, step: PlanStep) -> None:
-        """Optional ReAct iteration step (P1 capability switch, ISSUE-053).
+        """Optional ReAct iteration step (ISSUE-053 / ISSUE-134 grant wiring)."""
 
-        Only active when ``react_enabled`` is ``True`` AND a
-        ``ReadOnlyReActExecutor`` has been injected.  The plan-step goal
-        becomes the ReAct goal.
-
-        In ISSUE-054 scope the concrete ReAct loop wiring is a hook point;
-        ISSUE-053/ISSUE-055 deliver the full observe→think→act→reflect loop.
-        """
-        if not self.react_enabled or self.react_executor is None:
+        if not self.react_enabled:
             return
+        if self.react_executor_factory is None and self.react_executor is None:
+            return
+        if self.react_llm_client is None:
+            logger.warning("SuperAgent: ReAct skipped — react_llm_client not wired")
+            return
+
+        from app.orchestration.react_engine import ReActEngine
+        from app.services.tenant_resolution import resolve_tenant_id
+
         event_id = _event_id_from_context(ec)
-        # _record_agent_step is called by _execute_single_step before
-        # dispatching here — do NOT double-count.
-        logger.info(
-            "SuperAgent: ReAct step for event=%s goal=%r "
-            "(ISSUE-053 executor wiring deferred to ISSUE-055)",
-            event_id,
-            step.step_goal,
+        goal = (step.step_goal or "补全调查证据缺口").strip()
+        logger.info("SuperAgent: ReAct step for event=%s goal=%r", event_id, goal)
+
+        if self.react_executor_factory is not None:
+            react_exec = await self.react_executor_factory.for_event(
+                event_id,
+                tenant_id=resolve_tenant_id(ec.source_snapshot),
+                source_snapshot=ec.source_snapshot,
+            )
+        else:
+            react_exec = self.react_executor
+
+        context: dict[str, Any] = {
+            "event_id": event_id,
+            "gaps": goal,
+        }
+        if ec.evidence_output:
+            context["evidence_summary"] = str(ec.evidence_output)[:2000]
+        if ec.triage_result:
+            context["observation"] = str(ec.triage_result.get("reasoning", ""))[:2000]
+
+        engine = ReActEngine(
+            self.react_llm_client,
+            convergence_guard=self.convergence_guard,
+            trace_sink=self.trace_service,
         )
-        # ISSUE-053/ISSUE-055: replace with ReActEngine.run(goal=step.step_goal, ...)
-        # The executor is a ReadOnlyReActExecutor that requires per-event
-        # init params (tool_executor, event_id); the factory in events.py
-        # guards against REACT_ENABLED=true without a valid executor.
+        try:
+            result = await engine.run(goal, context, react_exec)
+        except Exception:
+            logger.exception("SuperAgent: ReAct run failed for event=%s", event_id)
+            return
+
+        if self.working_memory is not None:
+            try:
+                await self.working_memory.write(
+                    event_id,
+                    "react_output",
+                    result.model_dump(mode="json"),
+                )
+            except Exception:
+                logger.warning(
+                    "SuperAgent: failed to persist react_output for event=%s",
+                    event_id,
+                    exc_info=True,
+                )
 
     # ------------------------------------------------------------------ #
     # ConvergenceGuard helpers (ISSUE-052)

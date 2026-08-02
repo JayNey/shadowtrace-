@@ -71,3 +71,5 @@ def test_safe_projection_redacts_secrets() -> None:
     )
     assert projection.data.get("api_key") == "[REDACTED]"
     assert "sk-leaked" not in str(projection.data)
+    assert "prompt_injection_suspect" in projection.taint_flags
+    assert projection.trust_level == "untrusted"
