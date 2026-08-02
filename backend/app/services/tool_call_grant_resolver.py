@@ -1,4 +1,8 @@
-"""Grant scope resolution — registry ∩ grant intersection (ISSUE-134)."""
+"""Grant scope resolution — registry ∩ grant intersection (ISSUE-134).
+
+Phase B note: canonicalized scope-policy adapters (connector/domain/entity)
+will extend ``validate_scope_params``; Phase A inlines checks here intentionally.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +22,24 @@ from app.models.tool_call_grant import (
 )
 from app.models.tool_meta import RoutingKind
 from app.tools.registry import ToolRegistry
+
+
+def build_react_idempotency_key(
+    event_id: str,
+    *,
+    plan_step_id: str | None = None,
+    allowed_tools: list[str] | None = None,
+    max_calls: int | None = None,
+) -> str:
+    """Stable idempotency key for ReAct step grant mint/retry."""
+
+    step = (plan_step_id or "default").strip() or "default"
+    key = f"react-{event_id}-{step}"
+    if allowed_tools is not None:
+        scope_payload = f"{','.join(sorted(allowed_tools))}:{max_calls or 0}"
+        scope_digest = hashlib.sha256(scope_payload.encode("utf-8")).hexdigest()[:8]
+        key = f"{key}-{scope_digest}"
+    return key[:256]
 
 
 def build_namespace_key(
@@ -174,6 +196,7 @@ __all__ = [
     "build_grant_id",
     "build_namespace_key",
     "build_principal_id",
+    "build_react_idempotency_key",
     "default_grant_window",
     "grant_from_row",
     "hash_grant_token",

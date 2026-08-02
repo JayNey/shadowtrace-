@@ -655,6 +655,57 @@ class TestReactEnabled:
         await agent._run_react_step(ec, step)
         factory.for_event.assert_awaited_once()
 
+    async def test_react_skips_when_grant_persistence_unavailable(self) -> None:
+        """DB/persistence failures during grant mint must degrade without aborting."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.models.context import EventContext
+        from app.models.enums import (
+            DispositionPolicy,
+            EventStatus,
+            EventType,
+            FinalVerdict,
+            Severity,
+            WritebackReadiness,
+        )
+        from app.models.security_event import EventSummary
+
+        factory = MagicMock()
+        factory.for_event = AsyncMock(
+            side_effect=ToolCallGrantUnavailableError(
+                "tool call grant persistence unavailable",
+                details={"event_id": _EVENT_ID, "reason": "OperationalError"},
+            )
+        )
+        agent = SuperAgent(
+            react_enabled=True,
+            react_executor_factory=factory,
+            react_llm_client=MagicMock(),
+        )
+        ec = EventContext(
+            event=EventSummary(
+                event_id=_EVENT_ID,
+                event_type=EventType.INSIDER_THREAT,
+                title="Suspicious login",
+                status=EventStatus.NEW,
+                severity=Severity.MEDIUM,
+                risk_score=50,
+                final_verdict=FinalVerdict.NONE,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            )
+        )
+        step = PlanStep.model_construct(
+            step_order=4,
+            step_goal="Fill evidence gaps",
+            assigned_agent="react",
+            required_tools=["query_dns"],
+            success_criteria="gap closed",
+        )
+        await agent._run_react_step(ec, step)
+        factory.for_event.assert_awaited_once()
+
 
 class TestOrchestrationModeGate:
     """Scenario 5: ORCHESTRATION_MODE=analysis_only env gate."""

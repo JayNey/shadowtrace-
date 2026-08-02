@@ -247,6 +247,7 @@ class ReadOnlyReActExecutor:
                 action_type=action.action_type.value,
                 target_name=name,
             )
+        # Dev-only path when TOOL_CALL_GRANT_REQUIRED=false; production config forbids this.
         result = await self._plain_executor.call(
             name,
             dict(action.params),

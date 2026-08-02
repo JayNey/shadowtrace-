@@ -274,6 +274,41 @@ async def test_budget_seq_mismatch_fail_closed(service: ToolCallGrantService) ->
 
 
 @pytest.mark.asyncio
+async def test_reserve_rolls_back_pg_on_unexpected_budget_error(
+    service: ToolCallGrantService,
+) -> None:
+    sfx = _sfx()
+    event_id = f"evt-budget-rollback-{sfx}"
+    grant, _token = await _issue(service, event_id=event_id, max_calls=3)
+    original_reserve = service._budget_reservation.reserve  # noqa: SLF001 — test hook
+    call_count = 0
+
+    async def _broken_reserve(**kwargs: object) -> int:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return await original_reserve(**kwargs)  # type: ignore[arg-type]
+        raise RuntimeError("redis script failure")
+
+    service._budget_reservation.reserve = _broken_reserve  # type: ignore[method-assign]  # noqa: SLF001
+
+    await service.reserve_attempt(
+        grant.grant_id,
+        tool_name="query_dns",
+        params={},
+        event_id=event_id,
+    )
+    with pytest.raises(ToolCallGrantUnavailableError, match="budget reservation unavailable"):
+        await service.reserve_attempt(
+            grant.grant_id,
+            tool_name="query_dns",
+            params={"retry": True},
+            event_id=event_id,
+        )
+    assert await service.count_attempts(grant.grant_id) == 1
+
+
+@pytest.mark.asyncio
 async def test_idempotency_replay(service: ToolCallGrantService) -> None:
     sfx = _sfx()
     request = build_react_grant_request(

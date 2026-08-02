@@ -14,9 +14,60 @@ from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.models.tool_call_grant import ToolCallMode
 from app.services.safe_tool_projection import SafeToolProjectionService
 from app.services.tool_call_budget_reservation import ToolCallBudgetReservationService
-from app.services.tool_call_grant_resolver import validate_scope_params
+from app.services.tool_call_grant_resolver import build_react_idempotency_key, validate_scope_params
 from app.services.tool_call_grant_service import ToolCallGrantService
 from app.tools.registry import ToolRegistry
+
+
+def test_build_react_idempotency_key_is_stable_for_same_step() -> None:
+    key_a = build_react_idempotency_key(
+        "evt-a",
+        plan_step_id="react-step-1",
+        allowed_tools=["query_dns", "query_edr_process"],
+        max_calls=8,
+    )
+    key_b = build_react_idempotency_key(
+        "evt-a",
+        plan_step_id="react-step-1",
+        allowed_tools=["query_edr_process", "query_dns"],
+        max_calls=8,
+    )
+    key_c = build_react_idempotency_key(
+        "evt-a",
+        plan_step_id="react-step-2",
+        allowed_tools=["query_dns"],
+        max_calls=8,
+    )
+    assert key_a == key_b
+    assert key_a != key_c
+
+
+@pytest.mark.asyncio
+async def test_issue_grant_wraps_persistence_errors() -> None:
+    from sqlalchemy.exc import OperationalError
+
+    class _BrokenSession:
+        async def __aenter__(self) -> None:
+            raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    service = ToolCallGrantService(session_factory=lambda: _BrokenSession())  # type: ignore[arg-type]
+    with pytest.raises(ToolCallGrantUnavailableError, match="persistence unavailable"):
+        await service.issue_grant(
+            ToolCallGrantCreateRequest(
+                event_id="evt-db-down",
+                tenant_id="tenant-a",
+                scope=ToolCallGrantScope(allowed_tools=["query_dns"]),
+                execution_principal=BoundExecutionPrincipal(
+                    principal_id="tcp-dbdown1",
+                    agent_name="react_engine",
+                    actor_type="react_engine",
+                ),
+                idempotency_key="idem-db-down-key",
+            )
+        )
 
 
 @pytest.mark.asyncio

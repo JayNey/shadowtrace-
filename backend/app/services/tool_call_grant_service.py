@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import ToolCallGrantDeniedError, ToolCallGrantUnavailableError, ValidationError
@@ -28,6 +27,7 @@ from app.services.tool_call_grant_resolver import (
     build_attempt_id,
     build_grant_id,
     build_namespace_key,
+    build_react_idempotency_key,
     default_grant_window,
     grant_from_row,
     hash_grant_token,
@@ -95,39 +95,48 @@ class ToolCallGrantService:
             idempotency_key=request.idempotency_key,
         )
 
-        async with self._session_factory() as session:
-            existing = await session.scalar(
-                select(orm.ToolCallGrantORM).where(
-                    orm.ToolCallGrantORM.idempotency_key == request.idempotency_key
-                )
-            )
-            if existing is not None:
-                if existing.event_id != request.event_id:
-                    raise ValidationError(
-                        "idempotency_key reused for different event_id",
-                        details={"idempotency_key": request.idempotency_key},
-                    )
-                return ToolCallGrantIssueResult(
-                    grant=grant_from_row(existing),
-                    grant_token="",
-                )
-            session.add(row)
-            try:
-                await session.commit()
-            except IntegrityError as exc:
-                await session.rollback()
-                replay = await session.scalar(
+        try:
+            async with self._session_factory() as session:
+                existing = await session.scalar(
                     select(orm.ToolCallGrantORM).where(
                         orm.ToolCallGrantORM.idempotency_key == request.idempotency_key
                     )
                 )
-                if replay is not None:
+                if existing is not None:
+                    if existing.event_id != request.event_id:
+                        raise ValidationError(
+                            "idempotency_key reused for different event_id",
+                            details={"idempotency_key": request.idempotency_key},
+                        )
                     return ToolCallGrantIssueResult(
-                        grant=grant_from_row(replay),
+                        grant=grant_from_row(existing),
                         grant_token="",
                     )
-                raise ValidationError("failed to issue tool call grant") from exc
-            await session.refresh(row)
+                session.add(row)
+                try:
+                    await session.commit()
+                except IntegrityError as exc:
+                    await session.rollback()
+                    replay = await session.scalar(
+                        select(orm.ToolCallGrantORM).where(
+                            orm.ToolCallGrantORM.idempotency_key == request.idempotency_key
+                        )
+                    )
+                    if replay is not None:
+                        return ToolCallGrantIssueResult(
+                            grant=grant_from_row(replay),
+                            grant_token="",
+                        )
+                    raise ValidationError("failed to issue tool call grant") from exc
+                await session.refresh(row)
+        except ValidationError:
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("tool call grant issue persistence failed")
+            raise ToolCallGrantUnavailableError(
+                "tool call grant persistence unavailable",
+                details={"reason": type(exc).__name__},
+            ) from exc
 
         return ToolCallGrantIssueResult(grant=grant_from_row(row), grant_token=grant_token)
 
@@ -137,19 +146,28 @@ class ToolCallGrantService:
                 "tool call grant service unavailable",
                 details={"grant_id": grant_id},
             )
-        async with self._session_factory() as session:
-            row = await session.get(orm.ToolCallGrantORM, grant_id)
-            if row is None:
-                raise ToolCallGrantDeniedError(
-                    "unknown grant_id",
-                    details={"grant_id": grant_id},
-                )
-            if row.grant_token_hash != hash_grant_token(grant_token):
-                raise ToolCallGrantDeniedError(
-                    "grant token tampered or invalid",
-                    details={"grant_id": grant_id, "reason": "token_mismatch"},
-                )
-            return grant_from_row(row)
+        try:
+            async with self._session_factory() as session:
+                row = await session.get(orm.ToolCallGrantORM, grant_id)
+                if row is None:
+                    raise ToolCallGrantDeniedError(
+                        "unknown grant_id",
+                        details={"grant_id": grant_id},
+                    )
+                if row.grant_token_hash != hash_grant_token(grant_token):
+                    raise ToolCallGrantDeniedError(
+                        "grant token tampered or invalid",
+                        details={"grant_id": grant_id, "reason": "token_mismatch"},
+                    )
+                return grant_from_row(row)
+        except ToolCallGrantDeniedError:
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("tool call grant load failed grant_id=%s", grant_id)
+            raise ToolCallGrantUnavailableError(
+                "tool call grant persistence unavailable",
+                details={"grant_id": grant_id, "reason": type(exc).__name__},
+            ) from exc
 
     async def load_grant_trusted(self, grant_id: str) -> ToolCallGrant:
         """Server-side grant reload for trusted wiring (no opaque token)."""
@@ -159,14 +177,23 @@ class ToolCallGrantService:
                 "tool call grant service unavailable",
                 details={"grant_id": grant_id},
             )
-        async with self._session_factory() as session:
-            row = await session.get(orm.ToolCallGrantORM, grant_id)
-            if row is None:
-                raise ToolCallGrantDeniedError(
-                    "unknown grant_id",
-                    details={"grant_id": grant_id},
-                )
-            return grant_from_row(row)
+        try:
+            async with self._session_factory() as session:
+                row = await session.get(orm.ToolCallGrantORM, grant_id)
+                if row is None:
+                    raise ToolCallGrantDeniedError(
+                        "unknown grant_id",
+                        details={"grant_id": grant_id},
+                    )
+                return grant_from_row(row)
+        except ToolCallGrantDeniedError:
+            raise
+        except SQLAlchemyError as exc:
+            logger.exception("tool call grant trusted load failed grant_id=%s", grant_id)
+            raise ToolCallGrantUnavailableError(
+                "tool call grant persistence unavailable",
+                details={"grant_id": grant_id, "reason": type(exc).__name__},
+            ) from exc
 
     async def reserve_attempt(
         self,
@@ -228,8 +255,12 @@ class ToolCallGrantService:
                 grant = grant_from_row(fresh_row)
         except ToolCallGrantDeniedError:
             raise
-        except Exception:
-            raise
+        except SQLAlchemyError as exc:
+            logger.exception("tool call grant reserve persistence failed grant_id=%s", grant_id)
+            raise ToolCallGrantUnavailableError(
+                "tool call grant persistence unavailable",
+                details={"grant_id": grant_id, "reason": type(exc).__name__},
+            ) from exc
 
         try:
             reserved_seq = await self._budget_reservation.reserve(
@@ -238,15 +269,20 @@ class ToolCallGrantService:
                 grant_id=grant.grant_id,
                 max_calls=grant.max_calls,
             )
-        except ValueError as exc:
+        except Exception as exc:
             await self._rollback_reserved_attempt(
                 grant.grant_id,
                 attempt_id,
-                denial_reason="grant max_calls exhausted",
+                denial_reason="grant budget reservation failed",
             )
-            raise ToolCallGrantDeniedError(
-                "grant max_calls exhausted",
-                details={"grant_id": grant.grant_id, "max_calls": grant.max_calls},
+            if isinstance(exc, ValueError):
+                raise ToolCallGrantDeniedError(
+                    "grant max_calls exhausted",
+                    details={"grant_id": grant.grant_id, "max_calls": grant.max_calls},
+                ) from exc
+            raise ToolCallGrantUnavailableError(
+                "tool call grant budget reservation unavailable",
+                details={"grant_id": grant.grant_id, "reason": type(exc).__name__},
             ) from exc
 
         if int(reserved_seq) != int(record.attempt_seq):
@@ -410,7 +446,12 @@ def build_react_grant_request(
         ),
         max_calls=max_calls,
         policy_version=policy_version or DEFAULT_TOOL_CALL_GRANT_POLICY_VERSION,
-        idempotency_key=f"react-{event_id}-{uuid.uuid4().hex[:12]}",
+        idempotency_key=build_react_idempotency_key(
+            event_id,
+            plan_step_id=plan_step_id,
+            allowed_tools=allowed_tools,
+            max_calls=max_calls,
+        ),
     )
 
 
