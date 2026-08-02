@@ -19,6 +19,7 @@ from sqlalchemy.pool import NullPool
 from app.core.errors import ValidationError
 from app.db import models as orm
 from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE
+from app.detection.sequences.releases import GEO_SENSITIVE_SEQUENCE_V1, IDENTITY_EXFIL_SEQUENCE_V1
 from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
@@ -128,6 +129,7 @@ async def _insert_observation(
     scope_id: str,
     observed_at: datetime,
     action: str = "create_process",
+    category: str = "process_create",
     entity_type: str = "ip",
     entity_id: str = "10.0.0.10",
 ) -> BehaviorObservation:
@@ -147,7 +149,7 @@ async def _insert_observation(
         ingested_at=observed_at,
         entity_refs=[BehaviorEntityRef(entity_type=entity_type, entity_id=entity_id, role="src")],
         action=action,
-        category="process_create",
+        category=category,
         detection_score=55.0,
         content_hash="c" * 64,
         observation_hash="d" * 64,
@@ -1326,3 +1328,290 @@ async def test_statistical_anomaly_insufficient_history_records_typed_runtime_er
     assert len(result.errors) == 1
     assert result.errors[0].error_category == "validation_error"
     assert result.errors[0].detail.get("category") == "insufficient_history"
+
+
+async def _insert_sequence_observation(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    suffix: str,
+    tenant_id: str,
+    scope_id: str,
+    observed_at: datetime,
+    action: str,
+    category: str,
+    entity_type: str = "user",
+    entity_id: str = "account-1",
+) -> None:
+    await _insert_observation(
+        session_factory,
+        suffix=suffix,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        observed_at=observed_at,
+        action=action,
+        category=category,
+        entity_type=entity_type,
+        entity_id=entity_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_sequence_identity_exfil_produces_shadow_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    entity_type = "user"
+    entity_id = f"account-{suffix}"
+    steps = IDENTITY_EXFIL_SEQUENCE_V1.sequence_steps
+    for index, step in enumerate(steps):
+        await _insert_sequence_observation(
+            session_factory,
+            suffix=f"{suffix}-step-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=cutoff - timedelta(minutes=55 - index * 5),
+            action=step["action"],
+            category=step["category"],
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-identity-exfil",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_SEQUENCE,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="high",
+        match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert result.errors == []
+    assert len(result.candidates) == 1
+    candidate = result.candidates[0]
+    assert candidate.operator is RuleOperatorKind.EVENT_SEQUENCE
+    assert candidate.shadow_only is True
+    assert candidate.provenance.sequence_id == IDENTITY_EXFIL_SEQUENCE_V1.sequence_id
+    assert len(candidate.provenance.ordered_observation_ids) == 4
+    assert candidate.provenance.observation_ids == candidate.provenance.ordered_observation_ids
+    assert candidate.provenance.sequence_step_matches
+    assert "login" in (candidate.provenance.match_explanation or "")
+
+    second = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert second.candidates[0].candidate_detection_id == candidate.candidate_detection_id
+    assert second.candidates[0].content_hash == candidate.content_hash
+
+
+@pytest.mark.asyncio
+async def test_event_sequence_benign_partial_sequence_no_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    entity_type = "user"
+    entity_id = f"account-{suffix}"
+    for index, step in enumerate(IDENTITY_EXFIL_SEQUENCE_V1.sequence_steps[:3]):
+        await _insert_sequence_observation(
+            session_factory,
+            suffix=f"{suffix}-partial-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=cutoff - timedelta(minutes=50 - index * 10),
+            action=step["action"],
+            category=step["category"],
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-partial",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_SEQUENCE,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="high",
+        match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert result.candidates == []
+    assert result.errors == []
+
+
+@pytest.mark.asyncio
+async def test_event_sequence_out_of_order_observations_still_matches(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    entity_type = "user"
+    entity_id = f"account-{suffix}"
+    steps = list(IDENTITY_EXFIL_SEQUENCE_V1.sequence_steps)
+    insert_order = [3, 0, 2, 1]
+    for position, step_index in enumerate(insert_order):
+        step = steps[step_index]
+        await _insert_sequence_observation(
+            session_factory,
+            suffix=f"{suffix}-oo-{position}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=cutoff - timedelta(minutes=55 - step_index * 5),
+            action=step["action"],
+            category=step["category"],
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-oo",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_SEQUENCE,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="high",
+        match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert len(result.candidates) == 1
+    assert len(result.candidates[0].provenance.ordered_observation_ids) == 4
+
+
+@pytest.mark.asyncio
+async def test_event_sequence_tenant_isolation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_a = f"tenant-a-{suffix}"
+    tenant_b = f"tenant-b-{suffix}"
+    scope_a = await _seed_scope(session_factory, suffix=f"a-{suffix}", tenant_id=tenant_a)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    rule = DetectionRuleDefinition(
+        rule_id="rule-seq-iso",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_SEQUENCE,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_a,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="high",
+        match_criteria=IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_a,
+        scope_id=scope_a,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    with pytest.raises(ValidationError, match="not found for tenant"):
+        await runtime.execute_shadow(
+            source_tenant_id=tenant_b,
+            cutoff_at=cutoff,
+            package_id=package_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_geo_sensitive_sequence_produces_shadow_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_id = f"tenant-{suffix}"
+    scope_id = await _seed_scope(session_factory, suffix=suffix, tenant_id=tenant_id)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    entity_type = "user"
+    entity_id = f"account-{suffix}"
+    for index, step in enumerate(GEO_SENSITIVE_SEQUENCE_V1.sequence_steps):
+        await _insert_sequence_observation(
+            session_factory,
+            suffix=f"{suffix}-geo-{index}",
+            tenant_id=tenant_id,
+            scope_id=scope_id,
+            observed_at=cutoff - timedelta(minutes=40 - index * 5),
+            action=step["action"],
+            category=step["category"],
+            entity_type=entity_type,
+            entity_id=entity_id,
+        )
+
+    rule = DetectionRuleDefinition(
+        rule_id="rule-geo-sensitive",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_SEQUENCE,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id=scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="medium",
+        match_criteria=GEO_SENSITIVE_SEQUENCE_V1.as_match_criteria(),
+    )
+    package_id = await _register_shadow_package(
+        session_factory,
+        tenant_id=tenant_id,
+        scope_id=scope_id,
+        rule=rule,
+    )
+    runtime = DetectionRuleRuntimeService(session_factory)
+    result = await runtime.execute_shadow(
+        source_tenant_id=tenant_id,
+        cutoff_at=cutoff,
+        package_id=package_id,
+    )
+    assert len(result.candidates) == 1
+    assert result.candidates[0].provenance.sequence_id == GEO_SENSITIVE_SEQUENCE_V1.sequence_id
+    assert len(result.candidates[0].provenance.ordered_observation_ids) == 2
+

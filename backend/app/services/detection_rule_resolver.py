@@ -11,6 +11,7 @@ import orjson
 from app.core.errors import ValidationError
 from app.detection.operators import default_operator_registry
 from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE, MOCK_ACCOUNT_MAD_RELEASE_ID
+from app.detection.sequences.releases import GEO_SENSITIVE_SEQUENCE_V1, IDENTITY_EXFIL_SEQUENCE_V1
 from app.models.detection_rule import (
     CANDIDATE_DETECTION_SCHEMA_VERSION,
     DETECTION_RULE_SCHEMA_VERSION,
@@ -42,8 +43,13 @@ _ALLOWED_MATCH_CRITERIA_KEYS = frozenset(
         "model_release_id",
         "model_release_hash",
         "baseline_content_hash",
+        "sequence_id",
+        "sequence_hash",
+        "sequence_steps",
+        "max_step_gap_seconds",
     }
 )
+_ALLOWED_SEQUENCE_STEP_KEYS = frozenset({"action", "category", "entity_type", "entity_id"})
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -107,6 +113,7 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
     if operator_value in {
         RuleOperatorKind.EVENT_MATCH.value,
         RuleOperatorKind.EVENT_COUNT.value,
+        RuleOperatorKind.EVENT_SEQUENCE.value,
         RuleOperatorKind.STATISTICAL_ANOMALY.value,
     }:
         if rule.missing_data_policy is MissingDataPolicy.TREAT_AS_ZERO:
@@ -182,6 +189,69 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
                         "expected_release_hash": release_hash,
                     },
                 )
+
+    if operator_value == RuleOperatorKind.EVENT_SEQUENCE.value:
+        if rule.threshold <= 0:
+            raise ValidationError(
+                "event_sequence requires positive threshold",
+                details={"rule_id": rule.rule_id, "threshold": rule.threshold},
+            )
+        if rule.value_field is not None:
+            raise ValidationError(
+                "event_sequence must not set value_field",
+                details={"rule_id": rule.rule_id},
+            )
+        sequence_id = rule.match_criteria.get("sequence_id")
+        if not isinstance(sequence_id, str) or not sequence_id:
+            raise ValidationError(
+                "event_sequence requires sequence_id in match_criteria",
+                details={"rule_id": rule.rule_id},
+            )
+        known_sequences = {
+            IDENTITY_EXFIL_SEQUENCE_V1.sequence_id: IDENTITY_EXFIL_SEQUENCE_V1,
+            GEO_SENSITIVE_SEQUENCE_V1.sequence_id: GEO_SENSITIVE_SEQUENCE_V1,
+        }
+        release = known_sequences.get(sequence_id)
+        if release is None:
+            raise ValidationError(
+                "unsupported sequence package",
+                details={"rule_id": rule.rule_id, "sequence_id": sequence_id},
+            )
+        sequence_hash = rule.match_criteria.get("sequence_hash")
+        if isinstance(sequence_hash, str) and sequence_hash:
+            if sequence_hash != release.sequence_hash:
+                raise ValidationError(
+                    "sequence package hash mismatch",
+                    details={
+                        "rule_id": rule.rule_id,
+                        "sequence_id": sequence_id,
+                        "expected_sequence_hash": sequence_hash,
+                    },
+                )
+        raw_steps = rule.match_criteria.get("sequence_steps")
+        if not isinstance(raw_steps, list) or len(raw_steps) < 2:
+            raise ValidationError(
+                "event_sequence requires at least two sequence_steps",
+                details={"rule_id": rule.rule_id, "sequence_id": sequence_id},
+            )
+        for index, step in enumerate(raw_steps):
+            if not isinstance(step, dict) or not step:
+                raise ValidationError(
+                    "sequence step must be a non-empty object",
+                    details={"rule_id": rule.rule_id, "step_index": index},
+                )
+            for key in step:
+                if key not in _ALLOWED_SEQUENCE_STEP_KEYS:
+                    raise ValidationError(
+                        f"unsupported sequence step key: {key}",
+                        details={"rule_id": rule.rule_id, "step_index": index, "key": key},
+                    )
+        max_gap = rule.match_criteria.get("max_step_gap_seconds")
+        if max_gap is not None and (not isinstance(max_gap, int) or max_gap <= 0):
+            raise ValidationError(
+                "max_step_gap_seconds must be a positive integer",
+                details={"rule_id": rule.rule_id, "max_step_gap_seconds": max_gap},
+            )
 
     return rule
 

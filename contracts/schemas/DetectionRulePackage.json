@@ -190,6 +190,7 @@
       "enum": [
         "event_match",
         "event_count",
+        "event_sequence",
         "value_count",
         "statistical_anomaly"
       ],

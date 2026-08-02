@@ -362,7 +362,11 @@ class DetectionRuleRuntimeService:
         baselines: list[DetectionFeatureBaseline] = []
         scanned = 0
 
-        if rule.operator in {RuleOperatorKind.EVENT_MATCH, RuleOperatorKind.EVENT_COUNT}:
+        if rule.operator in {
+            RuleOperatorKind.EVENT_MATCH,
+            RuleOperatorKind.EVENT_COUNT,
+            RuleOperatorKind.EVENT_SEQUENCE,
+        }:
             observations = await self._load_observations(
                 session,
                 source_tenant_id=package.source_tenant_id,
@@ -420,6 +424,8 @@ class DetectionRuleRuntimeService:
             ).model_dump(mode="json")
             if match.scorer_provenance:
                 provenance_payload.update(match.scorer_provenance)
+            if match.sequence_provenance:
+                provenance_payload.update(match.sequence_provenance)
             candidates.append(
                 build_candidate_detection(
                     source_tenant_id=package.source_tenant_id,

@@ -17,7 +17,9 @@ DETECTION_RULE_SCHEMA_VERSION = "1.0"
 CANDIDATE_DETECTION_SCHEMA_VERSION = "1.0"
 DEFAULT_MAX_OBSERVATION_SCAN = 1000
 
-PHASE_A_OPERATORS = frozenset({"event_match", "event_count", "value_count", "statistical_anomaly"})
+PHASE_A_OPERATORS = frozenset(
+    {"event_match", "event_count", "event_sequence", "value_count", "statistical_anomaly"}
+)
 
 
 class DetectionRuleRuntimeState(StrEnum):
@@ -34,6 +36,7 @@ class RuleOperatorKind(StrEnum):
 
     EVENT_MATCH = "event_match"
     EVENT_COUNT = "event_count"
+    EVENT_SEQUENCE = "event_sequence"
     VALUE_COUNT = "value_count"
     STATISTICAL_ANOMALY = "statistical_anomaly"
 
@@ -126,6 +129,10 @@ class CandidateDetectionProvenance(BaseModel):
     baseline_content_hash: str | None = Field(default=None, max_length=64)
     snapshot_revision: int | None = Field(default=None, ge=1)
     contributing_features: list[dict[str, Any]] = Field(default_factory=list, max_length=16)
+    sequence_id: str | None = Field(default=None, max_length=128)
+    ordered_observation_ids: list[str] = Field(default_factory=list, max_length=256)
+    sequence_step_matches: list[dict[str, Any]] = Field(default_factory=list, max_length=32)
+    match_explanation: str | None = Field(default=None, max_length=512)
 
 
 class CandidateDetection(BaseModel):

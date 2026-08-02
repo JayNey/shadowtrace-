@@ -14,6 +14,7 @@ from app.detection.operators.event_match import EventMatchOperator
 from app.detection.operators.statistical_anomaly import StatisticalAnomalyOperator
 from app.detection.operators.value_count import ValueCountOperator
 from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE, MOCK_ACCOUNT_MAD_RELEASE_ID
+from app.detection.sequences.releases import IDENTITY_EXFIL_SEQUENCE_V1
 from app.models.behavior_observation import (
     BehaviorEntityRef,
     BehaviorObservation,
@@ -160,6 +161,46 @@ def test_compile_statistical_anomaly_rejects_bad_release_hash() -> None:
         compile_rule_definition(rule)
 
 
+def _event_sequence_rule(
+    *,
+    match_criteria: dict | None = None,
+) -> DetectionRuleDefinition:
+    return DetectionRuleDefinition(
+        rule_id="rule-seq",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_SEQUENCE,
+        feature_contract_version=FEATURE_CONTRACT_VERSION,
+        detection_scope_id="dscope-test",
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="high",
+        missing_data_policy=MissingDataPolicy.SKIP,
+        match_criteria=match_criteria or IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria(),
+    )
+
+
+def test_compile_event_sequence_requires_sequence_id() -> None:
+    criteria = IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria()
+    criteria.pop("sequence_id")
+    rule = _event_sequence_rule(match_criteria=criteria)
+    with pytest.raises(ValidationError, match="requires sequence_id"):
+        compile_rule_definition(rule)
+
+
+def test_compile_event_sequence_rejects_unknown_sequence() -> None:
+    criteria = IDENTITY_EXFIL_SEQUENCE_V1.as_match_criteria()
+    criteria["sequence_id"] = "unknown-sequence-v9"
+    rule = _event_sequence_rule(match_criteria=criteria)
+    with pytest.raises(ValidationError, match="unsupported sequence package"):
+        compile_rule_definition(rule)
+
+
+def test_compile_event_sequence_accepts_identity_exfil() -> None:
+    compiled = compile_rule_definition(_event_sequence_rule())
+    assert compiled.match_criteria["sequence_id"] == IDENTITY_EXFIL_SEQUENCE_V1.sequence_id
+
+
 def _mad_snapshot_and_baseline() -> tuple[FeatureSnapshot, DetectionFeatureBaseline]:
     cutoff = datetime(2026, 8, 3, 15, 30, 0, tzinfo=UTC)
     snapshot = FeatureSnapshot(
@@ -262,6 +303,7 @@ def test_default_operator_registry_contains_phase_a_operators() -> None:
         registry.get(RuleOperatorKind.STATISTICAL_ANOMALY.value).operator_kind
         == "statistical_anomaly"
     )
+    assert registry.get(RuleOperatorKind.EVENT_SEQUENCE.value).operator_kind == "event_sequence"
 
 
 def test_compile_rule_package_rejects_unknown_operator() -> None:

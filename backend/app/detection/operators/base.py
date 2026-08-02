@@ -21,6 +21,7 @@ class OperatorMatch:
     window_start: datetime | None = None
     window_end: datetime | None = None
     scorer_provenance: dict[str, Any] = field(default_factory=dict)
+    sequence_provenance: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

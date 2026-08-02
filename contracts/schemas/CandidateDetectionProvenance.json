@@ -196,6 +196,49 @@
       "maxItems": 16,
       "title": "Contributing Features",
       "type": "array"
+    },
+    "sequence_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Sequence Id"
+    },
+    "ordered_observation_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 256,
+      "title": "Ordered Observation Ids",
+      "type": "array"
+    },
+    "sequence_step_matches": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "maxItems": 32,
+      "title": "Sequence Step Matches",
+      "type": "array"
+    },
+    "match_explanation": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Match Explanation"
     }
   },
   "title": "CandidateDetectionProvenance",
