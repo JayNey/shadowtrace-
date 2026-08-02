@@ -192,6 +192,7 @@ class ObservabilitySnapshot:
     approval_operators: list[str] = field(default_factory=list)
     approval_plan_revisions: list[int] = field(default_factory=list)
     approval_cycles: list[int] = field(default_factory=list)
+    execution_job_count: int = 0
     disposition_outbox_count: int = 0
     audit_log_count: int = 0
 
@@ -244,6 +245,14 @@ async def collect_observability(
             )
             or 0
         )
+        execution_job_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.ActionExecutionJob)
+                .where(orm.ActionExecutionJob.event_id == event_id)
+            )
+            or 0
+        )
     return ObservabilitySnapshot(
         event_id=event_id,
         event_status=str(event_status) if event_status is not None else None,
@@ -256,9 +265,47 @@ async def collect_observability(
         approval_operators=[str(r.operator or "") for r in approval_rows if r.decided_at],
         approval_plan_revisions=[int(r.plan_revision) for r in approval_rows if r.decided_at],
         approval_cycles=[int(r.approval_cycle) for r in approval_rows if r.decided_at],
+        execution_job_count=execution_job_count,
         disposition_outbox_count=outbox_count,
         audit_log_count=audit_count,
     )
+
+
+def patch_production_session_factory(
+    monkeypatch: Any,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Route Celery task session lookups to the integration test factory."""
+    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: session_factory)
+
+
+def run_investigation_with_request(
+    *,
+    task_id: str,
+    event_id: str,
+    intent_id: str | None = None,
+    include_response_execution: bool = False,
+    redelivered: bool = False,
+) -> dict[str, str]:
+    """Invoke production ``run_investigation`` inline via request stack (no eager broker)."""
+    from celery.app.task import Context
+
+    from app.tasks import investigation_tasks as task_module
+
+    kwargs: dict[str, Any] = {"include_response_execution": include_response_execution}
+    if intent_id is not None:
+        kwargs["intent_id"] = intent_id
+    ctx = Context(
+        id=task_id,
+        delivery_info={"redelivered": redelivered},
+        retries=0,
+    )
+    task_module.run_investigation.request_stack.push(ctx)
+    try:
+        return task_module.run_investigation.run(event_id, **kwargs)
+    finally:
+        task_module.run_investigation.request_stack.pop()
 
 
 def unique_id(prefix: str) -> str:
@@ -278,13 +325,19 @@ TERMINAL_INTENT_STATUSES = frozenset(
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class MockExecutionStack:
     """Minimal mock-mode ActionExecutionService wiring for ISSUE-110 scenario B/C."""
 
     service: Any
     recorder: Any
     store: EventContextStore
+    _http_client: Any = field(repr=False, default=None)
+
+    async def aclose(self) -> None:
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
 
 
 async def build_mock_execution_stack(
@@ -352,7 +405,7 @@ async def build_mock_execution_stack(
         state_machine=state_machine,
         context_store=store,
     )
-    return MockExecutionStack(service=service, recorder=recorder, store=store)
+    return MockExecutionStack(service=service, recorder=recorder, store=store, _http_client=client)
 
 
 async def count_execution_jobs(

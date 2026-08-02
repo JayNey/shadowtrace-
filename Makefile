@@ -185,6 +185,7 @@ worker-nightly-smoke:
 
 worker-nightly-matrix: worker-nightly-pytest autonomous-mock-e2e-worker-pytest
 	@echo "Phase B pytest matrix + ISSUE-110 worker-gated E2E passed."
+	@echo "Prerequisite: Docker with worker profile (see autonomous-mock-e2e-worker-pytest)."
 
 # --- ISSUE-108 auto-investigate intent quality gate ------------------------- #
 auto-investigate-test:

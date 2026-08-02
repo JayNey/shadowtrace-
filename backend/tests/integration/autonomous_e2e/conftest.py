@@ -2,44 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.deps import get_approval_engine
-from app.core.celery_app import celery_app
 from app.core.config import get_settings
-from app.db.session_provider import init_worker_session_provider, reset_session_provider
 from app.main import app
-from tests.integration.autonomous_e2e.helpers import DEV_AUTH_TOKENS_JSON, build_approval_engine
-
-
-@pytest.fixture
-def celery_eager() -> Iterator[None]:
-    """Run Celery tasks inline for ISSUE-110 delivery-fencing tests."""
-    previous = {
-        "task_always_eager": celery_app.conf.task_always_eager,
-        "task_eager_propagates": celery_app.conf.task_eager_propagates,
-        "task_store_eager_result": celery_app.conf.task_store_eager_result,
-        "result_backend": celery_app.conf.result_backend,
-        "broker_url": celery_app.conf.broker_url,
-    }
-    celery_app.conf.task_always_eager = True
-    celery_app.conf.task_eager_propagates = True
-    celery_app.conf.task_store_eager_result = True
-    celery_app.conf.result_backend = "cache+memory://"
-    celery_app.conf.broker_url = "memory://"
-    init_worker_session_provider()
-    yield
-    reset_session_provider()
-    celery_app.conf.task_always_eager = previous["task_always_eager"]
-    celery_app.conf.task_eager_propagates = previous["task_eager_propagates"]
-    celery_app.conf.task_store_eager_result = previous["task_store_eager_result"]
-    celery_app.conf.result_backend = previous["result_backend"]
-    celery_app.conf.broker_url = previous["broker_url"]
+from tests.integration.autonomous_e2e.helpers import (
+    DEV_AUTH_TOKENS_JSON,
+    MockExecutionStack,
+    build_approval_engine,
+    build_mock_execution_stack,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +46,18 @@ def _clear_settings_cache() -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
+
+
+@pytest_asyncio.fixture
+async def mock_execution_stack(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+) -> AsyncIterator[MockExecutionStack]:
+    stack = await build_mock_execution_stack(session_factory, redis_client)
+    try:
+        yield stack
+    finally:
+        await stack.aclose()
 
 
 @pytest.fixture

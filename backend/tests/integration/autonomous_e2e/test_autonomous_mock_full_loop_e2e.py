@@ -22,7 +22,6 @@ from app.core.auth import Principal
 from app.core.celery_app import celery_app
 from app.core.celery_delivery import (
     celery_task_owner_id,
-    evaluate_redelivered_investigation_skip,
     normalize_public_task_state,
 )
 from app.core.celery_health import build_celery_health
@@ -66,14 +65,15 @@ from tests.integration.autonomous_e2e.helpers import (
     auth_headers,
     build_approval_engine,
     build_autonomous_stack,
-    build_mock_execution_stack,
     collect_observability,
     count_execution_jobs,
     incident_source,
     mock_autonomous_settings,
+    patch_production_session_factory,
     poll_until,
     principal_lacks_approver_role,
     require_celery_worker,
+    run_investigation_with_request,
     seed_primary_source_link,
     unique_id,
 )
@@ -279,7 +279,6 @@ async def test_scenario_a_stale_broker_task_skips_second_investigation(
 @pytest.mark.integration
 def test_scenario_a_dual_delivery_one_terminal_stale_skipped(
     session_factory: async_sessionmaker[AsyncSession],
-    celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Production run_investigation: current task completes once; stale task is skipped."""
@@ -308,21 +307,21 @@ def test_scenario_a_dual_delivery_one_terminal_stale_skipped(
         return {"status": "completed", "event_id": investigated_id}
 
     monkeypatch.setattr(tasks, "execute_investigation", _execute)
-    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
+    patch_production_session_factory(monkeypatch, session_factory)
 
-    first = tasks.run_investigation.apply(
-        args=[event_id],
-        kwargs={"intent_id": intent_id},
+    first = run_investigation_with_request(
         task_id=current_task,
-    ).result
+        event_id=event_id,
+        intent_id=intent_id,
+    )
     assert first["status"] == "completed"
     assert calls["n"] == 1
 
-    second = tasks.run_investigation.apply(
-        args=[event_id],
-        kwargs={"intent_id": intent_id},
+    second = run_investigation_with_request(
         task_id=stale_task,
-    ).result
+        event_id=event_id,
+        intent_id=intent_id,
+    )
     assert second["status"] == "skipped"
     assert second["reason"] in {"intent_already_terminal", "stale_broker_task"}
     assert calls["n"] == 1
@@ -330,7 +329,6 @@ def test_scenario_a_dual_delivery_one_terminal_stale_skipped(
     snap = asyncio.run(collect_observability(session_factory, event_id))
     assert snap.intent_statuses == [InvestigationIntentStatus.TERMINAL.value]
     assert snap.intent_broker_task_ids == [current_task]
-    assert snap.audit_log_count >= 0
 
 
 @pytest.mark.integration
@@ -393,10 +391,11 @@ async def test_scenario_a_publish_skips_intent_when_event_not_new(
 async def test_scenario_a_l0_auto_loop_executes_once_without_human(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
+    mock_execution_stack: Any,
 ) -> None:
     """L0 policy auto-approves and executes exactly once without human operator."""
     engine = await build_approval_engine(session_factory, redis_client)
-    stack = await build_mock_execution_stack(session_factory, redis_client)
+    stack = mock_execution_stack
     event_id = unique_id("evt-a-l0")
     action_id = unique_id("act-l0")
     await _seed_security_event(
@@ -440,16 +439,20 @@ async def test_scenario_a_l0_auto_loop_executes_once_without_human(
     assert not any(op.startswith("iss110") for op in snap.approval_operators)
     assert snap.pending_action_count == 0
     assert snap.action_count == 1
+    assert snap.execution_job_count == 1
 
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_scenario_a_l0_policy_auto_approve_only_for_l0_l1() -> None:
+async def test_scenario_a_l0_policy_auto_approve_l0_l1_not_l2() -> None:
     l0 = _response_action(event_id="evt-gate", level=ActionLevel.L0, action_id="act-l0")
+    l1 = _response_action(event_id="evt-gate", level=ActionLevel.L1, action_id="act-l1")
     l2 = _response_action(event_id="evt-gate", level=ActionLevel.L2, action_id="act-l2")
     l0_decision = evaluate_level_rules(l0, confidence=0.99, severity=Severity.CRITICAL)
+    l1_decision = evaluate_level_rules(l1, confidence=0.99, severity=Severity.CRITICAL)
     l2_decision = evaluate_level_rules(l2, confidence=0.99, severity=Severity.CRITICAL)
     assert l0_decision.decision is ApprovalDecisionKind.AUTO_APPROVE
+    assert l1_decision.decision is ApprovalDecisionKind.AUTO_APPROVE
     assert l2_decision.decision is ApprovalDecisionKind.REQUIRE_APPROVAL
 
 
@@ -496,7 +499,6 @@ async def test_scenario_a_worker_completes_enqueued_intent(
     assert snap.intent_broker_task_ids[0] is not None
     assert snap.event_status is not None
     assert snap.audit_log_count >= 1
-    assert snap.agent_trace_count >= 0
 
 
 # --------------------------------------------------------------------------- #
@@ -567,56 +569,37 @@ async def test_scenario_b_l2_human_approval_persists_operator(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_scenario_b_ingest_investigation_produces_l2_pending_then_executes_once(
+async def test_scenario_b_ingest_creates_intent_then_l2_pending_human_approve_executes_once(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
-    monkeypatch: pytest.MonkeyPatch,
     approve_api_client: Any,
+    mock_execution_stack: Any,
 ) -> None:
-    """Ingest → investigation produces waiting_approval L2 → human API approve → single execute."""
+    """Ingest creates intent; production L2 gate → human API approve → single execute."""
     engine = await build_approval_engine(session_factory, redis_client)
-    stack = await build_mock_execution_stack(session_factory, redis_client)
+    stack = mock_execution_stack
     events, _intent_service, _store = build_autonomous_stack(session_factory, redis_client)
-    produced: dict[str, str] = {}
-
-    async def _investigate(event_id: str, **_kwargs: Any) -> None:
-        action_id = unique_id("act-ingest-l2")
-        produced["action_id"] = action_id
-        action = _response_action(event_id=event_id, level=ActionLevel.L2, action_id=action_id)
-        async with session_factory() as session:
-            async with session.begin():
-                session.add(orm.Action(**action.model_dump()))
-                event_row = await session.get(orm.SecurityEvent, event_id)
-                assert event_row is not None
-                event_row.status = EventStatus.WAITING_APPROVAL.value
-        await engine.evaluate(action, _risk(), approval_cycle=0)
-
-    async def _fake_super_agent() -> Any:
-        agent = MagicMock()
-        agent.investigate = _investigate
-        return agent
-
-    monkeypatch.setattr("app.api.v1.deps.get_super_agent", _fake_super_agent)
-    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
-    monkeypatch.setattr(
-        "app.services.evidence_projection.bind_evidence_projection",
-        lambda _projection: nullcontext(),
-    )
-    monkeypatch.setattr(
-        "app.services.evidence_projection.EvidenceProjection",
-        lambda _factory: MagicMock(),
-    )
-    monkeypatch.setattr(
-        "app.services.investigation_guidance.record_investigation_workflow_path",
-        AsyncMock(),
-    )
 
     ingest = await events.ingest_source_object(
         incident_source(object_id=unique_id("inc-b-ingest"))
     )
-    result = await tasks.execute_investigation(ingest.event_id)
-    assert result["status"] == "completed"
-    action_id = produced["action_id"]
+    async with session_factory() as session:
+        intent_row = await session.scalar(
+            select(orm.InvestigationIntent).where(
+                orm.InvestigationIntent.event_id == ingest.event_id
+            )
+        )
+        assert intent_row is not None
+
+    action_id = unique_id("act-ingest-l2")
+    action = _response_action(event_id=ingest.event_id, level=ActionLevel.L2, action_id=action_id)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(orm.Action(**action.model_dump()))
+            event_row = await session.get(orm.SecurityEvent, ingest.event_id)
+            assert event_row is not None
+            event_row.status = EventStatus.WAITING_APPROVAL.value
+    await engine.evaluate(action, _risk(), approval_cycle=0)
 
     async with session_factory() as session:
         row = await session.get(orm.Action, action_id)
@@ -648,6 +631,7 @@ async def test_scenario_b_ingest_investigation_produces_l2_pending_then_executes
     assert snap.approval_operators == ["iss110-approver"]
     assert snap.approval_plan_revisions == [1]
     assert snap.approval_cycles == [0]
+    assert snap.execution_job_count == 1
     assert await count_execution_jobs(session_factory, ingest.event_id) == 1
 
 
@@ -656,6 +640,7 @@ async def test_scenario_b_ingest_investigation_produces_l2_pending_then_executes
 async def test_scenario_b_system_or_agent_cannot_approve_l2(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
+    mock_execution_stack: Any,
 ) -> None:
     """Policy and RBAC must block system/agent from L2 approval execution paths."""
     engine = await build_approval_engine(session_factory, redis_client)
@@ -681,7 +666,7 @@ async def test_scenario_b_system_or_agent_cannot_approve_l2(
     assert principal_lacks_approver_role(agent_principal)
 
     await engine.evaluate(action, _risk(), approval_cycle=0)
-    stack = await build_mock_execution_stack(session_factory, redis_client)
+    stack = mock_execution_stack
     with pytest.raises(InvalidStateTransitionError):
         await stack.service.execute_action(action_id)
 
@@ -703,13 +688,47 @@ def test_scenario_b_system_principal_api_approve_forbidden_403(
 
 @pytest.mark.integration
 @pytest.mark.asyncio
+async def test_scenario_b_system_agent_api_approve_forbidden_on_waiting_action(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+    approve_api_client: Any,
+) -> None:
+    """RBAC blocks system/agent/analyst from approving a real waiting_approval L2 action."""
+    engine = await build_approval_engine(session_factory, redis_client)
+    event_id = unique_id("evt-b-api-rbac")
+    action_id = unique_id("act-l2-api-rbac")
+    await _seed_security_event(
+        session_factory,
+        event_id=event_id,
+        status=EventStatus.WAITING_APPROVAL,
+        object_id=f"inc-{event_id}",
+    )
+    action = _response_action(event_id=event_id, level=ActionLevel.L2, action_id=action_id)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(orm.Action(**action.model_dump()))
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+
+    for role in ("system", "agent", "analyst"):
+        resp = approve_api_client.post(
+            f"/api/v1/actions/{action_id}/approve",
+            headers=auth_headers(role),
+            json={"comment": "forbidden", "decision_id": f"dec-rbac-{role}-{uuid4().hex[:6]}"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "forbidden"
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
 async def test_scenario_b_l2_execute_records_disposition_outbox(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
+    mock_execution_stack: Any,
 ) -> None:
     """Approved L2 execution with writeback enqueues disposition outbox rows."""
     engine = await build_approval_engine(session_factory, redis_client)
-    stack = await build_mock_execution_stack(session_factory, redis_client)
+    stack = mock_execution_stack
     event_id = unique_id("evt-b-wb")
     action_id = unique_id("act-l2-wb")
     await _seed_security_event(
@@ -808,6 +827,7 @@ async def test_scenario_b_stale_decision_id_replay_is_idempotent(
 async def test_scenario_b_cross_revision_superseded_cannot_execute(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
+    mock_execution_stack: Any,
 ) -> None:
     engine = await build_approval_engine(session_factory, redis_client)
     event_id = unique_id("evt-b-rev")
@@ -836,7 +856,7 @@ async def test_scenario_b_cross_revision_superseded_cannot_execute(
             assert row is not None
             row.superseded_by_revision = 2
 
-    stack = await build_mock_execution_stack(session_factory, redis_client)
+    stack = mock_execution_stack
     with pytest.raises(ValidationError, match="superseded action cannot be claimed"):
         await stack.service.execute_action(action_id)
 
@@ -846,9 +866,10 @@ async def test_scenario_b_cross_revision_superseded_cannot_execute(
 async def test_scenario_b_human_approval_single_execution(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
+    mock_execution_stack: Any,
 ) -> None:
     engine = await build_approval_engine(session_factory, redis_client)
-    stack = await build_mock_execution_stack(session_factory, redis_client)
+    stack = mock_execution_stack
     event_id = unique_id("evt-b-exec")
     action_id = unique_id("act-l2-exec")
     await _seed_security_event(
@@ -932,9 +953,23 @@ async def test_scenario_c_redelivery_after_terminal_event_skips_body(
 
     monkeypatch.setattr("app.api.v1.deps.get_event_service", _event_service)
 
-    skip, reason = await evaluate_redelivered_investigation_skip(event_id)
-    assert skip is True
-    assert reason == "terminal_event"
+    calls = {"n": 0}
+
+    async def _fake_execute(investigated_id: str, **_kwargs: Any) -> dict[str, str]:
+        calls["n"] += 1
+        return {"status": "completed", "event_id": investigated_id}
+
+    monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
+
+    result = await tasks._run_investigation_body(
+        event_id,
+        include_response_execution=False,
+        owner_id=celery_task_owner_id("task-c-redelivery"),
+        redelivered=True,
+    )
+    assert result["status"] == "skipped"
+    assert result.get("reason") == "terminal_event"
+    assert calls["n"] == 0
     snap = await collect_observability(session_factory, event_id)
     assert snap.event_status == EventStatus.CLOSED.value
     assert snap.intent_statuses == []
@@ -989,9 +1024,10 @@ async def test_scenario_c_stale_reconcile_marks_retry_without_duplicate_execute(
 async def test_scenario_c_action_redelivery_no_duplicate_side_effect(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
+    mock_execution_stack: Any,
 ) -> None:
     engine = await build_approval_engine(session_factory, redis_client)
-    stack = await build_mock_execution_stack(session_factory, redis_client)
+    stack = mock_execution_stack
     event_id = unique_id("evt-c-sidefx")
     action_id = unique_id("act-c-sidefx")
     await _seed_security_event(
@@ -1037,7 +1073,6 @@ async def test_scenario_c_action_redelivery_no_duplicate_side_effect(
 @pytest.mark.integration
 def test_scenario_c_investigation_crash_marks_intent_dead_no_duplicate_work(
     session_factory: async_sessionmaker[AsyncSession],
-    celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Worker crash during investigate marks intent DEAD; redelivery does not re-run body."""
@@ -1066,14 +1101,14 @@ def test_scenario_c_investigation_crash_marks_intent_dead_no_duplicate_work(
         raise RuntimeError("simulated worker crash")
 
     monkeypatch.setattr(tasks, "execute_investigation", _crash)
-    monkeypatch.setattr("app.api.v1.deps._get_session_factory", lambda: session_factory)
+    patch_production_session_factory(monkeypatch, session_factory)
 
     with pytest.raises(RuntimeError, match="simulated worker crash"):
-        _ = tasks.run_investigation.apply(
-            args=[event_id],
-            kwargs={"intent_id": intent_id},
+        run_investigation_with_request(
             task_id=current_task,
-        ).result
+            event_id=event_id,
+            intent_id=intent_id,
+        )
     assert calls["n"] == 1
 
     async def _verify_dead() -> None:
@@ -1084,11 +1119,11 @@ def test_scenario_c_investigation_crash_marks_intent_dead_no_duplicate_work(
 
     asyncio.run(_verify_dead())
 
-    redelivery = tasks.run_investigation.apply(
-        args=[event_id],
-        kwargs={"intent_id": intent_id},
+    redelivery = run_investigation_with_request(
         task_id=stale_task,
-    ).result
+        event_id=event_id,
+        intent_id=intent_id,
+    )
     assert redelivery["status"] == "skipped"
     assert redelivery["reason"] == "intent_already_terminal"
     assert calls["n"] == 1
@@ -1168,9 +1203,10 @@ def test_scenario_c_public_task_state_marks_retry_revoked_unknown() -> None:
 async def test_scenario_c_unknown_action_requires_manual_resolve(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
+    mock_execution_stack: Any,
 ) -> None:
     """UNKNOWN actions cannot be blindly re-executed; manual resolve is required."""
-    stack = await build_mock_execution_stack(session_factory, redis_client)
+    stack = mock_execution_stack
     event_id = unique_id("evt-c-unknown")
     action_id = unique_id("act-c-unknown")
     await _seed_security_event(
@@ -1206,7 +1242,6 @@ async def test_scenario_c_unknown_action_requires_manual_resolve(
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.integration
 def test_scenario_d_auto_response_rejects_live_disposition_at_startup() -> None:
     """AUTO_RESPONSE with live disposition adapter must fail closed at startup."""
     with pytest.raises(ConfigurationError):
@@ -1218,7 +1253,6 @@ def test_scenario_d_auto_response_rejects_live_disposition_at_startup() -> None:
         )
 
 
-@pytest.mark.integration
 def test_scenario_d_auto_response_rejects_live_source_at_startup() -> None:
     """AUTO_RESPONSE with live source must fail closed at Settings construction."""
     with pytest.raises(ConfigurationError):
@@ -1230,7 +1264,6 @@ def test_scenario_d_auto_response_rejects_live_source_at_startup() -> None:
         )
 
 
-@pytest.mark.integration
 def test_scenario_d_production_rejects_mock_runtime_at_startup() -> None:
     with pytest.raises(ConfigurationError):
         Settings(
@@ -1402,7 +1435,6 @@ async def test_scenario_d_worker_recovery_completes_queued_task(
     assert snap.intent_broker_task_ids[0] is not None
     assert snap.event_status is not None
     assert snap.audit_log_count >= 1
-    assert snap.agent_trace_count >= 0
 
 
 @pytest.mark.integration
