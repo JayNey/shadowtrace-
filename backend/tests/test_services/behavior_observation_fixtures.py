@@ -4,10 +4,28 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
 from app.models.enums import SourceDisposition, SourceObjectKind
+
+
+async def truncate_behavior_observation_tables(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Clear BObs-related tables for isolated integration tests."""
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(delete(orm.BehaviorObservationProjectionFailure))
+            await session.execute(delete(orm.BehaviorObservation))
+            await session.execute(delete(orm.DetectionScopeRevision))
+            await session.execute(delete(orm.SourceEventLink))
+            await session.execute(delete(orm.DispositionOutbox))
+            await session.execute(delete(orm.SourceObject))
+            await session.execute(delete(orm.SourceConnector))
+            await session.execute(delete(orm.DataQualityError))
+            await session.execute(delete(orm.SecurityEvent))
 
 
 async def seed_behavior_observation_connector(

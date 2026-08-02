@@ -172,6 +172,39 @@ async def test_list_projection_failures_defaults_to_open_backlog_only(
 
 
 @pytest.mark.asyncio
+async def test_list_projection_failures_scoped_to_tenant(
+    session_factory: async_sessionmaker[AsyncSession],
+    client: TestClient,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    tenant_a = f"tenant-a-{suffix}"
+    tenant_b = f"tenant-b-{suffix}"
+    service = BehaviorObservationService(session_factory)
+    await service.record_projection_failure(
+        source_record_id=f"src-a-{suffix}",
+        source_tenant_id=tenant_a,
+        error_category="projection_failed",
+        detail={"message": "tenant-a"},
+    )
+    await service.record_projection_failure(
+        source_record_id=f"src-b-{suffix}",
+        source_tenant_id=tenant_b,
+        error_category="projection_failed",
+        detail={"message": "tenant-b"},
+    )
+
+    response = client.get(
+        "/api/v1/behavior-observation-projection-failures",
+        params={"source_tenant_id": tenant_a},
+        headers=_hdr(),
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 1
+    assert payload["items"][0]["source_tenant_id"] == tenant_a
+
+
+@pytest.mark.asyncio
 async def test_list_projection_failures_dead_letter_filter(
     session_factory: async_sessionmaker[AsyncSession],
     client: TestClient,

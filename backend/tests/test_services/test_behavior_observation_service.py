@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -34,6 +34,9 @@ from tests.test_services.behavior_observation_fixtures import (
 )
 from tests.test_services.behavior_observation_fixtures import (
     seed_behavior_observation_source_log as seed_source_log,
+)
+from tests.test_services.behavior_observation_fixtures import (
+    truncate_behavior_observation_tables,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -68,29 +71,9 @@ async def session_factory(
 async def clean_tables(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[None]:
-    async with session_factory() as session:
-        async with session.begin():
-            await session.execute(delete(orm.BehaviorObservationProjectionFailure))
-            await session.execute(delete(orm.BehaviorObservation))
-            await session.execute(delete(orm.DetectionScopeRevision))
-            await session.execute(delete(orm.SourceEventLink))
-            await session.execute(delete(orm.DispositionOutbox))
-            await session.execute(delete(orm.SourceObject))
-            await session.execute(delete(orm.SourceConnector))
-            await session.execute(delete(orm.DataQualityError))
-            await session.execute(delete(orm.SecurityEvent))
+    await truncate_behavior_observation_tables(session_factory)
     yield
-    async with session_factory() as session:
-        async with session.begin():
-            await session.execute(delete(orm.BehaviorObservationProjectionFailure))
-            await session.execute(delete(orm.BehaviorObservation))
-            await session.execute(delete(orm.DetectionScopeRevision))
-            await session.execute(delete(orm.SourceEventLink))
-            await session.execute(delete(orm.DispositionOutbox))
-            await session.execute(delete(orm.SourceObject))
-            await session.execute(delete(orm.SourceConnector))
-            await session.execute(delete(orm.DataQualityError))
-            await session.execute(delete(orm.SecurityEvent))
+    await truncate_behavior_observation_tables(session_factory)
 
 
 def _observation_service(
