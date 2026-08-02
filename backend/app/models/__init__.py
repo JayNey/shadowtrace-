@@ -85,6 +85,17 @@ from app.models.feature_snapshot import (
     FeatureSnapshotQuery,
     SeasonalityProfile,
 )
+from app.models.detection_evaluation import (
+    DetectionCandidateRefs,
+    DetectionCaseObservation,
+    DetectionCaseResult,
+    DetectionEvaluationArtifact,
+    DetectionEvaluationConfig,
+    DetectionResourceMetrics,
+    DetectionResourceSummary,
+    DetectionTenantSafetyProbe,
+    DetectionTenantSafetySummary,
+)
 from app.models.detection_rule import (
     CandidateDetection,
     CandidateDetectionListResult,
@@ -338,6 +349,16 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "CandidateDetectionListResult": CandidateDetectionListResult,
     "DetectionRuleRuntimeError": DetectionRuleRuntimeError,
     "DetectionRuleRuntimeResult": DetectionRuleRuntimeResult,
+    # detection evaluation artifact (ISSUE-126 / #631 Phase A)
+    "DetectionEvaluationArtifact": DetectionEvaluationArtifact,
+    "DetectionEvaluationConfig": DetectionEvaluationConfig,
+    "DetectionCandidateRefs": DetectionCandidateRefs,
+    "DetectionCaseObservation": DetectionCaseObservation,
+    "DetectionCaseResult": DetectionCaseResult,
+    "DetectionResourceMetrics": DetectionResourceMetrics,
+    "DetectionResourceSummary": DetectionResourceSummary,
+    "DetectionTenantSafetyProbe": DetectionTenantSafetyProbe,
+    "DetectionTenantSafetySummary": DetectionTenantSafetySummary,
     # evaluation truth (ISSUE-113)
     "EvaluationCaseTruth": EvaluationCaseTruth,
     "EvaluationDatasetManifest": EvaluationDatasetManifest,

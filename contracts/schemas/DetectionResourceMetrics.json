@@ -1,0 +1,32 @@
+{
+  "additionalProperties": false,
+  "description": "Per-case shadow runtime resource accounting.",
+  "properties": {
+    "rules_evaluated": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Rules Evaluated",
+      "type": "integer"
+    },
+    "observations_scanned": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Observations Scanned",
+      "type": "integer"
+    },
+    "runtime_error_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Runtime Error Count",
+      "type": "integer"
+    },
+    "candidate_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Candidate Count",
+      "type": "integer"
+    }
+  },
+  "title": "DetectionResourceMetrics",
+  "type": "object"
+}

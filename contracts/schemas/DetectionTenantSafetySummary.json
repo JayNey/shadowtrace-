@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "DetectionTenantSafetyProbe": {
+      "additionalProperties": false,
+      "description": "Result of one cross-tenant isolation probe.",
+      "properties": {
+        "probe_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Probe Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "probe_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Probe Tenant Id",
+          "type": "string"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "reason_code": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "probe_id",
+        "source_tenant_id",
+        "probe_tenant_id",
+        "passed"
+      ],
+      "title": "DetectionTenantSafetyProbe",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Rollup of tenant isolation probes executed during evaluation.",
+  "properties": {
+    "probe_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Probe Count",
+      "type": "integer"
+    },
+    "pass_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Pass Count",
+      "type": "integer"
+    },
+    "fail_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Fail Count",
+      "type": "integer"
+    },
+    "probes": {
+      "items": {
+        "$ref": "#/$defs/DetectionTenantSafetyProbe"
+      },
+      "title": "Probes",
+      "type": "array"
+    }
+  },
+  "title": "DetectionTenantSafetySummary",
+  "type": "object"
+}

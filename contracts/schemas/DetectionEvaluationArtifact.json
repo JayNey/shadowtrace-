@@ -1,0 +1,1560 @@
+{
+  "$defs": {
+    "CandidateDetection": {
+      "additionalProperties": false,
+      "description": "Shadow-only detection candidate — never creates Event/SourceAlert.",
+      "properties": {
+        "candidate_detection_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Candidate Detection Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Package Id",
+          "type": "string"
+        },
+        "package_version": {
+          "minimum": 1,
+          "title": "Package Version",
+          "type": "integer"
+        },
+        "rule_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "rule_version": {
+          "minimum": 1,
+          "title": "Rule Version",
+          "type": "integer"
+        },
+        "operator": {
+          "$ref": "#/$defs/RuleOperatorKind"
+        },
+        "group_key": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Group Key",
+          "type": "object"
+        },
+        "cutoff_at": {
+          "format": "date-time",
+          "title": "Cutoff At",
+          "type": "string"
+        },
+        "window_kind": {
+          "maxLength": 16,
+          "minLength": 1,
+          "title": "Window Kind",
+          "type": "string"
+        },
+        "matched_value": {
+          "minimum": 0,
+          "title": "Matched Value",
+          "type": "number"
+        },
+        "severity": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Severity",
+          "type": "string"
+        },
+        "shadow_only": {
+          "const": true,
+          "default": true,
+          "title": "Shadow Only",
+          "type": "boolean"
+        },
+        "provenance": {
+          "$ref": "#/$defs/CandidateDetectionProvenance"
+        },
+        "content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        }
+      },
+      "required": [
+        "candidate_detection_id",
+        "source_tenant_id",
+        "detection_scope_id",
+        "package_id",
+        "package_version",
+        "rule_id",
+        "rule_version",
+        "operator",
+        "cutoff_at",
+        "window_kind",
+        "matched_value",
+        "severity",
+        "provenance",
+        "content_hash",
+        "idempotency_key"
+      ],
+      "title": "CandidateDetection",
+      "type": "object"
+    },
+    "CandidateDetectionProvenance": {
+      "additionalProperties": false,
+      "description": "Evidence anchors for shadow candidate output.",
+      "properties": {
+        "observation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Observation Ids",
+          "type": "array"
+        },
+        "snapshot_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Snapshot Ids",
+          "type": "array"
+        },
+        "window_start": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window Start"
+        },
+        "window_end": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Window End"
+        },
+        "model_release_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Id"
+        },
+        "model_release_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Hash"
+        },
+        "calibration_version": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Calibration Version"
+        },
+        "threshold_version": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Threshold Version"
+        },
+        "detection_score": {
+          "anyOf": [
+            {
+              "maximum": 100.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detection Score"
+        },
+        "feature_contract_version": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feature Contract Version"
+        },
+        "snapshot_content_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Snapshot Content Hash"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Watermark"
+        },
+        "baseline_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline Id"
+        },
+        "baseline_content_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baseline Content Hash"
+        },
+        "snapshot_revision": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Snapshot Revision"
+        },
+        "contributing_features": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "maxItems": 16,
+          "title": "Contributing Features",
+          "type": "array"
+        },
+        "sequence_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sequence Id"
+        },
+        "sequence_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sequence Hash"
+        },
+        "max_step_gap_seconds": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Step Gap Seconds"
+        },
+        "ordered_observation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "title": "Ordered Observation Ids",
+          "type": "array"
+        },
+        "sequence_step_matches": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "maxItems": 32,
+          "title": "Sequence Step Matches",
+          "type": "array"
+        },
+        "match_explanation": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Match Explanation"
+        }
+      },
+      "title": "CandidateDetectionProvenance",
+      "type": "object"
+    },
+    "ConfidenceInterval": {
+      "additionalProperties": false,
+      "description": "Wilson score interval for a proportion metric.",
+      "properties": {
+        "lower": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Lower",
+          "type": "number"
+        },
+        "upper": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Upper",
+          "type": "number"
+        },
+        "level": {
+          "default": 0.95,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Level",
+          "type": "number"
+        },
+        "method": {
+          "default": "wilson",
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Method",
+          "type": "string"
+        }
+      },
+      "required": [
+        "lower",
+        "upper"
+      ],
+      "title": "ConfidenceInterval",
+      "type": "object"
+    },
+    "DetectionCandidateRefs": {
+      "additionalProperties": false,
+      "description": "Pinned candidate package/model/rule identity bound into the artifact.",
+      "properties": {
+        "package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Package Id",
+          "type": "string"
+        },
+        "package_version": {
+          "minimum": 1,
+          "title": "Package Version",
+          "type": "integer"
+        },
+        "package_content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Package Content Hash",
+          "type": "string"
+        },
+        "rule_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Rule Ids",
+          "type": "array"
+        },
+        "feature_contract_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Feature Contract Version",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "scope_revision_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope Revision Id"
+        },
+        "model_release_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Id"
+        },
+        "model_release_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Hash"
+        }
+      },
+      "required": [
+        "package_id",
+        "package_version",
+        "package_content_hash",
+        "feature_contract_version",
+        "detection_scope_id"
+      ],
+      "title": "DetectionCandidateRefs",
+      "type": "object"
+    },
+    "DetectionCaseObservation": {
+      "additionalProperties": false,
+      "description": "Shadow replay observation for one detection evaluation case.",
+      "properties": {
+        "case_id": {
+          "minLength": 1,
+          "title": "Case Id",
+          "type": "string"
+        },
+        "slice_type": {
+          "$ref": "#/$defs/SliceType"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CandidateDetection"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "runtime_errors": {
+          "items": {
+            "$ref": "#/$defs/DetectionRuleRuntimeError"
+          },
+          "title": "Runtime Errors",
+          "type": "array"
+        },
+        "resource_metrics": {
+          "$ref": "#/$defs/DetectionResourceMetrics"
+        },
+        "observation_available": {
+          "default": true,
+          "title": "Observation Available",
+          "type": "boolean"
+        },
+        "replay_notes": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Replay Notes",
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "slice_type"
+      ],
+      "title": "DetectionCaseObservation",
+      "type": "object"
+    },
+    "DetectionCaseResult": {
+      "additionalProperties": false,
+      "description": "Aggregated per-case detection evaluation output.",
+      "properties": {
+        "case_id": {
+          "minLength": 1,
+          "title": "Case Id",
+          "type": "string"
+        },
+        "truth_id": {
+          "minLength": 1,
+          "title": "Truth Id",
+          "type": "string"
+        },
+        "truth_revision": {
+          "minimum": 1,
+          "title": "Truth Revision",
+          "type": "integer"
+        },
+        "truth_content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Truth Content Hash",
+          "type": "string"
+        },
+        "slice_type": {
+          "$ref": "#/$defs/SliceType"
+        },
+        "observation": {
+          "$ref": "#/$defs/DetectionCaseObservation"
+        },
+        "scorer_results": {
+          "items": {
+            "$ref": "#/$defs/EvaluationScorerResult"
+          },
+          "title": "Scorer Results",
+          "type": "array"
+        },
+        "case_status": {
+          "$ref": "#/$defs/EvaluationRunStatus"
+        },
+        "unevaluable_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unevaluable Reason"
+        }
+      },
+      "required": [
+        "case_id",
+        "truth_id",
+        "truth_revision",
+        "truth_content_hash",
+        "slice_type",
+        "observation",
+        "case_status"
+      ],
+      "title": "DetectionCaseResult",
+      "type": "object"
+    },
+    "DetectionEvaluationConfig": {
+      "additionalProperties": false,
+      "description": "Frozen detection evaluation configuration bound into the artifact.",
+      "properties": {
+        "seed": {
+          "minimum": 0,
+          "title": "Seed",
+          "type": "integer"
+        },
+        "cutoff_at": {
+          "format": "date-time",
+          "title": "Cutoff At",
+          "type": "string"
+        },
+        "replay_mode": {
+          "default": "detection_shadow",
+          "minLength": 1,
+          "title": "Replay Mode",
+          "type": "string"
+        },
+        "replay_fidelity": {
+          "default": "shadow_runtime_v1",
+          "description": "Shadow runtime replay against #624–#628 outputs. Does not use post-promotion Event severity or agent conclusions.",
+          "minLength": 1,
+          "title": "Replay Fidelity",
+          "type": "string"
+        },
+        "candidate_refs": {
+          "$ref": "#/$defs/DetectionCandidateRefs"
+        },
+        "scorer_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scorer Ids",
+          "type": "array"
+        },
+        "extra": {
+          "additionalProperties": true,
+          "title": "Extra",
+          "type": "object"
+        }
+      },
+      "required": [
+        "seed",
+        "cutoff_at",
+        "candidate_refs"
+      ],
+      "title": "DetectionEvaluationConfig",
+      "type": "object"
+    },
+    "DetectionResourceMetrics": {
+      "additionalProperties": false,
+      "description": "Per-case shadow runtime resource accounting.",
+      "properties": {
+        "rules_evaluated": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Rules Evaluated",
+          "type": "integer"
+        },
+        "observations_scanned": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Observations Scanned",
+          "type": "integer"
+        },
+        "runtime_error_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Runtime Error Count",
+          "type": "integer"
+        },
+        "candidate_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Candidate Count",
+          "type": "integer"
+        }
+      },
+      "title": "DetectionResourceMetrics",
+      "type": "object"
+    },
+    "DetectionResourceSummary": {
+      "additionalProperties": false,
+      "description": "Dataset-level resource rollups for shadow evaluation runs.",
+      "properties": {
+        "total_rules_evaluated": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total Rules Evaluated",
+          "type": "integer"
+        },
+        "total_observations_scanned": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total Observations Scanned",
+          "type": "integer"
+        },
+        "total_runtime_errors": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total Runtime Errors",
+          "type": "integer"
+        },
+        "total_candidates": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Total Candidates",
+          "type": "integer"
+        },
+        "max_observations_scanned_per_case": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Max Observations Scanned Per Case",
+          "type": "integer"
+        }
+      },
+      "title": "DetectionResourceSummary",
+      "type": "object"
+    },
+    "DetectionRuleRuntimeError": {
+      "additionalProperties": false,
+      "description": "Typed runtime failure — never silently treated as benign.",
+      "properties": {
+        "error_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Error Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Package Id",
+          "type": "string"
+        },
+        "rule_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Id"
+        },
+        "error_category": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Error Category",
+          "type": "string"
+        },
+        "error_message": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Error Message",
+          "type": "string"
+        },
+        "detail": {
+          "additionalProperties": true,
+          "title": "Detail",
+          "type": "object"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        }
+      },
+      "required": [
+        "error_id",
+        "source_tenant_id",
+        "package_id",
+        "error_category",
+        "error_message"
+      ],
+      "title": "DetectionRuleRuntimeError",
+      "type": "object"
+    },
+    "DetectionTenantSafetyProbe": {
+      "additionalProperties": false,
+      "description": "Result of one cross-tenant isolation probe.",
+      "properties": {
+        "probe_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Probe Id",
+          "type": "string"
+        },
+        "source_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Source Tenant Id",
+          "type": "string"
+        },
+        "probe_tenant_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Probe Tenant Id",
+          "type": "string"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "reason_code": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "probe_id",
+        "source_tenant_id",
+        "probe_tenant_id",
+        "passed"
+      ],
+      "title": "DetectionTenantSafetyProbe",
+      "type": "object"
+    },
+    "DetectionTenantSafetySummary": {
+      "additionalProperties": false,
+      "description": "Rollup of tenant isolation probes executed during evaluation.",
+      "properties": {
+        "probe_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Probe Count",
+          "type": "integer"
+        },
+        "pass_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Pass Count",
+          "type": "integer"
+        },
+        "fail_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Fail Count",
+          "type": "integer"
+        },
+        "probes": {
+          "items": {
+            "$ref": "#/$defs/DetectionTenantSafetyProbe"
+          },
+          "title": "Probes",
+          "type": "array"
+        }
+      },
+      "title": "DetectionTenantSafetySummary",
+      "type": "object"
+    },
+    "EvaluationAggregateMetrics": {
+      "additionalProperties": false,
+      "description": "Dataset-level rollups with explicit denominators.",
+      "properties": {
+        "case_count": {
+          "minimum": 0,
+          "title": "Case Count",
+          "type": "integer"
+        },
+        "pass_count": {
+          "minimum": 0,
+          "title": "Pass Count",
+          "type": "integer"
+        },
+        "fail_count": {
+          "minimum": 0,
+          "title": "Fail Count",
+          "type": "integer"
+        },
+        "unevaluable_count": {
+          "minimum": 0,
+          "title": "Unevaluable Count",
+          "type": "integer"
+        },
+        "error_count": {
+          "minimum": 0,
+          "title": "Error Count",
+          "type": "integer"
+        },
+        "pass_rate": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Pass Rate",
+          "type": "number"
+        },
+        "required_scorer_error_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Required Scorer Error Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "case_count",
+        "pass_count",
+        "fail_count",
+        "unevaluable_count",
+        "error_count",
+        "pass_rate"
+      ],
+      "title": "EvaluationAggregateMetrics",
+      "type": "object"
+    },
+    "EvaluationGateDiff": {
+      "additionalProperties": false,
+      "description": "Machine-readable threshold comparison delta.",
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "expected": {
+          "default": null,
+          "title": "Expected"
+        },
+        "actual": {
+          "default": null,
+          "title": "Actual"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "reason"
+      ],
+      "title": "EvaluationGateDiff",
+      "type": "object"
+    },
+    "EvaluationGateResult": {
+      "additionalProperties": false,
+      "description": "Threshold/baseline gate outcome.",
+      "properties": {
+        "verdict": {
+          "$ref": "#/$defs/GateVerdict"
+        },
+        "manifest_version": {
+          "default": "",
+          "maxLength": 64,
+          "title": "Manifest Version",
+          "type": "string"
+        },
+        "manifest_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Path"
+        },
+        "diffs": {
+          "items": {
+            "$ref": "#/$defs/EvaluationGateDiff"
+          },
+          "title": "Diffs",
+          "type": "array"
+        },
+        "quarantine_active": {
+          "default": false,
+          "description": "True when an active (non-expired) quarantine overrides threshold failures; consumers must read diffs alongside verdict.",
+          "title": "Quarantine Active",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "verdict"
+      ],
+      "title": "EvaluationGateResult",
+      "type": "object"
+    },
+    "EvaluationQualityReport": {
+      "additionalProperties": false,
+      "description": "Machine-readable offline quality report bound to one evaluation run.",
+      "properties": {
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "dataset_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "dataset_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Dataset Version",
+          "type": "string"
+        },
+        "dataset_content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Dataset Content Hash",
+          "type": "string"
+        },
+        "code_sha": {
+          "maxLength": 64,
+          "minLength": 7,
+          "title": "Code Sha",
+          "type": "string"
+        },
+        "release_refs": {
+          "$ref": "#/$defs/EvaluationReleaseRefs"
+        },
+        "sample_counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "title": "Sample Counts",
+          "type": "object"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/QualityMetricValue"
+          },
+          "title": "Metrics",
+          "type": "array"
+        },
+        "grouping_scorer_summaries": {
+          "items": {
+            "$ref": "#/$defs/GroupingScorerSummary"
+          },
+          "title": "Grouping Scorer Summaries",
+          "type": "array"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "dataset_version",
+        "dataset_content_hash",
+        "code_sha"
+      ],
+      "title": "EvaluationQualityReport",
+      "type": "object"
+    },
+    "EvaluationReleaseRefs": {
+      "additionalProperties": false,
+      "description": "Pinned release identifiers for reproducibility.",
+      "properties": {
+        "model_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Id"
+        },
+        "prompt_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Release Id"
+        },
+        "rule_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule Release Id"
+        },
+        "kb_release_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kb Release Id"
+        },
+        "config_profile": {
+          "default": "mock_p0",
+          "minLength": 1,
+          "title": "Config Profile",
+          "type": "string"
+        }
+      },
+      "title": "EvaluationReleaseRefs",
+      "type": "object"
+    },
+    "EvaluationRunStatus": {
+      "enum": [
+        "completed",
+        "failed",
+        "unevaluable"
+      ],
+      "title": "EvaluationRunStatus",
+      "type": "string"
+    },
+    "EvaluationScorerResult": {
+      "additionalProperties": false,
+      "description": "One scorer outcome for a single case.",
+      "properties": {
+        "scorer_id": {
+          "minLength": 1,
+          "title": "Scorer Id",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ScorerOutcome"
+        },
+        "reason_code": {
+          "default": "",
+          "maxLength": 128,
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Message",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "scorer_id",
+        "outcome"
+      ],
+      "title": "EvaluationScorerResult",
+      "type": "object"
+    },
+    "GateVerdict": {
+      "enum": [
+        "pass",
+        "fail",
+        "fail_closed"
+      ],
+      "title": "GateVerdict",
+      "type": "string"
+    },
+    "GroupingScorerSummary": {
+      "additionalProperties": false,
+      "description": "Rollup for optional severity/ATT&CK/incident grouping scorers.",
+      "properties": {
+        "scorer_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Scorer Id",
+          "type": "string"
+        },
+        "evaluated_count": {
+          "minimum": 0,
+          "title": "Evaluated Count",
+          "type": "integer"
+        },
+        "pass_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Pass Count",
+          "type": "integer"
+        },
+        "fail_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Fail Count",
+          "type": "integer"
+        },
+        "not_applicable_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Not Applicable Count",
+          "type": "integer"
+        },
+        "error_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Error Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scorer_id",
+        "evaluated_count"
+      ],
+      "title": "GroupingScorerSummary",
+      "type": "object"
+    },
+    "MetricDenominator": {
+      "additionalProperties": false,
+      "description": "Explicit numerator/denominator with missing-truth and error accounting.",
+      "properties": {
+        "numerator": {
+          "minimum": 0,
+          "title": "Numerator",
+          "type": "integer"
+        },
+        "denominator": {
+          "minimum": 0,
+          "title": "Denominator",
+          "type": "integer"
+        },
+        "missing_truth_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Missing Truth Count",
+          "type": "integer"
+        },
+        "error_count": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Error Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "title": "MetricDenominator",
+      "type": "object"
+    },
+    "QualityMetricStatus": {
+      "description": "Whether a metric value is safe to interpret.",
+      "enum": [
+        "computed",
+        "fail_closed",
+        "insufficient_sample"
+      ],
+      "title": "QualityMetricStatus",
+      "type": "string"
+    },
+    "QualityMetricValue": {
+      "additionalProperties": false,
+      "description": "One typed offline quality metric.",
+      "properties": {
+        "metric_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Metric Id",
+          "type": "string"
+        },
+        "value": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Null when status is fail_closed or insufficient_sample.",
+          "title": "Value"
+        },
+        "status": {
+          "$ref": "#/$defs/QualityMetricStatus"
+        },
+        "denominator": {
+          "$ref": "#/$defs/MetricDenominator"
+        },
+        "confidence_interval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ConfidenceInterval"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason": {
+          "default": "",
+          "maxLength": 256,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "metric_id",
+        "status",
+        "denominator"
+      ],
+      "title": "QualityMetricValue",
+      "type": "object"
+    },
+    "RuleOperatorKind": {
+      "description": "Phase A operators supported by the minimal runtime.",
+      "enum": [
+        "event_match",
+        "event_count",
+        "event_sequence",
+        "value_count",
+        "statistical_anomaly"
+      ],
+      "title": "RuleOperatorKind",
+      "type": "string"
+    },
+    "ScorerOutcome": {
+      "description": "Typed scorer result; unevaluable/error never count as pass.",
+      "enum": [
+        "pass",
+        "fail",
+        "unevaluable",
+        "error",
+        "skipped"
+      ],
+      "title": "ScorerOutcome",
+      "type": "string"
+    },
+    "SliceType": {
+      "description": "First-round evaluation slices; extend via reviewed schema revision only.",
+      "enum": [
+        "threat",
+        "benign",
+        "unevaluable"
+      ],
+      "title": "SliceType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Complete pre-promotion detection evaluation artifact (JSON, not a fact DB).",
+  "properties": {
+    "evaluation_id": {
+      "minLength": 1,
+      "title": "Evaluation Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "tenant_id": {
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "dataset_id": {
+      "minLength": 1,
+      "title": "Dataset Id",
+      "type": "string"
+    },
+    "dataset_version": {
+      "minLength": 1,
+      "title": "Dataset Version",
+      "type": "string"
+    },
+    "dataset_content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Dataset Content Hash",
+      "type": "string"
+    },
+    "code_sha": {
+      "maxLength": 64,
+      "minLength": 7,
+      "title": "Code Sha",
+      "type": "string"
+    },
+    "config": {
+      "$ref": "#/$defs/DetectionEvaluationConfig"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/EvaluationRunStatus"
+    },
+    "case_results": {
+      "items": {
+        "$ref": "#/$defs/DetectionCaseResult"
+      },
+      "title": "Case Results",
+      "type": "array"
+    },
+    "aggregates": {
+      "$ref": "#/$defs/EvaluationAggregateMetrics"
+    },
+    "gate": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvaluationGateResult"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "quality_report": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EvaluationQualityReport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "resource_summary": {
+      "$ref": "#/$defs/DetectionResourceSummary"
+    },
+    "tenant_safety": {
+      "$ref": "#/$defs/DetectionTenantSafetySummary"
+    },
+    "errors": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Errors",
+      "type": "array"
+    },
+    "artifact_hash": {
+      "default": "",
+      "maxLength": 64,
+      "minLength": 0,
+      "title": "Artifact Hash",
+      "type": "string"
+    },
+    "approval_note": {
+      "default": "Not a governance approval; consume via #630 only.",
+      "maxLength": 256,
+      "title": "Approval Note",
+      "type": "string"
+    }
+  },
+  "required": [
+    "evaluation_id",
+    "tenant_id",
+    "dataset_id",
+    "dataset_version",
+    "dataset_content_hash",
+    "code_sha",
+    "config",
+    "started_at",
+    "completed_at",
+    "status",
+    "aggregates"
+  ],
+  "title": "DetectionEvaluationArtifact",
+  "type": "object"
+}

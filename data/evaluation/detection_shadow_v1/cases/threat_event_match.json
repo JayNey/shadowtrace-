@@ -1,0 +1,60 @@
+{
+  "case_id": "threat_event_match",
+  "case_version": 1,
+  "source_tenant_id": "tenant-det-threat",
+  "source_product": "mock_xdr",
+  "connector_id": "conn-threat-001",
+  "slice_expectation": {
+    "slice_type": "threat",
+    "schema_version": "1.1",
+    "expected_case_label": "true_positive",
+    "expected_final_verdict": "confirmed_threat"
+  },
+  "label_provenance": {
+    "adjudicator": "detection-eval-curator",
+    "adjudicated_at": "2026-08-01T08:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "Shadow event_match should fire on process create."
+  },
+  "detection_replay": {
+    "source_tenant_id": "tenant-det-threat",
+    "cutoff_at": "2026-08-01T15:30:00+00:00",
+    "scope_seed": {
+      "integration_instance_id": "inst-threat-001",
+      "connector_id": "conn-threat-001"
+    },
+    "package_id": "drpkg-det-threat-v1",
+    "package_version": 1,
+    "expected_rule_ids": ["rule-event-match"],
+    "tenant_isolation_probe": {
+      "probe_id": "probe-threat-cross-tenant",
+      "probe_tenant_id": "tenant-det-foreign"
+    },
+    "rules": [
+      {
+        "rule_id": "rule-event-match",
+        "rule_version": 1,
+        "operator": "event_match",
+        "feature_contract_version": "1.0",
+        "detection_scope_id": "scope-placeholder",
+        "window_kind": "1h",
+        "group_key_fields": ["entity_type", "entity_id"],
+        "threshold": 1.0,
+        "severity": "medium",
+        "match_criteria": {"action": "create_process"}
+      }
+    ],
+    "observations": [
+      {
+        "observation_id": "obs-threat-001",
+        "observed_at": "2026-08-01T15:00:00+00:00",
+        "action": "create_process",
+        "category": "process_create",
+        "entity": {"entity_type": "ip", "entity_id": "10.0.0.10"},
+        "connector_id": "conn-threat-001",
+        "source_object_id": "log-threat-001"
+      }
+    ]
+  },
+  "retention_policy": "evaluation_standard"
+}

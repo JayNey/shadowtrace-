@@ -1,0 +1,38 @@
+{
+  "additionalProperties": false,
+  "description": "Dataset-level resource rollups for shadow evaluation runs.",
+  "properties": {
+    "total_rules_evaluated": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Total Rules Evaluated",
+      "type": "integer"
+    },
+    "total_observations_scanned": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Total Observations Scanned",
+      "type": "integer"
+    },
+    "total_runtime_errors": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Total Runtime Errors",
+      "type": "integer"
+    },
+    "total_candidates": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Total Candidates",
+      "type": "integer"
+    },
+    "max_observations_scanned_per_case": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Max Observations Scanned Per Case",
+      "type": "integer"
+    }
+  },
+  "title": "DetectionResourceSummary",
+  "type": "object"
+}

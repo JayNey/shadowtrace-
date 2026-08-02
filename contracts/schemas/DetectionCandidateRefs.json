@@ -1,0 +1,91 @@
+{
+  "additionalProperties": false,
+  "description": "Pinned candidate package/model/rule identity bound into the artifact.",
+  "properties": {
+    "package_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Package Id",
+      "type": "string"
+    },
+    "package_version": {
+      "minimum": 1,
+      "title": "Package Version",
+      "type": "integer"
+    },
+    "package_content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Package Content Hash",
+      "type": "string"
+    },
+    "rule_ids": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 64,
+      "title": "Rule Ids",
+      "type": "array"
+    },
+    "feature_contract_version": {
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Feature Contract Version",
+      "type": "string"
+    },
+    "detection_scope_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Detection Scope Id",
+      "type": "string"
+    },
+    "scope_revision_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scope Revision Id"
+    },
+    "model_release_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Release Id"
+    },
+    "model_release_hash": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Release Hash"
+    }
+  },
+  "required": [
+    "package_id",
+    "package_version",
+    "package_content_hash",
+    "feature_contract_version",
+    "detection_scope_id"
+  ],
+  "title": "DetectionCandidateRefs",
+  "type": "object"
+}

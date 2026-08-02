@@ -1,0 +1,53 @@
+{
+  "case_id": "benign_late_observation",
+  "case_version": 1,
+  "source_tenant_id": "tenant-det-late",
+  "slice_expectation": {
+    "slice_type": "benign",
+    "schema_version": "1.1",
+    "expected_case_label": "false_positive",
+    "expected_final_verdict": "false_positive"
+  },
+  "label_provenance": {
+    "adjudicator": "detection-eval-curator",
+    "adjudicated_at": "2026-08-01T08:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "Late observation after cutoff must not trigger detection."
+  },
+  "detection_replay": {
+    "source_tenant_id": "tenant-det-late",
+    "cutoff_at": "2026-08-01T15:30:00+00:00",
+    "scope_seed": {
+      "integration_instance_id": "inst-late-001",
+      "connector_id": "conn-late-001"
+    },
+    "package_id": "drpkg-det-late-v1",
+    "package_version": 1,
+    "rules": [
+      {
+        "rule_id": "rule-late-match",
+        "rule_version": 1,
+        "operator": "event_match",
+        "feature_contract_version": "1.0",
+        "detection_scope_id": "scope-placeholder",
+        "window_kind": "1h",
+        "group_key_fields": ["entity_type", "entity_id"],
+        "threshold": 1.0,
+        "severity": "medium",
+        "match_criteria": {"action": "create_process"}
+      }
+    ],
+    "observations": [
+      {
+        "observation_id": "obs-late-001",
+        "observed_at": "2026-08-01T15:45:00+00:00",
+        "action": "create_process",
+        "category": "process_create",
+        "entity": {"entity_type": "ip", "entity_id": "10.0.0.30"},
+        "connector_id": "conn-late-001",
+        "source_object_id": "log-late-001"
+      }
+    ]
+  },
+  "retention_policy": "evaluation_standard"
+}
