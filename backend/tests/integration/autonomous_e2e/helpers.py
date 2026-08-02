@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import json
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -18,15 +18,29 @@ from app.core.auth import ROLE_APPROVER, Principal
 from app.core.config import Settings
 from app.db import models as orm
 from app.db.orm.approval import ApprovalRecordORM
-from app.models.enums import InvestigationIntentStatus
+from app.models.enums import EventType, InvestigationIntentStatus, Severity, SourceObjectKind
+from app.models.investigation_intent import PRIMARY_LINK_ROLE
+from app.models.source import SourceReference
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
 from app.services.auto_response_policy import AutoResponsePolicyService
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService
-from app.services.event_service import EventService
+from app.services.event_service import EventService, IngestableSource
 from app.services.investigation_intent_service import InvestigationIntentService
 
 T = TypeVar("T")
+
+# Queue name that production workers do not consume — for broker-up / worker-down tests.
+ISOLATED_E2E_QUEUE = "iss110-isolated-e2e"
+
+DEV_AUTH_TOKENS_JSON = json.dumps(
+    {
+        "analyst-token": {"subject": "iss110-analyst", "roles": ["analyst"]},
+        "approver-token": {"subject": "iss110-approver", "roles": ["approver"]},
+        "system-token": {"subject": "system", "roles": []},
+        "agent-token": {"subject": "agent:response-agent", "roles": ["analyst"]},
+    }
+)
 
 
 def mock_autonomous_settings(**overrides: Any) -> Settings:
@@ -87,10 +101,69 @@ async def poll_until(
     raise TimeoutError(f"timed out waiting for {description} after {timeout_s}s")
 
 
+def incident_source(*, object_id: str) -> IngestableSource:
+    """Mock XDR incident ingest payload shared by ISSUE-110 scenarios."""
+    ref = SourceReference(
+        source_kind=SourceObjectKind.INCIDENT,
+        source_product="mock_xdr",
+        source_tenant_id="tenant-demo",
+        connector_id="conn-mock",
+        source_object_id=object_id,
+        source_updated_at=datetime.now(UTC),
+    )
+    return IngestableSource(
+        reference=ref,
+        title="Suspicious process incident",
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.HIGH,
+        normalized={"risk_score": 76, "event_type": "malicious_process"},
+    )
+
+
+async def seed_primary_source_link(
+    session: AsyncSession,
+    *,
+    event_id: str,
+    connector_id: str = "conn-mock",
+) -> str:
+    """Primary source link required for disposition/writeback paths."""
+    source_record_id = f"src-primary-{uuid4().hex[:8]}"
+    if await session.get(orm.SourceConnector, connector_id) is None:
+        session.add(
+            orm.SourceConnector(
+                connector_id=connector_id,
+                source_product="mock_xdr",
+                display_name="Mock XDR",
+            )
+        )
+    session.add(
+        orm.SourceObject(
+            source_record_id=source_record_id,
+            source_product="mock_xdr",
+            source_tenant_id="tenant-demo",
+            connector_id=connector_id,
+            source_kind=SourceObjectKind.INCIDENT.value,
+            source_object_id=f"INC-{uuid4().hex[:8]}",
+            next_outbox_sequence=0,
+        )
+    )
+    await session.flush()
+    session.add(
+        orm.SourceEventLink(
+            source_record_id=source_record_id,
+            event_id=event_id,
+            role=PRIMARY_LINK_ROLE,
+        )
+    )
+    return source_record_id
+
+
+def auth_headers(role: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {role}-token"}
+
+
 def celery_worker_responding() -> bool:
     """True when at least one Celery worker answers inspect ping."""
-    if os.environ.get("TASK_MODE", "").strip().lower() not in {"", "celery"}:
-        pass
     from app.core.celery_health import probe_celery_workers
 
     payload = probe_celery_workers(timeout=2.0)

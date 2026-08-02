@@ -34,7 +34,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
+.PHONY: up down down-v bootstrap smoke-bootstrap llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -183,8 +183,8 @@ worker-nightly-pytest:
 worker-nightly-smoke:
 	bash "$(CURDIR)/scripts/celery_worker_smoke.sh"
 
-worker-nightly-matrix: worker-nightly-pytest
-	@echo "Phase B pytest matrix passed. Run 'make worker-nightly-smoke' when Docker worker stack is up."
+worker-nightly-matrix: worker-nightly-pytest autonomous-mock-e2e-worker-pytest
+	@echo "Phase B pytest matrix + ISSUE-110 worker-gated E2E passed."
 
 # --- ISSUE-108 auto-investigate intent quality gate ------------------------- #
 auto-investigate-test:
@@ -229,8 +229,36 @@ autonomous-mock-e2e-pytest:
 
 autonomous-mock-e2e: autonomous-mock-e2e-pytest
 	@echo "Integration scenarios A–E (no worker) passed."
-	@echo "ci-test runs the same integration subset via default pytest addopts."
-	@echo "Full ISSUE-110 gate: make autonomous-mock-e2e && make up WORKER=1 && bash scripts/run_autonomous_mock_e2e.sh --worker"
+	@echo "Full ISSUE-110 gate: make autonomous-mock-e2e-worker-pytest"
+
+autonomous-mock-e2e-worker-pytest:
+	@set -eu; \
+	project="$(INTEGRATION_PROJECT_NAME)"; \
+	compose() { \
+		COMPOSE_PROJECT_NAME="$$project" \
+		POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \
+		BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
+		docker compose --project-name "$$project" \
+			-f "$(COMPOSE_FILE)" --profile worker "$$@"; \
+	}; \
+	cleanup() { \
+		status=$$?; \
+		trap - EXIT INT TERM; \
+		if [ "$$status" -ne 0 ]; then \
+			compose ps -a || true; \
+			compose logs --no-color postgres redis worker || true; \
+		fi; \
+		compose down --volumes --remove-orphans || true; \
+		exit "$$status"; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	compose up -d --wait --wait-timeout 180 postgres redis worker; \
+	cd "$(CURDIR)/backend"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		TASK_MODE=celery \
+		CELERY_BROKER_URL="$(CI_REDIS_URL)" \
+		$(PYTHON) -m pytest tests/integration/autonomous_e2e/ \
+		-m "autonomous_mock_e2e" -v --tb=short
 
 # --- ISSUE-107 Mock XDR ingestion scheduler quality gate -------------------- #
 ingestion-scheduler-test:
