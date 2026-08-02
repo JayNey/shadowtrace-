@@ -190,6 +190,34 @@ def test_candidate_detection_shadow_only_rejects_false() -> None:
         )
 
 
+def test_shadow_only_from_row_forces_true_and_logs_when_db_false(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from unittest.mock import MagicMock
+
+    from app.services.detection_rule_runtime import _shadow_only_from_row
+
+    row = MagicMock()
+    row.shadow_only = False
+    row.candidate_detection_id = "dcand-dirty"
+
+    with caplog.at_level("WARNING"):
+        assert _shadow_only_from_row(row) is True
+    assert "shadow_only=false" in caplog.text
+    assert "dcand-dirty" in caplog.text
+
+
+def test_shadow_only_from_row_true_when_db_true() -> None:
+    from unittest.mock import MagicMock
+
+    from app.services.detection_rule_runtime import _shadow_only_from_row
+
+    row = MagicMock()
+    row.shadow_only = True
+    row.candidate_detection_id = "dcand-clean"
+    assert _shadow_only_from_row(row) is True
+
+
 def test_runtime_transitions_fail_closed() -> None:
     assert allowed_runtime_transition(
         DetectionRuleRuntimeState.DRAFT,

@@ -158,6 +158,7 @@ def build_evaluation_case_truth(
     sanitized_correction_reason = (
         redact_sensitive_text(correction_reason)[:512] if correction_reason else None
     )
+    # Single timestamp keeps content_hash payload and returned model aligned.
     created_at = datetime.now(UTC)
     payload: dict[str, Any] = {
         "tenant_id": normalized_tenant_id,
@@ -197,6 +198,7 @@ def build_evaluation_case_truth(
         }
     )
     truth_hash = compute_truth_hash(payload)
+    # Caller-supplied slice_expectation is persisted as-is (already typed at API boundary).
     return EvaluationCaseTruth(
         truth_id=truth_id,
         tenant_id=normalized_tenant_id,

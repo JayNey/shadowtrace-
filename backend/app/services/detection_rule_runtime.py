@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.exc import IntegrityError
@@ -44,6 +45,16 @@ from app.services.feature_snapshot_resolver import (
 logger = logging.getLogger(__name__)
 
 
+def _shadow_only_from_row(row: orm.CandidateDetection) -> Literal[True]:
+    """Shadow runtime never emits live alerts; surface invariant violations in logs."""
+    if not row.shadow_only:
+        logger.warning(
+            "candidate_detection row shadow_only=false id=%s; shadow runtime forces True",
+            row.candidate_detection_id,
+        )
+    return True
+
+
 def row_to_candidate_detection(row: orm.CandidateDetection) -> CandidateDetection:
     return CandidateDetection(
         candidate_detection_id=row.candidate_detection_id,
@@ -59,8 +70,7 @@ def row_to_candidate_detection(row: orm.CandidateDetection) -> CandidateDetectio
         window_kind=row.window_kind,
         matched_value=float(row.matched_value),
         severity=row.severity,
-        # CandidateDetection.shadow_only is Literal[True]; shadow runtime never emits live alerts.
-        shadow_only=True,
+        shadow_only=_shadow_only_from_row(row),
         provenance=CandidateDetectionProvenance.model_validate(row.provenance),
         content_hash=row.content_hash,
         idempotency_key=row.idempotency_key,

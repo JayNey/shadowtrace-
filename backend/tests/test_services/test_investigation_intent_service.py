@@ -125,6 +125,53 @@ async def test_create_pending_intent_in_session(
 
 
 @pytest.mark.asyncio
+async def test_lookup_active_for_event_returns_matching_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(AUTO_INVESTIGATE_ENABLED=True, SOURCE_MODE="mock_xdr")
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    event_id = f"evt-intent-lookup-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            event = orm.SecurityEvent(
+                event_id=event_id,
+                event_type="malicious_process",
+                title="Suspicious process",
+                description="",
+                status=EventStatus.NEW.value,
+                severity=Severity.HIGH.value,
+                final_verdict="none",
+                creation_source_ref={"source_product": "mock_xdr"},
+                source_reference_snapshots=[],
+                disposition_policy="not_required",
+                raw_alert_ids=[],
+                source_type="mock_xdr",
+            )
+            session.add(event)
+            await session.flush()
+            intent_id = await service.maybe_create_pending_in_session(
+                session,
+                event,
+                link_role="primary",
+                source_product="mock_xdr",
+                created_or_promoted=True,
+            )
+            assert intent_id is not None
+
+    found = await service.lookup_active_for_event(event_id)
+    assert found is not None
+    assert found.intent_id == intent_id
+    assert found.event_id == event_id
+
+    missing = await service.lookup_active_for_event(f"evt-missing-{uuid4().hex[:8]}")
+    assert missing is None
+
+
+@pytest.mark.asyncio
 async def test_duplicate_intent_unique_by_event(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

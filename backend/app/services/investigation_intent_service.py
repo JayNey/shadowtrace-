@@ -459,6 +459,7 @@ class InvestigationIntentService:
             )
 
     async def lookup_active_for_event(self, event_id: str) -> orm.InvestigationIntent | None:
+        """Return the latest auto-investigate intent for an event (at most one per uq)."""
         async with self._session_factory() as session:
             return cast(
                 orm.InvestigationIntent | None,
@@ -470,6 +471,7 @@ class InvestigationIntentService:
                         orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE108_V1,
                     )
                     .order_by(orm.InvestigationIntent.created_at.desc())
+                    # Explicit limit aligns scalar() semantics; uq allows <=1 row anyway.
                     .limit(1)
                 ),
             )
