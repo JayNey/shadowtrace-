@@ -1132,3 +1132,81 @@ async def test_sqlalchemy_evidence_upsert_keeps_higher_confidence() -> None:
                     delete(orm.SecurityEvent).where(orm.SecurityEvent.event_id == event_id)
                 )
         await engine.dispose()
+
+
+async def test_plan_driven_required_tools_limits_queries(
+    tool_executor: Any,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+    evidence_projection: EvidenceProjection,
+) -> None:
+    """ISSUE-115: validated required_tools subset is honored (+ mandatory merge)."""
+    event_id = f"evt-evd-plan-{new_sfx()}"
+    await _seed_event_context(wm, event_id)
+    agent = _build_agent(tool_executor=tool_executor, wm=wm, evidence_repo=evidence_repo)
+    triage = TriageResult(
+        event_type=EventType.SUSPICIOUS_DOMAIN,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        entities=EntitySet(
+            domains=[DomainEntity(entity_id="ent-dom-plan", fqdn="plan-only.example")],
+        ),
+        reasoning="plan-driven dns lookup",
+    )
+    agent_input = EvidenceAgentInput(
+        event_id=event_id,
+        triage_result=triage,
+        required_tools=["query_dns"],
+    )
+
+    with bind_evidence_projection(evidence_projection):
+        with bind_evidence_query_scope(DEFAULT_SCOPE):
+            output = await agent.execute(agent_input)
+
+    assert agent.last_query_plan is not None
+    assert "query_dns" in agent.last_query_plan.tools
+    queried = {row["tool_name"] for row in agent.last_query_timings}
+    assert queried == set(agent.last_query_plan.tools)
+    assert len(queried) <= 3
+    assert "query_account_login" not in queried
+    assert isinstance(output, EvidenceOutput)
+
+
+async def test_run_one_query_deduped_reuses_cached_outcome(
+    tool_executor: Any,
+    wm: _FakeWorkingMemory,
+    evidence_repo: InMemoryEvidenceRepository,
+) -> None:
+    """ISSUE-115: identical query signature reuses prior outcome within one run."""
+    event_id = f"evt-evd-dedupe-{new_sfx()}"
+    agent = _build_agent(tool_executor=tool_executor, wm=wm, evidence_repo=evidence_repo)
+    triage = _main_scenario_triage()
+    time_range = dict(WINDOW)
+    scope = DEFAULT_SCOPE
+    params = agent._build_params(
+        "query_threat_intel",
+        triage.entities,
+        time_range,
+        ioc_list=triage.ioc_list,
+    )
+    assert params is not None
+    cache: dict[str, dict[str, Any]] = {}
+    first = await agent._run_one_query_deduped(
+        "query_threat_intel",
+        params,
+        event_id,
+        scope=scope,
+        time_range=time_range,
+        dedupe_cache=cache,
+    )
+    second = await agent._run_one_query_deduped(
+        "query_threat_intel",
+        params,
+        event_id,
+        scope=scope,
+        time_range=time_range,
+        dedupe_cache=cache,
+    )
+    assert first.get("dedupe_reused") is not True
+    assert second.get("dedupe_reused") is True
+    assert first.get("dedupe_key") == second.get("dedupe_key")

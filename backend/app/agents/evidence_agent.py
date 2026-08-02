@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
 from app.agents.conflict_detector import ConflictDetector
+from app.agents.evidence_tools import EVIDENCE_QUERY_ORDER
 from app.agents.evidence_parser import (
     TOOL_SOURCE_MAP,
     EvidenceParser,
@@ -46,19 +47,15 @@ from app.services.evidence_projection import (
     EvidenceQueryScope,
     bind_evidence_query_scope,
 )
+from app.services.evidence_query_plan_service import (
+    EvidenceQueryPlan,
+    build_query_dedupe_key,
+    resolve_evidence_query_plan,
+)
 
 logger = logging.getLogger(__name__)
 
-# Fixed serial query order (ISSUE-033).
-EVIDENCE_QUERY_ORDER: tuple[str, ...] = (
-    "query_account_login",
-    "query_edr_process",
-    "query_file_access",
-    "query_network_flow",
-    "query_dns",
-    "query_asset_info",
-    "query_threat_intel",
-)
+# Re-export for existing imports (planner/default plans/tests).
 
 # Default window when TriageResult has no explicit time range (ISSUE-005 has none).
 DEFAULT_TIME_RANGE: dict[str, str] = {
@@ -554,6 +551,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         )
         # Populated each run for agent_trace / acceptance checks.
         self.last_query_timings: list[dict[str, Any]] = []
+        self.last_query_plan: EvidenceQueryPlan | None = None
         self.last_persist_error: str | None = None
         self.last_collection_elapsed_s: float | None = None
 
@@ -562,6 +560,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             raise RuntimeError("EvidenceAgent requires tool_executor")
 
         self.last_query_timings = []
+        self.last_query_plan = None
         self.last_persist_error = None
         self.last_collection_elapsed_s = None
         time_range = await self._resolve_time_range(input)
@@ -573,6 +572,15 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "evidence queries require a trusted EventService scope"
             )
 
+        execution_plan = await self._read_execution_plan(input.event_id)
+        query_plan = resolve_evidence_query_plan(
+            input.triage_result,
+            planned_tools=list(input.required_tools),
+            execution_plan=execution_plan,
+        )
+        self.last_query_plan = query_plan
+        query_tools = tuple(query_plan.tools)
+
         mode = self.evidence_mode
         alert_text = input.alert_text.strip()
         if not alert_text:
@@ -583,13 +591,14 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 success_sources,
                 failed_sources,
                 gaps,
-            ) = await self._collect_all_triage_degraded(input)
+            ) = await self._collect_all_triage_degraded(input, query_tools=query_tools)
         elif mode == "concurrent":
             collected, success_sources, failed_sources, gaps = await self._collect_concurrent(
                 input,
                 time_range=time_range,
                 scope=scope,
                 alert_text=alert_text,
+                query_tools=query_tools,
             )
         else:
             collected, success_sources, failed_sources, gaps = await self._collect_sequential(
@@ -597,6 +606,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 time_range=time_range,
                 scope=scope,
                 alert_text=alert_text,
+                query_tools=query_tools,
             )
 
         evidence_list = self._dedup_and_sort(collected)
@@ -636,6 +646,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         time_range: dict[str, str],
         scope: EvidenceQueryScope | None,
         alert_text: str = "",
+        query_tools: tuple[str, ...] = EVIDENCE_QUERY_ORDER,
     ) -> tuple[list[Evidence], list[str], list[str], list[EvidenceGap]]:
         collected: list[Evidence] = []
         success_sources: list[str] = []
@@ -649,8 +660,9 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         ).entity_set
         raw_iocs = [item for item in input.triage_result.ioc_list if item]
         valid_iocs, _rejected_iocs = _validate_ioc_list(raw_iocs)
+        dedupe_cache: dict[str, dict[str, Any]] = {}
 
-        for tool_name in EVIDENCE_QUERY_ORDER:
+        for tool_name in query_tools:
             source = TOOL_SOURCE_MAP[tool_name]
             params = self._build_params(
                 tool_name,
@@ -673,11 +685,13 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                     reason=skip_reason,
                 )
             else:
-                outcome = await self._run_one_query(
+                outcome = await self._run_one_query_deduped(
                     tool_name,
                     params,
                     input.event_id,
                     scope=scope,
+                    time_range=time_range,
+                    dedupe_cache=dedupe_cache,
                 )
             await self._merge_outcome(
                 outcome,
@@ -693,6 +707,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
     async def _collect_all_triage_degraded(
         self,
         input: EvidenceAgentInput,
+        *,
+        query_tools: tuple[str, ...] = EVIDENCE_QUERY_ORDER,
     ) -> tuple[list[Evidence], list[str], list[str], list[EvidenceGap]]:
         """Skip all seven queries when triage is degraded without source entities."""
         collected: list[Evidence] = []
@@ -701,7 +717,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         gaps: list[EvidenceGap] = []
         started = time.perf_counter()
 
-        for tool_name in EVIDENCE_QUERY_ORDER:
+        for tool_name in query_tools:
             source = TOOL_SOURCE_MAP[tool_name]
             outcome = self._skipped_entity_outcome(
                 tool_name,
@@ -730,6 +746,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         time_range: dict[str, str],
         scope: EvidenceQueryScope | None,
         alert_text: str = "",
+        query_tools: tuple[str, ...] = EVIDENCE_QUERY_ORDER,
     ) -> tuple[list[Evidence], list[str], list[str], list[EvidenceGap]]:
         """Run queries concurrently; ``asyncio.wait`` keeps completed work on global timeout."""
         collected: list[Evidence] = []
@@ -739,6 +756,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         started = time.perf_counter()
 
         pending_tasks: dict[asyncio.Task[dict[str, Any]], str] = {}
+        pending_tasks_dedupe: dict[asyncio.Task[dict[str, Any]], str] = {}
         raw_entities = input.triage_result.entities
         validated_entities = _validate_entities_for_evidence(
             raw_entities,
@@ -746,7 +764,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         ).entity_set
         raw_iocs = [item for item in input.triage_result.ioc_list if item]
         valid_iocs, _rejected_iocs = _validate_ioc_list(raw_iocs)
-        for tool_name in EVIDENCE_QUERY_ORDER:
+        dedupe_cache: dict[str, dict[str, Any]] = {}
+        for tool_name in query_tools:
             source = TOOL_SOURCE_MAP[tool_name]
             params = self._build_params(
                 tool_name,
@@ -776,16 +795,29 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                     gaps=gaps,
                 )
                 continue
+            dedupe_key = build_query_dedupe_key(tool_name, params, time_range, scope)
+            cached = dedupe_cache.get(dedupe_key)
+            if cached is not None:
+                await self._merge_outcome(
+                    {**cached, "tool_name": tool_name},
+                    collected=collected,
+                    success_sources=success_sources,
+                    failed_sources=failed_sources,
+                    gaps=gaps,
+                )
+                continue
             task = asyncio.create_task(
                 self._run_one_query(
                     tool_name,
                     params,
                     input.event_id,
                     scope=scope,
+                    dedupe_key=dedupe_key,
                 ),
                 name=f"evidence:{tool_name}",
             )
             pending_tasks[task] = tool_name
+            pending_tasks_dedupe[task] = dedupe_key
 
         if pending_tasks:
             done, pending = await asyncio.wait(
@@ -797,7 +829,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             completed_by_tool = {
                 pending_tasks[task]: task for task in done if task in pending_tasks
             }
-            for tool_name in EVIDENCE_QUERY_ORDER:
+            for tool_name in query_tools:
                 completed_task = completed_by_tool.get(tool_name)
                 if completed_task is None:
                     continue
@@ -822,7 +854,13 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                         "success": False,
                         "timing_ms": 0,
                         "status_text": f"error:{exc}",
+                        "dedupe_key": pending_tasks_dedupe.get(completed_task),
                     }
+                else:
+                    dedupe_key = pending_tasks_dedupe.get(completed_task)
+                    if dedupe_key:
+                        outcome.setdefault("dedupe_key", dedupe_key)
+                        dedupe_cache.setdefault(dedupe_key, dict(outcome))
                 await self._merge_outcome(
                     outcome,
                     collected=collected,
@@ -901,6 +939,35 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             "status_text": f"skipped_{reason}",
         }
 
+    async def _run_one_query_deduped(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        event_id: str,
+        *,
+        scope: EvidenceQueryScope | None,
+        time_range: dict[str, str],
+        dedupe_cache: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        dedupe_key = build_query_dedupe_key(tool_name, params, time_range, scope)
+        cached = dedupe_cache.get(dedupe_key)
+        if cached is not None:
+            return {
+                **cached,
+                "tool_name": tool_name,
+                "dedupe_key": dedupe_key,
+                "dedupe_reused": True,
+            }
+        outcome = await self._run_one_query(
+            tool_name,
+            params,
+            event_id,
+            scope=scope,
+            dedupe_key=dedupe_key,
+        )
+        dedupe_cache[dedupe_key] = dict(outcome)
+        return outcome
+
     async def _run_one_query(
         self,
         tool_name: str,
@@ -908,6 +975,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         event_id: str,
         *,
         scope: EvidenceQueryScope | None,
+        dedupe_key: str | None = None,
     ) -> dict[str, Any]:
         source = TOOL_SOURCE_MAP[tool_name]
         tool_result, timing_ms, call_error = await self._call_query(
@@ -939,6 +1007,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "success": False,
                 "timing_ms": timing_ms,
                 "status_text": status_text,
+                "dedupe_key": dedupe_key,
             }
 
         parsed = self.parser.parse(
@@ -964,6 +1033,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "success": False,
                 "timing_ms": timing_ms,
                 "status_text": status_text,
+                "dedupe_key": dedupe_key,
             }
 
         return {
@@ -975,6 +1045,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             "success": True,
             "timing_ms": timing_ms,
             "status_text": status_text,
+            "dedupe_key": dedupe_key,
         }
 
     async def _merge_outcome(
@@ -995,6 +1066,7 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
         gap = outcome.get("gap")
         gap_reason = gap.reason if gap is not None else None
         records_count = len(parsed)
+        dedupe_key = outcome.get("dedupe_key")
 
         self.last_query_timings.append(
             {
@@ -1004,6 +1076,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "execution_time_ms": timing_ms,
                 "records_count": records_count,
                 "gap_reason": gap_reason,
+                "dedupe_key": dedupe_key,
+                "dedupe_reused": bool(outcome.get("dedupe_reused")),
             }
         )
         event_id = ""
@@ -1216,6 +1290,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "query_timings": list(self.last_query_timings),
                 "persist_ok": self.last_persist_error is None,
             }
+            if self.last_query_plan is not None:
+                envelope["query_plan"] = self.last_query_plan.model_dump(mode="json")
             if self.last_persist_error is not None:
                 envelope["persist_error"] = self.last_persist_error
         else:
@@ -1224,6 +1300,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "persist_ok": self.last_persist_error is None,
                 "persist_error": self.last_persist_error,
             }
+            if self.last_query_plan is not None:
+                envelope["query_plan"] = self.last_query_plan.model_dump(mode="json")
         try:
             await self.trace_service.log_trace(
                 event_id=input.event_id,
@@ -1246,6 +1324,20 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 self.agent_name,
                 exc_info=True,
             )
+
+    async def _read_execution_plan(self, event_id: str) -> dict[str, Any] | None:
+        if self.working_memory is None:
+            return None
+        try:
+            data = await self.working_memory.read(event_id, "execution_plan")
+        except Exception:
+            logger.debug(
+                "failed to read execution_plan for evidence query budget event=%s",
+                event_id,
+                exc_info=True,
+            )
+            return None
+        return data if isinstance(data, dict) else None
 
     async def _resolve_time_range(self, input: EvidenceAgentInput) -> dict[str, str]:
         """Prefer EventContext.event.occurred_at; fall back to configured default."""

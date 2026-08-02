@@ -58,6 +58,7 @@ from app.orchestration.writeback_recovery_handler import (
 from app.services.analysis_only_pipeline import run_rag_stage
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService, apply_flag_to_list
+from app.services.evidence_query_plan_service import extract_evidence_plan_inputs
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
 from app.services.state_machine_service import StateMachineService
@@ -813,11 +814,22 @@ def build_investigation_graph(
             context=TransitionContext(need_investigation=True),
             reason="investigation:evidence",
         )
+        planned_tools, _step_orders, _budget, _invalid = extract_evidence_plan_inputs(
+            state.get("execution_plan")
+        )
+        plan_step_goal = ""
+        execution_plan_data = state.get("execution_plan")
+        if isinstance(execution_plan_data, dict):
+            for step in execution_plan_data.get("steps") or []:
+                if isinstance(step, dict) and step.get("assigned_agent") == "evidence_agent":
+                    plan_step_goal = str(step.get("step_goal") or plan_step_goal)
         result = await evidence_agent.execute(
             EvidenceAgentInput(
                 event_id=state["event_id"],
                 triage_result=triage,
                 alert_text=_alert_text_from_state(state),
+                required_tools=planned_tools,
+                plan_step_goal=plan_step_goal,
             )
         )
         if not isinstance(result, EvidenceOutput):

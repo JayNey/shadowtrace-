@@ -244,6 +244,54 @@ def _enrich_agent_output(
         )
         if generated is not None:
             enriched.setdefault("reason_code", str(generated))
+    elif agent_name == "evidence_agent":
+        query_timings = output_data.get("query_timings") or []
+        if isinstance(query_timings, list):
+            enriched["candidate_actions"] = [
+                {
+                    "candidate_type": "evidence_query",
+                    "name": str(row.get("tool_name") or ""),
+                    "candidate_id": str(row.get("dedupe_key") or row.get("tool_name") or ""),
+                }
+                for row in query_timings[:50]
+                if isinstance(row, dict) and row.get("tool_name")
+            ]
+        evidence_list = output_data.get("evidence_list") or []
+        if isinstance(evidence_list, list):
+            enriched["evidence_refs"] = [
+                str(item.get("evidence_id"))
+                for item in evidence_list[:50]
+                if isinstance(item, dict) and item.get("evidence_id")
+            ]
+        gaps = output_data.get("gaps") or []
+        if isinstance(gaps, list):
+            enriched["gap_refs"] = [
+                {
+                    "source": str(item.get("missing_source") or ""),
+                    "reason": str(item.get("reason") or ""),
+                }
+                for item in gaps[:50]
+                if isinstance(item, dict)
+            ]
+        query_plan = output_data.get("query_plan") or {}
+        if isinstance(query_plan, dict):
+            step_orders = query_plan.get("plan_step_orders") or []
+            if step_orders:
+                enriched.setdefault("reason_code", f"plan_steps:{','.join(map(str, step_orders))}")
+            degraded = query_plan.get("degraded_reasons") or []
+            if degraded:
+                enriched.setdefault(
+                    "decision_summary",
+                    ",".join(str(item) for item in degraded)[:512],
+                )
+        enriched.setdefault(
+            "decision_summary",
+            (
+                f"collection_status={output_data.get('collection_status')} "
+                f"queries={len(query_timings) if isinstance(query_timings, list) else 0}"
+            )[:512],
+        )
+        enriched.setdefault("selected_action", f"evidence:{output_data.get('collection_status')}")
     if isinstance(input_data.get("event_id"), str):
         enriched.setdefault("event_id", input_data["event_id"])
     return enriched
