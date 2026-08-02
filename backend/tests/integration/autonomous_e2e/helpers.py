@@ -33,6 +33,10 @@ T = TypeVar("T")
 # Queue name that production workers do not consume — for broker-up / worker-down tests.
 ISOLATED_E2E_QUEUE = "iss110-isolated-e2e"
 
+# Shared integration DB may retain intents from prior runs. Tests that call
+# ``claim_and_publish_batch(limit=1)`` backdate ``created_at`` on dedicated rows
+# so claim ordering is deterministic without truncating shared state.
+
 DEV_AUTH_TOKENS_JSON = json.dumps(
     {
         "analyst-token": {"subject": "iss110-analyst", "roles": ["analyst"]},
@@ -186,6 +190,7 @@ class ObservabilitySnapshot:
     intent_statuses: list[str] = field(default_factory=list)
     intent_broker_task_ids: list[str | None] = field(default_factory=list)
     agent_trace_count: int = 0
+    agent_trace_ids: list[str] = field(default_factory=list)
     action_count: int = 0
     pending_action_count: int = 0
     approval_record_count: int = 0
@@ -212,14 +217,14 @@ async def collect_observability(
                 .order_by(orm.InvestigationIntent.created_at.asc())
             )
         ).all()
-        agent_trace_count = int(
-            await session.scalar(
-                select(func.count())
-                .select_from(orm.AgentTrace)
+        agent_trace_rows = (
+            await session.scalars(
+                select(orm.AgentTrace.trace_id)
                 .where(orm.AgentTrace.event_id == event_id)
+                .order_by(orm.AgentTrace.started_at.asc())
             )
-            or 0
-        )
+        ).all()
+        agent_trace_count = len(agent_trace_rows)
         actions = (
             await session.scalars(select(orm.Action).where(orm.Action.event_id == event_id))
         ).all()
@@ -259,6 +264,7 @@ async def collect_observability(
         intent_statuses=[row.status for row in intents],
         intent_broker_task_ids=[row.broker_task_id for row in intents],
         agent_trace_count=agent_trace_count,
+        agent_trace_ids=[str(trace_id) for trace_id in agent_trace_rows],
         action_count=len(actions),
         pending_action_count=len(pending_actions),
         approval_record_count=len(approval_rows),
