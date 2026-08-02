@@ -41,12 +41,6 @@ _TOP_K = 5
 _NO_ACTIVE_RELEASE = "no_active_knowledge_release"
 
 
-def _require_active_knowledge_release(settings: Settings) -> bool:
-    if settings.knowledge_release_require_active:
-        return True
-    return settings.app_env.strip().lower() == "production"
-
-
 class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
     """Stage 6 Agent: concurrent RAG retrieval across four knowledge bases.
 
@@ -106,9 +100,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             query_plan=await self._resolve_query_plan(input),
         )
         attack_kb_blocked = (
-            self._knowledge_release_service is not None
-            and context.query_plan is None
-            and _require_active_knowledge_release(cfg)
+            self._knowledge_release_service is not None and context.query_plan is None
         )
         retrieve_outcomes = await asyncio.gather(
             *(

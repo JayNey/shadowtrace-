@@ -124,3 +124,63 @@ async def test_release_filter_prevents_cross_release_reads(
     assert any(row.chunk_id == "atk-legacy-no-release" for row in legacy_hits)
 
     await embed.close()
+
+
+@pytest.mark.asyncio
+async def test_citations_carry_pinned_release_id(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.core.llm.base import InMemoryLLMCallAuditRecorder
+    from app.core.llm.mock_client import MockLLMClient
+    from app.rag.pipeline import RetrievalPipeline
+    from app.rag.query_rewriter import QueryRewriter
+    from app.rag.hybrid_retriever import HybridRetriever
+    from app.rag.reranker import MockReranker
+
+    settings = Settings(EMBEDDING_MODE="mock", EMBEDDING_MAX_BATCH_SIZE=128)
+    embed = EmbeddingService(settings)
+    store = KnowledgeStore(session_factory, embed)
+    service = KnowledgeReleaseService(session_factory, store=store, settings=settings)
+
+    bundle = build_bundle_from_techniques_json(DATA_FILE)
+    version = str(bundle["x_shadowtrace_attack_version"])
+    staged = await service.stage_stix_bundle(
+        bundle,
+        release_version=version,
+        provenance=default_attack_provenance("fixture://attack-citation"),
+    )
+    activated = await service.activate_release(staged.release_id)
+
+    plan = resolve_knowledge_query_plan(
+        corpus_id="attack_enterprise",
+        active_release_id=activated.release_id,
+        embedding_release_id=settings.embedding_release_id,
+        trace_id="trace-citation-test",
+    )
+    context = RetrievalContext(
+        tenant_id="tenant-a",
+        principal="test",
+        event_id="evt-citation",
+        trace_id="trace-citation-test",
+        query_plan=plan,
+    )
+    pipeline = RetrievalPipeline(
+        rewriter=QueryRewriter(
+            MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+            agent_name="test",
+        ),
+        retriever=HybridRetriever(store, embed),
+        reranker=MockReranker(),
+    )
+    result = await pipeline.retrieve(
+        "Valid Accounts credential access",
+        ["attack_kb"],
+        top_k=3,
+        context=context,
+    )
+    assert result.citations
+    assert all(cit.release_id == activated.release_id for cit in result.citations)
+    assert all(cit.corpus_id == "attack_enterprise" for cit in result.citations)
+    assert all(cit.object_id for cit in result.citations)
+
+    await embed.close()

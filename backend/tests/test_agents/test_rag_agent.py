@@ -1251,7 +1251,68 @@ class TestRAGAgentReleasePinning:
         assert len([c for c in pipeline.calls if c["kb_names"] != ["attack_kb"]]) == 3
 
     @pytest.mark.asyncio
-    async def test_dev_allows_unpinned_attack_kb_when_no_active_release(self):
+    async def test_production_blocks_attack_kb_without_active_release(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+
+        release_service = MagicMock()
+        release_service.get_active_release = AsyncMock(return_value=None)
+
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        pipeline = _MockPipeline(results=results)
+        settings = Settings(
+            app_env="production",
+            simulation_enabled=False,
+            source_mode="live_xdr",
+            tool_mode="live",
+            disposition_mode="live_xdr",
+            disposition_adapter_kind="live",
+            llm_mode="openai_compatible",
+            embedding_mode="remote",
+        )
+        agent = RAGAgent(
+            working_memory=wm,
+            pipeline=pipeline,
+            knowledge_release_service=release_service,
+            settings=settings,
+        )
+
+        output = await agent._run(
+            _make_input().model_copy(update={"tenant_id": "tenant-prod-test"})
+        )
+
+        assert output.attack_techniques == []
+        attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
+        assert attack_calls == []
+
+    @pytest.mark.asyncio
+    async def test_dev_allows_unpinned_attack_kb_without_release_service(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        pipeline = _MockPipeline(results=results)
+        settings = Settings(APP_ENV="development", EMBEDDING_MODE="mock")
+        agent = RAGAgent(
+            working_memory=wm,
+            pipeline=pipeline,
+            knowledge_release_service=None,
+            settings=settings,
+        )
+
+        output = await agent._run(_make_input())
+
+        assert len(output.attack_techniques) >= 2
+        attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
+        assert len(attack_calls) == 1
+        assert attack_calls[0]["context"].query_plan is None
+
+    @pytest.mark.asyncio
+    async def test_dev_blocks_attack_kb_when_release_service_has_no_active_release(self):
         from unittest.mock import AsyncMock, MagicMock
 
         from app.core.config import Settings
@@ -1272,10 +1333,9 @@ class TestRAGAgentReleasePinning:
 
         output = await agent._run(_make_input())
 
-        assert len(output.attack_techniques) >= 2
+        assert output.attack_techniques == []
         attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
-        assert len(attack_calls) == 1
-        assert attack_calls[0]["context"].query_plan is None
+        assert attack_calls == []
 
 
 class TestRAGAgentInputValidation:

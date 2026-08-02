@@ -306,3 +306,40 @@ async def test_retired_release_remains_auditable(
     assert retired is not None
     assert retired.lifecycle_state is KnowledgeReleaseLifecycleState.RETIRED
     assert retired.retired_at is not None
+
+
+@pytest.mark.asyncio
+async def test_cannot_activate_failed_release(service: KnowledgeReleaseService) -> None:
+    failed = await service.mark_import_failed(
+        corpus_id=ATTACK_CORPUS_ID,
+        content_hash="d" * 64,
+        provenance=default_attack_provenance("fixture://failed-activate"),
+        release_version="v15.1-failed-activate",
+        reason="bundle validation failed",
+    )
+    with pytest.raises(ValidationError, match="cannot activate a failed"):
+        await service.activate_release(failed.release_id)
+
+
+@pytest.mark.asyncio
+async def test_vector_ready_activation_succeeds_with_matching_embedding_release(
+    service: KnowledgeReleaseService,
+) -> None:
+    from app.core.embedding.release import build_embedding_release
+
+    bundle = _bundle()
+    version = str(bundle["x_shadowtrace_attack_version"])
+    staged = await service.stage_stix_bundle(
+        bundle,
+        release_version=version,
+        provenance=default_attack_provenance("fixture://attack-vector"),
+    )
+    settings = Settings(EMBEDDING_MODE="mock", EMBEDDING_MAX_BATCH_SIZE=128)
+    embedding_release_id = build_embedding_release(settings).release_id
+    activated = await service.activate_release(
+        staged.release_id,
+        vector_ready=True,
+        embedding_release_id=embedding_release_id,
+    )
+    assert activated.vector_ready is True
+    assert activated.embedding_release_id == embedding_release_id
