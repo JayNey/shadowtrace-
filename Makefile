@@ -455,6 +455,7 @@ ci-lint:
 	cd frontend && pnpm install --frozen-lockfile
 	cd frontend && pnpm lint
 	cd frontend && pnpm typecheck
+	# ISSUE-111: same Vitest step as CI frontend-build; use `make frontend-test` for frontend-only.
 	cd frontend && pnpm test
 
 ci-test:
