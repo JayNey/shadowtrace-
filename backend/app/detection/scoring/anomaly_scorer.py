@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 from app.core.errors import ValidationError
 from app.detection.scoring.release import AnomalyScorerRelease
-from app.detection.scoring.robust_stats import robust_z_score
+from app.detection.scoring.robust_stats import feature_anomaly_z
 from app.models.feature_snapshot import (
     DetectionBaselineStatus,
     DetectionFeatureBaseline,
@@ -36,6 +37,7 @@ class ContributingFeature:
     baseline_mad: float
     robust_z: float
     weight: float
+    scoring_method: str = "mad"
 
     def as_dict(self) -> dict[str, float | str]:
         return {
@@ -45,6 +47,7 @@ class ContributingFeature:
             "baseline_mad": round(self.baseline_mad, 4),
             "robust_z": round(self.robust_z, 4),
             "weight": round(self.weight, 4),
+            "scoring_method": self.scoring_method,
         }
 
 
@@ -85,6 +88,12 @@ def _coerce_feature_value(raw: Any, *, feature_name: str) -> float:
 
 def math_isfinite(value: float) -> bool:
     return value == value and value not in (float("inf"), float("-inf"))
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _robust_stats_for_feature(
@@ -190,6 +199,23 @@ def score_snapshot(
             },
         )
 
+    if _ensure_utc(snapshot.cutoff_at) != _ensure_utc(baseline.cutoff_at):
+        raise ValidationError(
+            "snapshot/baseline cutoff_at binding mismatch",
+            details={
+                "snapshot_cutoff_at": _ensure_utc(snapshot.cutoff_at).isoformat(),
+                "baseline_cutoff_at": _ensure_utc(baseline.cutoff_at).isoformat(),
+            },
+        )
+    if snapshot.window_kind != baseline.window_kind:
+        raise ValidationError(
+            "snapshot/baseline window_kind binding mismatch",
+            details={
+                "snapshot_window_kind": snapshot.window_kind.value,
+                "baseline_window_kind": baseline.window_kind.value,
+            },
+        )
+
     contributing: list[ContributingFeature] = []
     max_z = 0.0
     for feature_name in release.scored_features:
@@ -214,8 +240,7 @@ def score_snapshot(
             )
         raw_value = snapshot.features.get(feature_name)
         value = _coerce_feature_value(raw_value, feature_name=feature_name)
-        z = abs(robust_z_score(value=value, center=center, scale=scale))
-        weight = 1.0 / len(release.scored_features)
+        z, scoring_method = feature_anomaly_z(value=value, stats=stats)
         contributing.append(
             ContributingFeature(
                 feature_name=feature_name,
@@ -223,7 +248,8 @@ def score_snapshot(
                 baseline_median=center,
                 baseline_mad=scale,
                 robust_z=z,
-                weight=weight,
+                weight=0.0,
+                scoring_method=scoring_method,
             )
         )
         max_z = max(max_z, z)
@@ -233,6 +259,35 @@ def score_snapshot(
             "baseline missing robust stats for scorer release",
             details={"category": ScorerErrorCategory.INSUFFICIENT_COVERAGE},
         )
+
+    total_z = sum(item.robust_z for item in contributing)
+    if total_z > 0:
+        contributing = [
+            ContributingFeature(
+                feature_name=item.feature_name,
+                value=item.value,
+                baseline_median=item.baseline_median,
+                baseline_mad=item.baseline_mad,
+                robust_z=item.robust_z,
+                weight=item.robust_z / total_z,
+                scoring_method=item.scoring_method,
+            )
+            for item in contributing
+        ]
+    else:
+        equal_weight = 1.0 / len(contributing)
+        contributing = [
+            ContributingFeature(
+                feature_name=item.feature_name,
+                value=item.value,
+                baseline_median=item.baseline_median,
+                baseline_mad=item.baseline_mad,
+                robust_z=item.robust_z,
+                weight=equal_weight,
+                scoring_method=item.scoring_method,
+            )
+            for item in contributing
+        ]
 
     contributing_sorted = tuple(
         sorted(contributing, key=lambda item: item.robust_z, reverse=True)[

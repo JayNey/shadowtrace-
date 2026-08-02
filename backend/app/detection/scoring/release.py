@@ -19,7 +19,8 @@ SCORED_ACCOUNT_FEATURES = (
 MOCK_ACCOUNT_MAD_RELEASE_ID = "mock-account-mad-v1"
 MOCK_ACCOUNT_CALIBRATION_VERSION = "mad_robust_z_v1"
 MOCK_ACCOUNT_THRESHOLD_VERSION = "robust_z_3.5"
-# Frozen for release hash audit; MAD scoring ignores contamination until Phase B ensemble.
+# Frozen for release hash audit. Phase A scoring uses MAD + quantile fallback;
+# contamination is recorded in the artifact but not applied until Phase B ensemble.
 MOCK_ACCOUNT_CONTAMINATION = 0.05
 DEFAULT_ROBUST_Z_THRESHOLD = 3.5
 

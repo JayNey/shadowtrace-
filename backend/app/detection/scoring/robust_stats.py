@@ -41,11 +41,45 @@ def quantile(values: list[float], q: float) -> float:
     return ordered[lower] * (1 - weight) + ordered[upper] * weight
 
 
+_MAD_SCALE_FACTOR = 0.6745
+_MIN_QUANTILE_SCALE = 1e-6
+
+
 def robust_z_score(*, value: float, center: float, scale: float) -> float:
     """Modified z-score using MAD; 0.6745 scales MAD to std-equivalent units."""
     if scale <= 0:
         return 0.0
-    return 0.6745 * (value - center) / scale
+    return _MAD_SCALE_FACTOR * (value - center) / scale
+
+
+def feature_anomaly_z(*, value: float, stats: dict[str, float]) -> tuple[float, str]:
+    """Score one feature: MAD robust-z, quantile IQR fallback when MAD is degenerate."""
+    center = stats["median"]
+    scale = stats.get("mad", 0.0)
+    if scale > 0:
+        return abs(robust_z_score(value=value, center=center, scale=scale)), "mad"
+    if value == center:
+        return 0.0, "mad_degenerate"
+    p25 = stats.get("p25")
+    p75 = stats.get("p75")
+    p95 = stats.get("p95")
+    if p25 is not None and p75 is not None:
+        half_iqr = (p75 - p25) / 2.0
+        if half_iqr > _MIN_QUANTILE_SCALE:
+            if value > p75:
+                z = _MAD_SCALE_FACTOR * (value - p75) / half_iqr + _MAD_SCALE_FACTOR
+            elif value < p25:
+                z = _MAD_SCALE_FACTOR * (p25 - value) / half_iqr + _MAD_SCALE_FACTOR
+            else:
+                z = _MAD_SCALE_FACTOR * abs(value - center) / half_iqr
+            return z, "quantile_iqr"
+    if p95 is not None and value > p95:
+        tail_scale = max(p95 - center, _MIN_QUANTILE_SCALE)
+        return abs(_MAD_SCALE_FACTOR * (value - center) / tail_scale), "quantile_p95"
+    if p25 is not None and value < p25:
+        tail_scale = max(center - p25, _MIN_QUANTILE_SCALE)
+        return abs(_MAD_SCALE_FACTOR * (center - value) / tail_scale), "quantile_p25"
+    return abs(_MAD_SCALE_FACTOR * (value - center) / _MIN_QUANTILE_SCALE), "quantile_epsilon"
 
 
 def robust_feature_stats(values: list[float]) -> dict[str, float]:

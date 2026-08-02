@@ -1172,6 +1172,7 @@ async def test_statistical_anomaly_operator_produces_shadow_candidate(
     assert candidate.provenance.model_release_id == MOCK_ACCOUNT_MAD_RELEASE.release_id
     assert candidate.provenance.contributing_features
     assert candidate.provenance.baseline_content_hash == baseline.content_hash
+    assert candidate.provenance.source_watermark is not None
 
     second = await runtime.execute_shadow(
         source_tenant_id=tenant_id,

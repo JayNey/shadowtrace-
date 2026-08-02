@@ -149,6 +149,17 @@ def test_compile_statistical_anomaly_accepts_mock_release() -> None:
     assert compiled.match_criteria["model_release_id"] == MOCK_ACCOUNT_MAD_RELEASE_ID
 
 
+def test_compile_statistical_anomaly_rejects_bad_release_hash() -> None:
+    rule = _statistical_anomaly_rule(
+        match_criteria={
+            "model_release_id": MOCK_ACCOUNT_MAD_RELEASE_ID,
+            "model_release_hash": "deadbeef" * 8,
+        },
+    )
+    with pytest.raises(ValidationError, match="release hash mismatch"):
+        compile_rule_definition(rule)
+
+
 def _mad_snapshot_and_baseline() -> tuple[FeatureSnapshot, DetectionFeatureBaseline]:
     cutoff = datetime(2026, 8, 3, 15, 30, 0, tzinfo=UTC)
     snapshot = FeatureSnapshot(
@@ -194,6 +205,28 @@ def _mad_snapshot_and_baseline() -> tuple[FeatureSnapshot, DetectionFeatureBasel
         idempotency_key="idem-base",
     )
     return snapshot, baseline
+
+
+def test_statistical_anomaly_missing_baseline_fail_closed() -> None:
+    snapshot, _baseline = _mad_snapshot_and_baseline()
+    rule = _statistical_anomaly_rule(
+        match_criteria={
+            "entity_type": "user",
+            "entity_id": "account-1",
+            "model_release_id": MOCK_ACCOUNT_MAD_RELEASE_ID,
+        },
+    )
+    with pytest.raises(ValidationError, match="missing detection feature baseline"):
+        StatisticalAnomalyOperator().evaluate(
+            rule,
+            OperatorExecutionContext(
+                source_tenant_id="tenant-a",
+                cutoff_at=snapshot.cutoff_at,
+                observations=[],
+                snapshots=[snapshot],
+                baselines=[],
+            ),
+        )
 
 
 def test_statistical_anomaly_baseline_hash_mismatch_not_swallowed_by_skip() -> None:

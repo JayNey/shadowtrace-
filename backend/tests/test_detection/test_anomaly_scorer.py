@@ -63,7 +63,7 @@ def _baseline(*, stats: dict | None = None) -> DetectionFeatureBaseline:
                 "p75": 52.0,
                 "p95": 55.0,
             },
-            "unique_action_count": {"median": 2.0, "mad": 0.0, "p25": 2.0, "p75": 2.0, "p95": 2.0},
+            "unique_action_count": {"median": 2.0, "mad": 0.5, "p25": 2.0, "p75": 2.0, "p95": 2.0},
         },
     }
     return DetectionFeatureBaseline(
@@ -227,6 +227,69 @@ def test_baseline_missing_release_feature_stats_fail_closed() -> None:
         score_snapshot(
             snapshot=_snapshot(),
             baseline=_baseline(stats=partial_stats),
+            release=MOCK_ACCOUNT_MAD_RELEASE,
+            robust_z_threshold=3.5,
+        )
+
+
+def test_mad_zero_feature_uses_quantile_fallback_not_silent_normal() -> None:
+    stats = {
+        "snapshot_count": 3,
+        "robust": {
+            "observation_count": {"median": 3.0, "mad": 0.5, "p25": 2.0, "p75": 4.0, "p95": 5.0},
+            "avg_detection_score": {
+                "median": 50.0,
+                "mad": 2.0,
+                "p25": 48.0,
+                "p75": 52.0,
+                "p95": 55.0,
+            },
+            "unique_action_count": {
+                "median": 2.0,
+                "mad": 0.0,
+                "p25": 2.0,
+                "p75": 4.0,
+                "p95": 5.0,
+            },
+        },
+    }
+    result = score_snapshot(
+        snapshot=_snapshot(
+            features={
+                "observation_count": 3.0,
+                "avg_detection_score": 50.0,
+                "unique_action_count": 8.0,
+            }
+        ),
+        baseline=_baseline(stats=stats),
+        release=MOCK_ACCOUNT_MAD_RELEASE,
+        robust_z_threshold=3.5,
+    )
+    methods = {item.feature_name: item.scoring_method for item in result.contributing_features}
+    assert methods["unique_action_count"] == "quantile_iqr"
+    assert any(item.robust_z > 0 for item in result.contributing_features if item.feature_name == "unique_action_count")
+
+
+def test_snapshot_baseline_cutoff_mismatch_fail_closed() -> None:
+    baseline = _baseline()
+    mismatched = DetectionFeatureBaseline(
+        baseline_id=baseline.baseline_id,
+        source_tenant_id=baseline.source_tenant_id,
+        detection_scope_id=baseline.detection_scope_id,
+        entity_type=baseline.entity_type,
+        entity_id=baseline.entity_id,
+        window_kind=baseline.window_kind,
+        cutoff_at=datetime(2026, 8, 4, 15, 30, 0, tzinfo=UTC),
+        status=baseline.status,
+        stats=baseline.stats,
+        content_hash=baseline.content_hash,
+        cache_key=baseline.cache_key,
+        idempotency_key=baseline.idempotency_key,
+    )
+    with pytest.raises(ValidationError, match="cutoff_at binding mismatch"):
+        score_snapshot(
+            snapshot=_snapshot(),
+            baseline=mismatched,
             release=MOCK_ACCOUNT_MAD_RELEASE,
             robust_z_threshold=3.5,
         )

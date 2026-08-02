@@ -63,9 +63,7 @@ class StatisticalAnomalyOperator:
         if expected_baseline_hash is not None and not isinstance(expected_baseline_hash, str):
             expected_baseline_hash = None
 
-        robust_z_threshold = (
-            rule.threshold if rule.threshold > 0 else release.default_robust_z_threshold
-        )
+        robust_z_threshold = rule.threshold
 
         matches: list[OperatorMatch] = []
         for snapshot in context.snapshots:
@@ -80,14 +78,15 @@ class StatisticalAnomalyOperator:
                 context.baselines,
             )
             if baseline is None:
-                if rule.missing_data_policy is MissingDataPolicy.SKIP:
-                    continue
-                apply_missing_data_policy(
-                    policy=rule.missing_data_policy,
-                    rule_id=rule.rule_id,
-                    reason="missing detection feature baseline for snapshot entity",
+                raise ValidationError(
+                    "missing detection feature baseline for snapshot entity",
+                    details={
+                        "rule_id": rule.rule_id,
+                        "entity_type": snapshot.entity_type,
+                        "entity_id": snapshot.entity_id,
+                        "category": "insufficient_history",
+                    },
                 )
-                continue
 
             scored = score_snapshot(
                 snapshot=snapshot,
@@ -152,6 +151,7 @@ def _scorer_provenance(
         "detection_score": scored.detection_score,
         "feature_contract_version": snapshot.feature_contract_version,
         "snapshot_content_hash": snapshot.content_hash,
+        "source_watermark": snapshot.source_watermark.isoformat(),
         "baseline_id": baseline.baseline_id,
         "baseline_content_hash": baseline.content_hash,
         "snapshot_revision": snapshot.revision,

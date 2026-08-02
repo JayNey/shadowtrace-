@@ -121,6 +121,7 @@ class CandidateDetectionProvenance(BaseModel):
     detection_score: float | None = Field(default=None, ge=0.0, le=100.0)
     feature_contract_version: str | None = Field(default=None, max_length=32)
     snapshot_content_hash: str | None = Field(default=None, max_length=64)
+    source_watermark: datetime | None = None
     baseline_id: str | None = Field(default=None, max_length=128)
     baseline_content_hash: str | None = Field(default=None, max_length=64)
     snapshot_revision: int | None = Field(default=None, ge=1)

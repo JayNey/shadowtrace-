@@ -138,6 +138,19 @@
           "default": null,
           "title": "Snapshot Content Hash"
         },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Watermark"
+        },
         "baseline_id": {
           "anyOf": [
             {

@@ -10,7 +10,7 @@ import orjson
 
 from app.core.errors import ValidationError
 from app.detection.operators import default_operator_registry
-from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE_ID
+from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE, MOCK_ACCOUNT_MAD_RELEASE_ID
 from app.models.detection_rule import (
     CANDIDATE_DETECTION_SCHEMA_VERSION,
     DETECTION_RULE_SCHEMA_VERSION,
@@ -171,6 +171,17 @@ def compile_rule_definition(rule: DetectionRuleDefinition) -> DetectionRuleDefin
                 "unsupported anomaly scorer release",
                 details={"rule_id": rule.rule_id, "model_release_id": release_id},
             )
+        release_hash = rule.match_criteria.get("model_release_hash")
+        if isinstance(release_hash, str) and release_hash:
+            if release_hash != MOCK_ACCOUNT_MAD_RELEASE.release_hash:
+                raise ValidationError(
+                    "anomaly scorer release hash mismatch",
+                    details={
+                        "rule_id": rule.rule_id,
+                        "model_release_id": release_id,
+                        "expected_release_hash": release_hash,
+                    },
+                )
 
     return rule
 
