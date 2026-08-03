@@ -21,7 +21,7 @@ from app.models.knowledge_release import (
     KnowledgeQueryPlanValidationOutcome,
     KnowledgeTypedFilter,
 )
-from app.services.knowledge_release_resolver import corpus_to_kb_name
+from app.services.knowledge_release_resolver import kb_name_to_corpus
 
 _SUPPORTED_HINT_FILTER_KINDS: frozenset[KnowledgeFilterKind] = frozenset(
     {
@@ -60,20 +60,10 @@ def resolve_allowed_corpora_for_kbs(kb_names: list[str]) -> frozenset[str]:
     """Map requested KB names to server-known corpus ids (#635 policy deferred)."""
     corpora: set[str] = set()
     for kb_name in kb_names:
-        for corpus_id, mapped_kb in _iter_known_corpus_mappings():
-            if mapped_kb == kb_name:
-                corpora.add(corpus_id)
+        corpus_id = kb_name_to_corpus(kb_name)
+        if corpus_id is not None:
+            corpora.add(corpus_id)
     return frozenset(corpora)
-
-
-def _iter_known_corpus_mappings() -> list[tuple[str, str]]:
-    from app.models.knowledge_release import ATTACK_CORPUS_ID
-
-    mappings: list[tuple[str, str]] = []
-    attack_kb = corpus_to_kb_name(ATTACK_CORPUS_ID)
-    if attack_kb is not None:
-        mappings.append((ATTACK_CORPUS_ID, attack_kb))
-    return mappings
 
 
 def validate_knowledge_query_plan(

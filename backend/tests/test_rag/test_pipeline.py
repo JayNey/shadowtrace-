@@ -545,6 +545,94 @@ class TestPipelineDegradation:
         assert "knowledge_query_plan_rejected" in result.degraded_steps
         assert "plan_kb_not_in_scope" in result.degraded_steps
 
+    @pytest.mark.asyncio
+    async def test_rejects_multi_kb_when_plan_covers_single_kb(self) -> None:
+        from datetime import UTC, datetime
+
+        from app.core.config import Settings
+        from app.core.embedding.release import build_embedding_release
+        from app.models.knowledge_release import ATTACK_CORPUS_ID, KnowledgeQueryPlan
+
+        settings = Settings(EMBEDDING_MODE="mock")
+        active_emb = build_embedding_release(settings).release_id
+        plan = KnowledgeQueryPlan(
+            corpus_id=ATTACK_CORPUS_ID,
+            kb_name="attack_kb",
+            active_release_id="krel-plan-test",
+            embedding_release_id=active_emb,
+            trace_id="trace-multi-kb",
+            pinned_at=datetime.now(UTC),
+        )
+        context = RetrievalContext(
+            tenant_id="local",
+            principal="investigation:test",
+            event_id="evt-multi-kb",
+            trace_id="trace-multi-kb",
+            query_plan=plan,
+        )
+        chunks = [_make_chunk("chk-x", "attack_kb", "content", score=0.9)]
+        pipeline = RetrievalPipeline(
+            rewriter=QueryRewriter(
+                MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+                agent_name="test",
+            ),
+            retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+            settings=settings,
+        )
+        result = await pipeline.retrieve(
+            "accounts",
+            ["attack_kb", "fp_case_kb"],
+            top_k=1,
+            context=context,
+        )
+        assert result.chunks == []
+        assert "knowledge_query_plan_rejected" in result.degraded_steps
+        assert "plan_kb_scope_mismatch" in result.degraded_steps
+
+    @pytest.mark.asyncio
+    async def test_accepts_playbook_plan_before_retrieval(self) -> None:
+        from datetime import UTC, datetime
+
+        from app.core.config import Settings
+        from app.core.embedding.release import build_embedding_release
+        from app.models.knowledge_release import KnowledgeQueryPlan
+        from app.models.playbook_release import PLAYBOOK_CORPUS_ID, PLAYBOOK_KB_NAME
+
+        settings = Settings(EMBEDDING_MODE="mock")
+        active_emb = build_embedding_release(settings).release_id
+        plan = KnowledgeQueryPlan(
+            corpus_id=PLAYBOOK_CORPUS_ID,
+            kb_name=PLAYBOOK_KB_NAME,
+            active_release_id="pbrel-plan-test",
+            embedding_release_id=active_emb,
+            trace_id="trace-playbook-plan",
+            pinned_at=datetime.now(UTC),
+        )
+        context = RetrievalContext(
+            tenant_id="local",
+            principal="investigation:test",
+            event_id="evt-playbook-plan",
+            trace_id="trace-playbook-plan",
+            query_plan=plan,
+        )
+        chunks = [_make_chunk("chk-pb", PLAYBOOK_KB_NAME, "Data exfiltration response", score=0.9)]
+        pipeline = RetrievalPipeline(
+            rewriter=QueryRewriter(
+                MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+                agent_name="test",
+            ),
+            retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+            settings=settings,
+        )
+        result = await pipeline.retrieve("exfiltration", [PLAYBOOK_KB_NAME], top_k=1, context=context)
+        assert result.knowledge_query_plan is not None
+        assert result.knowledge_query_plan["active_release_id"] == "pbrel-plan-test"
+        assert result.knowledge_query_plan["plan_hash"]
+        assert "knowledge_query_plan_rejected" not in result.degraded_steps
+        assert len(result.chunks) == 1
+
 
 # ============================================================================
 # Full pipeline integration tests (requires PostgreSQL)

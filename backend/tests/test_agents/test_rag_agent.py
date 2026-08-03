@@ -1240,6 +1240,82 @@ class TestRAGAgentReleasePinning:
         assert attack_calls[0]["context"].query_plan.active_release_id == "krel-pin-test01"
 
     @pytest.mark.asyncio
+    async def test_playbook_query_plan_accepted_by_real_pipeline(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+        from app.core.llm.base import InMemoryLLMCallAuditRecorder
+        from app.core.llm.mock_client import MockLLMClient
+        from app.models.knowledge_release import (
+            KnowledgeImportStatus,
+            KnowledgeRelease,
+            KnowledgeReleaseLifecycleState,
+            KnowledgeReleaseProvenance,
+        )
+        from app.models.playbook_release import PLAYBOOK_CORPUS_ID, PLAYBOOK_KB_NAME, PLAYBOOK_SOURCE_ID
+        from app.rag.context import RetrievalContext
+        from app.rag.pipeline import RetrievalPipeline
+        from app.rag.query_rewriter import QueryRewriter
+        from app.rag.reranker import MockReranker
+
+        class _SelectiveRetriever:
+            async def retrieve(
+                self,
+                queries: list[str],
+                kb_names: list[str],
+                top_k: int = 5,
+                *,
+                context: RetrievalContext,
+            ) -> list[list[RetrievedChunk]]:
+                kb_name = kb_names[0] if kb_names else "unknown"
+                if kb_name == PLAYBOOK_KB_NAME:
+                    return [[_PLAYBOOK_CHUNKS[0]], [_PLAYBOOK_CHUNKS[0]]]
+                return [[], []]
+
+        settings = Settings(
+            APP_ENV="development",
+            EMBEDDING_MODE="mock",
+            EMBEDDING_RELEASE_ID="emb-test-release",
+        )
+        playbook_release = KnowledgeRelease(
+            release_id="pbrel-pin-test01",
+            corpus_id=PLAYBOOK_CORPUS_ID,
+            source_id=PLAYBOOK_SOURCE_ID,
+            release_version="v1-test",
+            content_hash="c" * 64,
+            provenance=KnowledgeReleaseProvenance(source_path="fixture://playbook-test"),
+            import_status=KnowledgeImportStatus.VALIDATED,
+            lifecycle_state=KnowledgeReleaseLifecycleState.ACTIVE,
+            vector_ready=True,
+            embedding_release_id="emb-test-release",
+            idempotency_key=f"{PLAYBOOK_CORPUS_ID}:{'c' * 64}",
+        )
+        playbook_release_service = MagicMock()
+        playbook_release_service.get_active_release = AsyncMock(return_value=playbook_release)
+
+        pipeline = RetrievalPipeline(
+            rewriter=QueryRewriter(
+                MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+                agent_name="RAGAgent",
+            ),
+            retriever=_SelectiveRetriever(),
+            reranker=MockReranker(),
+            settings=settings,
+        )
+        agent = RAGAgent(
+            working_memory=_MockBoundWorkingMemory(),
+            pipeline=pipeline,
+            knowledge_release_service=None,
+            playbook_release_service=playbook_release_service,
+            settings=settings,
+        )
+
+        output = await agent._run(_make_input())
+
+        assert len(output.playbook_refs) >= 1
+        assert output.playbook_refs[0].playbook_id == "pb-a1b2c3d4"
+
+    @pytest.mark.asyncio
     async def test_blocks_attack_kb_without_active_release_when_required(self):
         from unittest.mock import AsyncMock, MagicMock
 

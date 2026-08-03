@@ -119,6 +119,18 @@ class RetrievalPipeline:
                         "sanitized_plan_hash": "",
                     },
                 )
+            if set(kb_names) != {context.query_plan.kb_name}:
+                return RetrievalResult(
+                    query=query,
+                    rewritten_queries=[query],
+                    chunks=[],
+                    citations=[],
+                    degraded_steps=degraded + [_PLAN_REJECTED, "plan_kb_scope_mismatch"],
+                    knowledge_query_plan={
+                        "rejected_reasons": ["plan_kb_scope_mismatch"],
+                        "sanitized_plan_hash": "",
+                    },
+                )
             cfg = self._settings or get_settings()
             active_embedding_release_id = build_embedding_release(cfg).release_id
             outcome = validate_knowledge_query_plan(

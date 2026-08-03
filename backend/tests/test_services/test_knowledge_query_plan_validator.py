@@ -18,6 +18,7 @@ from app.models.knowledge_release import (
 )
 from app.services.knowledge_query_plan_validator import (
     compute_plan_hash,
+    resolve_allowed_corpora_for_kbs,
     validate_knowledge_query_plan,
 )
 
@@ -157,6 +158,36 @@ def test_validate_rejects_corpus_not_allowed_for_kb() -> None:
     )
     assert outcome.accepted is False
     assert "corpus_not_allowed_for_kb" in outcome.rejected_reasons
+
+
+def test_resolve_allowed_corpora_includes_playbook_kb() -> None:
+    corpora = resolve_allowed_corpora_for_kbs(["attack_kb", "playbook_kb"])
+    assert corpora == frozenset({"attack_enterprise", "playbook_soar"})
+
+
+def test_validate_accepts_playbook_release_pinned_plan() -> None:
+    from app.models.playbook_release import PLAYBOOK_CORPUS_ID, PLAYBOOK_KB_NAME
+
+    active_emb = _active_embedding_release_id()
+    plan = KnowledgeQueryPlan(
+        corpus_id=PLAYBOOK_CORPUS_ID,
+        kb_name=PLAYBOOK_KB_NAME,
+        active_release_id="pbrel-test",
+        embedding_release_id=active_emb,
+        trace_id="trace-playbook",
+        pinned_at=datetime.now(UTC),
+    )
+    outcome = validate_knowledge_query_plan(
+        plan,
+        tenant_id="tenant-a",
+        principal="investigation:rag_agent",
+        kb_names=[PLAYBOOK_KB_NAME],
+        active_embedding_release_id=active_emb,
+    )
+    assert outcome.accepted is True
+    assert outcome.plan is not None
+    assert outcome.plan.corpus_id == PLAYBOOK_CORPUS_ID
+    assert outcome.plan.plan_hash
 
 
 def test_compute_plan_hash_is_stable() -> None:
