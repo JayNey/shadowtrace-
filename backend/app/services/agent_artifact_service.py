@@ -211,6 +211,30 @@ class AgentArtifactService:
 
         return _artifact_from_row(row)
 
+    async def load_latest(
+        self,
+        *,
+        task_id: str,
+        logical_artifact_key: str,
+        tenant_id: str,
+    ) -> AgentArtifact | None:
+        """Return the newest artifact revision for a task/logical key."""
+        self._require_available()
+        async with self._session_factory() as session:  # type: ignore[union-attr]
+            row = await session.scalar(
+                select(orm.AgentArtifactORM)
+                .where(
+                    orm.AgentArtifactORM.task_id == task_id,
+                    orm.AgentArtifactORM.logical_artifact_key == logical_artifact_key,
+                    orm.AgentArtifactORM.tenant_id == tenant_id,
+                )
+                .order_by(orm.AgentArtifactORM.producer_revision.desc())
+                .limit(1)
+            )
+            if row is None:
+                return None
+            return _artifact_from_row(row)
+
     def _require_available(self) -> None:
         if not self._available:
             raise AgentTaskUnavailableError("artifact ledger persistence unavailable")

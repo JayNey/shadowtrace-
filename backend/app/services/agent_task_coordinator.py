@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from app.core.errors import AgentTaskDeniedError, AgentTaskUnavailableError
+from app.models.agent_io import RiskAssessment
 from app.models.agent_task import (
     TERMINAL_AGENT_TASK_STATUSES,
     AgentArtifactPersistRequest,
@@ -72,6 +73,35 @@ async def _maybe_requeue_recoverable(task: AgentTask, agent_task_service: AgentT
         return task
 
 
+async def _load_completed_risk_assessment(
+    artifact_service: AgentArtifactService | None,
+    *,
+    task: AgentTask,
+    tenant_id: str,
+) -> RiskAssessment | None:
+    if artifact_service is None:
+        return None
+    try:
+        artifact = await artifact_service.load_latest(
+            task_id=task.task_id,
+            logical_artifact_key="risk_assessment",
+            tenant_id=tenant_id,
+        )
+    except AgentTaskUnavailableError:
+        return None
+    if artifact is None:
+        return None
+    try:
+        return RiskAssessment.model_validate(artifact.payload)
+    except Exception:
+        logger.warning(
+            "Stored risk_assessment artifact invalid for task=%s",
+            task.task_id,
+            exc_info=True,
+        )
+        return None
+
+
 async def run_risk_score_with_ledger(
     agent_task_service: AgentTaskService | None,
     artifact_service: AgentArtifactService | None,
@@ -96,6 +126,18 @@ async def run_risk_score_with_ledger(
 
     if task.status in TERMINAL_AGENT_TASK_STATUSES:
         if task.status is AgentTaskStatus.COMPLETED:
+            cached = await _load_completed_risk_assessment(
+                artifact_service,
+                task=task,
+                tenant_id=tenant_id,
+            )
+            if cached is not None:
+                return cached
+            logger.warning(
+                "COMPLETED AgentTask missing risk_assessment artifact; re-executing for event=%s task=%s",
+                event_id,
+                task.task_id,
+            )
             return await execute()
         task = await _maybe_requeue_recoverable(task, agent_task_service, tenant_id=tenant_id)
         if task.status in TERMINAL_AGENT_TASK_STATUSES:
@@ -111,6 +153,7 @@ async def run_risk_score_with_ledger(
         )
         await agent_task_service.start(claim, tenant_id=tenant_id)
         result = await execute()
+        artifact_persisted = False
         if artifact_service is not None:
             payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
             if isinstance(payload, dict):
@@ -134,13 +177,41 @@ async def run_risk_score_with_ledger(
                         tenant_id=tenant_id,
                         event_id=event_id,
                     )
-                except Exception:
+                    artifact_persisted = True
+                except Exception as exc:
                     logger.warning(
                         "AgentArtifact persist failed for event=%s task=%s",
                         event_id,
                         task.task_id,
                         exc_info=True,
                     )
+                    try:
+                        await agent_task_service.fail(
+                            claim,
+                            error_summary=f"artifact_persist_failed: {exc.__class__.__name__}",
+                        )
+                    except Exception:
+                        logger.warning(
+                            "AgentTask fail transition failed after artifact persist error for event=%s task=%s",
+                            event_id,
+                            task.task_id,
+                            exc_info=True,
+                        )
+                    return result
+        if artifact_service is not None and not artifact_persisted:
+            try:
+                await agent_task_service.fail(
+                    claim,
+                    error_summary="artifact_persist_skipped: non-dict payload",
+                )
+            except Exception:
+                logger.warning(
+                    "AgentTask fail transition failed after artifact skip for event=%s task=%s",
+                    event_id,
+                    task.task_id,
+                    exc_info=True,
+                )
+            return result
         await agent_task_service.complete(claim)
         return result
     except (AgentTaskDeniedError, AgentTaskUnavailableError) as exc:
