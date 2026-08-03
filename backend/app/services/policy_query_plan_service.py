@@ -49,11 +49,16 @@ async def validate_pinned_policy_query_plan(
         )
     if plan.profile_id is None or plan.profile_revision is None:
         return None
+    authorized = (
+        authorized_tenant_id.strip()
+        if authorized_tenant_id is not None
+        else normalized_tenant
+    )
     return await profile_service.validate_profile_revision(
         tenant_id=normalized_tenant,
         profile_id=plan.profile_id,
         profile_revision=plan.profile_revision,
-        authorized_tenant_id=authorized_tenant_id,
+        authorized_tenant_id=authorized,
     )
 
 
@@ -72,9 +77,11 @@ async def resolve_active_policy_query_plan(
         logger.debug("no active policy release for corpus=%s", POLICY_CORPUS_ID)
         return None
 
+    normalized_tenant = tenant_id.strip()
     profile = await profile_service.get_effective_profile(
-        tenant_id=tenant_id,
+        tenant_id=normalized_tenant,
         principal=principal,
+        authorized_tenant_id=normalized_tenant,
     )
     embedding_release_id = active.embedding_release_id
     if not embedding_release_id:
@@ -90,7 +97,7 @@ async def resolve_active_policy_query_plan(
         principal=principal.strip(),
     )
     plan = build_policy_query_plan(
-        tenant_id=tenant_id,
+        tenant_id=normalized_tenant,
         principal=principal,
         knowledge_plan=knowledge_plan,
         profile=profile,

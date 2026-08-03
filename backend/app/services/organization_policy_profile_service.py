@@ -123,6 +123,14 @@ class OrganizationPolicyProfileService:
             tenant_id=request.tenant_id,
             authorized_tenant_id=authorized_tenant_id,
         )
+        if not request.framework_allowlist:
+            raise ValidationError(
+                "framework allowlist must be non-empty for policy profile upsert",
+                details={
+                    "tenant_id": request.tenant_id,
+                    "reason": "profile_incomplete",
+                },
+            )
         now = datetime.now(tz=UTC)
         async with self._session_factory() as session:
             async with session.begin():

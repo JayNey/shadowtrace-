@@ -434,3 +434,115 @@ async def test_validate_pinned_policy_query_plan_uses_historical_revision(
     assert pinned_profile is not None
     assert pinned_profile.revision == 1
     assert pinned_profile.framework_allowlist == ("nist_csf",)
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_activate_retires_previous_active_policy_release(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_policy_tables: None,
+) -> None:
+    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    provenance = KnowledgeReleaseProvenance.model_validate(
+        default_policy_provenance(str(DATA_FILE))
+    )
+    staged_v1 = await release_service.stage_policy_bundle(
+        bundle,
+        release_version="v1",
+        provenance=provenance,
+    )
+    bundle_v2 = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    bundle_v2["controls"][0]["title"] = "Identity and Access Management (rev2)"
+    staged_v2 = await release_service.stage_policy_bundle(
+        bundle_v2,
+        release_version="v2",
+        provenance=provenance,
+    )
+    active_v1 = await release_service.activate_release(staged_v1.release_id)
+    assert active_v1.lifecycle_state is KnowledgeReleaseLifecycleState.ACTIVE
+
+    active_v2 = await release_service.activate_release(staged_v2.release_id)
+    assert active_v2.lifecycle_state is KnowledgeReleaseLifecycleState.ACTIVE
+
+    retired_v1 = await release_service.get_release(staged_v1.release_id)
+    assert retired_v1 is not None
+    assert retired_v1.lifecycle_state is KnowledgeReleaseLifecycleState.RETIRED
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_stage_policy_bundle_rejects_incomplete_replay(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_policy_tables: None,
+) -> None:
+    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    provenance = KnowledgeReleaseProvenance.model_validate(
+        default_policy_provenance(str(DATA_FILE))
+    )
+    staged = await release_service.stage_policy_bundle(
+        bundle,
+        release_version="v1",
+        provenance=provenance,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                text("DELETE FROM policy_release_object WHERE release_id = :release_id"),
+                {"release_id": staged.release_id},
+            )
+    with pytest.raises(ValidationError, match="policy release bundle incomplete"):
+        await release_service.stage_policy_bundle(
+            bundle,
+            release_version="v1",
+            provenance=provenance,
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_resolve_active_policy_query_plan_rejects_cross_tenant_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_policy_tables: None,
+) -> None:
+    settings = Settings(embedding_mode="mock")
+    release_service = PolicyReleaseService(session_factory, settings=settings)
+    profile_service = OrganizationPolicyProfileService(session_factory)
+    bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    provenance = KnowledgeReleaseProvenance.model_validate(
+        default_policy_provenance(str(DATA_FILE))
+    )
+    staged = await release_service.stage_policy_bundle(
+        bundle,
+        release_version="v1",
+        provenance=provenance,
+    )
+    await release_service.activate_release(staged.release_id)
+    tenant_id = f"tenant-policy-{uuid.uuid4().hex[:8]}"
+    await profile_service.upsert_profile(
+        OrganizationPolicyProfileUpsertRequest(
+            tenant_id=tenant_id,
+            owner_principal="principal-policy",
+            framework_allowlist=("nist_csf",),
+        ),
+        actor_principal="principal-policy",
+        authorized_tenant_id=tenant_id,
+    )
+    plan = await resolve_active_policy_query_plan(
+        release_service,
+        profile_service,
+        settings,
+        tenant_id=tenant_id,
+        principal="principal-policy",
+        trace_id="trace-policy-cross-tenant",
+    )
+    assert plan is not None
+    with pytest.raises(ValidationError, match="cross-tenant"):
+        await validate_pinned_policy_query_plan(
+            plan,
+            profile_service,
+            tenant_id=tenant_id,
+            principal="principal-policy",
+            authorized_tenant_id="tenant-other",
+        )

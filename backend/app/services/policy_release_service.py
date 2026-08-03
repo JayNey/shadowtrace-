@@ -43,6 +43,38 @@ from app.services.policy_release_resolver import (
 logger = logging.getLogger(__name__)
 
 
+async def _assert_policy_release_bundle_complete(
+    session: AsyncSession,
+    row: orm.KnowledgeReleaseORM,
+) -> None:
+    """Fail closed when a release row exists without its immutable child objects."""
+    from sqlalchemy import func
+
+    object_count = await session.scalar(
+        select(func.count())
+        .select_from(orm.PolicyReleaseObjectORM)
+        .where(orm.PolicyReleaseObjectORM.release_id == row.release_id)
+    )
+    mapping_count = await session.scalar(
+        select(func.count())
+        .select_from(orm.AttackControlMappingORM)
+        .where(orm.AttackControlMappingORM.release_id == row.release_id)
+    )
+    expected_objects = int(row.object_count)
+    expected_mappings = int(row.relationship_count)
+    if object_count != expected_objects or mapping_count != expected_mappings:
+        raise ValidationError(
+            "policy release bundle incomplete",
+            details={
+                "release_id": row.release_id,
+                "expected_object_count": expected_objects,
+                "actual_object_count": object_count,
+                "expected_mapping_count": expected_mappings,
+                "actual_mapping_count": mapping_count,
+            },
+        )
+
+
 def _row_to_release(row: orm.KnowledgeReleaseORM) -> KnowledgeRelease:
     return KnowledgeRelease(
         release_id=row.release_id,
@@ -123,6 +155,7 @@ class PolicyReleaseService:
                 )
                 if existing is not None:
                     await session.refresh(existing)
+                    await _assert_policy_release_bundle_complete(session, existing)
                     return _row_to_release(existing)
 
                 release = build_knowledge_release(
@@ -163,6 +196,7 @@ class PolicyReleaseService:
                     idempotency_key=release.idempotency_key,
                 )
                 session.add(row)
+                # Materialize parent row before child FK inserts (multi-table flush ordering).
                 await session.flush()
                 for control in validation.controls:
                     object_hash = compute_policy_control_hash(control)
@@ -200,6 +234,10 @@ class PolicyReleaseService:
                             .limit(1)
                         )
                         if existing_after is not None:
+                            await _assert_policy_release_bundle_complete(
+                                replay_session,
+                                existing_after,
+                            )
                             return _row_to_release(existing_after)
                     raise
                 await session.refresh(row)

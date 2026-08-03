@@ -209,3 +209,21 @@ async def test_get_effective_profile_rejects_cross_tenant_scope(
             principal="owner-a",
             authorized_tenant_id="tenant-other",
         )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_upsert_profile_rejects_empty_framework_allowlist(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_profile_tables: None,
+) -> None:
+    service = OrganizationPolicyProfileService(session_factory)
+    with pytest.raises(ValidationError, match="framework allowlist must be non-empty"):
+        await service.upsert_profile(
+            OrganizationPolicyProfileUpsertRequest(
+                tenant_id=f"tenant-profile-{uuid.uuid4().hex[:8]}",
+                owner_principal="owner-a",
+                framework_allowlist=(),
+            ),
+            actor_principal="admin-a",
+        )
