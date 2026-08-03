@@ -1,0 +1,133 @@
+{
+  "$defs": {
+    "AgentTaskContextRef": {
+      "additionalProperties": false,
+      "description": "Allowlisted pointer to EventContext field or prior artifact.",
+      "properties": {
+        "ref_kind": {
+          "enum": [
+            "event_context_field",
+            "artifact"
+          ],
+          "title": "Ref Kind",
+          "type": "string"
+        },
+        "ref_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Ref Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "maxLength": 16,
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref_kind",
+        "ref_id"
+      ],
+      "title": "AgentTaskContextRef",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Immutable producer output bound to task revision/attempt.",
+  "properties": {
+    "artifact_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "task_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    },
+    "event_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "logical_artifact_key": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Logical Artifact Key",
+      "type": "string"
+    },
+    "producer_revision": {
+      "minimum": 1,
+      "title": "Producer Revision",
+      "type": "integer"
+    },
+    "producer_attempt": {
+      "minimum": 1,
+      "title": "Producer Attempt",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "maxLength": 16,
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "source_refs": {
+      "items": {
+        "$ref": "#/$defs/AgentTaskContextRef"
+      },
+      "maxItems": 16,
+      "title": "Source Refs",
+      "type": "array"
+    },
+    "decision_record_refs": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 32,
+      "title": "Decision Record Refs",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "task_id",
+    "event_id",
+    "tenant_id",
+    "logical_artifact_key",
+    "producer_revision",
+    "producer_attempt",
+    "content_hash",
+    "created_at"
+  ],
+  "title": "AgentArtifact",
+  "type": "object"
+}

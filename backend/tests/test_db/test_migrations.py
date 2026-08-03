@@ -31,6 +31,9 @@ BACKEND_DIR = Path(__file__).resolve().parents[2]
 # Must match Alembic head public tables (excl. alembic_version) and
 # ``Base.metadata.tables``; update in the same PR as any core migration.
 CORE_TABLES = {
+    "agent_task",
+    "agent_task_attempt",
+    "agent_artifact",
     "action",
     "action_execution_job",
     "action_target_result",

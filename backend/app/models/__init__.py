@@ -10,6 +10,16 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from app.models.action import Action, ImpactAssessment
+from app.models.agent_task import (
+    AgentArtifact,
+    AgentTask,
+    AgentTaskAttemptRecord,
+    AgentTaskClaim,
+    AgentTaskContextRef,
+    AgentTaskEnqueueRequest,
+    AgentTaskGoal,
+    ContentProjection,
+)
 from app.models.agent_io import (
     AgentInput,
     AttackStoryline,
@@ -319,6 +329,14 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "TimelineEntry": TimelineEntry,
     "StorylinePhase": StorylinePhase,
     "AttackStoryline": AttackStoryline,
+    "AgentArtifact": AgentArtifact,
+    "AgentTask": AgentTask,
+    "AgentTaskAttemptRecord": AgentTaskAttemptRecord,
+    "AgentTaskClaim": AgentTaskClaim,
+    "AgentTaskContextRef": AgentTaskContextRef,
+    "AgentTaskEnqueueRequest": AgentTaskEnqueueRequest,
+    "AgentTaskGoal": AgentTaskGoal,
+    "ContentProjection": ContentProjection,
     "StorylineClaimRef": StorylineClaimRef,
     "GraphNode": GraphNode,
     "GraphEdge": GraphEdge,

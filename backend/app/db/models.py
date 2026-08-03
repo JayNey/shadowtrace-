@@ -1215,3 +1215,8 @@ from app.db.orm.shadow_run import (  # noqa: E402,F401
     ShadowQueryArtifactORM,
     ShadowRunORM,
 )
+from app.db.orm.agent_task import (  # noqa: E402,F401
+    AgentArtifactORM,
+    AgentTaskAttemptORM,
+    AgentTaskORM,
+)

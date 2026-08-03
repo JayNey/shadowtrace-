@@ -1,0 +1,49 @@
+{
+  "additionalProperties": false,
+  "description": "Lease-bound worker claim with fencing token.",
+  "properties": {
+    "task_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    },
+    "fencing_token": {
+      "maxLength": 256,
+      "minLength": 16,
+      "title": "Fencing Token",
+      "type": "string"
+    },
+    "lease_expires_at": {
+      "format": "date-time",
+      "title": "Lease Expires At",
+      "type": "string"
+    },
+    "attempt": {
+      "minimum": 1,
+      "title": "Attempt",
+      "type": "integer"
+    },
+    "worker_principal": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Worker Principal",
+      "type": "string"
+    },
+    "revision": {
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "task_id",
+    "fencing_token",
+    "lease_expires_at",
+    "attempt",
+    "worker_principal",
+    "revision"
+  ],
+  "title": "AgentTaskClaim",
+  "type": "object"
+}

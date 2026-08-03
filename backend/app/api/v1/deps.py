@@ -58,6 +58,9 @@ _detection_context_projector: Any = None  # DetectionContextProjector (ISSUE-127
 _detection_context_service: Any = None  # DetectionContextService (ISSUE-127)
 _decision_record_service: Any = None  # DecisionRecordService (ISSUE-131)
 _tool_call_grant_service: Any = None  # ToolCallGrantService (ISSUE-134)
+_agent_task_service: Any = None  # AgentTaskService (ISSUE-133)
+_agent_artifact_service: Any = None  # AgentArtifactService (ISSUE-133)
+_content_projection_service: Any = None  # ContentProjectionService (ISSUE-133)
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -113,6 +116,36 @@ def _get_tool_call_grant_service() -> Any:
             budget_reservation=ToolCallBudgetReservationService(_get_redis()),
         )
     return _tool_call_grant_service
+
+
+def _get_agent_task_service() -> Any:
+    global _agent_task_service
+    if _agent_task_service is None:
+        from app.services.agent_task_service import AgentTaskService
+
+        _agent_task_service = AgentTaskService(
+            _get_session_factory(),
+            grant_service=_get_tool_call_grant_service(),
+        )
+    return _agent_task_service
+
+
+def _get_agent_artifact_service() -> Any:
+    global _agent_artifact_service
+    if _agent_artifact_service is None:
+        from app.services.agent_artifact_service import AgentArtifactService
+
+        _agent_artifact_service = AgentArtifactService(_get_session_factory())
+    return _agent_artifact_service
+
+
+def _get_content_projection_service() -> Any:
+    global _content_projection_service
+    if _content_projection_service is None:
+        from app.services.content_projection_service import ContentProjectionService
+
+        _content_projection_service = ContentProjectionService()
+    return _content_projection_service
 
 
 def _get_audit_log() -> Any:
@@ -954,7 +987,7 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
-    global _memory_governance, _detection_governance, _detection_promotion, _detection_context_projector, _detection_context_service, _decision_record_service, _tool_call_grant_service
+    global _memory_governance, _detection_governance, _detection_promotion, _detection_context_projector, _detection_context_service, _decision_record_service, _tool_call_grant_service, _agent_task_service, _agent_artifact_service, _content_projection_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
     from app.playbook.resources import reset_playbook_resources_cache
@@ -998,3 +1031,6 @@ def reset_deps() -> None:
     _detection_context_service = None
     _decision_record_service = None
     _tool_call_grant_service = None
+    _agent_task_service = None
+    _agent_artifact_service = None
+    _content_projection_service = None

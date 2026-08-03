@@ -154,6 +154,9 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "replan_count_exceeded": ErrorCategory.PERMANENT,
     "writeback_recovery_exhausted": ErrorCategory.PERMANENT,
     "writeback_manual_resolution_required": ErrorCategory.PERMANENT,
+    # Agent task ledger (ISSUE-133)
+    "agent_task_denied": ErrorCategory.GUARDRAIL,
+    "agent_task_unavailable": ErrorCategory.TRANSIENT,
     # Writeback readback (ISSUE-064)
     "readback_failed": ErrorCategory.TOOL,
 }
@@ -332,6 +335,24 @@ class ToolCallGrantUnavailableError(ShadowTraceError):
 
     status_code = 503
     default_error_code = "tool_call_grant_unavailable"
+    default_category = ErrorCategory.TRANSIENT
+    default_retryable = True
+
+
+class AgentTaskDeniedError(ShadowTraceError):
+    """AgentTask fencing, scope, or transition denied (ISSUE-133)."""
+
+    status_code = 403
+    default_error_code = "agent_task_denied"
+    default_category = ErrorCategory.GUARDRAIL
+    default_retryable = False
+
+
+class AgentTaskUnavailableError(ShadowTraceError):
+    """AgentTask ledger persistence unavailable (ISSUE-133)."""
+
+    status_code = 503
+    default_error_code = "agent_task_unavailable"
     default_category = ErrorCategory.TRANSIENT
     default_retryable = True
 

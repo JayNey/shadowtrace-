@@ -1,0 +1,89 @@
+{
+  "$defs": {
+    "AgentTaskStatus": {
+      "description": "Task lifecycle — at-least-once delivery with exactly-once terminal transitions.",
+      "enum": [
+        "queued",
+        "claimed",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "expired",
+        "dead",
+        "manual"
+      ],
+      "title": "AgentTaskStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Auditable attempt history for redelivery tracing.",
+  "properties": {
+    "attempt_id": {
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "attempt_seq": {
+      "minimum": 1,
+      "title": "Attempt Seq",
+      "type": "integer"
+    },
+    "worker_principal": {
+      "title": "Worker Principal",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/AgentTaskStatus"
+    },
+    "fencing_token_hash": {
+      "title": "Fencing Token Hash",
+      "type": "string"
+    },
+    "started_at": {
+      "format": "date-time",
+      "title": "Started At",
+      "type": "string"
+    },
+    "finished_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Finished At"
+    },
+    "error_summary": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Summary"
+    }
+  },
+  "required": [
+    "attempt_id",
+    "task_id",
+    "attempt_seq",
+    "worker_principal",
+    "status",
+    "fencing_token_hash",
+    "started_at"
+  ],
+  "title": "AgentTaskAttemptRecord",
+  "type": "object"
+}
