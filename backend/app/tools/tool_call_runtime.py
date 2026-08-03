@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,8 +12,12 @@ from app.core.errors import ToolCallGrantUnavailableError
 from app.models.agent_io import PlanStep
 from app.models.enums import ToolCategory
 from app.models.tool_meta import RoutingKind
-from app.models.tool_call_grant import ToolCallGrantScope
-from app.orchestration.react_engine import DEFAULT_TOOL_CALL_BUDGET, ReadOnlyReActExecutor
+from app.models.tool_call_grant import ToolCallGrantScope, ToolCallMode
+from app.orchestration.react_engine import (
+    DEFAULT_TOOL_CALL_BUDGET,
+    ReadOnlyAgentCallable,
+    ReadOnlyReActExecutor,
+)
 from app.services.safe_tool_projection import SafeToolProjectionService
 from app.services.tool_call_grant_resolver import resolve_effective_query_tools
 from app.services.tool_call_grant_service import (
@@ -154,6 +159,74 @@ class ReactToolExecutorFactory:
             grant_token=grant_token,
         )
         return ReadOnlyReActExecutor(bound, event_id=event_id)
+
+    async def for_shadow_run(
+        self,
+        event_id: str,
+        *,
+        shadow_run_id: str,
+        tenant_id: str,
+        allowed_agents: Mapping[str, ReadOnlyAgentCallable] | None = None,
+        allowed_tools: list[str] | None = None,
+        max_calls: int | None = None,
+    ) -> ReadOnlyReActExecutor:
+        """Mint a shadow-namespace grant for isolated query pivot (#641)."""
+        if not shadow_run_id.strip():
+            raise ValueError("shadow_run_id is required for shadow ReAct executor")
+        if not tenant_id.strip():
+            raise ValueError("tenant_id is required for shadow ReAct executor")
+
+        if not self.settings.tool_call_grant_required:
+            return ReadOnlyReActExecutor(
+                self.inner_executor,
+                event_id=event_id,
+                allowed_agents=allowed_agents,
+                agent_name="shadow_query_pivot",
+            )
+
+        if not self.grant_service.available:
+            raise ToolCallGrantUnavailableError(
+                "tool call grant service unavailable for shadow ReAct",
+                details={"event_id": event_id, "shadow_run_id": shadow_run_id},
+            )
+
+        scope_tools = resolve_react_grant_tools(
+            self.registry,
+            allowed_tools or list_dynamic_query_tools(self.registry),
+        )
+        issued = await self.grant_service.issue_grant(
+            build_react_grant_request(
+                event_id=event_id,
+                tenant_id=tenant_id,
+                allowed_tools=scope_tools,
+                max_calls=max(1, max_calls or DEFAULT_TOOL_CALL_BUDGET),
+                policy_version=self.settings.tool_call_grant_policy_version,
+                plan_step_id=f"shadow-{shadow_run_id}",
+                shadow_run_id=shadow_run_id,
+                mode=ToolCallMode.SHADOW,
+            )
+        )
+        if issued.grant_token:
+            grant = issued.grant
+            grant_token = issued.grant_token
+        else:
+            grant = await self.grant_service.load_grant_trusted(issued.grant.grant_id)
+            grant_token = ""
+
+        bound = BoundToolExecutor(
+            inner=self.inner_executor,
+            grant=grant,
+            grant_service=self.grant_service,
+            registry=self.registry,
+            projection_service=self.projection_service,
+            grant_token=grant_token,
+        )
+        return ReadOnlyReActExecutor(
+            bound,
+            event_id=event_id,
+            allowed_agents=allowed_agents,
+            agent_name="shadow_query_pivot",
+        )
 
 
 __all__ = [

@@ -451,6 +451,7 @@ def build_react_grant_request(
             plan_step_id=plan_step_id,
             allowed_tools=allowed_tools,
             max_calls=max_calls,
+            shadow_run_id=shadow_run_id,
         ),
     )
 

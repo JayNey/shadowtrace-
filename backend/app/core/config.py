@@ -144,6 +144,29 @@ class Settings(BaseSettings):
 
     orchestration_mode: str = Field(default="graph", alias="ORCHESTRATION_MODE")
     react_enabled: bool = Field(default=False, alias="REACT_ENABLED")
+    react_shadow_pivot_enabled: bool = Field(
+        default=False,
+        alias="REACT_SHADOW_PIVOT_ENABLED",
+        description="Enable shadow-isolated ReAct mock query pivot (ISSUE-135)",
+    )
+    react_shadow_max_steps: int = Field(
+        default=5,
+        alias="REACT_SHADOW_MAX_STEPS",
+        ge=1,
+        le=20,
+    )
+    react_shadow_max_tool_calls: int = Field(
+        default=5,
+        alias="REACT_SHADOW_MAX_TOOL_CALLS",
+        ge=0,
+        le=50,
+    )
+    react_shadow_retention_hours: int = Field(
+        default=168,
+        alias="REACT_SHADOW_RETENTION_HOURS",
+        ge=1,
+        le=720,
+    )
     task_mode: str = Field(default="background", alias="TASK_MODE")
     celery_broker_url: str = Field(default="", alias="CELERY_BROKER_URL")
     approval_timeout_minutes: int = Field(default=30, alias="APPROVAL_TIMEOUT_MINUTES")
@@ -312,6 +335,10 @@ class Settings(BaseSettings):
             violations.append("playbook_fixture_fallback=true")
         if self.react_enabled and not self.tool_call_grant_required:
             violations.append("react_enabled=true requires tool_call_grant_required=true")
+        if self.react_shadow_pivot_enabled and not self.tool_call_grant_required:
+            violations.append(
+                "react_shadow_pivot_enabled=true requires tool_call_grant_required=true"
+            )
         return violations
 
 

@@ -1209,3 +1209,8 @@ from app.db.orm.approval import ApprovalRecordORM  # noqa: E402,F401
 from app.db.orm.detection_governance import DetectionGovernanceDecisionORM  # noqa: E402,F401
 from app.db.orm.memory_review import MemoryReviewORM  # noqa: E402,F401
 from app.db.orm.profile import EntityProfileORM  # noqa: E402,F401
+from app.db.orm.shadow_run import (  # noqa: E402,F401
+    ShadowDecisionRecordORM,
+    ShadowQueryArtifactORM,
+    ShadowRunORM,
+)

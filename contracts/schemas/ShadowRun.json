@@ -1,0 +1,159 @@
+{
+  "$defs": {
+    "ShadowRunProvenance": {
+      "additionalProperties": false,
+      "description": "Server-owned run provenance \u2014 no client trust.",
+      "properties": {
+        "trigger": {
+          "minLength": 1,
+          "title": "Trigger",
+          "type": "string"
+        },
+        "principal": {
+          "minLength": 1,
+          "title": "Principal",
+          "type": "string"
+        },
+        "policy_version": {
+          "default": "shadow_pivot_v1",
+          "minLength": 1,
+          "title": "Policy Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trigger",
+        "principal"
+      ],
+      "title": "ShadowRunProvenance",
+      "type": "object"
+    },
+    "ShadowRunStatus": {
+      "description": "Lifecycle for an isolated shadow query pivot run.",
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "rejected"
+      ],
+      "title": "ShadowRunStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Isolated shadow namespace run bound to one production event correlation id.",
+  "properties": {
+    "shadow_run_id": {
+      "minLength": 1,
+      "title": "Shadow Run Id",
+      "type": "string"
+    },
+    "event_id": {
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "tenant_id": {
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "namespace_key": {
+      "minLength": 1,
+      "title": "Namespace Key",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/ShadowRunStatus",
+      "default": "running"
+    },
+    "max_steps": {
+      "default": 5,
+      "maximum": 50,
+      "minimum": 1,
+      "title": "Max Steps",
+      "type": "integer"
+    },
+    "step_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Step Count",
+      "type": "integer"
+    },
+    "max_tool_calls": {
+      "default": 5,
+      "maximum": 100,
+      "minimum": 0,
+      "title": "Max Tool Calls",
+      "type": "integer"
+    },
+    "tool_call_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Tool Call Count",
+      "type": "integer"
+    },
+    "provenance": {
+      "$ref": "#/$defs/ShadowRunProvenance"
+    },
+    "result_summary": {
+      "additionalProperties": true,
+      "title": "Result Summary",
+      "type": "object"
+    },
+    "rejected_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Rejected Reasons",
+      "type": "array"
+    },
+    "retention_expires_at": {
+      "format": "date-time",
+      "title": "Retention Expires At",
+      "type": "string"
+    },
+    "created_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created At"
+    },
+    "completed_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Completed At"
+    }
+  },
+  "required": [
+    "shadow_run_id",
+    "event_id",
+    "tenant_id",
+    "namespace_key",
+    "provenance",
+    "retention_expires_at"
+  ],
+  "title": "ShadowRun",
+  "type": "object"
+}

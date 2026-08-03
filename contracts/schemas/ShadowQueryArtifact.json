@@ -1,0 +1,68 @@
+{
+  "$defs": {
+    "ShadowQueryArtifactKind": {
+      "description": "Typed artifact emitted by shadow retrieval/query steps.",
+      "enum": [
+        "retrieval_hit",
+        "tool_projection",
+        "pivot_summary"
+      ],
+      "title": "ShadowQueryArtifactKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One typed, sanitized shadow artifact (never raw CoT).",
+  "properties": {
+    "artifact_id": {
+      "minLength": 1,
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "shadow_run_id": {
+      "minLength": 1,
+      "title": "Shadow Run Id",
+      "type": "string"
+    },
+    "kind": {
+      "$ref": "#/$defs/ShadowQueryArtifactKind"
+    },
+    "content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "payload": {
+      "additionalProperties": true,
+      "title": "Payload",
+      "type": "object"
+    },
+    "provenance": {
+      "additionalProperties": true,
+      "title": "Provenance",
+      "type": "object"
+    },
+    "created_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Created At"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "shadow_run_id",
+    "kind",
+    "content_hash"
+  ],
+  "title": "ShadowQueryArtifact",
+  "type": "object"
+}

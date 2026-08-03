@@ -167,6 +167,13 @@ from app.models.knowledge_release import (
     KnowledgeRelease,
     KnowledgeTypedFilter,
 )
+from app.models.shadow_run import (
+    ShadowQueryArtifact,
+    ShadowQueryPivotRequest,
+    ShadowQueryPivotResult,
+    ShadowRun,
+    ShadowRunProvenance,
+)
 from app.models.playbook_release import (
     PlaybookActionTemplateSnapshot,
     PlaybookRef,
@@ -443,6 +450,12 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "PlaybookRef": PlaybookRef,
     "PlaybookActionTemplateSnapshot": PlaybookActionTemplateSnapshot,
     "ResolvedPlaybook": ResolvedPlaybook,
+    # shadow query pivot (ISSUE-135 / #641)
+    "ShadowRun": ShadowRun,
+    "ShadowRunProvenance": ShadowRunProvenance,
+    "ShadowQueryArtifact": ShadowQueryArtifact,
+    "ShadowQueryPivotRequest": ShadowQueryPivotRequest,
+    "ShadowQueryPivotResult": ShadowQueryPivotResult,
     # llm provider health (ISSUE-106 / #609)
     "LLMProviderHealth": LLMProviderHealth,
     "LLMProbeStatus": LLMProbeStatus,

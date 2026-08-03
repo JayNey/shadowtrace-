@@ -1,0 +1,59 @@
+{
+  "additionalProperties": false,
+  "description": "Trusted entry request for a shadow-only query pivot.",
+  "properties": {
+    "event_id": {
+      "minLength": 1,
+      "title": "Event Id",
+      "type": "string"
+    },
+    "tenant_id": {
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "principal": {
+      "minLength": 1,
+      "title": "Principal",
+      "type": "string"
+    },
+    "trace_id": {
+      "minLength": 1,
+      "title": "Trace Id",
+      "type": "string"
+    },
+    "goal": {
+      "minLength": 1,
+      "title": "Goal",
+      "type": "string"
+    },
+    "evidence_gaps": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Gaps",
+      "type": "array"
+    },
+    "observation": {
+      "default": "",
+      "title": "Observation",
+      "type": "string"
+    },
+    "allowed_query_tools": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Allowed Query Tools",
+      "type": "array"
+    }
+  },
+  "required": [
+    "event_id",
+    "tenant_id",
+    "principal",
+    "trace_id",
+    "goal"
+  ],
+  "title": "ShadowQueryPivotRequest",
+  "type": "object"
+}

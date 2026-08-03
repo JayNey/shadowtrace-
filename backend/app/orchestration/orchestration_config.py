@@ -18,9 +18,23 @@ def assert_graph_orchestration_config(settings: Settings | None = None) -> None:
         )
 
 
+def assert_shadow_pivot_config(settings: Settings | None = None) -> None:
+    """Validate shadow query pivot prerequisites at startup (#641 Phase A)."""
+    cfg = settings or get_settings()
+    if not cfg.react_shadow_pivot_enabled:
+        return
+    if not cfg.tool_call_grant_required:
+        raise ConfigurationError(
+            "REACT_SHADOW_PIVOT_ENABLED=true requires TOOL_CALL_GRANT_REQUIRED=true",
+            error_code="configuration_error",
+            details={"react_shadow_pivot_enabled": True},
+        )
+
+
 def assert_orchestration_mode(settings: Settings | None = None) -> None:
     """Apply the env gate for the active orchestration mode."""
     cfg = settings or get_settings()
+    assert_shadow_pivot_config(cfg)
     mode = (cfg.orchestration_mode or "graph").strip().lower()
     if mode == "analysis_only":
         assert_analysis_only_mode(cfg)
@@ -37,4 +51,5 @@ def assert_orchestration_mode(settings: Settings | None = None) -> None:
 __all__ = [
     "assert_graph_orchestration_config",
     "assert_orchestration_mode",
+    "assert_shadow_pivot_config",
 ]

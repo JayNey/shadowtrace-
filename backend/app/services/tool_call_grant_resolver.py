@@ -30,11 +30,14 @@ def build_react_idempotency_key(
     plan_step_id: str | None = None,
     allowed_tools: list[str] | None = None,
     max_calls: int | None = None,
+    shadow_run_id: str | None = None,
 ) -> str:
     """Stable idempotency key for ReAct step grant mint/retry."""
 
     step = (plan_step_id or "default").strip() or "default"
     key = f"react-{event_id}-{step}"
+    if shadow_run_id:
+        key = f"{key}-shadow-{(shadow_run_id or '').strip()}"
     if allowed_tools is not None:
         scope_payload = f"{','.join(sorted(allowed_tools))}:{max_calls or 0}"
         scope_digest = hashlib.sha256(scope_payload.encode("utf-8")).hexdigest()[:8]

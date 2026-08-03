@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "ShadowQueryArtifact": {
+      "additionalProperties": false,
+      "description": "One typed, sanitized shadow artifact (never raw CoT).",
+      "properties": {
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "shadow_run_id": {
+          "minLength": 1,
+          "title": "Shadow Run Id",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/ShadowQueryArtifactKind"
+        },
+        "content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": true,
+          "title": "Payload",
+          "type": "object"
+        },
+        "provenance": {
+          "additionalProperties": true,
+          "title": "Provenance",
+          "type": "object"
+        },
+        "created_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Created At"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "shadow_run_id",
+        "kind",
+        "content_hash"
+      ],
+      "title": "ShadowQueryArtifact",
+      "type": "object"
+    },
+    "ShadowQueryArtifactKind": {
+      "description": "Typed artifact emitted by shadow retrieval/query steps.",
+      "enum": [
+        "retrieval_hit",
+        "tool_projection",
+        "pivot_summary"
+      ],
+      "title": "ShadowQueryArtifactKind",
+      "type": "string"
+    },
+    "ShadowRunStatus": {
+      "description": "Lifecycle for an isolated shadow query pivot run.",
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "rejected"
+      ],
+      "title": "ShadowRunStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Outcome of one shadow pivot \u2014 production stores remain untouched.",
+  "properties": {
+    "shadow_run_id": {
+      "title": "Shadow Run Id",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/ShadowRunStatus"
+    },
+    "react_stop_reason": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "React Stop Reason"
+    },
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ShadowQueryArtifact"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "decision_record_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Decision Record Ids",
+      "type": "array"
+    },
+    "rejected_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Rejected Reasons",
+      "type": "array"
+    },
+    "degraded": {
+      "default": false,
+      "title": "Degraded",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "shadow_run_id",
+    "status"
+  ],
+  "title": "ShadowQueryPivotResult",
+  "type": "object"
+}
