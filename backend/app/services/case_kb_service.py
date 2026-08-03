@@ -60,7 +60,13 @@ class CaseKBService:
     # Search
     # ------------------------------------------------------------------
 
-    async def search_fp_cases(self, alert_text: str, top_k: int = 5) -> list[RetrievedChunk]:
+    async def search_fp_cases(
+        self,
+        alert_text: str,
+        top_k: int = 5,
+        *,
+        tenant_id: str | None = None,
+    ) -> list[RetrievedChunk]:
         """Hybrid-search ``fp_case_kb`` for false-positive patterns matching *alert_text*."""
         keyword_query = _fp_keyword_query(alert_text)
         results = await self._kb.hybrid_search(
@@ -68,6 +74,7 @@ class CaseKBService:
             alert_text,
             keyword_query=keyword_query,
             top_k=top_k,
+            tenant_id=tenant_id,
         )
         # Mock embeddings produce non-semantic vector scores; prefer keyword/hybrid hits.
         if keyword_query != alert_text.strip():
@@ -79,10 +86,17 @@ class CaseKBService:
         query_text: str,
         event_type: str | None = None,
         top_k: int = 5,
+        *,
+        tenant_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Hybrid-search ``history_case_kb``, optionally filtered by *event_type* in metadata."""
         fetch_k = top_k if event_type is None else top_k * 3
-        results = await self._kb.hybrid_search(HISTORY_KB_NAME, query_text, top_k=fetch_k)
+        results = await self._kb.hybrid_search(
+            HISTORY_KB_NAME,
+            query_text,
+            top_k=fetch_k,
+            tenant_id=tenant_id,
+        )
         if event_type is not None:
             results = [r for r in results if r.metadata.get("event_type") == event_type]
             results = results[:top_k]

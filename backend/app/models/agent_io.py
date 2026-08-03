@@ -326,7 +326,7 @@ class RAGOutput(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
     knowledge_query_plan: dict[str, Any] | None = Field(
         default=None,
-        description="Pinned knowledge + embedding release ids for this request (ISSUE-128)",
+        description="Release-pinned query plans keyed by kb_name (attack_kb, playbook_kb)",
     )
     degraded: bool = False
 

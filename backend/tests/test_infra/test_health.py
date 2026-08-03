@@ -144,6 +144,7 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     assert body["investigation"]["auto_response_enabled"] is False
     assert body["investigation"]["approval_policy_version"] == "issue109_v1"
     assert body["investigation"]["detection_governance_policy_version"] == "issue125_v1"
+    assert body["investigation"]["knowledge_query_plan_schema_version"] == "1.0"
 
     for key in ("source_adapter", "disposition_adapter", "tool_provider"):
         component = body[key]
@@ -196,6 +197,9 @@ async def test_health_investigation_block_matches_contract(client: AsyncClient) 
     from app.services.detection_governance_policy import DETECTION_GOVERNANCE_POLICY_VERSION
 
     assert cfg.detection_governance_policy_version == DETECTION_GOVERNANCE_POLICY_VERSION
+    from app.models.knowledge_release import KNOWLEDGE_QUERY_PLAN_SCHEMA_VERSION
+
+    assert cfg.knowledge_query_plan_schema_version == KNOWLEDGE_QUERY_PLAN_SCHEMA_VERSION
 
 
 @pytest.mark.asyncio

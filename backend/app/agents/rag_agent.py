@@ -136,11 +136,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         citations = _aggregate_citations(results)
 
         all_failed = all(r is None for r in results.values())
-        plan_payload = None
-        if attack_plan is not None:
-            plan_payload = attack_plan.model_dump(mode="json")
-        elif playbook_plan is not None:
-            plan_payload = playbook_plan.model_dump(mode="json")
+        plan_payload = _build_knowledge_query_plan_payload(attack_plan, playbook_plan)
         output = RAGOutput(
             attack_techniques=attack_techniques,
             fp_similarity=fp_similarity,
@@ -299,6 +295,19 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
 # --------------------------------------------------------------------------- #
 # Result assembly helpers
 # --------------------------------------------------------------------------- #
+
+
+def _build_knowledge_query_plan_payload(
+    attack_plan: KnowledgeQueryPlan | None,
+    playbook_plan: KnowledgeQueryPlan | None,
+) -> dict[str, Any] | None:
+    """Trace payload keyed by kb_name when one or more release-pinned plans apply."""
+    plans: dict[str, Any] = {}
+    if attack_plan is not None:
+        plans["attack_kb"] = attack_plan.model_dump(mode="json")
+    if playbook_plan is not None:
+        plans["playbook_kb"] = playbook_plan.model_dump(mode="json")
+    return plans or None
 
 
 def _build_attack_techniques(

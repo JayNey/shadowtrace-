@@ -61,6 +61,10 @@ def _alembic_config() -> Config:
 
 @pytest.fixture(scope="module")
 def migrated() -> None:
+    os.environ["DATABASE_URL"] = DATABASE_URL
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
     command.upgrade(_alembic_config(), "head")
 
 

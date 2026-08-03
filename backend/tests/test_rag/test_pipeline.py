@@ -44,6 +44,26 @@ DATABASE_URL = os.environ.get(
 )
 
 
+def _postgres_reachable() -> bool:
+    import asyncio
+
+    from app.db.session_provider import SessionProvider
+
+    provider = SessionProvider(DATABASE_URL, pool="nullpool")
+    try:
+        return asyncio.run(provider.ping_postgres())
+    except Exception:
+        return False
+    finally:
+        asyncio.run(provider.dispose())
+
+
+requires_postgres = pytest.mark.skipif(
+    not _postgres_reachable(),
+    reason="PostgreSQL not reachable",
+)
+
+
 def _ctx(event_id: str = "test-event") -> RetrievalContext:
     return RetrievalContext(
         tenant_id="local",
@@ -591,6 +611,67 @@ class TestPipelineDegradation:
         assert "plan_kb_scope_mismatch" in result.degraded_steps
 
     @pytest.mark.asyncio
+    async def test_rejects_release_pinned_kb_without_plan_in_production(self) -> None:
+        settings = Settings(
+            app_env="production",
+            simulation_enabled=False,
+            source_mode="live_xdr",
+            tool_mode="live",
+            disposition_mode="live_xdr",
+            disposition_adapter_kind="live",
+            llm_mode="openai_compatible",
+            embedding_mode="remote",
+        )
+        pipeline = RetrievalPipeline(
+            rewriter=QueryRewriter(
+                MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+                agent_name="test",
+            ),
+            retriever=_ConstantRetriever([[], []]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+            settings=settings,
+        )
+        result = await pipeline.retrieve(
+            "accounts",
+            ["attack_kb"],
+            top_k=1,
+            context=_ctx("evt-prod-no-plan"),
+        )
+        assert result.chunks == []
+        assert "plan_required_in_production" in result.degraded_steps
+
+    @pytest.mark.asyncio
+    async def test_allows_case_kb_without_plan_in_production(self) -> None:
+        chunks = [_make_chunk("chk-fp", "fp_case_kb", "benign admin tool", score=0.9)]
+        settings = Settings(
+            app_env="production",
+            simulation_enabled=False,
+            source_mode="live_xdr",
+            tool_mode="live",
+            disposition_mode="live_xdr",
+            disposition_adapter_kind="live",
+            llm_mode="openai_compatible",
+            embedding_mode="remote",
+        )
+        pipeline = RetrievalPipeline(
+            rewriter=QueryRewriter(
+                MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+                agent_name="test",
+            ),
+            retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+            settings=settings,
+        )
+        result = await pipeline.retrieve(
+            "admin tool",
+            ["fp_case_kb"],
+            top_k=1,
+            context=_ctx("evt-prod-case-kb"),
+        )
+        assert len(result.chunks) == 1
+        assert "plan_required_in_production" not in result.degraded_steps
+
+    @pytest.mark.asyncio
     async def test_accepts_playbook_plan_before_retrieval(self) -> None:
         from datetime import UTC, datetime
 
@@ -641,6 +722,10 @@ class TestPipelineDegradation:
 
 @pytest.fixture(scope="module")
 def migrated() -> None:
+    os.environ["DATABASE_URL"] = DATABASE_URL
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
     command.upgrade(_alembic_config(), "head")
 
 
@@ -737,6 +822,7 @@ async def seeded_store(
     return knowledge_store
 
 
+@requires_postgres
 class TestFullPipelineIntegration:
     """End-to-end pipeline tests requiring a running PostgreSQL."""
 

@@ -646,9 +646,11 @@ def test_investigation_health_config_contract_fields() -> None:
         auto_response_enabled=False,
         approval_policy_version="issue109_v1",
         detection_governance_policy_version="issue125_v1",
+        knowledge_query_plan_schema_version="1.0",
     )
     assert cfg.approval_policy_version == "issue109_v1"
     assert cfg.detection_governance_policy_version == "issue125_v1"
+    assert cfg.knowledge_query_plan_schema_version == "1.0"
     assert cfg.auto_response_enabled is False
 
 

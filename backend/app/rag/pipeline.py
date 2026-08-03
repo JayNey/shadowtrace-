@@ -22,6 +22,7 @@ from app.services.knowledge_query_plan_validator import validate_knowledge_query
 logger = logging.getLogger(__name__)
 
 _PLAN_REJECTED = "knowledge_query_plan_rejected"
+_RELEASE_PINNED_KBS = frozenset({"attack_kb", "playbook_kb"})
 
 
 class RetrievalPipeline:
@@ -105,6 +106,23 @@ class RetrievalPipeline:
     ) -> RetrievalResult:
         active_context = context
         effective_top_k = top_k
+
+        cfg = self._settings or get_settings()
+        if context.query_plan is None and cfg.app_env.strip().lower() == "production":
+            pinned_requested = _RELEASE_PINNED_KBS.intersection(kb_names)
+            if pinned_requested:
+                return RetrievalResult(
+                    query=query,
+                    rewritten_queries=[query],
+                    chunks=[],
+                    citations=[],
+                    degraded_steps=degraded + [_PLAN_REJECTED, "plan_required_in_production"],
+                    knowledge_query_plan={
+                        "rejected_reasons": ["plan_required_in_production"],
+                        "sanitized_plan_hash": "",
+                        "kb_names": kb_names,
+                    },
+                )
 
         if context.query_plan is not None:
             if context.query_plan.kb_name not in kb_names:

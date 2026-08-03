@@ -352,17 +352,23 @@ class KnowledgeStore:
         *,
         keyword_query: str | None = None,
         top_k: int = 10,
+        tenant_id: str | None = None,
         release_id: str | None = None,
     ) -> list[RetrievedChunk]:
         """Vector search plus keyword fallback, merged by chunk_id."""
         query_vec = await self._embed.embed_query(query_text)
         vector_hits = await self.vector_search(
-            kb_name, query_vec, top_k=top_k, release_id=release_id
+            kb_name,
+            query_vec,
+            top_k=top_k,
+            tenant_id=tenant_id,
+            release_id=release_id,
         )
         keyword_hits = await self.keyword_search(
             kb_name,
             keyword_query if keyword_query is not None else query_text,
             top_k=top_k,
+            tenant_id=tenant_id,
             release_id=release_id,
         )
         return _merge_hybrid_results(vector_hits, keyword_hits, top_k)

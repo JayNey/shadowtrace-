@@ -190,6 +190,30 @@ def test_validate_accepts_playbook_release_pinned_plan() -> None:
     assert outcome.plan.plan_hash
 
 
+def test_validate_rejects_unsupported_filter_in_base_plan() -> None:
+    active_emb = _active_embedding_release_id()
+    plan = _base_plan(embedding_release_id=active_emb)
+    plan = plan.model_copy(
+        update={
+            "typed_filters": (
+                KnowledgeTypedFilter(
+                    kind=KnowledgeFilterKind.TIME_AFTER,
+                    value="2026-01-01T00:00:00Z",
+                ),
+            )
+        }
+    )
+    outcome = validate_knowledge_query_plan(
+        plan,
+        tenant_id="tenant-a",
+        principal="investigation:rag_agent",
+        kb_names=["attack_kb"],
+        active_embedding_release_id=active_emb,
+    )
+    assert outcome.accepted is False
+    assert "unsupported_filter_kind" in outcome.rejected_reasons
+
+
 def test_compute_plan_hash_is_stable() -> None:
     payload = {"corpus_id": ATTACK_CORPUS_ID, "top_k": 5}
     assert compute_plan_hash(payload) == compute_plan_hash(payload)

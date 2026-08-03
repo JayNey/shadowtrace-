@@ -10,6 +10,7 @@ from redis.asyncio import Redis
 from app.core.celery_health import build_celery_health
 from app.core.config import Settings, get_settings
 from app.db.session_provider import peek_session_provider, ping_postgres_url
+from app.models.knowledge_release import KNOWLEDGE_QUERY_PLAN_SCHEMA_VERSION
 from app.services.action_approval_policy import APPROVAL_POLICY_VERSION
 from app.services.detection_governance_policy import DETECTION_GOVERNANCE_POLICY_VERSION
 
@@ -233,5 +234,6 @@ async def health(
             "auto_response_enabled": settings.auto_response_enabled,
             "approval_policy_version": APPROVAL_POLICY_VERSION,
             "detection_governance_policy_version": DETECTION_GOVERNANCE_POLICY_VERSION,
+            "knowledge_query_plan_schema_version": KNOWLEDGE_QUERY_PLAN_SCHEMA_VERSION,
         },
     }

@@ -189,6 +189,7 @@ class InvestigationHealthConfig(BaseModel):
     auto_response_enabled: bool
     approval_policy_version: str
     detection_governance_policy_version: str
+    knowledge_query_plan_schema_version: str
 
 
 class InvestigationIntentDispatchResponse(BaseModel):

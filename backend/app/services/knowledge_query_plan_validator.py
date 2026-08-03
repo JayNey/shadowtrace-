@@ -127,7 +127,7 @@ def validate_knowledge_query_plan(
     for filt in base_plan.typed_filters:
         if filt.kind not in _SUPPORTED_HINT_FILTER_KINDS:
             rejected.append("unsupported_filter_kind")
-            break
+            continue
         _append_filter(filt)
 
     source_ids = _sanitize_hint_list(agent_hints.source_ids)
@@ -172,6 +172,7 @@ def validate_knowledge_query_plan(
         principal=normalized_principal,
         corpus_id=base_plan.corpus_id,
         kb_name=base_plan.kb_name,
+        # Single pinned corpus for this request; not the full multi-kb allow-list.
         allowed_corpora=narrowed_corpora if narrowed_corpora else allowed_corpora,
         active_release_id=base_plan.active_release_id,
         embedding_release_id=base_plan.embedding_release_id,

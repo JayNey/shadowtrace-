@@ -27,6 +27,7 @@ from app.models.entities import (
 )
 from app.models.workflow import FP_LOW_THRESHOLD
 from app.services.case_kb_service import CaseKBService
+from app.services.tenant_resolution import resolve_tenant_id
 from app.services.working_memory import BoundWorkingMemory
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,8 @@ class FalsePositiveMatcher:
         self,
         source_snapshot: dict[str, Any],
         entities: EntitySet,
+        *,
+        tenant_id: str | None = None,
     ) -> FPMatchResult:
         """Match *source_snapshot* + *entities* against the fp_case_kb.
 
@@ -88,15 +91,21 @@ class FalsePositiveMatcher:
                 fallback uses the compatible ``raw_alert_snapshot`` field).
             entities: Entity set for text enrichment (regex-extracted for
                 the pre-triage hook path; LLM-extracted for post-triage).
+            tenant_id: Optional authenticated tenant scope for storage pre-filter.
 
         Returns:
             FPMatchResult with recommendation based on top-1 score vs
             FP_HIGH_THRESHOLD / FP_LOW_THRESHOLD.
         """
         alert_text = _build_alert_text(source_snapshot, entities)
+        scoped_tenant = (tenant_id or resolve_tenant_id(source_snapshot) or "").strip() or None
 
         try:
-            results = await self._case_kb.search_fp_cases(alert_text, top_k=1)
+            results = await self._case_kb.search_fp_cases(
+                alert_text,
+                top_k=1,
+                tenant_id=scoped_tenant,
+            )
         except Exception:
             logger.warning(
                 "FalsePositiveMatcher: fp_case_kb search failed; returning no_match",

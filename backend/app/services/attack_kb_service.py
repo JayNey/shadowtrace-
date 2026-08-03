@@ -135,6 +135,7 @@ class AttackKBService:
           the minimal ``_KEYWORD_QUERY_ALIASES`` map for Chinese analyst queries.
         """
         if self._store.semantic_search_enabled:
+            # TODO(#644): route through validated KnowledgeQueryPlan + tenant scope.
             return await self._store.vector_search_query(KB_NAME, query_text, top_k=top_k)
 
         stripped = query_text.strip()

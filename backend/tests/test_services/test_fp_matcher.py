@@ -209,6 +209,22 @@ def _chunk(case_id: str, score: float, pattern: str = "") -> RetrievedChunk:
 
 
 @pytest.mark.asyncio
+async def test_matcher_passes_resolved_tenant_to_case_kb(
+    matcher: FalsePositiveMatcher, mock_case_kb: Any
+) -> None:
+    mock_case_kb.search_fp_cases.return_value = []
+    snapshot: dict[str, Any] = {
+        "alert_type": "account_anomaly",
+        "tenant_id": "tenant-fp-test",
+    }
+    await matcher.match(snapshot, EntitySet())
+
+    mock_case_kb.search_fp_cases.assert_awaited_once()
+    _args, kwargs = mock_case_kb.search_fp_cases.await_args
+    assert kwargs.get("tenant_id") == "tenant-fp-test"
+
+
+@pytest.mark.asyncio
 async def test_matcher_high_score_investigate_with_flag(
     matcher: FalsePositiveMatcher, mock_case_kb: Any
 ) -> None:

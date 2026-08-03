@@ -1232,12 +1232,66 @@ class TestRAGAgentReleasePinning:
         output = await agent._run(_make_input())
 
         assert output.knowledge_query_plan is not None
-        assert output.knowledge_query_plan["active_release_id"] == "krel-pin-test01"
-        assert output.knowledge_query_plan["embedding_release_id"] == "emb-test-release"
+        assert output.knowledge_query_plan["attack_kb"]["active_release_id"] == "krel-pin-test01"
+        assert output.knowledge_query_plan["attack_kb"]["embedding_release_id"] == "emb-test-release"
         attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
         assert attack_calls
         assert attack_calls[0]["context"].query_plan is not None
         assert attack_calls[0]["context"].query_plan.active_release_id == "krel-pin-test01"
+
+    @pytest.mark.asyncio
+    async def test_output_includes_attack_and_playbook_plans(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+        from app.models.knowledge_release import (
+            KnowledgeImportStatus,
+            KnowledgeRelease,
+            KnowledgeReleaseLifecycleState,
+            KnowledgeReleaseProvenance,
+        )
+        from app.models.playbook_release import PLAYBOOK_CORPUS_ID, PLAYBOOK_SOURCE_ID
+
+        attack_release = _make_active_release("krel-dual-test01")
+        attack_service = MagicMock()
+        attack_service.get_active_release = AsyncMock(return_value=attack_release)
+
+        playbook_release = KnowledgeRelease(
+            release_id="pbrel-dual-test01",
+            corpus_id=PLAYBOOK_CORPUS_ID,
+            source_id=PLAYBOOK_SOURCE_ID,
+            release_version="v1-dual",
+            content_hash="d" * 64,
+            provenance=KnowledgeReleaseProvenance(source_path="fixture://playbook-dual"),
+            import_status=KnowledgeImportStatus.VALIDATED,
+            lifecycle_state=KnowledgeReleaseLifecycleState.ACTIVE,
+            vector_ready=True,
+            embedding_release_id="emb-test-release",
+            idempotency_key=f"{PLAYBOOK_CORPUS_ID}:{'d' * 64}",
+        )
+        playbook_service = MagicMock()
+        playbook_service.get_active_release = AsyncMock(return_value=playbook_release)
+
+        wm = _MockBoundWorkingMemory()
+        pipeline = _MockPipeline(results=_make_full_results())
+        settings = Settings(
+            APP_ENV="development",
+            EMBEDDING_MODE="mock",
+            EMBEDDING_RELEASE_ID="emb-test-release",
+        )
+        agent = RAGAgent(
+            working_memory=wm,
+            pipeline=pipeline,
+            knowledge_release_service=attack_service,
+            playbook_release_service=playbook_service,
+            settings=settings,
+        )
+
+        output = await agent._run(_make_input())
+
+        assert output.knowledge_query_plan is not None
+        assert output.knowledge_query_plan["attack_kb"]["active_release_id"] == "krel-dual-test01"
+        assert output.knowledge_query_plan["playbook_kb"]["active_release_id"] == "pbrel-dual-test01"
 
     @pytest.mark.asyncio
     async def test_playbook_query_plan_accepted_by_real_pipeline(self):
