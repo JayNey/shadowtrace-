@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -51,6 +52,7 @@ from app.models.detection_governance import (
     DetectionGovernanceThresholdBinding,
 )
 from app.models.detection_promotion import (
+    DetectionPromotionReasonCode,
     DetectionPromotionRequest,
     DetectionPromotionStatus,
     SourceIngestCorrelationOutcome,
@@ -956,3 +958,274 @@ async def test_derived_connector_source_row_uses_online_status(
         row = await session.get(orm.SourceConnector, connector_id)
     assert row is not None
     assert row.status == ConnectorStatus.ONLINE.value
+
+
+async def _seed_governed_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[
+    object,
+    object,
+    DetectionEvaluationArtifact,
+    DetectionGovernanceDecision,
+    object,
+]:
+    fixture_index = load_detection_fixture_index(DATASET_DIR)
+    replay = fixture_index.by_case_id["threat_event_match"]
+    seeded = await seed_detection_replay_fixture(session_factory, replay)
+    runtime = DetectionRuleRuntimeService(session_factory)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    result = await runtime.execute_shadow(
+        source_tenant_id=seeded.source_tenant_id,
+        package_id=seeded.package_id,
+        cutoff_at=cutoff,
+    )
+    assert result.candidates
+    candidate = result.candidates[0]
+    candidate_refs = build_candidate_refs(replay, seeded)
+    artifact = _artifact_for_seeded(
+        seeded=seeded,
+        candidate_refs=candidate_refs,
+        candidate_set_hash="c" * 64,
+    )
+    principal = _reviewer_principal(seeded.source_tenant_id)
+    governance = DetectionGovernanceService(session_factory)
+    decision = await governance.record_decision(
+        principal,
+        artifact,
+        DetectionGovernanceDecisionRequest(
+            decision=DetectionGovernanceDecisionKind.APPROVE,
+            reason_note="approved for promotion test",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    return seeded, candidate, artifact, decision, replay
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_concurrent_promotion_completes_once(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+) -> None:
+    seeded, candidate, artifact, decision, _ = await _seed_governed_candidate(session_factory)
+    request = DetectionPromotionRequest(
+        tenant_id=seeded.source_tenant_id,
+        candidate_detection_id=candidate.candidate_detection_id,
+        decision_id=decision.decision_id,
+    )
+    first, second = await asyncio.gather(
+        promotion_service.promote_candidate(artifact, request),
+        promotion_service.promote_candidate(artifact, request),
+    )
+    assert first.status is DetectionPromotionStatus.COMPLETED
+    assert second.status is DetectionPromotionStatus.COMPLETED
+    assert first.record.promotion_id == second.record.promotion_id
+    assert first.ingest_result is not None
+    assert second.ingest_result is not None
+    assert first.ingest_result.event_id == second.ingest_result.event_id
+
+    promotion_key = build_promotion_key(
+        candidate_detection_id=candidate.candidate_detection_id,
+        candidate_content_hash=candidate.content_hash,
+        decision_id=decision.decision_id,
+    )
+    async with session_factory() as session:
+        rows = list(
+            await session.scalars(
+                select(DetectionPromotionORM).where(
+                    DetectionPromotionORM.promotion_key == promotion_key
+                )
+            )
+        )
+    assert len(rows) == 1
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_reingest_records_idempotent_outcome(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+) -> None:
+    seeded, candidate, artifact, decision, _ = await _seed_governed_candidate(session_factory)
+    request = DetectionPromotionRequest(
+        tenant_id=seeded.source_tenant_id,
+        candidate_detection_id=candidate.candidate_detection_id,
+        decision_id=decision.decision_id,
+    )
+    first = await promotion_service.promote_candidate(artifact, request)
+    assert first.status is DetectionPromotionStatus.COMPLETED
+    assert first.ingest_result is not None
+    assert first.ingest_result.correlation_outcome is SourceIngestCorrelationOutcome.CREATED
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(DetectionPromotionORM, first.record.promotion_id)
+            assert row is not None
+            row.status = DetectionPromotionStatus.RETRY.value
+            row.event_id = None
+
+    second = await promotion_service.promote_candidate(artifact, request)
+    assert second.status is DetectionPromotionStatus.COMPLETED
+    assert second.ingest_result is not None
+    assert second.ingest_result.correlation_outcome in {
+        SourceIngestCorrelationOutcome.IDEMPOTENT,
+        SourceIngestCorrelationOutcome.DUPLICATE,
+    }
+    assert second.ingest_result.event_id == first.ingest_result.event_id
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_link_revision_increments_when_event_id_changes(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+    event_service_for_promotion: EventService,
+) -> None:
+    seeded, candidate, artifact, decision, _ = await _seed_governed_candidate(session_factory)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    promotion_key = build_promotion_key(
+        candidate_detection_id=candidate.candidate_detection_id,
+        candidate_content_hash=candidate.content_hash,
+        decision_id=decision.decision_id,
+    )
+    promotion_id = await promotion_service._allocate_promotion_id()
+    typed = ingest_result_to_typed(
+        await event_service_for_promotion.ingest_source_object(
+            IngestableSource(
+                reference=SourceReference(
+                    source_kind=SourceObjectKind.ALERT,
+                    source_product="mock_xdr",
+                    source_tenant_id=seeded.source_tenant_id,
+                    connector_id=build_derived_detection_connector_id(
+                        source_tenant_id=seeded.source_tenant_id,
+                        detection_scope_id=seeded.detection_scope_id,
+                    ),
+                    source_object_id="pdet-link-revision",
+                    source_updated_at=cutoff,
+                ),
+                normalized={"title": "link revision", "severity": "high"},
+                title="link revision",
+                severity=Severity.HIGH,
+                event_type=EventType.MALICIOUS_PROCESS,
+                source_type="derived_detection",
+            )
+        )
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                DetectionPromotionORM(
+                    promotion_id=promotion_id,
+                    tenant_id=seeded.source_tenant_id,
+                    promotion_key=promotion_key,
+                    status=DetectionPromotionStatus.SOURCE_PERSISTED.value,
+                    decision_id=decision.decision_id,
+                    candidate_detection_id=candidate.candidate_detection_id,
+                    candidate_content_hash=candidate.content_hash,
+                    package_id=seeded.package_id,
+                    package_version=1,
+                    package_content_hash=seeded.package_content_hash,
+                    detection_scope_id=seeded.detection_scope_id,
+                    scope_revision_id=seeded.scope_revision_id,
+                    source_record_id=typed.source_record_id,
+                    event_id="evt-superseded",
+                    link_revision=1,
+                    ingest_result=typed.model_dump(mode="json"),
+                )
+            )
+
+    resumed = await promotion_service.promote_candidate(
+        artifact,
+        DetectionPromotionRequest(
+            tenant_id=seeded.source_tenant_id,
+            candidate_detection_id=candidate.candidate_detection_id,
+            decision_id=decision.decision_id,
+        ),
+    )
+    assert resumed.status is DetectionPromotionStatus.COMPLETED
+    assert resumed.record.link_revision == 2
+    assert resumed.record.event_id == typed.event_id
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_fail_closed_package_hash_mismatch(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+) -> None:
+    seeded, candidate, artifact, decision, _ = await _seed_governed_candidate(session_factory)
+    async with session_factory() as session:
+        async with session.begin():
+            package_row = await session.get(orm.DetectionRulePackage, seeded.package_id)
+            assert package_row is not None
+            package_row.content_hash = "f" * 64
+
+    with pytest.raises(ValidationError, match="package content hash mismatch"):
+        await promotion_service.promote_candidate(
+            artifact,
+            DetectionPromotionRequest(
+                tenant_id=seeded.source_tenant_id,
+                candidate_detection_id=candidate.candidate_detection_id,
+                decision_id=decision.decision_id,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_fail_closed_package_not_shadow_active(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+) -> None:
+    seeded, candidate, artifact, decision, _ = await _seed_governed_candidate(session_factory)
+    rule_service = DetectionRuleService(session_factory)
+    await rule_service.disable_package(
+        source_tenant_id=seeded.source_tenant_id,
+        package_id=seeded.package_id,
+    )
+
+    with pytest.raises(ValidationError, match="package not shadow_active") as exc_info:
+        await promotion_service.promote_candidate(
+            artifact,
+            DetectionPromotionRequest(
+                tenant_id=seeded.source_tenant_id,
+                candidate_detection_id=candidate.candidate_detection_id,
+                decision_id=decision.decision_id,
+            ),
+        )
+    assert (
+        exc_info.value.details.get("reason")
+        == DetectionPromotionReasonCode.PACKAGE_NOT_SHADOW_ACTIVE.value
+    )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_fail_closed_candidate_not_shadow(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+) -> None:
+    seeded, candidate, artifact, decision, _ = await _seed_governed_candidate(session_factory)
+    async with session_factory() as session:
+        async with session.begin():
+            candidate_row = await session.get(
+                orm.CandidateDetection,
+                candidate.candidate_detection_id,
+            )
+            assert candidate_row is not None
+            candidate_row.shadow_only = False
+
+    with pytest.raises(ValidationError, match="candidate is not shadow-only") as exc_info:
+        await promotion_service.promote_candidate(
+            artifact,
+            DetectionPromotionRequest(
+                tenant_id=seeded.source_tenant_id,
+                candidate_detection_id=candidate.candidate_detection_id,
+                decision_id=decision.decision_id,
+            ),
+        )
+    assert (
+        exc_info.value.details.get("reason")
+        == DetectionPromotionReasonCode.CANDIDATE_NOT_SHADOW.value
+    )

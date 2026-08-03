@@ -290,7 +290,19 @@ class DetectionPromotionService:
         self,
         package_row: orm.DetectionRulePackage,
     ) -> None:
-        current = DetectionRuleRuntimeState(package_row.runtime_state)
+        """Promote the entire package on the first successful candidate promotion.
+
+        ISSUE-124 intentionally transitions the whole ``shadow_active`` package to
+        ``production_active`` when any governed candidate completes the saga.
+        """
+        async with self._session_factory() as session:
+            fresh = await session.get(orm.DetectionRulePackage, package_row.package_id)
+            if fresh is None or fresh.source_tenant_id != package_row.source_tenant_id:
+                raise ResourceNotFoundError(
+                    "detection rule package not found",
+                    details={"package_id": package_row.package_id},
+                )
+            current = DetectionRuleRuntimeState(fresh.runtime_state)
         if current is DetectionRuleRuntimeState.PRODUCTION_ACTIVE:
             return
         if current is not DetectionRuleRuntimeState.SHADOW_ACTIVE:
@@ -301,12 +313,22 @@ class DetectionPromotionService:
                     "runtime_state": current.value,
                 },
             )
-        await self._rules.transition_runtime_state(
-            package_id=package_row.package_id,
-            target_state=DetectionRuleRuntimeState.PRODUCTION_ACTIVE,
-            source_tenant_id=package_row.source_tenant_id,
-        )
-
+        try:
+            await self._rules.transition_runtime_state(
+                package_id=package_row.package_id,
+                target_state=DetectionRuleRuntimeState.PRODUCTION_ACTIVE,
+                source_tenant_id=package_row.source_tenant_id,
+            )
+        except ValidationError:
+            package = await self._rules.get_package(
+                source_tenant_id=package_row.source_tenant_id,
+                package_id=package_row.package_id,
+            )
+            if (
+                package is None
+                or package.runtime_state is not DetectionRuleRuntimeState.PRODUCTION_ACTIVE
+            ):
+                raise
     @staticmethod
     def _artifact_approved_candidate_keys(
         artifact: DetectionEvaluationArtifact,
@@ -323,6 +345,13 @@ class DetectionPromotionService:
         artifact: DetectionEvaluationArtifact,
         candidate: CandidateDetection,
     ) -> None:
+        """Validate governance binding against the candidate under promotion.
+
+        When ``artifact.case_results`` is empty, artifact membership is skipped;
+        governance ``candidate_binding`` remains the authoritative source of truth.
+        When case results list candidates, the promoted candidate must appear in
+        that enumeration (fail-closed).
+        """
         bound = decision.candidate_binding.candidate_refs
         if candidate.detection_scope_id != bound.detection_scope_id:
             raise ValidationError(
@@ -402,6 +431,11 @@ class DetectionPromotionService:
                 raise ResourceNotFoundError(
                     "candidate detection not found",
                     details={"candidate_detection_id": candidate_detection_id},
+                )
+            if not row.shadow_only:
+                raise ValidationError(
+                    "promotion blocked: candidate is not shadow-only",
+                    details={"reason": DetectionPromotionReasonCode.CANDIDATE_NOT_SHADOW.value},
                 )
             return row_to_candidate_detection(row)
 
@@ -535,44 +569,47 @@ class DetectionPromotionService:
             return _row_to_record(row)
 
     async def _insert_ledger(self, record: DetectionPromotionRecord) -> DetectionPromotionRecord:
-        async with self._session_factory() as session:
-            async with session.begin():
-                try:
-                    session.add(
-                        DetectionPromotionORM(
-                            promotion_id=record.promotion_id,
-                            tenant_id=record.tenant_id,
-                            promotion_key=record.promotion_key,
-                            status=record.status.value,
-                            decision_id=record.decision_id,
-                            candidate_detection_id=record.candidate_detection_id,
-                            candidate_content_hash=record.candidate_content_hash,
-                            package_id=record.package_id,
-                            package_version=record.package_version,
-                            package_content_hash=record.package_content_hash,
-                            detection_scope_id=record.detection_scope_id,
-                            scope_revision_id=record.scope_revision_id,
-                            derived_connector_id=record.derived_connector_id,
-                            source_record_id=record.source_record_id,
-                            event_id=record.event_id,
-                            link_revision=record.link_revision,
-                            ingest_result=(
-                                record.ingest_result.model_dump(mode="json")
-                                if record.ingest_result
-                                else None
-                            ),
-                            reason_codes=[code.value for code in record.reason_codes],
-                            reason_message=record.reason_message,
-                            payload={"schema_version": DETECTION_PROMOTION_SCHEMA_VERSION},
-                        )
-                    )
-                    await session.flush()
-                except IntegrityError:
-                    existing = await self._get_by_promotion_key(record.promotion_key)
-                    if existing is None:
-                        raise
-                    return existing
-        return record
+        orm_row = DetectionPromotionORM(
+            promotion_id=record.promotion_id,
+            tenant_id=record.tenant_id,
+            promotion_key=record.promotion_key,
+            status=record.status.value,
+            decision_id=record.decision_id,
+            candidate_detection_id=record.candidate_detection_id,
+            candidate_content_hash=record.candidate_content_hash,
+            package_id=record.package_id,
+            package_version=record.package_version,
+            package_content_hash=record.package_content_hash,
+            detection_scope_id=record.detection_scope_id,
+            scope_revision_id=record.scope_revision_id,
+            derived_connector_id=record.derived_connector_id,
+            source_record_id=record.source_record_id,
+            event_id=record.event_id,
+            link_revision=record.link_revision,
+            ingest_result=(
+                record.ingest_result.model_dump(mode="json")
+                if record.ingest_result
+                else None
+            ),
+            reason_codes=[code.value for code in record.reason_codes],
+            reason_message=record.reason_message,
+            payload={"schema_version": DETECTION_PROMOTION_SCHEMA_VERSION},
+        )
+        for _ in range(5):
+            async with self._session_factory() as session:
+                async with session.begin():
+                    try:
+                        session.add(orm_row)
+                        await session.flush()
+                        return record
+                    except IntegrityError:
+                        pass
+            existing = await self._get_by_promotion_key(record.promotion_key)
+            if existing is not None:
+                return existing
+        raise RuntimeError(
+            f"detection promotion ledger insert lost race for key={record.promotion_key}"
+        )
 
     async def _update_ledger(
         self,
