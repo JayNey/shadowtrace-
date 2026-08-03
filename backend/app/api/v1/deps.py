@@ -792,6 +792,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         output_guard=output_guard,
         trace_service=trace_service,
         event_service=event_service,
+        detection_context_service=get_detection_context_service(),
         event_bus=event_bus,
         scenario_id="insider_data_exfiltration",
     )

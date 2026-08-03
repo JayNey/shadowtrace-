@@ -104,6 +104,16 @@ class DetectionPromotionRequest(BaseModel):
     )
 
 
+class DetectionContextProjectionError(BaseModel):
+    """Structured detection context projection failure surfaced on promotion results."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(..., min_length=1, max_length=128)
+    message: str = Field(default="", max_length=512)
+    recorded_at: datetime | None = None
+
+
 class DetectionPromotionRecord(BaseModel):
     """Immutable promotion ledger row (append-only status transitions)."""
 
@@ -143,6 +153,7 @@ class DetectionPromotionResult(BaseModel):
     record: DetectionPromotionRecord
     ingest_result: TypedIngestResult | None = None
     resumed: bool = False
+    context_projection_error: DetectionContextProjectionError | None = None
 
 
 class DerivedDetectionConnectorRecord(BaseModel):
@@ -168,6 +179,7 @@ __all__ = [
     "DERIVED_DETECTION_ADAPTER_VERSION",
     "DETECTION_PROMOTION_SCHEMA_VERSION",
     "DerivedDetectionConnectorRecord",
+    "DetectionContextProjectionError",
     "DetectionPromotionReasonCode",
     "DetectionPromotionRecord",
     "DetectionPromotionRequest",

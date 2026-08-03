@@ -15,7 +15,8 @@
         "derived_connector_recursion",
         "ingest_failed",
         "package_transition_blocked",
-        "promotion_superseded"
+        "promotion_superseded",
+        "context_projection_failed"
       ],
       "title": "DetectionPromotionReasonCode",
       "type": "string"

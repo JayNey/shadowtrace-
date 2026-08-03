@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import ResourceNotFoundError, ValidationError
@@ -38,6 +40,12 @@ from app.services.feature_snapshot_resolver import row_to_feature_snapshot
 logger = logging.getLogger(__name__)
 
 WRITER_ID = "DetectionContextProjector"
+_MAX_REVISION_ATTEMPTS = 3
+
+
+def _event_projection_lock_key(*, tenant_id: str, event_id: str) -> int:
+    material = f"dctx-proj|{tenant_id}|{event_id}".encode()
+    return int.from_bytes(hashlib.sha256(material).digest()[:8], byteorder="big", signed=True)
 
 
 def _promotion_record_from_row(row: DetectionPromotionORM):
@@ -180,6 +188,14 @@ class DetectionContextProjector:
         else:
             event_revision = current_revision
 
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": _event_projection_lock_key(
+                tenant_id=tenant_id,
+                event_id=promotion.event_id,
+            )},
+        )
+
         package_row = await session.scalar(
             select(orm.DetectionRulePackage).where(
                 orm.DetectionRulePackage.package_id == promotion.package_id,
@@ -208,36 +224,77 @@ class DetectionContextProjector:
                 f"missing_package:{promotion.package_id}",
             ]
 
-        revision, supersedes = await self._snapshots.next_revision(
+        return await self._persist_snapshot_with_revision_retry(
             session,
-            tenant_id=tenant_id,
-            event_id=promotion.event_id,
-        )
-        snapshot = build_detection_context_snapshot(
             promotion=promotion,
             candidate=candidate,
             decision=decision,
             event_revision=event_revision,
             rule=rule,
             feature_snapshots=feature_snapshots,
-            revision=revision,
-            supersedes_snapshot_id=supersedes,
             projection_errors=projection_errors,
         )
 
-        existing = await session.scalar(
-            select(DetectionContextSnapshotORM).where(
-                DetectionContextSnapshotORM.idempotency_key == snapshot.idempotency_key
+    async def _persist_snapshot_with_revision_retry(
+        self,
+        session: AsyncSession,
+        *,
+        promotion,
+        candidate,
+        decision,
+        event_revision: int,
+        rule: DetectionRuleDefinition | None,
+        feature_snapshots: list[FeatureSnapshot],
+        projection_errors: list[str],
+    ) -> DetectionContextSnapshot:
+        last_integrity_error: IntegrityError | None = None
+        for attempt in range(_MAX_REVISION_ATTEMPTS):
+            revision, supersedes = await self._snapshots.next_revision(
+                session,
+                tenant_id=promotion.tenant_id,
+                event_id=promotion.event_id,
             )
-        )
-        if existing is not None:
-            stored = DetectionContextSnapshot.model_validate(existing.body)
-            await self._write_context_ref(session, promotion.event_id, stored, force=False)
-            return stored.model_copy(update={"created_at": existing.created_at})
+            snapshot = build_detection_context_snapshot(
+                promotion=promotion,
+                candidate=candidate,
+                decision=decision,
+                event_revision=event_revision,
+                rule=rule,
+                feature_snapshots=feature_snapshots,
+                revision=revision,
+                supersedes_snapshot_id=supersedes,
+                projection_errors=projection_errors,
+            )
 
-        persisted = await self._snapshots.persist_in_session(session, snapshot)
-        await self._write_context_ref(session, promotion.event_id, persisted, force=True)
-        return persisted
+            existing = await session.scalar(
+                select(DetectionContextSnapshotORM).where(
+                    DetectionContextSnapshotORM.idempotency_key == snapshot.idempotency_key
+                )
+            )
+            if existing is not None:
+                stored = DetectionContextSnapshot.model_validate(existing.body)
+                await self._write_context_ref(session, promotion.event_id, stored, force=False)
+                return stored.model_copy(update={"created_at": existing.created_at})
+
+            try:
+                persisted = await self._snapshots.persist_in_session(session, snapshot)
+            except IntegrityError as exc:
+                last_integrity_error = exc
+                if attempt + 1 >= _MAX_REVISION_ATTEMPTS:
+                    break
+                continue
+
+            await self._write_context_ref(session, promotion.event_id, persisted, force=True)
+            return persisted
+
+        raise ValidationError(
+            "detection context projection blocked: revision allocation conflict",
+            details={
+                "event_id": promotion.event_id,
+                "attempts": _MAX_REVISION_ATTEMPTS,
+                "reason": "revision_allocation_conflict",
+            },
+        ) from last_integrity_error
 
     async def _load_feature_snapshots(
         self,

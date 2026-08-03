@@ -1261,7 +1261,6 @@ async def test_report_agent_skips_detection_context_when_tenant_unknown() -> Non
 
     from app.agents.report_agent import ReportAgent
     from app.models.detection_context_snapshot import DetectionContextSnapshotRef
-    from app.models.security_event import SecurityEvent
 
     event_id = "evt-no-tenant"
     ref = DetectionContextSnapshotRef(
@@ -1278,9 +1277,56 @@ async def test_report_agent_skips_detection_context_when_tenant_unknown() -> Non
     event.creation_source_ref = None
     event_service = AsyncMock()
     event_service.get_event = AsyncMock(return_value=event)
-    event_service._session_factory = MagicMock()
+    detection_context_service = AsyncMock()
 
-    agent = ReportAgent(event_service=event_service, working_memory=wm)
+    agent = ReportAgent(
+        event_service=event_service,
+        working_memory=wm,
+        detection_context_service=detection_context_service,
+    )
     snapshot = await agent._load_detection_context_snapshot(event_id)
     assert snapshot is None
-    event_service._session_factory.assert_not_called()
+    detection_context_service.get_snapshot.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_report_agent_rejects_stale_detection_context_ref() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.agents.report_agent import ReportAgent
+    from app.models.detection_context_snapshot import DetectionContextSnapshotRef
+
+    event_id = "evt-stale-ref"
+    hash64 = "a" * 64
+    ref = DetectionContextSnapshotRef(
+        snapshot_id="dctx-stale-ref",
+        revision=1,
+        content_hash=hash64,
+        promotion_id="dprom-test",
+        promotion_link_revision=1,
+        event_revision=1,
+    )
+    wm = AsyncMock()
+    wm.read = AsyncMock(return_value=ref.model_dump(mode="json"))
+    event = MagicMock()
+    event.creation_source_ref = MagicMock(source_tenant_id="tenant-a")
+    event_service = AsyncMock()
+    event_service.get_event = AsyncMock(return_value=event)
+    stale_snapshot = _sample_detection_context_snapshot(event_id=event_id)
+    stale_snapshot = stale_snapshot.model_copy(
+        update={"revision": 2, "content_hash": "b" * 64},
+    )
+    detection_context_service = AsyncMock()
+    detection_context_service.get_snapshot = AsyncMock(return_value=stale_snapshot)
+
+    agent = ReportAgent(
+        event_service=event_service,
+        working_memory=wm,
+        detection_context_service=detection_context_service,
+    )
+    snapshot = await agent._load_detection_context_snapshot(event_id)
+    assert snapshot is None
+    detection_context_service.get_snapshot.assert_awaited_once_with(
+        ref.snapshot_id,
+        tenant_id="tenant-a",
+    )

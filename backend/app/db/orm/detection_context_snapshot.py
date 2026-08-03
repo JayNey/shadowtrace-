@@ -24,7 +24,6 @@ class DetectionContextSnapshotORM(Base):
             "revision",
             name="uq_detection_context_snapshot_event_revision",
         ),
-        Index("ix_detection_context_snapshot_event_revision", "tenant_id", "event_id", "revision"),
         Index("ix_detection_context_snapshot_promotion", "promotion_id"),
     )
 

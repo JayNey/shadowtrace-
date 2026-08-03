@@ -636,6 +636,133 @@ async def test_promotion_records_projection_failure_on_blocked_projection(
         assert DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value in (
             row.reason_codes or []
         )
+    assert promotion.context_projection_error is not None
+    assert (
+        promotion.context_projection_error.reason == "candidate_content_hash_mismatch"
+    )
+    assert "candidate hash mismatch" in promotion.context_projection_error.message
+
+
+def test_build_detection_context_snapshot_same_inputs_same_hash() -> None:
+    from app.models.detection_evaluation import DetectionCandidateRefs
+    from app.models.detection_governance import (
+        DetectionGovernanceCandidateBinding,
+        DetectionGovernanceDecision,
+        DetectionGovernanceDecisionKind,
+        DetectionGovernanceEvaluationBinding,
+        DetectionGovernanceThresholdBinding,
+    )
+    from app.models.detection_promotion import (
+        DetectionPromotionRecord,
+        DetectionPromotionStatus,
+    )
+    from app.models.detection_rule import (
+        CandidateDetection,
+        CandidateDetectionProvenance,
+        DetectionRuleDefinition,
+        MissingDataPolicy,
+        RuleOperatorKind,
+    )
+    from app.models.feature_snapshot import FeatureWindowKind
+    from app.services.detection_context_resolver import build_detection_context_snapshot
+
+    hash64 = "a" * 64
+    candidate = CandidateDetection(
+        candidate_detection_id="cand-hash-test",
+        source_tenant_id="tenant-a",
+        detection_scope_id="dscope-1",
+        package_id="pkg-1",
+        package_version=1,
+        rule_id="rule-1",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_MATCH,
+        group_key={"entity_type": "account", "entity_id": "alice"},
+        cutoff_at=datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC),
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        matched_value=2.0,
+        severity="high",
+        provenance=CandidateDetectionProvenance(detection_score=88.5),
+        content_hash=hash64,
+        idempotency_key="idem-hash-test",
+    )
+    refs = DetectionCandidateRefs(
+        package_id=candidate.package_id,
+        package_version=candidate.package_version,
+        package_content_hash="b" * 64,
+        rule_ids=[candidate.rule_id],
+        feature_contract_version="1.0",
+        detection_scope_id=candidate.detection_scope_id,
+        scope_revision_id="dsrev-1",
+    )
+    decision = DetectionGovernanceDecision(
+        decision_id="dgov-hash-test",
+        tenant_id=candidate.source_tenant_id,
+        decision=DetectionGovernanceDecisionKind.APPROVE,
+        candidate_binding=DetectionGovernanceCandidateBinding(
+            candidate_set_hash="c" * 64,
+            candidate_refs=refs,
+            feature_contract_version="1.0",
+            detection_scope_id=candidate.detection_scope_id,
+            scope_revision_id="dsrev-1",
+        ),
+        evaluation_binding=DetectionGovernanceEvaluationBinding(
+            evaluation_id="deval-hash-test",
+            dataset_id="detection_shadow_v1",
+            dataset_version="2026.08.02",
+            dataset_content_hash="d" * 64,
+            artifact_hash="e" * 64,
+            code_sha="abc1234",
+        ),
+        threshold_binding=DetectionGovernanceThresholdBinding(manifest_version="2026.08.02"),
+        binding_hash="f" * 64,
+        decision_hash="0" * 64,
+        policy_version="issue125_v1",
+        reviewer_subject="approver-1",
+        decided_at=datetime(2026, 8, 1, 16, 0, 0, tzinfo=UTC),
+    )
+    promotion = DetectionPromotionRecord(
+        promotion_id="dprom-hash-test",
+        tenant_id=candidate.source_tenant_id,
+        promotion_key="promotion-key",
+        status=DetectionPromotionStatus.COMPLETED,
+        decision_id=decision.decision_id,
+        candidate_detection_id=candidate.candidate_detection_id,
+        candidate_content_hash=candidate.content_hash,
+        package_id=candidate.package_id,
+        package_version=candidate.package_version,
+        package_content_hash=refs.package_content_hash,
+        detection_scope_id=candidate.detection_scope_id,
+        scope_revision_id="dsrev-1",
+        event_id="evt-hash-test",
+        link_revision=1,
+    )
+    rule = DetectionRuleDefinition(
+        rule_id=candidate.rule_id,
+        rule_version=candidate.rule_version,
+        operator=RuleOperatorKind.EVENT_MATCH,
+        feature_contract_version="1.0",
+        detection_scope_id=candidate.detection_scope_id,
+        window_kind=FeatureWindowKind.ONE_HOUR.value,
+        group_key_fields=["entity_type", "entity_id"],
+        threshold=1.0,
+        severity="high",
+        missing_data_policy=MissingDataPolicy.SKIP,
+        match_criteria={"attack_technique_ids": ["T1059"]},
+    )
+    kwargs = {
+        "promotion": promotion,
+        "candidate": candidate,
+        "decision": decision,
+        "event_revision": 1,
+        "rule": rule,
+        "feature_snapshots": [],
+        "revision": 1,
+    }
+    first = build_detection_context_snapshot(**kwargs)
+    second = build_detection_context_snapshot(**kwargs)
+    assert first.content_hash == second.content_hash
+    assert first.snapshot_id == second.snapshot_id
+    assert first.idempotency_key == second.idempotency_key
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,41 @@
 {
   "$defs": {
+    "DetectionContextProjectionError": {
+      "additionalProperties": false,
+      "description": "Structured detection context projection failure surfaced on promotion results.",
+      "properties": {
+        "reason": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "message": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Message",
+          "type": "string"
+        },
+        "recorded_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Recorded At"
+        }
+      },
+      "required": [
+        "reason"
+      ],
+      "title": "DetectionContextProjectionError",
+      "type": "object"
+    },
     "DetectionPromotionReasonCode": {
       "description": "Machine-readable promotion failure / gate reason codes.",
       "enum": [
@@ -15,7 +51,8 @@
         "derived_connector_recursion",
         "ingest_failed",
         "package_transition_blocked",
-        "promotion_superseded"
+        "promotion_superseded",
+        "context_projection_failed"
       ],
       "title": "DetectionPromotionReasonCode",
       "type": "string"
@@ -430,6 +467,17 @@
       "default": false,
       "title": "Resumed",
       "type": "boolean"
+    },
+    "context_projection_error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/DetectionContextProjectionError"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

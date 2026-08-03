@@ -24,6 +24,7 @@ from app.models.detection_governance import (
 )
 from app.models.detection_promotion import (
     DETECTION_PROMOTION_SCHEMA_VERSION,
+    DetectionContextProjectionError,
     DetectionPromotionReasonCode,
     DetectionPromotionRecord,
     DetectionPromotionRequest,
@@ -95,41 +96,62 @@ class DetectionPromotionService:
         self._context_projector = context_projector
         self._now = now or (lambda: datetime.now(UTC))
 
-    async def _maybe_project_detection_context(self, record: DetectionPromotionRecord) -> None:
+    async def _maybe_project_detection_context(
+        self,
+        record: DetectionPromotionRecord,
+    ) -> DetectionContextProjectionError | None:
         if self._context_projector is None:
-            return
+            return None
         if record.status is not DetectionPromotionStatus.COMPLETED or record.event_id is None:
-            return
+            return None
         try:
             await self._context_projector.project_from_promotion(
                 record.promotion_id,
                 tenant_id=record.tenant_id,
             )
+            return None
         except ValidationError as exc:
+            reason = (
+                str(
+                    exc.details.get(
+                        "reason",
+                        DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value,
+                    )
+                )
+                if isinstance(exc.details, dict)
+                else DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value
+            )
             await self._record_projection_failure(
                 record.promotion_id,
                 message=str(exc),
-                reason=(
-                    exc.details.get("reason", DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value)
-                    if isinstance(exc.details, dict)
-                    else DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value
-                ),
+                reason=reason,
             )
             logger.error(
                 "detection context projection blocked promotion_id=%s reason=%s",
                 record.promotion_id,
                 exc.details if isinstance(exc.details, dict) else exc,
             )
+            return DetectionContextProjectionError(
+                reason=reason,
+                message=str(exc)[:512],
+                recorded_at=self._now(),
+            )
         except Exception as exc:
+            reason = DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value
             await self._record_projection_failure(
                 record.promotion_id,
                 message=f"{type(exc).__name__}: {exc}",
-                reason=DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value,
+                reason=reason,
             )
-            logger.warning(
+            logger.error(
                 "detection context projection failed promotion_id=%s: %s",
                 record.promotion_id,
                 exc,
+            )
+            return DetectionContextProjectionError(
+                reason=reason,
+                message=f"{type(exc).__name__}: {exc}"[:512],
+                recorded_at=self._now(),
             )
 
     async def _record_projection_failure(
@@ -166,8 +188,10 @@ class DetectionPromotionService:
         result: DetectionPromotionResult,
     ) -> DetectionPromotionResult:
         finalized = self._finalize_promotion_result(result)
-        await self._maybe_project_detection_context(finalized.record)
-        return finalized
+        projection_error = await self._maybe_project_detection_context(finalized.record)
+        if projection_error is None:
+            return finalized
+        return finalized.model_copy(update={"context_projection_error": projection_error})
 
     async def promote_candidate(
         self,

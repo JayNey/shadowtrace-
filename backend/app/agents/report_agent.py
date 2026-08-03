@@ -99,6 +99,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         audit_service: Any | None = None,
         event_bus: Any | None = None,
         event_service: Any | None = None,
+        detection_context_service: Any | None = None,
         section_builder: ReportSectionBuilder | None = None,
         scenario_id: str | None = None,
         llm_timeout_seconds: float = LLM_TIMEOUT_SECONDS,
@@ -114,6 +115,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             event_bus=event_bus,
         )
         self.event_service = event_service
+        self.detection_context_service = detection_context_service
         self.section_builder = section_builder or ReportSectionBuilder()
         self.scenario_id = scenario_id
         self.llm_timeout_seconds = float(llm_timeout_seconds)
@@ -598,11 +600,10 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         except Exception:
             logger.debug("invalid detection_context_snapshot ref", exc_info=True)
             return None
-        if self.event_service is None or not hasattr(self.event_service, "_session_factory"):
+        if self.detection_context_service is None:
             return None
-        from app.services.detection_context_service import DetectionContextService
-
-        service = DetectionContextService(self.event_service._session_factory)
+        if self.event_service is None:
+            return None
         event = await self.event_service.get_event(event_id)
         tenant_id = (
             event.creation_source_ref.source_tenant_id
@@ -615,7 +616,26 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 event_id,
             )
             return None
-        snapshot = await service.get_snapshot(ref.snapshot_id, tenant_id=tenant_id)
+        snapshot = await self.detection_context_service.get_snapshot(
+            ref.snapshot_id,
+            tenant_id=tenant_id,
+        )
+        if snapshot is None:
+            logger.debug(
+                "skip detection context snapshot load: snapshot not found snapshot_id=%s",
+                ref.snapshot_id,
+            )
+            return None
+        if snapshot.revision != ref.revision or snapshot.content_hash != ref.content_hash:
+            logger.error(
+                "detection context snapshot ref mismatch event_id=%s snapshot_id=%s "
+                "ref_revision=%s snapshot_revision=%s",
+                event_id,
+                ref.snapshot_id,
+                ref.revision,
+                snapshot.revision,
+            )
+            return None
         return snapshot
 
     async def _write_context(self, event_id: str, report: InvestigationReport) -> None:
