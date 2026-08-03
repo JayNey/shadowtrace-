@@ -16,7 +16,7 @@ class _FakeGovernance:
     def __init__(self) -> None:
         self.calls: list[tuple[str, Any]] = []
 
-    async def assess_eligibility(self, artifact: Any, *, threshold_manifest_path: Any = None) -> Any:
+    async def assess_eligibility(self, artifact: Any, *, threshold_manifest_path: Any = None, principal: Any = None) -> Any:
         from app.models.detection_governance import DetectionGovernanceEligibilityAssessment
 
         self.calls.append(("assess", artifact.evaluation_id))
@@ -90,7 +90,7 @@ def governance_client(monkeypatch: pytest.MonkeyPatch) -> tuple[TestClient, _Fak
     app.dependency_overrides[deps.get_detection_governance_service] = lambda: fake
 
     async def _principal() -> Principal:
-        return Principal(subject="api-approver", roles=["approver"])
+        return Principal(subject="api-approver", roles=["approver"], tenant_id="tenant-a")
 
     app.dependency_overrides[get_principal] = _principal
     client = TestClient(app)

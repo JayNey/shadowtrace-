@@ -38,6 +38,7 @@ class Principal(BaseModel):
     subject: str
     display_name: str = ""
     roles: list[str] = Field(default_factory=list)
+    tenant_id: str | None = None
 
     def has_any_role(self, roles: Iterable[str]) -> bool:
         wanted = set(roles)
@@ -75,6 +76,7 @@ def _dev_token_registry() -> dict[str, Principal]:
             subject=spec.get("subject", token),
             display_name=spec.get("display_name", ""),
             roles=list(spec.get("roles", [])),
+            tenant_id=spec.get("tenant_id"),
         )
     return registry
 
@@ -95,10 +97,13 @@ def _principal_from_trusted_proxy(request: Request) -> Principal | None:
         return None
     roles_header = request.headers.get("X-Auth-Roles", "")
     roles = [r.strip() for r in roles_header.split(",") if r.strip()]
+    tenant_id = request.headers.get("X-Auth-Tenant-Id")
+    tenant_id = tenant_id.strip() if isinstance(tenant_id, str) and tenant_id.strip() else None
     return Principal(
         subject=subject,
         display_name=request.headers.get("X-Auth-Display-Name", ""),
         roles=roles,
+        tenant_id=tenant_id,
     )
 
 

@@ -35,6 +35,7 @@ async def assess_detection_governance_eligibility(
         threshold_manifest_path=Path(body.threshold_manifest_path)
         if body.threshold_manifest_path
         else None,
+        principal=principal,
     )
     return s.DetectionGovernanceEligibilityResponse.model_validate(assessment.model_dump())
 
@@ -75,7 +76,7 @@ async def get_detection_governance_decision(
     principal: Annotated[Principal, require_roles(ROLE_ANALYST, ROLE_APPROVER)],
     governance: DetectionGovernanceDep,
 ) -> s.DetectionGovernanceDecisionResponse:
-    decision = await governance.get_decision(decision_id, tenant_id=tenant_id)
+    decision = await governance.get_decision(decision_id, tenant_id=tenant_id, principal=principal)
     return s.DetectionGovernanceDecisionResponse.model_validate(decision.model_dump())
 
 
@@ -97,6 +98,7 @@ async def list_detection_governance_decisions(
         binding_hash=binding_hash,
         limit=page_size,
         offset=offset,
+        principal=principal,
     )
     return s.DetectionGovernanceDecisionListResponse(
         total=total,
@@ -142,5 +144,6 @@ async def evaluate_detection_promotion_gate(
     result = await governance.evaluate_promotion_gate(
         artifact,
         binding_hash=body.binding_hash,
+        principal=principal,
     )
     return s.DetectionGovernancePromotionGateResponse.model_validate(result.model_dump())

@@ -203,8 +203,8 @@ def _artifact(*, eligible: bool = True) -> DetectionEvaluationArtifact:
     return finalize_detection_artifact(artifact)
 
 
-def _approver() -> Principal:
-    return Principal(subject="detection-approver-1", roles=["approver"])
+def _approver(*, tenant_id: str = "tenant-detection-eval") -> Principal:
+    return Principal(subject="detection-approver-1", roles=["approver"], tenant_id=tenant_id)
 
 
 @pytest.mark.asyncio
@@ -235,7 +235,11 @@ async def test_record_approve_requires_human_reviewer(
     service = DetectionGovernanceService(session_factory)
     with pytest.raises(ValidationError, match="human reviewer"):
         await service.record_decision(
-            Principal(subject="system:scheduler", roles=["approver"]),
+            Principal(
+                subject="system:scheduler",
+                roles=["approver"],
+                tenant_id="tenant-detection-eval",
+            ),
             _artifact(eligible=True),
             DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.APPROVE),
             threshold_manifest_path=THRESHOLD_PATH,
@@ -412,7 +416,11 @@ async def test_record_approve_rejects_agent_principal(
     service = DetectionGovernanceService(session_factory)
     with pytest.raises(ValidationError, match="human reviewer"):
         await service.record_decision(
-            Principal(subject="agent:planner", roles=["approver"]),
+            Principal(
+                subject="agent:planner",
+                roles=["approver"],
+                tenant_id="tenant-detection-eval",
+            ),
             _artifact(eligible=True),
             DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.APPROVE),
             threshold_manifest_path=THRESHOLD_PATH,
@@ -473,3 +481,130 @@ def test_policy_loader_reads_manifest_limits() -> None:
     assert policy.policy_version == "issue125_v1"
     assert policy.max_runtime_errors >= 0
     assert policy.require_gate_pass is True
+    assert policy.default_approval_ttl_hours == 168
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_record_approve_applies_default_ttl_when_expires_at_missing(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    now = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
+    service = DetectionGovernanceService(session_factory, now=lambda: now)
+    decision = await service.record_decision(
+        _approver(),
+        _artifact(eligible=True),
+        DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.APPROVE),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    assert decision.expires_at is not None
+    assert decision.expires_at == now + timedelta(hours=168)
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_record_approve_requires_threshold_manifest_path(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    service = DetectionGovernanceService(session_factory)
+    with pytest.raises(ValidationError, match="threshold_manifest_path required"):
+        await service.record_decision(
+            _approver(),
+            _artifact(eligible=True),
+            DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.APPROVE),
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_record_approve_rejects_duplicate_active_binding(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    service = DetectionGovernanceService(session_factory)
+    artifact = _artifact(eligible=True)
+    await service.record_decision(
+        _approver(),
+        artifact,
+        DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.APPROVE),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    with pytest.raises(ValidationError, match="active approval already exists"):
+        await service.record_decision(
+            _approver(),
+            artifact,
+            DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.APPROVE),
+            threshold_manifest_path=THRESHOLD_PATH,
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_record_decision_rejects_cross_tenant_principal(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    from app.core.errors import ResourceNotFoundError
+
+    service = DetectionGovernanceService(session_factory)
+    with pytest.raises(ResourceNotFoundError):
+        await service.record_decision(
+            _approver(tenant_id="other-tenant"),
+            _artifact(eligible=True),
+            DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.REJECT),
+            threshold_manifest_path=THRESHOLD_PATH,
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_get_decision_rejects_cross_tenant_principal(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    from app.core.errors import ResourceNotFoundError
+
+    service = DetectionGovernanceService(session_factory)
+    decision = await service.record_decision(
+        _approver(),
+        _artifact(eligible=True),
+        DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.REJECT),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    with pytest.raises(ResourceNotFoundError):
+        await service.get_decision(
+            decision.decision_id,
+            tenant_id=decision.tenant_id,
+            principal=_approver(tenant_id="other-tenant"),
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_expire_active_approvals_is_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    now = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
+    service = DetectionGovernanceService(session_factory, now=lambda: now)
+    artifact = _artifact(eligible=True)
+    await service.record_decision(
+        _approver(),
+        artifact,
+        DetectionGovernanceDecisionRequest(
+            decision=DetectionGovernanceDecisionKind.APPROVE,
+            expires_at=now - timedelta(minutes=1),
+        ),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    first = await service.expire_active_approvals()
+    second = await service.expire_active_approvals()
+    assert len(first) == 1
+    assert second == []
+    chain, _ = await service.list_decisions(tenant_id=artifact.tenant_id, limit=20)
+    expire_records = [
+        item for item in chain if item.decision == DetectionGovernanceDecisionKind.EXPIRE
+    ]
+    assert len(expire_records) == 1

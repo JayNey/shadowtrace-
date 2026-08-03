@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.auth import ROLE_APPROVER, Principal
+from app.core.auth import ROLE_ADMIN, Principal
 from app.core.errors import ResourceNotFoundError, ValidationError
 from app.db.orm.detection_governance import DetectionGovernanceDecisionORM
 from app.models.detection_evaluation import DetectionEvaluationArtifact
@@ -32,9 +32,22 @@ from app.services.detection_governance_binding import (
 from app.services.detection_governance_policy import (
     DETECTION_GOVERNANCE_POLICY_VERSION,
     assess_governance_eligibility,
+    get_detection_governance_policy,
 )
 
 _SYSTEM_REVIEWER = "system:detection-governance"
+
+
+def assert_governance_tenant_access(principal: Principal, tenant_id: str) -> None:
+    """Fail closed when a non-admin principal accesses another tenant's records."""
+    if principal.has_any_role([ROLE_ADMIN]):
+        return
+    scoped = principal.tenant_id
+    if not scoped or scoped != tenant_id:
+        raise ResourceNotFoundError(
+            "detection governance decision not found",
+            details={"tenant_id": tenant_id, "reason": "tenant_scope_denied"},
+        )
 
 
 class DetectionGovernanceService:
@@ -54,7 +67,10 @@ class DetectionGovernanceService:
         artifact: DetectionEvaluationArtifact,
         *,
         threshold_manifest_path: Path | None = None,
+        principal: Principal | None = None,
     ):
+        if principal is not None:
+            assert_governance_tenant_access(principal, artifact.tenant_id)
         return assess_governance_eligibility(
             artifact,
             threshold_manifest_path=threshold_manifest_path,
@@ -68,6 +84,7 @@ class DetectionGovernanceService:
         *,
         threshold_manifest_path: Path | None = None,
     ) -> DetectionGovernanceDecision:
+        assert_governance_tenant_access(principal, artifact.tenant_id)
         if request.decision not in {
             DetectionGovernanceDecisionKind.APPROVE,
             DetectionGovernanceDecisionKind.REJECT,
@@ -77,6 +94,11 @@ class DetectionGovernanceService:
                 details={"decision": request.decision.value},
             )
         self._require_human_reviewer(principal)
+        if request.decision == DetectionGovernanceDecisionKind.APPROVE and threshold_manifest_path is None:
+            raise ValidationError(
+                "approval blocked: threshold_manifest_path required",
+                details={"reason": "threshold_manifest_path_missing"},
+            )
 
         assessment = assess_governance_eligibility(
             artifact,
@@ -111,6 +133,10 @@ class DetectionGovernanceService:
         )
 
         decided_at = self._now()
+        expires_at = request.expires_at
+        if request.decision == DetectionGovernanceDecisionKind.APPROVE and expires_at is None:
+            policy = get_detection_governance_policy()
+            expires_at = decided_at + timedelta(hours=policy.default_approval_ttl_hours)
         decision_id = await self._new_decision_id()
         decision = finalize_decision(
             DetectionGovernanceDecision(
@@ -127,7 +153,7 @@ class DetectionGovernanceService:
                 reason_codes=reason_codes,
                 reason_note=request.reason_note.strip(),
                 decided_at=decided_at,
-                expires_at=request.expires_at,
+                expires_at=expires_at,
             )
         )
         await self._insert_decision(
@@ -146,6 +172,7 @@ class DetectionGovernanceService:
     ) -> DetectionGovernanceDecision:
         self._require_human_reviewer(principal)
         target = await self.get_decision(decision_id, tenant_id=tenant_id)
+        assert_governance_tenant_access(principal, target.tenant_id)
         if target.decision != DetectionGovernanceDecisionKind.APPROVE:
             raise ValidationError(
                 "only approve decisions can be revoked",
@@ -186,49 +213,64 @@ class DetectionGovernanceService:
         now = self._now()
         expired_ids: list[str] = []
         async with self._session_factory() as session:
-            rows = list(
-                await session.scalars(
-                    select(DetectionGovernanceDecisionORM).order_by(
-                        DetectionGovernanceDecisionORM.decided_at.asc()
+            async with session.begin():
+                rows = list(
+                    await session.scalars(
+                        select(DetectionGovernanceDecisionORM)
+                        .order_by(DetectionGovernanceDecisionORM.decided_at.asc())
+                        .with_for_update()
                     )
                 )
-            )
-        decisions = [_row_to_decision(row) for row in rows]
-        by_binding: dict[str, list[DetectionGovernanceDecision]] = {}
-        for decision in decisions:
-            by_binding.setdefault(decision.binding_hash, []).append(decision)
+                decisions = [_row_to_decision(row) for row in rows]
+                by_binding: dict[str, list[DetectionGovernanceDecision]] = {}
+                for decision in decisions:
+                    by_binding.setdefault(decision.binding_hash, []).append(decision)
 
-        for current_binding_hash, chain in by_binding.items():
-            if binding_hash is not None and current_binding_hash != binding_hash:
-                continue
-            for record in sorted(chain, key=lambda item: item.decided_at):
-                if record.decision != DetectionGovernanceDecisionKind.APPROVE:
-                    continue
-                if record.expires_at is None or record.expires_at > now:
-                    continue
-                if _is_superseded(record, chain):
-                    continue
-                expire_id = await self._new_decision_id()
-                expire = finalize_decision(
-                    DetectionGovernanceDecision(
-                        decision_id=expire_id,
-                        tenant_id=record.tenant_id,
-                        decision=DetectionGovernanceDecisionKind.EXPIRE,
-                        candidate_binding=record.candidate_binding,
-                        evaluation_binding=record.evaluation_binding,
-                        threshold_binding=record.threshold_binding,
-                        binding_hash=record.binding_hash,
-                        policy_version=DETECTION_GOVERNANCE_POLICY_VERSION,
-                        reviewer_subject=_SYSTEM_REVIEWER,
-                        reviewer_roles=[],
-                        reason_codes=[DetectionGovernanceReasonCode.DECISION_EXPIRED],
-                        reason_note=f"approval expired at {record.expires_at.isoformat()}",
-                        decided_at=now,
-                        supersedes_decision_id=record.decision_id,
-                    )
-                )
-                await self._insert_decision(expire, require_no_active_approval=False)
-                expired_ids.append(expire.decision_id)
+                for current_binding_hash, chain in by_binding.items():
+                    if binding_hash is not None and current_binding_hash != binding_hash:
+                        continue
+                    for record in sorted(chain, key=lambda item: item.decided_at):
+                        if record.decision != DetectionGovernanceDecisionKind.APPROVE:
+                            continue
+                        if record.expires_at is None or record.expires_at > now:
+                            continue
+                        if _is_superseded(record, chain):
+                            continue
+                        expire_id = await self._new_decision_id_in_session(session)
+                        expire = finalize_decision(
+                            DetectionGovernanceDecision(
+                                decision_id=expire_id,
+                                tenant_id=record.tenant_id,
+                                decision=DetectionGovernanceDecisionKind.EXPIRE,
+                                candidate_binding=record.candidate_binding,
+                                evaluation_binding=record.evaluation_binding,
+                                threshold_binding=record.threshold_binding,
+                                binding_hash=record.binding_hash,
+                                policy_version=DETECTION_GOVERNANCE_POLICY_VERSION,
+                                reviewer_subject=_SYSTEM_REVIEWER,
+                                reviewer_roles=[],
+                                reason_codes=[DetectionGovernanceReasonCode.DECISION_EXPIRED],
+                                reason_note=f"approval expired at {record.expires_at.isoformat()}",
+                                decided_at=now,
+                                supersedes_decision_id=record.decision_id,
+                            )
+                        )
+                        session.add(
+                            DetectionGovernanceDecisionORM(
+                                decision_id=expire.decision_id,
+                                tenant_id=expire.tenant_id,
+                                decision=expire.decision.value,
+                                binding_hash=expire.binding_hash,
+                                decision_hash=expire.decision_hash,
+                                payload=expire.model_dump(mode="json"),
+                                reviewer_subject=expire.reviewer_subject,
+                                supersedes_decision_id=expire.supersedes_decision_id,
+                                expires_at=expire.expires_at,
+                                decided_at=expire.decided_at,
+                            )
+                        )
+                        chain.append(expire)
+                        expired_ids.append(expire.decision_id)
         return expired_ids
 
     async def get_decision(
@@ -236,6 +278,7 @@ class DetectionGovernanceService:
         decision_id: str,
         *,
         tenant_id: str | None = None,
+        principal: Principal | None = None,
     ) -> DetectionGovernanceDecision:
         async with self._session_factory() as session:
             row = await session.get(DetectionGovernanceDecisionORM, decision_id)
@@ -250,6 +293,8 @@ class DetectionGovernanceService:
                 "detection governance decision not found",
                 details={"decision_id": decision_id, "tenant_id": tenant_id},
             )
+        if principal is not None:
+            assert_governance_tenant_access(principal, decision.tenant_id)
         return decision
 
     async def list_decisions(
@@ -259,7 +304,10 @@ class DetectionGovernanceService:
         binding_hash: str | None = None,
         limit: int = 50,
         offset: int = 0,
+        principal: Principal | None = None,
     ) -> tuple[list[DetectionGovernanceDecision], int]:
+        if tenant_id is not None and principal is not None:
+            assert_governance_tenant_access(principal, tenant_id)
         safe_limit = max(1, min(limit, 200))
         safe_offset = max(0, offset)
         async with self._session_factory() as session:
@@ -288,8 +336,11 @@ class DetectionGovernanceService:
         artifact: DetectionEvaluationArtifact,
         *,
         binding_hash: str | None = None,
+        principal: Principal | None = None,
     ) -> DetectionGovernancePromotionGateResult:
         """Read-only promotion eligibility snapshot for #629 (Phase A helper)."""
+        if principal is not None:
+            assert_governance_tenant_access(principal, artifact.tenant_id)
         candidate_binding = build_candidate_binding(artifact)
         evaluation_binding = build_evaluation_binding(artifact)
         threshold_binding = build_threshold_binding(artifact)
@@ -386,15 +437,20 @@ class DetectionGovernanceService:
 
     async def _new_decision_id(self) -> str:
         async with self._session_factory() as session:
-            for _ in range(8):
-                decision_id = f"dgov-{secrets.token_hex(4)}"
-                existing = await session.get(DetectionGovernanceDecisionORM, decision_id)
-                if existing is None:
-                    return decision_id
+            return await self._new_decision_id_in_session(session)
+
+    async def _new_decision_id_in_session(self, session: AsyncSession) -> str:
+        for _ in range(8):
+            decision_id = f"dgov-{secrets.token_hex(4)}"
+            existing = await session.get(DetectionGovernanceDecisionORM, decision_id)
+            if existing is None:
+                return decision_id
         raise RuntimeError("failed to allocate detection governance decision_id")
 
     @staticmethod
     def _require_human_reviewer(principal: Principal) -> None:
+        from app.core.auth import ROLE_APPROVER
+
         if not principal.has_any_role([ROLE_APPROVER]):
             raise ValidationError(
                 "governance decision requires approver role",
@@ -458,4 +514,4 @@ def _resolve_active_approval(
     return active
 
 
-__all__ = ["DetectionGovernanceService"]
+__all__ = ["DetectionGovernanceService", "assert_governance_tenant_access"]
