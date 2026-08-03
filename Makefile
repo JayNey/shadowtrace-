@@ -57,7 +57,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -544,6 +544,47 @@ detection-evaluation-run:
 		--seed 42 \
 		--threshold-manifest "$(CURDIR)/data/evaluation/detection_shadow_v1/threshold_manifest.json" \
 		--compare-baseline "$(CURDIR)/data/evaluation/detection_shadow_v1/baseline_artifact.json"
+
+# --- ISSUE-126 detection production comparison (Phase B; requires promoted candidates) --- #
+detection-production-comparison-run:
+	@set -eu; \
+	project="$(INTEGRATION_PROJECT_NAME)"; \
+	compose() { \
+		COMPOSE_PROJECT_NAME="$$project" \
+		POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \
+		BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
+		docker compose --project-name "$$project" \
+			-f "$(COMPOSE_FILE)" "$$@"; \
+	}; \
+	cleanup() { \
+		status=$$?; \
+		trap - EXIT INT TERM; \
+		compose down --volumes --remove-orphans || true; \
+		exit "$$status"; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	compose up -d --wait --wait-timeout 120 postgres redis; \
+	cd "$(CURDIR)/backend"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" $(PYTHON) -m alembic upgrade head; \
+	DETECTION_PHASE_A="$(CURDIR)/artifacts/evaluation/detection_latest_run.json"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" $(PYTHON) -m scripts.run_detection_evaluation \
+		--output "$$DETECTION_PHASE_A" \
+		--code-sha "$$(git -C "$(CURDIR)" rev-parse HEAD)" \
+		--seed 42 \
+		--threshold-manifest "$(CURDIR)/data/evaluation/detection_shadow_v1/threshold_manifest.json"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		$(PYTHON) -m scripts.bootstrap_detection_production_promotions \
+		--phase-a-artifact "$$DETECTION_PHASE_A" \
+		--dataset-dir "$(CURDIR)/data/evaluation/detection_production_v1" \
+		--threshold-manifest "$(CURDIR)/data/evaluation/detection_shadow_v1/threshold_manifest.json"; \
+	DATABASE_URL="$(CI_DATABASE_URL)" REDIS_URL="$(CI_REDIS_URL)" \
+		$(PYTHON) -m scripts.run_detection_production_comparison \
+		--phase-a-artifact "$$DETECTION_PHASE_A" \
+		--dataset-dir "$(CURDIR)/data/evaluation/detection_production_v1" \
+		--output "$(CURDIR)/artifacts/evaluation/detection_production_latest.json" \
+		--code-sha "$$(git -C "$(CURDIR)" rev-parse HEAD)" \
+		--seed 42 \
+		--compare-baseline "$(CURDIR)/data/evaluation/detection_production_v1/baseline_comparison_artifact.json"
 
 # --- ISSUE-009 local / CI parity gates ------------------------------------ #
 ci-lint:

@@ -1,0 +1,92 @@
+{
+  "$defs": {
+    "DetectionProductionCaseBinding": {
+      "additionalProperties": false,
+      "description": "Fixture/manifest expectation for one promoted evaluation case.",
+      "properties": {
+        "case_id": {
+          "minLength": 1,
+          "title": "Case Id",
+          "type": "string"
+        },
+        "expect_promotion": {
+          "default": true,
+          "title": "Expect Promotion",
+          "type": "boolean"
+        },
+        "expected_production_severity": {
+          "anyOf": [
+            {
+              "maxLength": 32,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Production Severity"
+        },
+        "min_coverage_ready_ratio": {
+          "anyOf": [
+            {
+              "maximum": 1.0,
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Min Coverage Ready Ratio"
+        }
+      },
+      "required": [
+        "case_id"
+      ],
+      "title": "DetectionProductionCaseBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Pinned case bindings for production comparison datasets.",
+  "properties": {
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "shadow_dataset_id": {
+      "minLength": 1,
+      "title": "Shadow Dataset Id",
+      "type": "string"
+    },
+    "shadow_dataset_version": {
+      "minLength": 1,
+      "title": "Shadow Dataset Version",
+      "type": "string"
+    },
+    "bindings": {
+      "items": {
+        "$ref": "#/$defs/DetectionProductionCaseBinding"
+      },
+      "title": "Bindings",
+      "type": "array"
+    },
+    "content_hash": {
+      "default": "",
+      "maxLength": 64,
+      "minLength": 0,
+      "title": "Content Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "shadow_dataset_id",
+    "shadow_dataset_version"
+  ],
+  "title": "DetectionProductionBindingManifest",
+  "type": "object"
+}

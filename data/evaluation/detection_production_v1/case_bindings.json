@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "shadow_dataset_id": "detection_shadow_v1",
+  "shadow_dataset_version": "2026.08.02",
+  "bindings": [
+    {
+      "case_id": "threat_event_match",
+      "expect_promotion": true,
+      "expected_production_severity": "medium",
+      "min_coverage_ready_ratio": 0.0
+    }
+  ]
+}

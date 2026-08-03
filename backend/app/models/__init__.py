@@ -109,6 +109,14 @@ from app.models.detection_evaluation import (
     DetectionTenantSafetyProbe,
     DetectionTenantSafetySummary,
 )
+from app.models.detection_production_comparison import (
+    DetectionProductionBindingManifest,
+    DetectionProductionCaseBinding,
+    DetectionProductionCaseComparison,
+    DetectionProductionComparisonArtifact,
+    DetectionProductionComparisonConfig,
+    DetectionProductionCoverageDrift,
+)
 from app.models.detection_governance import (
     DetectionGovernanceCandidateBinding,
     DetectionGovernanceDecision,
@@ -432,6 +440,13 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "DetectionResourceSummary": DetectionResourceSummary,
     "DetectionTenantSafetyProbe": DetectionTenantSafetyProbe,
     "DetectionTenantSafetySummary": DetectionTenantSafetySummary,
+    # detection production comparison (ISSUE-126 / #631 Phase B)
+    "DetectionProductionComparisonArtifact": DetectionProductionComparisonArtifact,
+    "DetectionProductionComparisonConfig": DetectionProductionComparisonConfig,
+    "DetectionProductionCaseBinding": DetectionProductionCaseBinding,
+    "DetectionProductionCaseComparison": DetectionProductionCaseComparison,
+    "DetectionProductionBindingManifest": DetectionProductionBindingManifest,
+    "DetectionProductionCoverageDrift": DetectionProductionCoverageDrift,
     # detection governance (ISSUE-125 / #630 Phase A)
     "DetectionGovernanceCandidateBinding": DetectionGovernanceCandidateBinding,
     "DetectionGovernanceDecision": DetectionGovernanceDecision,

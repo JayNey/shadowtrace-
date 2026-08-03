@@ -1,0 +1,45 @@
+{
+  "additionalProperties": false,
+  "description": "Frozen comparison configuration bound into the artifact.",
+  "properties": {
+    "phase_a_artifact_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Phase A Artifact Hash",
+      "type": "string"
+    },
+    "phase_a_evaluation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Phase A Evaluation Id",
+      "type": "string"
+    },
+    "binding_manifest_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Binding Manifest Hash",
+      "type": "string"
+    },
+    "comparison_fidelity": {
+      "default": "production_post_promotion_v1",
+      "description": "Production signals from #629 promotions + #633 context snapshots.",
+      "minLength": 1,
+      "title": "Comparison Fidelity",
+      "type": "string"
+    },
+    "seed": {
+      "default": 0,
+      "description": "Reserved comparison run seed for provenance (not used in diff logic).",
+      "minimum": 0,
+      "title": "Seed",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "phase_a_artifact_hash",
+    "phase_a_evaluation_id",
+    "binding_manifest_hash"
+  ],
+  "title": "DetectionProductionComparisonConfig",
+  "type": "object"
+}

@@ -1,0 +1,8 @@
+{
+  "dataset_id": "detection_production_v1",
+  "dataset_version": "2026.08.04",
+  "shadow_dataset_id": "detection_shadow_v1",
+  "shadow_dataset_version": "2026.08.02",
+  "schema_version": "1.0",
+  "content_hash": "473e8fc31f00ce20c03ab8e714070c19207c04de6bca81dada5cdb1cc49a2470"
+}

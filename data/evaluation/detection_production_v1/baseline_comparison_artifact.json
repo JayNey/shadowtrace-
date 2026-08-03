@@ -1,0 +1,49 @@
+{
+  "advisory_note": "Advisory recommendation only; does not modify models/rules, governance state, or the Phase A evaluation artifact.",
+  "artifact_hash": "",
+  "case_comparisons": [
+    {
+      "case_id": "threat_event_match",
+      "drift_reasons": [],
+      "outcome_status": "aligned",
+      "shadow_candidate_count": 1,
+      "shadow_case_status": "completed",
+      "slice_type": "threat"
+    }
+  ],
+  "code_sha": "baseline0001",
+  "comparison_id": "baseline-comparison-v1",
+  "completed_at": "2026-08-04T00:00:00Z",
+  "config": {
+    "binding_manifest_hash": "473e8fc31f00ce20c03ab8e714070c19207c04de6bca81dada5cdb1cc49a2470",
+    "comparison_fidelity": "production_post_promotion_v1",
+    "phase_a_artifact_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "phase_a_evaluation_id": "baseline-phase-a",
+    "seed": 42
+  },
+  "coverage_drift": {
+    "compared_case_count": 1,
+    "drift_detected": false,
+    "drift_reasons": [],
+    "production_feature_snapshot_total": 0,
+    "production_insufficient_coverage_total": 0,
+    "production_ready_snapshot_total": 0
+  },
+  "errors": [],
+  "phase_a_refs": {
+    "artifact_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "code_sha": "baseline0001",
+    "dataset_content_hash": "4786dcbb13e5b510df2960b80ac488d1dc1b7eee40f260e8c0e93f093990ae48",
+    "dataset_id": "detection_shadow_v1",
+    "dataset_version": "2026.08.02",
+    "evaluation_id": "baseline-phase-a"
+  },
+  "recommendation": "continue",
+  "recommendation_reasons": [
+    "production outcomes aligned with shadow evaluation"
+  ],
+  "schema_version": "1.0",
+  "started_at": "2026-08-04T00:00:00Z",
+  "status": "completed",
+  "tenant_id": "tenant-det-threat"
+}

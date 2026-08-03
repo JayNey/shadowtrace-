@@ -1,0 +1,158 @@
+{
+  "$defs": {
+    "DetectionProductionOutcomeStatus": {
+      "description": "Shadow vs production alignment for one evaluation case.",
+      "enum": [
+        "aligned",
+        "drift",
+        "missing_promotion",
+        "unexpected_promotion",
+        "snapshot_missing",
+        "not_applicable"
+      ],
+      "title": "DetectionProductionOutcomeStatus",
+      "type": "string"
+    },
+    "EvaluationRunStatus": {
+      "enum": [
+        "completed",
+        "failed",
+        "unevaluable"
+      ],
+      "title": "EvaluationRunStatus",
+      "type": "string"
+    },
+    "SliceType": {
+      "description": "Evaluation slices; extend via reviewed schema revision only (#618 / #642).",
+      "enum": [
+        "threat",
+        "benign",
+        "unevaluable",
+        "security",
+        "knowledge",
+        "agentic",
+        "coordination"
+      ],
+      "title": "SliceType",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Per-case shadow vs production outcome comparison.",
+  "properties": {
+    "case_id": {
+      "minLength": 1,
+      "title": "Case Id",
+      "type": "string"
+    },
+    "slice_type": {
+      "$ref": "#/$defs/SliceType"
+    },
+    "shadow_case_status": {
+      "$ref": "#/$defs/EvaluationRunStatus"
+    },
+    "shadow_candidate_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Shadow Candidate Count",
+      "type": "integer"
+    },
+    "outcome_status": {
+      "$ref": "#/$defs/DetectionProductionOutcomeStatus"
+    },
+    "promotion_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Promotion Id"
+    },
+    "event_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Id"
+    },
+    "candidate_detection_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Candidate Detection Id"
+    },
+    "production_severity": {
+      "anyOf": [
+        {
+          "maxLength": 32,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Production Severity"
+    },
+    "coverage_ready_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Coverage Ready Count"
+    },
+    "coverage_total_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Coverage Total Count"
+    },
+    "drift_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16,
+      "title": "Drift Reasons",
+      "type": "array"
+    }
+  },
+  "required": [
+    "case_id",
+    "slice_type",
+    "shadow_case_status",
+    "outcome_status"
+  ],
+  "title": "DetectionProductionCaseComparison",
+  "type": "object"
+}

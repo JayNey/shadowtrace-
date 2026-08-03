@@ -1,0 +1,45 @@
+{
+  "additionalProperties": false,
+  "description": "Dataset-level production coverage drift rollup.",
+  "properties": {
+    "compared_case_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Compared Case Count",
+      "type": "integer"
+    },
+    "production_ready_snapshot_total": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Production Ready Snapshot Total",
+      "type": "integer"
+    },
+    "production_feature_snapshot_total": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Production Feature Snapshot Total",
+      "type": "integer"
+    },
+    "production_insufficient_coverage_total": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Production Insufficient Coverage Total",
+      "type": "integer"
+    },
+    "drift_detected": {
+      "default": false,
+      "title": "Drift Detected",
+      "type": "boolean"
+    },
+    "drift_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 16,
+      "title": "Drift Reasons",
+      "type": "array"
+    }
+  },
+  "title": "DetectionProductionCoverageDrift",
+  "type": "object"
+}
