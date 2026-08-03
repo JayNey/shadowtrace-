@@ -51,7 +51,7 @@ class ScorerRegistry:
 
 
 def default_scorer_registry() -> ScorerRegistry:
-    """Built-in Phase A/B scorers for threat/benign/unevaluable slices."""
+    """Built-in evaluation scorers for threat/benign and #642 slice variants."""
     from app.evaluation.scorers.agentic_scorers import AgenticSliceScorer
     from app.evaluation.scorers.coordination_scorers import CoordinationSliceScorer
     from app.evaluation.scorers.grouping_scorers import (

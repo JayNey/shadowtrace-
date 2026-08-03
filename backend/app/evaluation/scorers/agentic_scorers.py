@@ -16,8 +16,12 @@ _KIND_REQUIRED_FIELDS: dict[AgenticExpectationKind, tuple[str, ...]] = {
     AgenticExpectationKind.BOUNDED_PIVOT_SUCCESS: (
         "expected_pivot_completed",
         "expected_step_count_within_bounds",
+        "expected_typed_artifact_produced",
     ),
-    AgenticExpectationKind.EVIDENCE_FIDELITY: ("expected_evidence_refs_valid",),
+    AgenticExpectationKind.EVIDENCE_FIDELITY: (
+        "expected_evidence_refs_valid",
+        "expected_typed_artifact_produced",
+    ),
     AgenticExpectationKind.NO_RAW_COT: ("expected_raw_cot_persisted",),
     AgenticExpectationKind.SHADOW_CROSS_TENANT_DENIED: ("expected_cross_tenant_denied",),
     AgenticExpectationKind.SHADOW_BUDGET_RACE: ("expected_budget_race_rejected",),
@@ -137,6 +141,14 @@ class AgenticSliceScorer:
                 f"observed kind {observed.expectation_kind!r} != "
                 f"{expectation.expectation_kind.value!r}",
             )
+
+        if expectation.expectation_kind is AgenticExpectationKind.SHADOW_DEGRADED_FAIL_CLOSED:
+            if not observed.dependency_degraded:
+                return _fail(
+                    self.scorer_id,
+                    "dependency_degraded_required",
+                    "shadow_degraded_fail_closed requires dependency_degraded=True",
+                )
 
         for expected_field, observed_field in _OBSERVED_FIELD_BY_EXPECTATION.items():
             expected = getattr(expectation, expected_field)

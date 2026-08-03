@@ -10,5 +10,5 @@
     "prompt_release_id": "prompt-eval-v1",
     "config_profile": "mock_p0_agentic_coordination"
   },
-  "evaluation_notes": "ISSUE-136 Phase B (agentic/ReAct shadow) and Phase C (coordination/crash) deterministic cases."
+  "evaluation_notes": "ISSUE-136 Phase B/C deterministic cases. Replay fidelity=slice_adapter_stub (mock adapters only; does not invoke #641 ShadowQueryPivotService or #639 AgentTask ledger). Committed fixtures use replay_variant=pass; negative paths covered by unit tests with replay_variant=fail."
 }

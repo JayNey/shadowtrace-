@@ -1,8 +1,12 @@
-"""Deterministic slice replay adapters for security/knowledge evaluation (#642 Phase A).
+"""Deterministic slice replay adapters for evaluation slices (#642 Phase A/B/C).
 
-Adapters simulate grant-boundary and retrieval-pipeline decision paths without
-touching production stores. Observations are derived from expectation_kind +
-seed, not copied field-for-field from truth expectations (unlike echo_truth_stub).
+Adapters simulate security grant boundaries, knowledge retrieval, ReAct shadow
+pivot paths, and task/artifact coordination without touching production stores.
+Observations are derived from expectation_kind (+ seed for knowledge plan_hash),
+not copied field-for-field from truth expectations (unlike echo_truth_stub).
+
+Replay fidelity label: ``slice_adapter_stub`` — does not invoke live #641/#639
+runtime services; negative paths use ``replay_variant=fail`` in unit tests.
 """
 
 from __future__ import annotations
