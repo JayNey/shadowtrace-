@@ -714,7 +714,8 @@ class SourceIngester:
     ) -> IngestResult:
         """Canonical single-alert ingest — surfaces EventService typed IngestResult unchanged."""
         result = await self._events.ingest_source_object(
-            source_to_ingestable(alert, source_type=source_type)
+            source_to_ingestable(alert, source_type=source_type),
+            fail_soft=True,
         )
         if not await self._project_behavior_observation(result.source_record_id):
             logger.warning(

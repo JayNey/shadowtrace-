@@ -210,6 +210,28 @@ def _bundle_correlation_outcome(bundle: "_CreateBundle") -> SourceIngestCorrelat
     return SourceIngestCorrelationOutcome.DUPLICATE
 
 
+def _source_record_id_for(source: IngestableSource) -> str:
+    ref = source.reference
+    identity = canonical_source_identity(
+        source_product=ref.source_product,
+        source_tenant_id=ref.source_tenant_id,
+        connector_id=ref.connector_id,
+        source_kind=ref.source_kind.value,
+        source_object_id=ref.source_object_id,
+    )
+    return stable_source_record_id(identity=identity)
+
+
+def _failed_ingest_result(exc: ValidationError, source: IngestableSource) -> IngestResult:
+    return IngestResult(
+        source_record_id=_source_record_id_for(source),
+        event_id=None,
+        accepted=False,
+        error_code=exc.error_code,
+        error_message=exc.message,
+    )
+
+
 def _ingest_result_from_bundle(bundle: "_CreateBundle") -> IngestResult:
     return IngestResult(
         source_record_id=bundle.source_record_id,
@@ -460,9 +482,19 @@ class EventService:
     # Ingest / create
     # ------------------------------------------------------------------ #
 
-    async def ingest_source_object(self, source_object: IngestableSource) -> IngestResult:
+    async def ingest_source_object(
+        self,
+        source_object: IngestableSource,
+        *,
+        fail_soft: bool = False,
+    ) -> IngestResult:
         """Upsert source_object and attach / create / promote an internal event."""
-        bundle = await self._ingest_with_unique_retry(source_object)
+        try:
+            bundle = await self._ingest_with_unique_retry(source_object)
+        except ValidationError as exc:
+            if fail_soft:
+                return _failed_ingest_result(exc, source_object)
+            raise
         await self._post_create_side_effects(
             bundle.event,
             force_context_refresh=not bundle.idempotent,
@@ -1973,6 +2005,9 @@ class EventService:
             source_record_id=related_record_id,
             created=False,
             idempotent=False,
+            source_object_id=source.reference.source_object_id,
+            source_revision=int(related_obj.current_state_version),
+            link_role=LINK_ROLE_RELATED,
         )
 
     async def _event_has_merge_blockers(self, session: AsyncSession, event_id: str) -> bool:

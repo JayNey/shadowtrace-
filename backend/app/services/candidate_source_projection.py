@@ -59,7 +59,6 @@ def candidate_to_source_alert(
         "candidate_content_hash": candidate.content_hash,
         "provenance_snapshot": candidate.provenance.model_dump(mode="json"),
         "group_key": candidate.group_key,
-        "provenance": candidate.provenance.model_dump(mode="json"),
     }
     reference = SourceReference(
         source_kind=SourceObjectKind.ALERT,

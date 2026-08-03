@@ -55,8 +55,12 @@ def build_promotion_key(
     candidate_detection_id: str,
     candidate_content_hash: str,
     decision_id: str,
+    package_version: int,
 ) -> str:
-    return f"{candidate_detection_id}|{candidate_content_hash}|{decision_id}"
+    return (
+        f"{candidate_detection_id}|{candidate_content_hash}|"
+        f"v{package_version}|{decision_id}"
+    )
 
 
 class DetectionPromotionService:
@@ -129,18 +133,23 @@ class DetectionPromotionService:
             candidate_detection_id=candidate.candidate_detection_id,
             candidate_content_hash=candidate.content_hash,
             decision_id=decision_id,
+            package_version=candidate.package_version,
         )
         existing = await self._get_by_promotion_key(promotion_key)
         if existing is not None:
             if existing.status is DetectionPromotionStatus.COMPLETED:
-                return DetectionPromotionResult(
-                    promotion_id=existing.promotion_id,
-                    status=existing.status,
-                    record=existing,
-                    ingest_result=existing.ingest_result,
-                    resumed=True,
+                return self._finalize_promotion_result(
+                    DetectionPromotionResult(
+                        promotion_id=existing.promotion_id,
+                        status=existing.status,
+                        record=existing,
+                        ingest_result=existing.ingest_result,
+                        resumed=True,
+                    )
                 )
-            return await self._resume(existing, artifact, decision, candidate)
+            return self._finalize_promotion_result(
+                await self._resume(existing, artifact, decision, candidate)
+            )
 
         package_row = await self._load_package_row(candidate.package_id, request.tenant_id)
         package = row_to_detection_rule_package(package_row)
@@ -176,7 +185,9 @@ class DetectionPromotionService:
             updated_at=self._now(),
         )
         record = await self._insert_ledger(record)
-        return await self._advance(record, artifact, decision, candidate, package_row)
+        return self._finalize_promotion_result(
+            await self._advance(record, artifact, decision, candidate, package_row)
+        )
 
     async def _resume(
         self,
@@ -286,6 +297,26 @@ class DetectionPromotionService:
             resumed=resumed,
         )
 
+    @staticmethod
+    def _finalize_promotion_result(
+        result: DetectionPromotionResult,
+    ) -> DetectionPromotionResult:
+        if result.status is DetectionPromotionStatus.DEAD:
+            raise ValidationError(
+                "promotion failed: retry budget exhausted",
+                details={
+                    "promotion_id": result.promotion_id,
+                    "reason_codes": [code.value for code in result.record.reason_codes],
+                    "reason_message": result.record.reason_message,
+                    "ingest_result": (
+                        result.ingest_result.model_dump(mode="json")
+                        if result.ingest_result is not None
+                        else None
+                    ),
+                },
+            )
+        return result
+
     async def _maybe_transition_package_to_production(
         self,
         package_row: orm.DetectionRulePackage,
@@ -329,6 +360,7 @@ class DetectionPromotionService:
                 or package.runtime_state is not DetectionRuleRuntimeState.PRODUCTION_ACTIVE
             ):
                 raise
+
     @staticmethod
     def _artifact_approved_candidate_keys(
         artifact: DetectionEvaluationArtifact,

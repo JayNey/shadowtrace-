@@ -53,6 +53,7 @@ _graph_sync_service: Any = None  # GraphSyncService (ISSUE-082)
 _neo4j_client: Any = None  # Neo4jClient (ISSUE-082)
 _memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
 _detection_governance: Any = None  # DetectionGovernanceService (ISSUE-125)
+_detection_promotion: Any = None  # DetectionPromotionService (ISSUE-124)
 _decision_record_service: Any = None  # DecisionRecordService (ISSUE-131)
 _tool_call_grant_service: Any = None  # ToolCallGrantService (ISSUE-134)
 
@@ -264,6 +265,33 @@ def get_detection_governance_service() -> Any:
 
 
 DetectionGovernanceDep = Annotated[Any, Depends(get_detection_governance_service)]
+
+
+async def get_detection_promotion_service() -> Any:
+    """Return the shared detection promotion saga service (ISSUE-124)."""
+    global _detection_promotion
+    if _detection_promotion is None:
+        from app.ingestion.source_ingester import SourceIngester
+        from app.services.detection_promotion_service import DetectionPromotionService
+
+        settings = get_settings()
+        session_factory = _get_session_factory()
+        event_service = await get_event_service()
+        ingester = SourceIngester(
+            event_service,
+            session_factory,
+            source_mode=settings.source_mode,
+        )
+        _detection_promotion = DetectionPromotionService(
+            session_factory,
+            governance=get_detection_governance_service(),
+            event_service=event_service,
+            source_ingester=ingester,
+        )
+    return _detection_promotion
+
+
+DetectionPromotionDep = Annotated[Any, Depends(get_detection_promotion_service)]
 
 
 def _get_adapter_registry() -> Any:
@@ -897,7 +925,7 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
-    global _memory_governance, _detection_governance, _decision_record_service, _tool_call_grant_service
+    global _memory_governance, _detection_governance, _detection_promotion, _decision_record_service, _tool_call_grant_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
     from app.playbook.resources import reset_playbook_resources_cache
@@ -936,5 +964,6 @@ def reset_deps() -> None:
     _neo4j_client = None
     _memory_governance = None
     _detection_governance = None
+    _detection_promotion = None
     _decision_record_service = None
     _tool_call_grant_service = None

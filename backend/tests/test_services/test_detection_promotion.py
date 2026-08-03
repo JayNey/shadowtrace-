@@ -26,6 +26,7 @@ from app.db.orm.detection_promotion import (
     DerivedDetectionConnectorORM,
     DetectionPromotionORM,
 )
+from app.db.orm.approval import ApprovalRecordORM
 from app.evaluation.detection.artifact import finalize_detection_artifact
 from app.evaluation.detection.fixture_loader import load_detection_fixture_index
 from app.evaluation.detection.fixture_seeder import (
@@ -49,6 +50,8 @@ from app.models.detection_governance import (
     DetectionGovernanceDecisionKind,
     DetectionGovernanceDecisionRequest,
     DetectionGovernanceEvaluationBinding,
+    DetectionGovernancePromotionGateResult,
+    DetectionGovernanceReasonCode,
     DetectionGovernanceThresholdBinding,
 )
 from app.models.detection_promotion import (
@@ -157,24 +160,34 @@ async def session_factory(
 async def clean_promotion_tables(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> AsyncIterator[None]:
+    async def _clear_event_graph(session: AsyncSession) -> None:
+        await session.execute(delete(orm.DispositionReceipt))
+        await session.execute(delete(orm.DispositionOutbox))
+        await session.execute(delete(orm.ActionExecutionJob))
+        await session.execute(delete(orm.ToolCallLog))
+        await session.execute(delete(orm.LLMCallLog))
+        await session.execute(delete(orm.EventAuditLog))
+        await session.execute(delete(orm.DecisionRecord))
+        await session.execute(delete(orm.AgentTrace))
+        await session.execute(delete(ApprovalRecordORM))
+        await session.execute(delete(orm.Action))
+        await session.execute(delete(orm.Report))
+        await session.execute(delete(orm.Evidence))
+        await session.execute(delete(DetectionPromotionORM))
+        await session.execute(delete(DerivedDetectionConnectorORM))
+        await session.execute(delete(DetectionGovernanceDecisionORM))
+        await session.execute(delete(orm.SourceEventLink))
+        await session.execute(delete(orm.SourceObject))
+        await session.execute(delete(orm.SecurityEvent))
+
     async with session_factory() as session:
         async with session.begin():
-            await session.execute(delete(DetectionPromotionORM))
-            await session.execute(delete(DerivedDetectionConnectorORM))
-            await session.execute(delete(DetectionGovernanceDecisionORM))
-            await session.execute(delete(orm.SourceEventLink))
-            await session.execute(delete(orm.SourceObject))
-            await session.execute(delete(orm.SecurityEvent))
+            await _clear_event_graph(session)
     await clear_detection_tables(session_factory)
     yield
     async with session_factory() as session:
         async with session.begin():
-            await session.execute(delete(DetectionPromotionORM))
-            await session.execute(delete(DerivedDetectionConnectorORM))
-            await session.execute(delete(DetectionGovernanceDecisionORM))
-            await session.execute(delete(orm.SourceEventLink))
-            await session.execute(delete(orm.SourceObject))
-            await session.execute(delete(orm.SecurityEvent))
+            await _clear_event_graph(session)
     await clear_detection_tables(session_factory)
 
 
@@ -196,9 +209,11 @@ def test_build_promotion_key_includes_candidate_and_decision() -> None:
         candidate_detection_id="cand-1",
         candidate_content_hash="a" * 64,
         decision_id="dgov-123",
+        package_version=2,
     )
     assert "cand-1" in key
     assert "dgov-123" in key
+    assert "v2" in key
 
 
 def test_ingest_result_to_typed_maps_provisional_fields() -> None:
@@ -219,6 +234,20 @@ def test_ingest_result_to_typed_maps_provisional_fields() -> None:
     assert typed.correlation_outcome is SourceIngestCorrelationOutcome.CREATED
     assert typed.link_disposition is SourceIngestLinkDisposition.PROVISIONAL
     assert typed.source_object_id == "pdet-123"
+
+
+def test_bundle_correlation_outcome_merged_for_related_link() -> None:
+    from app.services.event_service import _CreateBundle, _bundle_correlation_outcome
+    from app.db import models as orm
+
+    event = orm.SecurityEvent(event_id="evt-merge", row_version=3)
+    bundle = _CreateBundle(
+        event=event,
+        source_record_id="src-related",
+        created=False,
+        link_role="related",
+    )
+    assert _bundle_correlation_outcome(bundle) is SourceIngestCorrelationOutcome.MERGED
 
 
 @pytest_asyncio.fixture
@@ -508,6 +537,7 @@ async def test_promotion_crash_recovery_from_source_persisted(
         candidate_detection_id=candidate.candidate_detection_id,
         candidate_content_hash=candidate.content_hash,
         decision_id=decision.decision_id,
+        package_version=candidate.package_version,
     )
     promotion_id = await promotion._allocate_promotion_id()
     typed = ingest_result_to_typed(
@@ -898,15 +928,24 @@ async def test_promotion_dead_after_retry_budget(
         ),
         threshold_manifest_path=THRESHOLD_PATH,
     )
-    outcome = await promotion.promote_candidate(
-        artifact,
-        DetectionPromotionRequest(
-            tenant_id=seeded.source_tenant_id,
-            candidate_detection_id=candidate.candidate_detection_id,
-            decision_id=decision.decision_id,
-        ),
-    )
-    assert outcome.status is DetectionPromotionStatus.DEAD
+    with pytest.raises(ValidationError, match="retry budget exhausted"):
+        await promotion.promote_candidate(
+            artifact,
+            DetectionPromotionRequest(
+                tenant_id=seeded.source_tenant_id,
+                candidate_detection_id=candidate.candidate_detection_id,
+                decision_id=decision.decision_id,
+            ),
+        )
+
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(DetectionPromotionORM).where(
+                DetectionPromotionORM.candidate_detection_id == candidate.candidate_detection_id
+            )
+        )
+        assert row is not None
+        assert row.status == DetectionPromotionStatus.DEAD.value
 
 
 @pytest.mark.asyncio
@@ -1029,6 +1068,7 @@ async def test_concurrent_promotion_completes_once(
         candidate_detection_id=candidate.candidate_detection_id,
         candidate_content_hash=candidate.content_hash,
         decision_id=decision.decision_id,
+        package_version=candidate.package_version,
     )
     async with session_factory() as session:
         rows = list(
@@ -1088,6 +1128,7 @@ async def test_promotion_link_revision_increments_when_event_id_changes(
         candidate_detection_id=candidate.candidate_detection_id,
         candidate_content_hash=candidate.content_hash,
         decision_id=decision.decision_id,
+        package_version=candidate.package_version,
     )
     promotion_id = await promotion_service._allocate_promotion_id()
     typed = ingest_result_to_typed(
@@ -1146,6 +1187,47 @@ async def test_promotion_link_revision_increments_when_event_id_changes(
     assert resumed.status is DetectionPromotionStatus.COMPLETED
     assert resumed.record.link_revision == 2
     assert resumed.record.event_id == typed.event_id
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_fail_closed_artifact_hash_mismatch(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seeded, candidate, artifact, decision, _ = await _seed_governed_candidate(session_factory)
+    tampered = artifact.model_copy(update={"artifact_hash": "0" * 64})
+
+    async def _gate_allows(
+        _self: DetectionGovernanceService,
+        _artifact: DetectionEvaluationArtifact,
+        **_: object,
+    ) -> DetectionGovernancePromotionGateResult:
+        return DetectionGovernancePromotionGateResult(
+            allowed=True,
+            decision_id=decision.decision_id,
+        )
+
+    monkeypatch.setattr(
+        DetectionGovernanceService,
+        "evaluate_promotion_gate",
+        _gate_allows,
+    )
+
+    with pytest.raises(ValidationError, match="artifact_hash") as exc_info:
+        await promotion_service.promote_candidate(
+            tampered,
+            DetectionPromotionRequest(
+                tenant_id=seeded.source_tenant_id,
+                candidate_detection_id=candidate.candidate_detection_id,
+                decision_id=decision.decision_id,
+            ),
+        )
+    assert (
+        exc_info.value.details.get("reason")
+        == DetectionGovernanceReasonCode.ARTIFACT_HASH_MISMATCH.value
+    )
 
 
 @pytest.mark.asyncio
