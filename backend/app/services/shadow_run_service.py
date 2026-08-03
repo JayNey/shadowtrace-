@@ -182,6 +182,7 @@ class ShadowRunService:
             content_hash=content_hash,
             payload=payload,
             provenance=dict(provenance or {}),
+            retention_expires_at=run.retention_expires_at,
             created_at=datetime.now(UTC),
         )
         async with self._session_factory() as session:
@@ -194,6 +195,7 @@ class ShadowRunService:
                         content_hash=artifact.content_hash,
                         payload=artifact.payload,
                         provenance=artifact.provenance,
+                        retention_expires_at=artifact.retention_expires_at,
                     )
                 )
         return artifact

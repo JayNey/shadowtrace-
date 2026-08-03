@@ -33,6 +33,19 @@
           "title": "Provenance",
           "type": "object"
         },
+        "retention_expires_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retention Expires At"
+        },
         "created_at": {
           "anyOf": [
             {

@@ -50,12 +50,18 @@ def _record_hash(record: DecisionRecord) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+_QUERY_SUCCESS_STATUSES = frozenset({"success", "ok"})
+
+
 def _count_query_invocations(rounds: list[ReActRound]) -> int:
     return sum(
         1
         for round_ in rounds
         if round_.action is not None
         and round_.action.action_type in _QUERY_INVOCATION_TYPES
+        and round_.action_result is not None
+        and str(round_.action_result.get("status", "")).strip().lower()
+        in _QUERY_SUCCESS_STATUSES
     )
 
 
@@ -106,6 +112,14 @@ class ShadowQueryPivotService:
                 shadow_run_id="",
                 status=ShadowRunStatus.REJECTED,
                 rejected_reasons=["missing_tenant_or_principal"],
+                degraded=True,
+            )
+
+        if pipeline is None:
+            return ShadowQueryPivotResult(
+                shadow_run_id="",
+                status=ShadowRunStatus.REJECTED,
+                rejected_reasons=["retrieval_pipeline_unavailable"],
                 degraded=True,
             )
 
@@ -173,6 +187,7 @@ class ShadowQueryPivotService:
             agent_name="shadow_query_pivot",
         )
 
+        react_result = None
         try:
             react_result = await engine.run(
                 request.goal,
@@ -227,18 +242,43 @@ class ShadowQueryPivotService:
                 request.event_id,
                 run.shadow_run_id,
             )
+            rounds = react_result.rounds if react_result is not None else []
+            partial_artifacts: list = []
+            partial_record_ids: list[str] = []
+            if rounds:
+                try:
+                    partial_artifacts = await self._persist_round_artifacts(run, rounds)
+                    partial_record_ids = await self._persist_shadow_decision_records(
+                        run,
+                        request,
+                        rounds,
+                    )
+                except Exception:
+                    logger.exception(
+                        "shadow pivot partial persistence failed event=%s shadow_run=%s",
+                        request.event_id,
+                        run.shadow_run_id,
+                    )
+            step_count = len(rounds)
+            tool_calls = _count_query_invocations(rounds)
             await self._shadow_runs.finalize_run(
                 run.shadow_run_id,
                 status=ShadowRunStatus.FAILED,
-                step_count=0,
-                tool_call_count=0,
+                step_count=step_count,
+                tool_call_count=tool_calls,
                 rejected_reasons=["pivot_execution_error"],
-                result_summary={"detail": str(exc)[:512]},
+                result_summary={
+                    "detail": str(exc)[:512],
+                    "partial_artifact_count": len(partial_artifacts),
+                    "partial_decision_record_count": len(partial_record_ids),
+                },
             )
             return ShadowQueryPivotResult(
                 shadow_run_id=run.shadow_run_id,
                 status=ShadowRunStatus.FAILED,
                 rejected_reasons=["pivot_execution_error"],
+                artifacts=partial_artifacts,
+                decision_record_ids=partial_record_ids,
                 degraded=True,
             )
 

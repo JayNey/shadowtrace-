@@ -107,6 +107,7 @@ def upgrade() -> None:
             server_default=sa.text("now()"),
             nullable=False,
         ),
+        sa.Column("retention_expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.PrimaryKeyConstraint("artifact_id"),
     )
     op.create_index(

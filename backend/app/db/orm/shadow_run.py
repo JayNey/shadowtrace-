@@ -73,4 +73,5 @@ class ShadowQueryArtifactORM(Base):
     content_hash: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    retention_expires_at: Mapped[datetime] = mapped_column(_TS, nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)

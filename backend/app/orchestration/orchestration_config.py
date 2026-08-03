@@ -18,6 +18,22 @@ def assert_graph_orchestration_config(settings: Settings | None = None) -> None:
         )
 
 
+def assert_shadow_pivot_retrieval_ready(settings: Settings | None = None) -> None:
+    """Fail closed when shadow pivot is enabled but retrieval pipeline is not attached."""
+    cfg = settings or get_settings()
+    if not cfg.react_shadow_pivot_enabled:
+        return
+    from app.rag.resources import peek_loaded_retrieval_resources
+
+    loaded = peek_loaded_retrieval_resources()
+    if loaded is None or loaded.pipeline is None:
+        raise ConfigurationError(
+            "REACT_SHADOW_PIVOT_ENABLED=true requires an attached RetrievalPipeline",
+            error_code="configuration_error",
+            details={"react_shadow_pivot_enabled": True, "pipeline_attached": False},
+        )
+
+
 def assert_shadow_pivot_config(settings: Settings | None = None) -> None:
     """Validate shadow query pivot prerequisites at startup (#641 Phase A)."""
     cfg = settings or get_settings()
@@ -41,6 +57,7 @@ def assert_shadow_pivot_config(settings: Settings | None = None) -> None:
             error_code="configuration_error",
             details={"react_shadow_pivot_enabled": True},
         )
+    assert_shadow_pivot_retrieval_ready(cfg)
 
 
 def assert_orchestration_mode(settings: Settings | None = None) -> None:
@@ -64,4 +81,5 @@ __all__ = [
     "assert_graph_orchestration_config",
     "assert_orchestration_mode",
     "assert_shadow_pivot_config",
+    "assert_shadow_pivot_retrieval_ready",
 ]

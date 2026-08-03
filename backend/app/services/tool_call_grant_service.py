@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -386,6 +386,18 @@ class ToolCallGrantService:
                 )
             )
             return len(list(rows))
+
+    async def count_production_grants_for_event(self, event_id: str) -> int:
+        async with self._session_factory() as session:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(orm.ToolCallGrantORM)
+                .where(
+                    orm.ToolCallGrantORM.event_id == event_id,
+                    orm.ToolCallGrantORM.mode == ToolCallMode.PRODUCTION.value,
+                )
+            )
+            return int(count or 0)
 
     def _assert_grant_live(self, grant: ToolCallGrant, *, event_id: str) -> None:
         now = datetime.now(tz=UTC)

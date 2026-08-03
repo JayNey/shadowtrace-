@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.pool import NullPool
 
 from app.core.config import Settings
+from app.core.llm.base import LLMProviderError
 from app.core.embedding.release import build_embedding_release
 from app.core.llm.base import LLMMessage, LLMResponse
 from app.db import models as orm
@@ -249,6 +250,7 @@ async def test_shadow_pivot_produces_artifacts_without_production_mutation(
             or 0
         )
         prod_attempts_before = await grant_service.count_production_attempts_for_event(event_id)
+        prod_grants_before = await grant_service.count_production_grants_for_event(event_id)
 
     result = await pivot.run_pivot(
         ShadowQueryPivotRequest(
@@ -277,6 +279,7 @@ async def test_shadow_pivot_produces_artifacts_without_production_mutation(
     assert retrieval_artifacts
     assert retrieval_artifacts[0].payload.get("chunk_count") == 1
     assert retrieval_artifacts[0].payload.get("plan_hash")
+    assert retrieval_artifacts[0].retention_expires_at is not None
     pipeline.retrieve.assert_awaited_once()
 
     async with session_factory() as session:
@@ -306,8 +309,10 @@ async def test_shadow_pivot_produces_artifacts_without_production_mutation(
         )
 
     prod_attempts_after = await grant_service.count_production_attempts_for_event(event_id)
+    prod_grants_after = await grant_service.count_production_grants_for_event(event_id)
     assert prod_before == prod_after == 0
     assert prod_attempts_before == prod_attempts_after == 0
+    assert prod_grants_before == prod_grants_after == 0
     assert shadow_runs == 1
     assert shadow_records >= 2
 
@@ -564,3 +569,313 @@ async def test_shadow_pivot_denies_unlisted_agent(
     finalized = await shadow_service.get_run(result.shadow_run_id)
     assert finalized is not None
     assert finalized.status in {ShadowRunStatus.COMPLETED, ShadowRunStatus.FAILED}
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_shadow_pivot_preserves_partial_step_count_on_late_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_tables: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sfx = uuid.uuid4().hex[:8]
+    event_id = f"evt-pivot-partial-{sfx}"
+    trace_id = f"trace-partial-{sfx}"
+    settings = Settings(
+        EMBEDDING_MODE="mock",
+        TOOL_CALL_GRANT_REQUIRED=True,
+        REACT_SHADOW_PIVOT_ENABLED=True,
+        KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+        REACT_SHADOW_MAX_STEPS=3,
+        REACT_SHADOW_MAX_TOOL_CALLS=3,
+    )
+
+    grant_service = ToolCallGrantService(session_factory)
+    shadow_service = ShadowRunService.from_settings(session_factory, settings)
+    registry = ToolRegistry()
+    registry.auto_discover()
+    react_factory = ReactToolExecutorFactory(
+        inner_executor=ToolExecutor(registry=registry),
+        grant_service=grant_service,
+        settings=settings,
+        projection_service=SafeToolProjectionService(registry),
+    )
+
+    release_service = MagicMock()
+    release_service.get_active_release = AsyncMock(return_value=MagicMock(release_id="krel-partial"))
+    monkeypatch.setattr(
+        "app.services.react_mock_query_adapter.resolve_active_knowledge_query_plan",
+        AsyncMock(return_value=_active_attack_plan(settings, trace_id)),
+    )
+
+    pivot = ShadowQueryPivotService(shadow_service, settings=settings)
+    llm = _ScriptedLLM()
+    llm.add_round(
+        ReActThinkOutput(
+            decision_summary="query knowledge",
+            reason_code=ReActReasonCode.FILL_EVIDENCE_GAP,
+            action=ReActAction(
+                action_type=ReActActionType.CALL_AGENT,
+                target_name="mock_query_retrieval",
+                params={"query": "exfil", "kb_names": [ATTACK_KB_NAME]},
+            ),
+        ),
+        ReActReflectOutput(
+            decision_summary="partial evidence found",
+            confidence=0.6,
+            gap_code=ReActGapCode.EVIDENCE_MISSING,
+            uncertainty_code=ReActUncertaintyCode.INCOMPLETE_COVERAGE,
+        ),
+    )
+    llm.think_queue.append(
+        LLMProviderError("llm failed on round 2", retryable=False)
+    )
+
+    pipeline = MagicMock()
+    pipeline.retrieve = AsyncMock(
+        return_value=RetrievalResult(
+            query="exfil",
+            chunks=[
+                RetrievedChunk(
+                    chunk_id="chk-partial",
+                    kb_name=ATTACK_KB_NAME,
+                    content="Exfiltration technique",
+                    metadata={"tenant_id": "tenant-a"},
+                    score=0.8,
+                    retrieval_method="vector",
+                )
+            ],
+        )
+    )
+
+    result = await pivot.run_pivot(
+        ShadowQueryPivotRequest(
+            event_id=event_id,
+            tenant_id="tenant-a",
+            principal="investigation:test",
+            trace_id=trace_id,
+            goal="partial then fail",
+        ),
+        llm_client=llm,
+        react_factory=react_factory,
+        pipeline=pipeline,
+        knowledge_release_service=release_service,
+    )
+
+    assert result.status is ShadowRunStatus.FAILED
+    assert result.react_stop_reason == "error"
+    finalized = await shadow_service.get_run(result.shadow_run_id)
+    assert finalized is not None
+    assert finalized.step_count == 1
+    assert finalized.tool_call_count >= 1
+    assert result.decision_record_ids
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_shadow_pivot_enforces_tool_call_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_tables: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sfx = uuid.uuid4().hex[:8]
+    event_id = f"evt-pivot-budget-{sfx}"
+    trace_id = f"trace-budget-{sfx}"
+    settings = Settings(
+        EMBEDDING_MODE="mock",
+        TOOL_CALL_GRANT_REQUIRED=True,
+        REACT_SHADOW_PIVOT_ENABLED=True,
+        KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+        REACT_SHADOW_MAX_STEPS=2,
+        REACT_SHADOW_MAX_TOOL_CALLS=1,
+    )
+
+    grant_service = ToolCallGrantService(session_factory)
+    shadow_service = ShadowRunService.from_settings(session_factory, settings)
+    registry = ToolRegistry()
+    registry.auto_discover()
+    react_factory = ReactToolExecutorFactory(
+        inner_executor=ToolExecutor(registry=registry),
+        grant_service=grant_service,
+        settings=settings,
+        projection_service=SafeToolProjectionService(registry),
+    )
+
+    release_service = MagicMock()
+    release_service.get_active_release = AsyncMock(return_value=MagicMock(release_id="krel-budget"))
+    monkeypatch.setattr(
+        "app.services.react_mock_query_adapter.resolve_active_knowledge_query_plan",
+        AsyncMock(return_value=_active_attack_plan(settings, trace_id)),
+    )
+
+    pivot = ShadowQueryPivotService(shadow_service, settings=settings)
+    llm = _ScriptedLLM()
+    for _ in range(2):
+        llm.add_round(
+            ReActThinkOutput(
+                decision_summary="query dns for exfil domain",
+                reason_code=ReActReasonCode.FILL_EVIDENCE_GAP,
+                action=ReActAction(
+                    action_type=ReActActionType.CALL_TOOL,
+                    target_name="query_dns",
+                    params={"domain": "evil.example"},
+                ),
+            ),
+            ReActReflectOutput(
+                decision_summary="dns lookup result",
+                confidence=0.5,
+                gap_code=ReActGapCode.EVIDENCE_MISSING,
+                uncertainty_code=ReActUncertaintyCode.INCOMPLETE_COVERAGE,
+            ),
+        )
+
+    result = await pivot.run_pivot(
+        ShadowQueryPivotRequest(
+            event_id=event_id,
+            tenant_id="tenant-a",
+            principal="investigation:test",
+            trace_id=trace_id,
+            goal="bounded tool calls",
+            allowed_query_tools=["query_dns"],
+        ),
+        llm_client=llm,
+        react_factory=react_factory,
+        pipeline=MagicMock(),
+        knowledge_release_service=release_service,
+    )
+
+    assert result.shadow_run_id
+    finalized = await shadow_service.get_run(result.shadow_run_id)
+    assert finalized is not None
+    assert finalized.tool_call_count <= settings.react_shadow_max_tool_calls
+
+    async with session_factory() as session:
+        grant = await session.scalar(
+            select(orm.ToolCallGrantORM).where(
+                orm.ToolCallGrantORM.event_id == event_id,
+                orm.ToolCallGrantORM.mode == ToolCallMode.SHADOW.value,
+            )
+        )
+    assert grant is not None
+    assert grant.attempt_count <= settings.react_shadow_max_tool_calls
+    assert result.react_stop_reason in {"budget_exhausted", "error", "max_rounds"}
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_shadow_pivot_end_to_end_with_real_pipeline_stub(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_tables: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.llm.base import InMemoryLLMCallAuditRecorder
+    from app.core.llm.mock_client import MockLLMClient
+    from app.rag.context import RetrievalContext
+    from app.rag.pipeline import RetrievalPipeline
+    from app.rag.query_rewriter import QueryRewriter
+    from app.rag.reranker import MockReranker
+
+    class _ConstantRetriever:
+        async def retrieve(
+            self,
+            queries: list[str],
+            kb_names: list[str],
+            top_k: int = 5,
+            *,
+            context: RetrievalContext,
+        ) -> list[list[RetrievedChunk]]:
+            chunk = RetrievedChunk(
+                chunk_id="chk-real-pipeline",
+                kb_name=ATTACK_KB_NAME,
+                content="Exfiltration over Web Service",
+                metadata={
+                    "source_id": "mitre_attack_stix",
+                    "tenant_id": context.tenant_id,
+                    "release_id": "krel-real-pipeline",
+                },
+                score=0.92,
+                retrieval_method="vector",
+            )
+            return [[chunk], [chunk]]
+
+    sfx = uuid.uuid4().hex[:8]
+    event_id = f"evt-pivot-real-{sfx}"
+    trace_id = f"trace-real-{sfx}"
+    settings = Settings(
+        EMBEDDING_MODE="mock",
+        TOOL_CALL_GRANT_REQUIRED=True,
+        REACT_SHADOW_PIVOT_ENABLED=True,
+        KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+        REACT_SHADOW_MAX_TOOL_CALLS=2,
+        REACT_SHADOW_MAX_STEPS=2,
+    )
+
+    grant_service = ToolCallGrantService(session_factory)
+    shadow_service = ShadowRunService.from_settings(session_factory, settings)
+    registry = ToolRegistry()
+    registry.auto_discover()
+    react_factory = ReactToolExecutorFactory(
+        inner_executor=ToolExecutor(registry=registry),
+        grant_service=grant_service,
+        settings=settings,
+        projection_service=SafeToolProjectionService(registry),
+    )
+
+    release_service = MagicMock()
+    release_service.get_active_release = AsyncMock(return_value=MagicMock(release_id="krel-real-pipeline"))
+    monkeypatch.setattr(
+        "app.services.react_mock_query_adapter.resolve_active_knowledge_query_plan",
+        AsyncMock(return_value=_active_attack_plan(settings, trace_id)),
+    )
+
+    pipeline = RetrievalPipeline(
+        rewriter=QueryRewriter(
+            MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+            agent_name="shadow_query_pivot",
+        ),
+        retriever=_ConstantRetriever(),
+        reranker=MockReranker(),
+        settings=settings,
+    )
+
+    pivot = ShadowQueryPivotService(shadow_service, settings=settings)
+    llm = _ScriptedLLM()
+    llm.add_round(
+        ReActThinkOutput(
+            decision_summary="query via real pipeline stub",
+            reason_code=ReActReasonCode.FILL_EVIDENCE_GAP,
+            action=ReActAction(
+                action_type=ReActActionType.CALL_AGENT,
+                target_name="mock_query_retrieval",
+                params={"query": "exfiltration web service", "kb_names": [ATTACK_KB_NAME]},
+            ),
+        ),
+        ReActReflectOutput(
+            decision_summary="found technique via pipeline",
+            confidence=0.88,
+            gap_code=ReActGapCode.EVIDENCE_MISSING,
+            uncertainty_code=ReActUncertaintyCode.INCOMPLETE_COVERAGE,
+        ),
+    )
+
+    result = await pivot.run_pivot(
+        ShadowQueryPivotRequest(
+            event_id=event_id,
+            tenant_id="tenant-a",
+            principal="investigation:test",
+            trace_id=trace_id,
+            goal="real pipeline e2e",
+        ),
+        llm_client=llm,
+        react_factory=react_factory,
+        pipeline=pipeline,
+        knowledge_release_service=release_service,
+    )
+
+    assert result.status is ShadowRunStatus.COMPLETED
+    retrieval_artifacts = [
+        artifact for artifact in result.artifacts if artifact.kind.value == "retrieval_hit"
+    ]
+    assert retrieval_artifacts
+    assert retrieval_artifacts[0].payload.get("plan_hash")
+    assert retrieval_artifacts[0].retention_expires_at is not None

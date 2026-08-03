@@ -76,9 +76,20 @@ async def test_for_shadow_run_mints_shadow_grant() -> None:
     assert call_request.shadow_run_id == "sr-test-001"
 
 
-def test_assert_shadow_pivot_config_requires_grant() -> None:
+def test_assert_shadow_pivot_config_requires_grant(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.core.errors import ConfigurationError
     from app.orchestration.orchestration_config import assert_shadow_pivot_config
+    from app.rag.resources import LoadedRetrievalResources
+
+    attached = LoadedRetrievalResources(
+        status="ready",
+        mode="mock",
+        pipeline=MagicMock(),
+    )
+    monkeypatch.setattr(
+        "app.rag.resources.peek_loaded_retrieval_resources",
+        lambda: attached,
+    )
 
     with pytest.raises(ConfigurationError, match="TOOL_CALL_GRANT_REQUIRED"):
         assert_shadow_pivot_config(
@@ -116,6 +127,50 @@ def test_assert_shadow_pivot_config_requires_grant() -> None:
     assert_shadow_pivot_config(
         Settings(REACT_SHADOW_PIVOT_ENABLED=False, TOOL_CALL_GRANT_REQUIRED=False)
     )
+
+
+def test_assert_shadow_pivot_config_requires_attached_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.errors import ConfigurationError
+    from app.orchestration.orchestration_config import assert_shadow_pivot_config
+
+    monkeypatch.setattr(
+        "app.rag.resources.peek_loaded_retrieval_resources",
+        lambda: None,
+    )
+    with pytest.raises(ConfigurationError, match="RetrievalPipeline"):
+        assert_shadow_pivot_config(
+            Settings(
+                REACT_SHADOW_PIVOT_ENABLED=True,
+                TOOL_CALL_GRANT_REQUIRED=True,
+                KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+                RETRIEVAL_FIXTURE_FALLBACK=False,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_pivot_rejected_when_pipeline_unavailable() -> None:
+    pivot = ShadowQueryPivotService(
+        ShadowRunService(MagicMock()),
+        settings=Settings(REACT_SHADOW_PIVOT_ENABLED=True),
+    )
+    result = await pivot.run_pivot(
+        ShadowQueryPivotRequest(
+            event_id="evt-no-pipeline",
+            tenant_id="tenant-a",
+            principal="investigation:test",
+            trace_id="trace-no-pipeline",
+            goal="test",
+        ),
+        llm_client=MagicMock(),
+        react_factory=MagicMock(),
+        pipeline=None,  # type: ignore[arg-type]
+    )
+    assert result.status is ShadowRunStatus.REJECTED
+    assert "retrieval_pipeline_unavailable" in result.rejected_reasons
+    assert result.shadow_run_id == ""
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,7 @@ class ShadowQueryArtifact(BaseModel):
     content_hash: str = Field(..., min_length=64, max_length=64)
     payload: dict[str, Any] = Field(default_factory=dict)
     provenance: dict[str, Any] = Field(default_factory=dict)
+    retention_expires_at: datetime | None = None
     created_at: datetime | None = None
 
 
