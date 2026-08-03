@@ -672,6 +672,30 @@ async def test_playbook_ref_validation_error_skips_legacy_fallback() -> None:
     assert "playbook resolution failed" in plan.strategy_summary
 
 
+@pytest.mark.asyncio
+async def test_invalid_playbook_refs_fallback_to_rules_without_playbook_pinning() -> None:
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(event_type=EventType.ACCOUNT_ANOMALY))
+    wm.values[(event_id, "rag_output")] = {
+        "playbook_refs": [{"playbook_id": "pb-incomplete-ref-only"}],
+    }
+
+    class _RejectingReleaseService:
+        async def resolve_playbook_ref(self, *_args: Any, **_kwargs: Any) -> tuple[Playbook, Any]:
+            raise AssertionError("resolve_playbook_ref must not run for invalid refs")
+
+    agent = ResponseAgent(
+        working_memory=wm,
+        capability_manifest=build_mock_capability_manifest(),
+        playbook_release_service=_RejectingReleaseService(),
+        llm_client=_FailingLLM(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    assert not any(a.playbook_ref is not None for a in plan.actions)
+    assert "playbook_refs_invalid" in plan.strategy_summary
+
+
 def test_action_fingerprint_and_id_are_stable() -> None:
     fp = compute_action_fingerprint(
         event_id="evt-1",

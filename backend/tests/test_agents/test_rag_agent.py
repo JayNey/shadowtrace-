@@ -1357,6 +1357,74 @@ class TestRAGAgentReleasePinning:
         attack_calls = [c for c in pipeline.calls if c["kb_names"] == ["attack_kb"]]
         assert attack_calls == []
 
+    @pytest.mark.asyncio
+    async def test_blocks_playbook_kb_without_active_release_when_required(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+
+        playbook_release_service = MagicMock()
+        playbook_release_service.get_active_release = AsyncMock(return_value=None)
+
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        pipeline = _MockPipeline(results=results)
+        settings = Settings(
+            APP_ENV="development",
+            EMBEDDING_MODE="mock",
+            PLAYBOOK_RELEASE_REQUIRE_ACTIVE=True,
+        )
+        agent = RAGAgent(
+            working_memory=wm,
+            pipeline=pipeline,
+            playbook_release_service=playbook_release_service,
+            settings=settings,
+        )
+
+        output = await agent._run(_make_input())
+
+        assert output.playbook_refs == []
+        playbook_calls = [c for c in pipeline.calls if c["kb_names"] == ["playbook_kb"]]
+        assert playbook_calls == []
+        assert len(output.similar_cases) >= 1
+
+    @pytest.mark.asyncio
+    async def test_production_blocks_playbook_kb_without_active_release(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.core.config import Settings
+
+        playbook_release_service = MagicMock()
+        playbook_release_service.get_active_release = AsyncMock(return_value=None)
+
+        wm = _MockBoundWorkingMemory()
+        results = _make_full_results()
+        pipeline = _MockPipeline(results=results)
+        settings = Settings(
+            app_env="production",
+            simulation_enabled=False,
+            source_mode="live_xdr",
+            tool_mode="live",
+            disposition_mode="live_xdr",
+            disposition_adapter_kind="live",
+            llm_mode="openai_compatible",
+            embedding_mode="remote",
+        )
+        agent = RAGAgent(
+            working_memory=wm,
+            pipeline=pipeline,
+            playbook_release_service=playbook_release_service,
+            settings=settings,
+        )
+
+        output = await agent._run(
+            _make_input().model_copy(update={"tenant_id": "tenant-prod-test"})
+        )
+
+        assert output.playbook_refs == []
+        playbook_calls = [c for c in pipeline.calls if c["kb_names"] == ["playbook_kb"]]
+        assert playbook_calls == []
+
 
 class TestRAGAgentInputValidation:
     def test_rag_agent_input_accepts_none_evidence(self):

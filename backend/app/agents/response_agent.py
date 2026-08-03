@@ -226,12 +226,13 @@ class ActionCandidate:
     action_template_snapshot: PlaybookActionTemplateSnapshot | None = None
 
 
-def _parse_playbook_refs(rag_output: Any) -> list[PlaybookRef]:
+def _parse_playbook_refs(rag_output: Any) -> tuple[list[PlaybookRef], bool]:
+    """Return parsed refs and whether raw refs were present but all invalid."""
     if not isinstance(rag_output, dict):
-        return []
+        return [], False
     raw_refs = rag_output.get("playbook_refs") or []
-    if not isinstance(raw_refs, list):
-        return []
+    if not isinstance(raw_refs, list) or not raw_refs:
+        return [], False
     refs: list[PlaybookRef] = []
     for item in raw_refs:
         if isinstance(item, PlaybookRef):
@@ -242,7 +243,7 @@ def _parse_playbook_refs(rag_output: Any) -> list[PlaybookRef]:
                 refs.append(PlaybookRef.model_validate(item))
             except ValidationError:
                 continue
-    return refs
+    return refs, not refs
 
 
 class ResponsePolicyFilter:
@@ -800,7 +801,21 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         ctx: dict[str, Any],
     ) -> tuple[list[ActionCandidate], ResponsePlanGeneratedBy, str]:
         rag_output = ctx.get("rag_output")
-        playbook_refs = _parse_playbook_refs(rag_output)
+        playbook_refs, invalid_playbook_refs = _parse_playbook_refs(rag_output)
+
+        if invalid_playbook_refs:
+            logger.warning(
+                "ResponseAgent playbook refs invalid event=%s",
+                input.event_id,
+            )
+            return (
+                expand_rule_candidates(
+                    get_rule_actions(event_type, severity),
+                    entities,
+                ),
+                ResponsePlanGeneratedBy.TEMPLATE,
+                "playbook_refs_invalid; DEFAULT_RESPONSE_RULES fallback",
+            )
 
         if playbook_refs and self.playbook_release_service is not None:
             try:

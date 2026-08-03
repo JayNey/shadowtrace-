@@ -201,7 +201,13 @@ async def health(
 
     # 503 only for hard dependency / embedding failures — not missing workers alone (#622).
     # LLM affects HTTP status only when explicitly required (#609).
-    if not hard_deps_ok or not embedding_ok or (llm_required and not llm_ok):
+    # Playbook readiness affects HTTP status when production or require_active (#645).
+    if (
+        not hard_deps_ok
+        or not embedding_ok
+        or (llm_required and not llm_ok)
+        or (playbook_required and not playbook_ok)
+    ):
         response.status_code = 503
 
     return {

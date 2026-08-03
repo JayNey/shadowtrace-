@@ -102,6 +102,24 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
             new_callable=AsyncMock,
             return_value=_llm_health_payload(status="ok"),
         ),
+        patch(
+            "app.api.v1.health._check_loaded_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "pipeline_attached": True, "reasons": []},
+        ),
+        patch(
+            "app.api.v1.health._check_playbook_resources",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "ready",
+                "mode": "production",
+                "active_release_id": "krel-playbook-test01",
+                "postgres": "ok",
+                "session_pool": "pooled",
+                "fixture_fallback_enabled": False,
+                "reasons": [],
+            },
+        ),
     ):
         response = await client.get("/api/v1/health")
 

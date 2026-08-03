@@ -94,6 +94,15 @@ async def test_health_response_includes_loaded_resources(client: AsyncClient) ->
         new_callable=AsyncMock,
         return_value={"status": "ready", "pipeline_attached": True, "reasons": []},
     ), patch(
+        "app.api.v1.health._check_playbook_resources",
+        new_callable=AsyncMock,
+        return_value={
+            "status": "ready",
+            "mode": "production",
+            "active_release_id": "krel-playbook-test01",
+            "reasons": [],
+        },
+    ), patch(
         "app.api.v1.health.build_celery_health",
         new_callable=AsyncMock,
         return_value={
