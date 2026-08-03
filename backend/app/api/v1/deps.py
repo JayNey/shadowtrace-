@@ -454,6 +454,7 @@ async def _build_production_investigation_graph(
         "response_agent": response_agent,
         "verify_agent": verify_agent,
         "rag_agent": stack["rag"],
+        "graph_agent": stack["graph_agent"],
     }
     services = {
         "state_machine": stack["state_machine"],
@@ -860,6 +861,7 @@ async def get_pipeline() -> Any:
             triage_agent=stack["triage"],
             evidence_agent=stack["evidence"],
             rag_agent=stack["rag"],
+            graph_agent=stack["graph_agent"],
             risk_agent=stack["risk"],
             report_agent=stack["report"],
             context_store=stack["context_store"],

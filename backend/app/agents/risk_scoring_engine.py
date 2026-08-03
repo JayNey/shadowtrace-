@@ -8,6 +8,7 @@ from typing import Any
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceOutput,
+    GraphOutput,
     RAGOutput,
     RiskFactor,
     TriageResult,
@@ -412,7 +413,7 @@ class RiskScoringEngine:
         triage_result: TriageResult,
         evidence_output: EvidenceOutput,
         rag_output: RAGOutput | None = None,
-        storyline: dict[str, Any] | None = None,
+        graph_output: GraphOutput | None = None,
     ) -> dict[str, tuple[float, str]]:
         """Return ``{factor_name: (raw_score_0_100, reasoning)}``."""
         evidence = list(evidence_output.evidence_list)
@@ -420,7 +421,7 @@ class RiskScoringEngine:
             "asset_impact": self._asset_impact(triage_result, evidence),
             "behavior_anomaly": self._behavior_anomaly(evidence),
             "evidence_confidence": self._evidence_confidence(evidence_output),
-            "attack_stage": self._attack_stage(evidence, rag_output, storyline),
+            "attack_stage": self._attack_stage(evidence, rag_output, graph_output),
             "data_sensitivity": self._data_sensitivity(evidence),
             "threat_intel": self._threat_intel(evidence, rag_output),
         }
@@ -499,7 +500,7 @@ class RiskScoringEngine:
         self,
         evidence: list[Evidence],
         rag_output: RAGOutput | None,
-        storyline: dict[str, Any] | None,
+        graph_output: GraphOutput | None,
     ) -> tuple[float, str]:
         stages: list[float] = []
         labels: list[str] = []
@@ -532,20 +533,23 @@ class RiskScoringEngine:
                         stages.append(95.0)
                         labels.append(tactic)
 
-        if storyline:
-            for phase in storyline.get("phases") or []:
-                name = str(phase.get("phase_name") or "").lower()
-                if name in {"exfiltration", "post_action"}:
-                    stages.append(95.0)
-                    labels.append(name)
-                elif name in {"staging", "collection"}:
-                    stages.append(70.0)
-                    labels.append(name)
-                elif name == "initial_access":
-                    stages.append(25.0)
-                    labels.append(name)
+        if graph_output is not None:
+            summary = graph_output.summary
+            if summary is not None:
+                for feature in summary.features:
+                    if feature.evidence_ids:
+                        stages.append(feature.score_hint)
+                        labels.append(f"{feature.feature_kind}:{feature.feature_id}")
+            else:
+                for edge in graph_output.edges:
+                    if edge.evidence_id:
+                        stages.append(55.0)
+                        labels.append(edge.relation_type.value)
 
         if not stages:
+            if graph_output is not None and graph_output.degraded:
+                reason = graph_output.degraded_reason or "graph_degraded"
+                return 30.0, f"graph degraded ({reason}); early-stage baseline"
             return 30.0, "缺少 ATT&CK/阶段线索，按早期阶段基线"
         best = max(stages)
         return best, "攻击阶段依据: " + ", ".join(dict.fromkeys(labels))[:120]

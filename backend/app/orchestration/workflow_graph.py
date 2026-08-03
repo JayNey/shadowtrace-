@@ -19,6 +19,8 @@ from app.models.agent_io import (
     EvidenceAgentInput,
     EvidenceOutput,
     ExecutionPlan,
+    GraphAgentInput,
+    GraphOutput,
     PlannerAgentInput,
     RAGOutput,
     ReportAgentInput,
@@ -108,6 +110,7 @@ NODE_CLOSE = "close_node"
 NODE_PLANNER = "planner_node"
 NODE_EVIDENCE = "evidence_node"
 NODE_FP_ADJUDICATION = "fp_adjudication_node"
+NODE_GRAPH = "graph_node"
 NODE_RAG = "rag_node"
 NODE_RISK = "risk_node"
 NODE_RESPONSE = "response_node"
@@ -125,6 +128,7 @@ P0_NODE_SEQUENCE = (
     NODE_PLANNER,
     NODE_EVIDENCE,
     NODE_FP_ADJUDICATION,
+    NODE_GRAPH,
     NODE_RISK,
     NODE_RESPONSE,
     NODE_APPROVAL,
@@ -573,6 +577,7 @@ def build_investigation_graph(
     report_agent = cast(_AgentLike, agents["report_agent"])
     response_agent = cast(_AgentLike | None, agents.get("response_agent"))
     rag_agent = cast(RAGAgent | None, agents.get("rag_agent"))
+    graph_agent = cast(_AgentLike | None, agents.get("graph_agent"))
     runtime = cast(_WorkflowRuntimeLike, services["workflow_runtime"])
     event_service = cast(_EventServiceLike, services["event_service"])
     degraded_flags = cast(DegradedFlagService, services["degraded_flags"])
@@ -891,10 +896,35 @@ def build_investigation_graph(
             update["rag_output"] = output.model_dump(mode="json")
         return _patch_state(_trace(NODE_RAG), update)
 
+    async def graph_node(state: InvestigationState) -> InvestigationState:
+        if graph_agent is None:
+            return _trace(NODE_GRAPH)
+        evidence = EvidenceOutput.model_validate(state["evidence_output"])
+        result = await graph_agent.execute(
+            GraphAgentInput(
+                event_id=state["event_id"],
+                evidence_output=evidence,
+            )
+        )
+        if not isinstance(result, GraphOutput):
+            raise TypeError("graph_agent must return GraphOutput")
+        update: dict[str, Any] = {"graph_output": result.model_dump(mode="json")}
+        if result.degraded:
+            flags = list(state.get("degraded_flags") or [])
+            if "graph_degraded" not in flags:
+                flags.append("graph_degraded")
+            update["degraded_flags"] = flags
+        return _patch_state(_trace(NODE_GRAPH), update)
+
     async def risk_node(state: InvestigationState) -> InvestigationState:
         rag_output = (
             RAGOutput.model_validate(state["rag_output"])
             if state.get("rag_output") is not None
+            else None
+        )
+        graph_output = (
+            GraphOutput.model_validate(state["graph_output"])
+            if state.get("graph_output") is not None
             else None
         )
         await _transition_status(
@@ -908,6 +938,7 @@ def build_investigation_graph(
                 event_id=state["event_id"],
                 triage_result=TriageResult.model_validate(state["triage_result"]),
                 evidence_output=EvidenceOutput.model_validate(state["evidence_output"]),
+                graph_output=graph_output,
                 rag_output=rag_output,
             )
         )
@@ -1448,6 +1479,7 @@ def build_investigation_graph(
     register(NODE_PLANNER, planner_graph_node)
     register(NODE_EVIDENCE, evidence_node)
     register(NODE_FP_ADJUDICATION, fp_adjudication_node)
+    register(NODE_GRAPH, graph_node)
     register(NODE_RISK, risk_node)
     register(NODE_RESPONSE, response_node)
     register(NODE_APPROVAL, approval_node)
@@ -1485,10 +1517,11 @@ def build_investigation_graph(
     graph.add_conditional_edges(
         NODE_FP_ADJUDICATION,
         route_after_fp_adjudication,
-        {ROUTE_CONTINUE: NODE_RAG if rag_agent is not None else NODE_RISK},
+        {ROUTE_CONTINUE: NODE_RAG if rag_agent is not None else NODE_GRAPH},
     )
     if rag_agent is not None:
-        graph.add_edge(NODE_RAG, NODE_RISK)
+        graph.add_edge(NODE_RAG, NODE_GRAPH)
+    graph.add_edge(NODE_GRAPH, NODE_RISK)
     graph.add_conditional_edges(
         NODE_RISK,
         route_after_risk,
@@ -1713,6 +1746,7 @@ __all__ = [
     "NODE_CLOSE",
     "NODE_EVIDENCE",
     "NODE_EXECUTE",
+    "NODE_GRAPH",
     "NODE_HALT",
     "NODE_MANUAL_HOLD",
     "NODE_PLANNER",

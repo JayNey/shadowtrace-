@@ -208,6 +208,24 @@ def test_attack_storyline_ok() -> None:
     assert story.phases[0].phase_name is StorylinePhaseName.EXFILTRATION
 
 
+def test_attack_storyline_legacy_payload_defaults_to_v1_and_legacy_grounding() -> None:
+    """ISSUE-116: missing v2 fields must not default to schema_version 2.0."""
+    from app.models.agent_io import StorylineGroundingStatus
+
+    story = AttackStoryline.model_validate(
+        {
+            "storyline_id": "sty-legacy01",
+            "event_id": "evt-legacy01",
+            "narrative_summary": "legacy storyline",
+            "phases": [],
+            "generated_by": "rule",
+        }
+    )
+    assert story.schema_version == "1.0"
+    assert story.grounding_status is StorylineGroundingStatus.LEGACY_EVIDENCE_GROUNDED
+    assert story.claim_refs == []
+
+
 def test_storyline_rejects_unknown_phase_name() -> None:
     with pytest.raises(ValidationError):
         StorylinePhase(phase_order=1, phase_name="recon")  # type: ignore[arg-type]

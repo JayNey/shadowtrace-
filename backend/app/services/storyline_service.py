@@ -21,10 +21,12 @@ from app.core.errors import ShadowTraceError
 from app.models.agent_io import (
     AttackStoryline,
     StorylineGeneratedBy,
+    StorylineGroundingStatus,
     StorylinePhase,
     StorylinePhaseName,
     TimelineEntry,
 )
+from app.services.storyline_claim_refs import attach_storyline_claim_refs
 from app.models.enums import Severity
 from app.models.ids import new_storyline_id
 
@@ -143,8 +145,9 @@ class StorylineService:
                     entity_names=entity_names,
                 )
                 if storyline is not None:
-                    await self._write(event_id, storyline)
-                    return storyline
+                    finalized = self._finalize_storyline(storyline)
+                    await self._write(event_id, finalized)
+                    return finalized
             except Exception as exc:
                 logger.warning(
                     "StorylineService LLM path failed for event=%s: %s",
@@ -158,8 +161,9 @@ class StorylineService:
             evidence_list=evidence_list,
             technique_matches=technique_matches,
         )
-        await self._write(event_id, storyline)
-        return storyline
+        finalized = self._finalize_storyline(storyline)
+        await self._write(event_id, finalized)
+        return finalized
 
     # ------------------------------------------------------------------ #
     # LLM path
@@ -375,6 +379,30 @@ class StorylineService:
             phases=storyline_phases,
             generated_by=StorylineGeneratedBy.RULE,
         )
+
+    # ------------------------------------------------------------------ #
+    # Claim refs (ISSUE-116 Phase B)
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _finalize_storyline(storyline: AttackStoryline) -> AttackStoryline:
+        """Attach evidence-bound claim refs; preserve storyline on failure."""
+        try:
+            return attach_storyline_claim_refs(
+                storyline,
+                grounding_status=StorylineGroundingStatus.EVIDENCE_GROUNDED,
+            )
+        except Exception:
+            logger.warning(
+                "Storyline claim ref attachment failed for event=%s; marking unavailable",
+                storyline.event_id,
+                exc_info=True,
+            )
+            return storyline.model_copy(
+                update={
+                    "grounding_status": StorylineGroundingStatus.CLAIM_REFS_UNAVAILABLE,
+                }
+            )
 
     # ------------------------------------------------------------------ #
     # WorkingMemory

@@ -75,7 +75,6 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         self.last_raw_confidence: float | None = None
 
     async def _run(self, input: RiskAgentInput) -> RiskAssessment:
-        storyline = await self._read_optional(input.event_id, "storyline")
         fp_match = await self._read_optional(input.event_id, "false_positive_match")
         fp_adjudication = await self._read_optional(input.event_id, "fp_adjudication")
         source_snapshot = await self._read_optional(input.event_id, "source_snapshot")
@@ -83,8 +82,6 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             fp_match = None
         if not isinstance(fp_adjudication, dict):
             fp_adjudication = None
-        if not isinstance(storyline, dict):
-            storyline = None
         if not isinstance(source_snapshot, dict):
             source_snapshot = None
 
@@ -92,7 +89,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             triage_result=input.triage_result,
             evidence_output=input.evidence_output,
             rag_output=input.rag_output,
-            storyline=storyline,
+            graph_output=input.graph_output,
         )
 
         llm_scores: dict[str, tuple[float, str]] | None = None
@@ -106,7 +103,6 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             try:
                 llm_scores, llm_confidence, llm_admissibility = await self._score_with_llm(
                     input,
-                    storyline,
                     source_snapshot=source_snapshot,
                 )
                 if llm_admissibility is LlmAdmissibility.VALID and llm_scores is not None:
@@ -194,7 +190,6 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
     async def _score_with_llm(
         self,
         input: RiskAgentInput,
-        storyline: dict[str, Any] | None,
         *,
         source_snapshot: dict[str, Any] | None = None,
     ) -> tuple[dict[str, tuple[float, str]] | None, float, LlmAdmissibility]:
@@ -216,15 +211,27 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                     else None
                 ),
             }
-        storyline_summary = None
-        if storyline is not None:
-            storyline_summary = str(storyline.get("narrative_summary") or "")[:500]
+        graph_summary = None
+        if input.graph_output is not None and input.graph_output.summary is not None:
+            graph_summary = {
+                "degraded": input.graph_output.degraded,
+                "degraded_reason": input.graph_output.degraded_reason,
+                "features": [
+                    {
+                        "feature_id": feature.feature_id,
+                        "feature_kind": feature.feature_kind,
+                        "score_hint": feature.score_hint,
+                        "evidence_ids": list(feature.evidence_ids),
+                    }
+                    for feature in input.graph_output.summary.features
+                ],
+            }
 
         messages = build_risk_messages(
             triage_result=input.triage_result,
             evidence_output=input.evidence_output,
             rag_summary=rag_summary,
-            storyline_summary=storyline_summary,
+            graph_summary=graph_summary,
             source_snapshot=source_snapshot,
         )
         response = await self.llm_client.chat(

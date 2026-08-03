@@ -23,7 +23,7 @@ def build_risk_messages(
     triage_result: TriageResult,
     evidence_output: EvidenceOutput,
     rag_summary: dict[str, Any] | None = None,
-    storyline_summary: str | None = None,
+    graph_summary: dict[str, Any] | None = None,
     source_snapshot: dict[str, Any] | None = None,
 ) -> list[LLMMessage]:
     """Build JSON-mode messages that request per-dimension scores only (no CoT)."""
@@ -70,7 +70,7 @@ def build_risk_messages(
             ],
         },
         "rag": rag_summary or {},
-        "storyline_summary": storyline_summary or "",
+        "graph_summary": graph_summary or {},
         "required_factors": list(FACTOR_NAMES),
         "response_schema": {
             "factors": {

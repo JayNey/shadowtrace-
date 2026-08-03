@@ -612,7 +612,7 @@
     },
     "EventSummary": {
       "additionalProperties": false,
-      "description": "The authoritative shape of ``EventContext.event`` (ISSUE-094 \u00a72).",
+      "description": "The authoritative shape of ``EventContext.event`` (ISSUE-094 §2).",
       "properties": {
         "event_id": {
           "title": "Event Id",
@@ -730,7 +730,7 @@
       "type": "object"
     },
     "EventType": {
-      "description": "Supported security event types (intro \u00a71); extensible via scenario packs.",
+      "description": "Supported security event types (intro §1); extensible via scenario packs.",
       "enum": [
         "account_anomaly",
         "host_compromise",
@@ -925,7 +925,7 @@
     },
     "ImpactAssessment": {
       "additionalProperties": false,
-      "description": "Estimated blast radius / reversibility of an action (ISSUE-079).\n\nFields match the ISSUE-079 unified naming:\n- ``impact_score``: 0-100, base (action_level) + asset bonus, capped at 100\n- ``business_disruption``: none / low / medium / high\n- ``reversible``: per rollback mapping (e.g. force_logout \u2192 False)",
+      "description": "Estimated blast radius / reversibility of an action (ISSUE-079).\n\nFields match the ISSUE-079 unified naming:\n- ``impact_score``: 0-100, base (action_level) + asset bonus, capped at 100\n- ``business_disruption``: none / low / medium / high\n- ``reversible``: per rollback mapping (e.g. force_logout → False)",
       "properties": {
         "action_id": {
           "title": "Action Id",
@@ -1265,7 +1265,7 @@
     },
     "SourceObjectLocator": {
       "additionalProperties": false,
-      "description": "Minimal writeback locator (intro \u00a74.3.5 / ISSUE-002).",
+      "description": "Minimal writeback locator (intro §4.3.5 / ISSUE-002).",
       "properties": {
         "source_product": {
           "title": "Source Product",

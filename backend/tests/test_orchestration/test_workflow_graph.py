@@ -16,6 +16,10 @@ from app.models.agent_io import (
     EvidenceAgentInput,
     EvidenceOutput,
     ExecutionPlan,
+    GraphAgentInput,
+    GraphOutput,
+    GraphSummary,
+    GraphSummaryFeature,
     PlanBudget,
     PlanStep,
     ReportAgentInput,
@@ -52,6 +56,7 @@ from app.orchestration.workflow_graph import (
     NODE_CLOSE,
     NODE_EXECUTE,
     NODE_FP_ADJUDICATION,
+    NODE_GRAPH,
     NODE_HALT,
     NODE_MANUAL_HOLD,
     NODE_PLANNER,
@@ -116,6 +121,30 @@ class StubAgent:
     async def execute(self, input: Any) -> Any:
         self.calls.append(input)
         return self.result
+
+
+class CapturingGraphAgent:
+    """Returns distinct graph outputs per invocation (ISSUE-116 replan coverage)."""
+
+    def __init__(self) -> None:
+        self.calls: list[GraphAgentInput] = []
+
+    async def execute(self, input: GraphAgentInput) -> GraphOutput:
+        self.calls.append(input)
+        call_no = len(self.calls)
+        return GraphOutput(
+            summary=GraphSummary(
+                features=[
+                    GraphSummaryFeature(
+                        feature_id=f"graph_call_{call_no}",
+                        feature_kind="attack_stage",
+                        score_hint=40.0 + (10.0 * call_no),
+                        evidence_ids=[f"evd-call-{call_no:02d}"],
+                        provenance="graph_edge",
+                    )
+                ]
+            )
+        )
 
 
 class FixedEvidencePlanPlanner:
@@ -572,6 +601,45 @@ async def test_graph_compiles_and_golden_path_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_graph_node_passes_graph_output_to_risk() -> None:
+    """ISSUE-116: pre-risk graph output is typed into RiskAgentInput."""
+    graph_output = GraphOutput(
+        summary=GraphSummary(
+            features=[
+                GraphSummaryFeature(
+                    feature_id="attack_path_0",
+                    feature_kind="attack_path",
+                    score_hint=60.0,
+                    evidence_ids=["evd-00000001"],
+                    provenance="graph_path",
+                )
+            ]
+        )
+    )
+    graph_stub = StubAgent(graph_output)
+    risk_stub = StubAgent(
+        RiskAssessment(
+            risk_score=80,
+            severity=Severity.HIGH,
+            confidence=0.9,
+            scoring_mode=ScoringMode.RULE_ONLY,
+        )
+    )
+    agents = _agents()
+    agents["graph_agent"] = graph_stub
+    agents["risk_agent"] = risk_stub
+    graph = build_investigation_graph(agents, _services(FakeStateMachine()))
+    await graph.ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-graph-002"}},
+    )
+    assert len(graph_stub.calls) == 1
+    assert len(risk_stub.calls) == 1
+    assert risk_stub.calls[0].graph_output is not None
+    assert NODE_GRAPH in graph.get_graph().nodes
+
+
+@pytest.mark.asyncio
 async def test_graph_replan_one_cycle_then_success() -> None:
     """ISSUE-062: effect verification failure triggers one replan cycle then CLOSED."""
     verify_agent = ReplanOnceVerifyAgent()
@@ -593,6 +661,26 @@ async def test_graph_replan_one_cycle_then_success() -> None:
     assert NODE_CLOSE in trace
     assert len(verify_agent.calls) == 2
     assert machine.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_graph_node_recomputes_on_replan_cycle() -> None:
+    """ISSUE-116: replan loops back through graph_node instead of skipping stale graph."""
+    graph_agent = CapturingGraphAgent()
+    verify_agent = ReplanOnceVerifyAgent()
+    machine = FakeStateMachine()
+    services = _services(machine)
+    agents = _agents_with_verify(verify_agent)
+    agents["graph_agent"] = graph_agent
+    final = await build_investigation_graph(agents, services).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-graph-replan"}},
+    )
+
+    assert NODE_REPLAN in final["node_trace"]
+    assert len(graph_agent.calls) == 2
+    assert graph_agent.calls[0].event_id == "evt-graph-001"
+    assert graph_agent.calls[1].event_id == "evt-graph-001"
 
 
 @pytest.mark.asyncio
@@ -637,7 +725,8 @@ async def test_optional_rag_is_between_evidence_and_risk() -> None:
     edges = {(edge.source, edge.target) for edge in graph_view.edges}
     assert ("evidence_node", NODE_FP_ADJUDICATION) in edges
     assert (NODE_FP_ADJUDICATION, NODE_RAG) in edges
-    assert (NODE_RAG, NODE_RISK) in edges
+    assert (NODE_RAG, NODE_GRAPH) in edges
+    assert (NODE_GRAPH, NODE_RISK) in edges
 
 
 @pytest.mark.asyncio
@@ -730,6 +819,7 @@ async def test_deferred_response_not_required_reaches_closed() -> None:
         NODE_PLANNER,
         "evidence_node",
         NODE_FP_ADJUDICATION,
+        NODE_GRAPH,
         NODE_RISK,
         NODE_REPORT,
         NODE_CLOSE,
@@ -754,6 +844,7 @@ async def test_deferred_response_required_stays_reporting() -> None:
         NODE_PLANNER,
         "evidence_node",
         NODE_FP_ADJUDICATION,
+        NODE_GRAPH,
         NODE_RISK,
         NODE_REPORT,
         NODE_HALT,

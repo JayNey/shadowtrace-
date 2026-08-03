@@ -31,6 +31,9 @@ from app.core.llm.mock_client import MockLLMClient
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceOutput,
+    GraphOutput,
+    GraphSummary,
+    GraphSummaryFeature,
     LlmAdmissibility,
     RiskAgentInput,
     RiskFactor,
@@ -381,6 +384,41 @@ def test_rule_engine_saturated_scores_reach_high_risk() -> None:
     assert scores["threat_intel"][0] >= 70.0
     merged = sum(scores[name][0] * FACTOR_WEIGHTS[name] for name in FACTOR_WEIGHTS)
     assert merged >= 70.0
+
+
+def test_rule_engine_uses_graph_summary_for_attack_stage() -> None:
+    """ISSUE-116: attack_stage consumes evidence-bound graph summary features."""
+    engine = RiskScoringEngine()
+    empty = EvidenceOutput(
+        evidence_list=[],
+        overall_confidence=0.0,
+        collection_status=CollectionStatus.COMPLETED,
+    )
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=False,
+    )
+    graph_output = GraphOutput(
+        summary=GraphSummary(
+            features=[
+                GraphSummaryFeature(
+                    feature_id="relation_connected_to",
+                    feature_kind="attack_stage",
+                    score_hint=70.0,
+                    evidence_ids=["evd-graph-001"],
+                    provenance="graph_edge",
+                )
+            ]
+        )
+    )
+    scores = engine.score(
+        triage_result=triage,
+        evidence_output=empty,
+        graph_output=graph_output,
+    )
+    assert scores["attack_stage"][0] == 70.0
+    assert "relation_connected_to" in scores["attack_stage"][1]
 
 
 def test_rule_engine_boundary_all_zero_and_all_hundred() -> None:

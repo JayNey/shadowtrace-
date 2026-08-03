@@ -372,12 +372,28 @@ export interface StorylinePhase {
   entries: TimelineEntry[];
 }
 
+export type StorylineGroundingStatus =
+  | "evidence_grounded"
+  | "legacy_evidence_grounded"
+  | "claim_refs_unavailable";
+
+export interface StorylineClaimRef {
+  claim_id: string;
+  proposition_kind: "timeline_entry" | "phase_summary";
+  evidence_ids: string[];
+  schema_version?: string;
+  ordinal: number;
+}
+
 export interface AttackStoryline {
   storyline_id: string;
   event_id: string;
   narrative_summary: string;
   phases: StorylinePhase[];
   generated_by: StorylineGeneratedBy;
+  schema_version?: string;
+  claim_refs?: StorylineClaimRef[];
+  grounding_status?: StorylineGroundingStatus;
 }
 
 /* ------------------------------------------------------------------ */

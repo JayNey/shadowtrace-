@@ -622,8 +622,11 @@ class TestGraphAgentIntegration:
         import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
+        from app.core.config import get_settings
         from app.models.agent_io import EvidenceOutput
         from app.services.graph_sync_service import SyncResult
+
+        monkeypatch.setattr(get_settings(), "neo4j_enabled", True)
 
         event_id = f"evt-sync-schedule-{_new_sfx()}"
         wm = _FakeWorkingMemory()
@@ -660,6 +663,96 @@ class TestGraphAgentIntegration:
         await asyncio.sleep(0)
 
         mock_sync.sync_event_graph.assert_awaited_once_with(event_id)
+
+    async def test_execute_reuses_cached_graph_when_evidence_unchanged(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ISSUE-116: read-before-generate skips GraphBuilder when evidence is unchanged."""
+        from app.models.agent_io import EvidenceOutput
+
+        wm = _FakeWorkingMemory()
+        build_calls = 0
+        original_build = GraphBuilder.build
+
+        @staticmethod
+        def _counting_build(evidence_list: list[Evidence]) -> tuple[list[Any], list[Any]]:
+            nonlocal build_calls
+            build_calls += 1
+            return original_build(evidence_list)
+
+        monkeypatch.setattr(GraphBuilder, "build", _counting_build)
+
+        agent = _build_agent(wm=wm)
+        event_id = f"evt-cache-{_new_sfx()}"
+        evidence_output = EvidenceOutput(
+            evidence_list=_main_scenario_evidence(event_id),
+            conflicts=[],
+            gaps=[],
+            success_sources=[EvidenceSource.IDENTITY.value],
+            failed_sources=[],
+            overall_confidence=0.85,
+            collection_status=CollectionStatus.COMPLETED,
+        )
+        agent_input = GraphAgentInput(event_id=event_id, evidence_output=evidence_output)
+
+        first = await agent.execute(agent_input)
+        assert first.summary is not None
+        assert build_calls == 1
+
+        second = await agent.execute(agent_input)
+        assert second.summary is not None
+        assert build_calls == 1
+        assert len(second.nodes) == len(first.nodes)
+
+    async def test_neo4j_disabled_sets_typed_reason_without_blocking_graph(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ISSUE-116: Neo4j disabled annotates summary reason without graph.degraded."""
+        from unittest.mock import MagicMock
+
+        from app.models.agent_io import EvidenceOutput
+
+        wm = _FakeWorkingMemory()
+        mock_sync = MagicMock()
+        agent = GraphAgent(
+            working_memory=wm,
+            session_factory=None,
+            graph_sync_service=mock_sync,
+        )
+
+        async def _fake_persist(
+            self: GraphAgent,
+            event_id: str,
+            nodes: list[Any],
+            edges: list[Any],
+        ) -> None:
+            self.last_persist_ok = True
+            self.last_persist_error = None
+
+        monkeypatch.setattr(GraphAgent, "_persist_graph", _fake_persist)
+
+        event_id = f"evt-neo4j-off-{_new_sfx()}"
+        evidence_output = EvidenceOutput(
+            evidence_list=_main_scenario_evidence(event_id),
+            conflicts=[],
+            gaps=[],
+            success_sources=[EvidenceSource.IDENTITY.value],
+            failed_sources=[],
+            overall_confidence=0.85,
+            collection_status=CollectionStatus.COMPLETED,
+        )
+        output = await agent.execute(
+            GraphAgentInput(event_id=event_id, evidence_output=evidence_output)
+        )
+
+        assert output.degraded is False
+        assert output.degraded_reason == "neo4j_disabled"
+        assert output.summary is not None
+        assert output.summary.degraded_reason == "neo4j_disabled"
+        assert output.summary.degraded is False
+        mock_sync.sync_event_graph.assert_not_called()
 
 
 # ====================================================================== #

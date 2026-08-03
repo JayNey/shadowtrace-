@@ -57,6 +57,7 @@ class InvestigationState(TypedDict, total=False):
     execution_ok: bool
     include_rag: bool
     evidence_output: dict[str, Any] | None
+    graph_output: dict[str, Any] | None
     rag_output: dict[str, Any] | None
     risk_assessment: dict[str, Any] | None
     response_plan: dict[str, Any] | None

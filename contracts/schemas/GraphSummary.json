@@ -1,0 +1,95 @@
+{
+  "$defs": {
+    "GraphSummaryFeature": {
+      "additionalProperties": false,
+      "description": "Evidence-bound structured graph feature for pre-risk scoring (ISSUE-116).",
+      "properties": {
+        "feature_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Feature Id",
+          "type": "string"
+        },
+        "feature_kind": {
+          "enum": [
+            "attack_path",
+            "central_entity",
+            "lateral_movement",
+            "attack_stage"
+          ],
+          "title": "Feature Kind",
+          "type": "string"
+        },
+        "score_hint": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Score Hint",
+          "type": "number"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "provenance": {
+          "default": "graph_edge",
+          "enum": [
+            "graph_edge",
+            "graph_path",
+            "graph_centrality"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        }
+      },
+      "required": [
+        "feature_id",
+        "feature_kind",
+        "score_hint"
+      ],
+      "title": "GraphSummaryFeature",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Deterministic graph-derived features consumed by RiskAgent (ISSUE-116).",
+  "properties": {
+    "schema_version": {
+      "default": "1.0",
+      "maxLength": 16,
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "features": {
+      "items": {
+        "$ref": "#/$defs/GraphSummaryFeature"
+      },
+      "title": "Features",
+      "type": "array"
+    },
+    "degraded": {
+      "default": false,
+      "title": "Degraded",
+      "type": "boolean"
+    },
+    "degraded_reason": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Degraded Reason"
+    }
+  },
+  "title": "GraphSummary",
+  "type": "object"
+}

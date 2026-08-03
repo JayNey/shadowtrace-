@@ -10,12 +10,69 @@
       "title": "Severity",
       "type": "string"
     },
+    "StorylineClaimRef": {
+      "additionalProperties": false,
+      "description": "Stable navigation id for an evidence-grounded storyline proposition (ISSUE-116).",
+      "properties": {
+        "claim_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Claim Id",
+          "type": "string"
+        },
+        "proposition_kind": {
+          "default": "timeline_entry",
+          "enum": [
+            "timeline_entry",
+            "phase_summary"
+          ],
+          "title": "Proposition Kind",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 32,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "default": "1.0",
+          "maxLength": 16,
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "ordinal": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Ordinal",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "claim_id"
+      ],
+      "title": "StorylineClaimRef",
+      "type": "object"
+    },
     "StorylineGeneratedBy": {
       "enum": [
         "llm",
         "rule"
       ],
       "title": "StorylineGeneratedBy",
+      "type": "string"
+    },
+    "StorylineGroundingStatus": {
+      "description": "How storyline claims are grounded to evidence (ISSUE-116 Phase B).",
+      "enum": [
+        "evidence_grounded",
+        "legacy_evidence_grounded",
+        "claim_refs_unavailable"
+      ],
+      "title": "StorylineGroundingStatus",
       "type": "string"
     },
     "StorylinePhase": {
@@ -143,6 +200,24 @@
     },
     "generated_by": {
       "$ref": "#/$defs/StorylineGeneratedBy"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "maxLength": 16,
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "claim_refs": {
+      "items": {
+        "$ref": "#/$defs/StorylineClaimRef"
+      },
+      "title": "Claim Refs",
+      "type": "array"
+    },
+    "grounding_status": {
+      "$ref": "#/$defs/StorylineGroundingStatus",
+      "default": "legacy_evidence_grounded"
     }
   },
   "required": [

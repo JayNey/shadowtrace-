@@ -196,6 +196,26 @@ class TimelineEntry(BaseModel):
     severity_hint: Severity | None = None
 
 
+class StorylineClaimRef(BaseModel):
+    """Stable navigation id for an evidence-grounded storyline proposition (ISSUE-116)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    claim_id: str = Field(..., min_length=1, max_length=128)
+    proposition_kind: Literal["timeline_entry", "phase_summary"] = "timeline_entry"
+    evidence_ids: list[str] = Field(default_factory=list, max_length=32)
+    schema_version: str = Field(default="1.0", min_length=1, max_length=16)
+    ordinal: int = Field(default=0, ge=0)
+
+
+class StorylineGroundingStatus(StrEnum):
+    """How storyline claims are grounded to evidence (ISSUE-116 Phase B)."""
+
+    EVIDENCE_GROUNDED = "evidence_grounded"
+    LEGACY_EVIDENCE_GROUNDED = "legacy_evidence_grounded"
+    CLAIM_REFS_UNAVAILABLE = "claim_refs_unavailable"
+
+
 class StorylinePhase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -214,6 +234,11 @@ class AttackStoryline(BaseModel):
     narrative_summary: str
     phases: list[StorylinePhase] = Field(default_factory=list)
     generated_by: StorylineGeneratedBy
+    schema_version: str = Field(default="1.0", min_length=1, max_length=16)
+    claim_refs: list[StorylineClaimRef] = Field(default_factory=list)
+    grounding_status: StorylineGroundingStatus = (
+        StorylineGroundingStatus.LEGACY_EVIDENCE_GROUNDED
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +280,34 @@ class CrossEventPath(BaseModel):
     risk_hint: str = ""
 
 
+class GraphSummaryFeature(BaseModel):
+    """Evidence-bound structured graph feature for pre-risk scoring (ISSUE-116)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    feature_id: str = Field(..., min_length=1, max_length=128)
+    feature_kind: Literal[
+        "attack_path",
+        "central_entity",
+        "lateral_movement",
+        "attack_stage",
+    ]
+    score_hint: float = Field(..., ge=0.0, le=100.0)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=32)
+    provenance: Literal["graph_edge", "graph_path", "graph_centrality"] = "graph_edge"
+
+
+class GraphSummary(BaseModel):
+    """Deterministic graph-derived features consumed by RiskAgent (ISSUE-116)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(default="1.0", min_length=1, max_length=16)
+    features: list[GraphSummaryFeature] = Field(default_factory=list)
+    degraded: bool = False
+    degraded_reason: str | None = Field(default=None, max_length=256)
+
+
 class GraphOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -265,6 +318,9 @@ class GraphOutput(BaseModel):
     attack_path_candidates: list[list[str]] = Field(default_factory=list)
     # Filled by AttackPathService when NEO4J_ENABLED; otherwise always [].
     cross_event_paths: list[CrossEventPath] = Field(default_factory=list)
+    summary: GraphSummary | None = None
+    degraded: bool = False
+    degraded_reason: str | None = Field(default=None, max_length=256)
 
 
 # --------------------------------------------------------------------------- #

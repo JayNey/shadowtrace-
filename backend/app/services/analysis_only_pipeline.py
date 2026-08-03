@@ -1,6 +1,6 @@
 """Sequential analysis-only pipeline (ISSUE-038 / ISSUE-047).
 
-Runs Triage → Evidence → RAG → Risk → Report for mock/offline development.
+Runs Triage → Evidence → RAG → Graph → Risk → Report for mock/offline development.
 RAGAgent sits after Evidence and before Risk; failures degrade to ``rag_output=None``
 without blocking downstream scoring or reporting.
 
@@ -29,6 +29,8 @@ from app.models.agent_io import (
     CollectionStatus,
     EvidenceAgentInput,
     EvidenceOutput,
+    GraphAgentInput,
+    GraphOutput,
     RAGAgentInput,
     RAGOutput,
     ReportAgentInput,
@@ -183,6 +185,7 @@ class AnalysisOnlyPipeline:
         triage_agent: TriageAgent | _AgentProtocol,
         evidence_agent: EvidenceAgent | _AgentProtocol,
         rag_agent: _AgentProtocol,
+        graph_agent: _AgentProtocol | None = None,
         risk_agent: RiskAgent | _AgentProtocol,
         report_agent: ReportAgent | _AgentProtocol,
         event_service: EventService | Any | None = None,
@@ -195,6 +198,7 @@ class AnalysisOnlyPipeline:
         self._triage = triage_agent
         self._evidence = evidence_agent
         self._rag = rag_agent
+        self._graph = graph_agent
         self._risk = risk_agent
         self._report = report_agent
         self._event_service = event_service
@@ -208,6 +212,7 @@ class AnalysisOnlyPipeline:
         self.triage_agent = triage_agent
         self.evidence_agent = evidence_agent
         self.rag_agent = rag_agent
+        self.graph_agent = graph_agent
         self.risk_agent = risk_agent
         self.report_agent = report_agent
         self.event_service = event_service
@@ -318,6 +323,8 @@ class AnalysisOnlyPipeline:
             ),
         )
 
+        graph_output = await self._run_graph(event_id, evidence_output)
+
         await self._transition(
             event_id,
             EventStatus.SCORING,
@@ -328,6 +335,7 @@ class AnalysisOnlyPipeline:
             triage_result,
             evidence_output,
             rag_output,
+            graph_output,
         )
         final_verdict = await _read_persisted_final_verdict(self._event_service, event_id)
 
@@ -470,18 +478,47 @@ class AnalysisOnlyPipeline:
             raise TypeError("EvidenceAgent must return EvidenceOutput")
         return output
 
+    async def _run_graph(
+        self,
+        event_id: str,
+        evidence_output: EvidenceOutput,
+    ) -> GraphOutput | None:
+        if self._graph is None:
+            return None
+        try:
+            output = await self._graph.execute(
+                GraphAgentInput(event_id=event_id, evidence_output=evidence_output)
+            )
+        except Exception:
+            logger.warning(
+                "GraphAgent failed for event=%s; continuing without graph output",
+                event_id,
+                exc_info=True,
+            )
+            return None
+        if not isinstance(output, GraphOutput):
+            logger.warning(
+                "GraphAgent returned unexpected type %s for event=%s; degrading",
+                type(output).__name__,
+                event_id,
+            )
+            return None
+        return output
+
     async def _run_risk(
         self,
         event_id: str,
         triage_result: TriageResult,
         evidence_output: EvidenceOutput,
         rag_output: RAGOutput | None,
+        graph_output: GraphOutput | None,
     ) -> RiskAssessment:
         risk_input = RiskAgentInput(
             event_id=event_id,
             triage_result=triage_result,
             evidence_output=evidence_output,
             rag_output=rag_output,
+            graph_output=graph_output,
         )
         output = await self._risk.execute(risk_input)
         if not isinstance(output, RiskAssessment):

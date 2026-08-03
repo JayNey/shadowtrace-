@@ -546,3 +546,22 @@ async def test_backfill_no_techniques_no_error() -> None:
     for phase in storyline.phases:
         for e in phase.entries:
             assert e.technique_id is None
+
+
+async def test_generate_attaches_claim_refs_v2() -> None:
+    """ISSUE-116 Phase B: storyline emits evidence-grounded claim refs."""
+    from app.models.agent_io import StorylineGroundingStatus
+
+    entries = [
+        _make_evidence(evidence_type="login", description="login"),
+        _make_evidence(evidence_type="file_access", description="read file"),
+        _make_evidence(evidence_type="upload", description="upload"),
+    ]
+    ctx = _make_event_context(evidence_list=entries)
+    svc = StorylineService(working_memory=_FakeWorkingMemory())
+    storyline = await svc.generate(ctx)
+
+    assert storyline.schema_version == "2.0"
+    assert storyline.grounding_status is StorylineGroundingStatus.EVIDENCE_GROUNDED
+    assert len(storyline.claim_refs) >= 1
+    assert all(ref.evidence_ids for ref in storyline.claim_refs)

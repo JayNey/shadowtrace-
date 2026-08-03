@@ -9,6 +9,7 @@ WorkingMemory.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.base import BaseAgent
 from app.agents.graph_builder import GraphBuilder
+from app.core.config import get_settings
 from app.core.errors import ShadowTraceError
 from app.db.orm.graph import GraphEdgeORM, GraphNodeORM
 from app.models.agent_io import GraphAgentInput, GraphOutput
@@ -26,6 +28,7 @@ from app.services.graph_projection import (
     compute_central_entities as _compute_central_entities,
 )
 from app.services.graph_projection import find_attack_paths as _find_attack_paths
+from app.services.graph_summary_builder import build_graph_summary
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +96,16 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
         evidence_list: list[Evidence] = input.evidence_output.evidence_list
         self.last_degraded_reason = None
 
+        cached = await self._read_cached_graph(event_id, evidence_list)
+        if cached is not None:
+            return cached
+
         # 1. Build graph from evidence (pure in-memory transformation)
         try:
             nodes, edges = GraphBuilder.build(evidence_list)
         except Exception:
             logger.exception("GraphBuilder failed for event=%s", event_id)
-            output = self._empty_degraded()
+            output = self._finalize_output(self._empty_degraded(), reason="graph_builder_failed")
             await self._mark_degraded(event_id, reason="graph_builder_failed")
             await self._write_context(event_id, output)
             return output
@@ -120,28 +127,31 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
         # 5. Persist to PostgreSQL (best-effort; degrades on failure)
         await self._persist_graph(event_id, nodes, edges)
         if self.last_persist_error is not None:
-            await self._mark_degraded(
-                event_id,
+            output = self._finalize_output(
+                output,
                 reason=f"graph_persist_failed: {self.last_persist_error}",
             )
+            await self._mark_degraded(event_id, reason=output.degraded_reason or "graph_persist_failed")
+        else:
+            output = self._finalize_output(output)
 
-        # 5b. Trigger Neo4j mirror sync (ISSUE-082 §实现步骤 point 3).
-        # Fire-and-forget: NEO4J_ENABLED=false → immediately returns skipped=True.
-        # Only trigger when PG persist succeeded — if the nodes/edges aren't in
-        # PostgreSQL, there is nothing to mirror to Neo4j.
+        # 5b. Neo4j mirror sync + typed availability reason (ISSUE-082 / ISSUE-116).
         if self._graph_sync_service is not None and self.last_persist_ok:
-            try:
-                task = asyncio.create_task(
-                    self._graph_sync_service.sync_event_graph(event_id),
-                    name=f"neo4j-sync-{event_id}",
-                )
-                task.add_done_callback(_log_background_task_failure)
-            except Exception:
-                logger.warning(
-                    "Failed to schedule Neo4j sync for event=%s",
-                    event_id,
-                    exc_info=True,
-                )
+            if not get_settings().neo4j_enabled:
+                output = self._annotate_neo4j_unavailable(output, reason="neo4j_disabled")
+            else:
+                try:
+                    task = asyncio.create_task(
+                        self._graph_sync_service.sync_event_graph(event_id),
+                        name=f"neo4j-sync-{event_id}",
+                    )
+                    task.add_done_callback(_log_background_task_failure)
+                except Exception:
+                    logger.warning(
+                        "Failed to schedule Neo4j sync for event=%s",
+                        event_id,
+                        exc_info=True,
+                    )
 
         # 6. Write to EventContext via WorkingMemory
         await self._write_context(event_id, output)
@@ -250,6 +260,55 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
         except Exception:
             logger.warning("GraphAgent WM write failed event=%s", event_id, exc_info=True)
 
+    async def _read_cached_graph(
+        self,
+        event_id: str,
+        evidence_list: list[Evidence],
+    ) -> GraphOutput | None:
+        """Read-before-generate: reuse prior graph_output when evidence set is unchanged."""
+        if self.working_memory is None:
+            return None
+        try:
+            raw = await self.working_memory.read(event_id, "graph_output")
+        except Exception:
+            logger.debug("GraphAgent cache read failed event=%s", event_id, exc_info=True)
+            return None
+        if raw is None:
+            return None
+        try:
+            cached = GraphOutput.model_validate(raw)
+        except Exception:
+            logger.debug("GraphAgent cache invalid event=%s", event_id, exc_info=True)
+            return None
+        if _evidence_fingerprint(evidence_list) != _graph_evidence_fingerprint(cached):
+            return None
+        if cached.summary is None:
+            return self._finalize_output(cached)
+        return cached
+
+    def _finalize_output(
+        self,
+        output: GraphOutput,
+        *,
+        reason: str | None = None,
+    ) -> GraphOutput:
+        if reason:
+            self.last_degraded_reason = reason
+            output = output.model_copy(
+                update={
+                    "degraded": True,
+                    "degraded_reason": reason,
+                }
+            )
+        summary = build_graph_summary(output)
+        return output.model_copy(update={"summary": summary})
+
+    @staticmethod
+    def _annotate_neo4j_unavailable(output: GraphOutput, *, reason: str) -> GraphOutput:
+        """Record Neo4j unavailability without marking the in-memory graph degraded."""
+        annotated = output.model_copy(update={"degraded_reason": reason})
+        return annotated.model_copy(update={"summary": build_graph_summary(annotated)})
+
     async def _mark_degraded(self, event_id: str, *, reason: str) -> None:
         """Best-effort degraded marker for graph build/persist failures."""
         self.last_degraded_reason = reason
@@ -282,4 +341,18 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
             edges=[],
             central_entities=[],
             attack_path_candidates=[],
+            degraded=True,
+            degraded_reason="graph_builder_failed",
         )
+
+
+def _evidence_fingerprint(evidence_list: list[Evidence]) -> str:
+    ids = sorted({item.evidence_id for item in evidence_list if item.evidence_id})
+    material = "|".join(ids)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _graph_evidence_fingerprint(output: GraphOutput) -> str:
+    ids = sorted({edge.evidence_id for edge in output.edges if edge.evidence_id})
+    material = "|".join(ids)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
