@@ -188,9 +188,7 @@ class DetectionGovernanceService:
                 rows = list(
                     await session.scalars(
                         select(DetectionGovernanceDecisionORM)
-                        .where(
-                            DetectionGovernanceDecisionORM.binding_hash == target.binding_hash
-                        )
+                        .where(DetectionGovernanceDecisionORM.binding_hash == target.binding_hash)
                         .order_by(DetectionGovernanceDecisionORM.decided_at.asc())
                         .with_for_update()
                     )
@@ -270,8 +268,7 @@ class DetectionGovernanceService:
                         await session.scalars(
                             select(DetectionGovernanceDecisionORM)
                             .where(
-                                DetectionGovernanceDecisionORM.binding_hash
-                                == current_binding_hash
+                                DetectionGovernanceDecisionORM.binding_hash == current_binding_hash
                             )
                             .order_by(DetectionGovernanceDecisionORM.decided_at.asc())
                             .with_for_update()
@@ -466,8 +463,7 @@ class DetectionGovernanceService:
                         await session.scalars(
                             select(DetectionGovernanceDecisionORM)
                             .where(
-                                DetectionGovernanceDecisionORM.binding_hash
-                                == decision.binding_hash
+                                DetectionGovernanceDecisionORM.binding_hash == decision.binding_hash
                             )
                             .order_by(DetectionGovernanceDecisionORM.decided_at.asc())
                             .with_for_update()

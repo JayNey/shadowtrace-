@@ -993,7 +993,17 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
-    global _memory_governance, _detection_governance, _detection_promotion, _detection_context_projector, _detection_context_service, _decision_record_service, _tool_call_grant_service, _agent_task_service, _agent_artifact_service, _content_projection_service
+    global \
+        _memory_governance, \
+        _detection_governance, \
+        _detection_promotion, \
+        _detection_context_projector, \
+        _detection_context_service, \
+        _decision_record_service, \
+        _tool_call_grant_service, \
+        _agent_task_service, \
+        _agent_artifact_service, \
+        _content_projection_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
     from app.playbook.resources import reset_playbook_resources_cache
