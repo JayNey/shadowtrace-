@@ -46,7 +46,7 @@ from app.models.report import InvestigationReport
 from app.models.workflow import TransitionContext
 from app.services.tenant_resolution import resolve_tenant_id
 from app.services.event_service import EventService, StateMachinePort
-from app.services.agent_task_coordinator import enqueue_risk_score_task
+from app.services.agent_task_coordinator import run_risk_score_with_ledger
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
 
@@ -196,6 +196,7 @@ class AnalysisOnlyPipeline:
         degraded_flags: Any | None = None,
         settings: Settings | None = None,
         agent_task_service: Any | None = None,
+        agent_artifact_service: Any | None = None,
     ) -> None:
         self._triage = triage_agent
         self._evidence = evidence_agent
@@ -210,6 +211,7 @@ class AnalysisOnlyPipeline:
         self._degraded_flags = degraded_flags
         self._settings = settings
         self._agent_task_service = agent_task_service
+        self._agent_artifact_service = agent_artifact_service
 
         # Back-compat aliases for ISSUE-047 unit tests.
         self.triage_agent = triage_agent
@@ -344,19 +346,29 @@ class AnalysisOnlyPipeline:
             source_snapshot = await self._context_store.get(event_id, "source_snapshot")
             tenant_id = resolve_tenant_id(source_snapshot)
         if tenant_id:
-            await enqueue_risk_score_task(
+            risk_assessment = await run_risk_score_with_ledger(
                 self._agent_task_service,
+                self._agent_artifact_service,
                 event_id=event_id,
                 tenant_id=tenant_id,
+                worker_principal="investigation:analysis_only_pipeline",
                 idempotency_key=f"risk-score:{event_id}",
+                execute=lambda: self._run_risk(
+                    event_id,
+                    triage_result,
+                    evidence_output,
+                    rag_output,
+                    graph_output,
+                ),
             )
-        risk_assessment = await self._run_risk(
-            event_id,
-            triage_result,
-            evidence_output,
-            rag_output,
-            graph_output,
-        )
+        else:
+            risk_assessment = await self._run_risk(
+                event_id,
+                triage_result,
+                evidence_output,
+                rag_output,
+                graph_output,
+            )
         final_verdict = await _read_persisted_final_verdict(self._event_service, event_id)
 
         await self._transition(

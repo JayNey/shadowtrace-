@@ -238,8 +238,6 @@ def validate_agent_task_transition(
     """Fail closed on illegal transitions."""
     if current is target:
         return
-    if current in TERMINAL_AGENT_TASK_STATUSES:
-        raise ValueError(f"terminal task cannot transition from {current.value} to {target.value}")
     allowed: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
         AgentTaskStatus.QUEUED: {AgentTaskStatus.CLAIMED, AgentTaskStatus.CANCELLED, AgentTaskStatus.EXPIRED},
         AgentTaskStatus.CLAIMED: {
@@ -256,9 +254,13 @@ def validate_agent_task_transition(
             AgentTaskStatus.DEAD,
         },
         AgentTaskStatus.FAILED: {AgentTaskStatus.QUEUED} if allow_retry else set(),
+        AgentTaskStatus.EXPIRED: {AgentTaskStatus.QUEUED} if allow_retry else set(),
     }
-    if target not in allowed.get(current, set()):
-        raise ValueError(f"illegal task transition {current.value} -> {target.value}")
+    if target in allowed.get(current, set()):
+        return
+    if current in TERMINAL_AGENT_TASK_STATUSES:
+        raise ValueError(f"terminal task cannot transition from {current.value} to {target.value}")
+    raise ValueError(f"illegal task transition {current.value} -> {target.value}")
 
 
 __all__ = [

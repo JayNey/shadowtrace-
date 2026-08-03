@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 import orjson
+from jsonschema import Draft202012Validator
 
 from app.core.errors import ValidationError
 from app.core.sanitization import sanitize_data
@@ -80,6 +81,16 @@ class ContentProjectionService:
 
     def __init__(self, *, max_bytes: int = MAX_PROJECTION_BYTES) -> None:
         self._max_bytes = max_bytes
+        self._schema_validator = Draft202012Validator(ContentProjection.model_json_schema())
+
+    def _validate_projection_payload(self, payload: dict[str, Any]) -> None:
+        errors = sorted(self._schema_validator.iter_errors(payload), key=lambda err: list(err.path))
+        if errors:
+            raise ValidationError(
+                "content projection schema validation failed",
+                error_code="validation_error",
+                details={"errors": [error.message for error in errors[:8]]},
+            )
 
     def build(
         self,
@@ -110,12 +121,14 @@ class ContentProjectionService:
                 error_code="validation_error",
             )
 
-        return ContentProjection(
+        projection = ContentProjection(
             projection_kind=projection_kind,
             fields=bounded,
             source_refs=source_refs,
             byte_size=byte_size,
         )
+        self._validate_projection_payload(projection.model_dump(mode="json"))
+        return projection
 
     def _bound_payload(self, value: dict[str, Any]) -> dict[str, Any]:
         bounded: dict[str, Any] = {}

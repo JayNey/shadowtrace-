@@ -501,6 +501,8 @@ async def _build_production_investigation_graph(
         "disposition_sync": await get_disposition_sync(),
         "event_disposition": await get_event_disposition_service(),
         "convergence_guard": convergence_guard,
+        "agent_task_service": _get_agent_task_service(),
+        "agent_artifact_service": _get_agent_artifact_service(),
     }
     checkpointer = await build_checkpointer(_get_redis())
     return build_investigation_graph(agents, services, checkpointer=checkpointer)
@@ -902,6 +904,7 @@ async def get_pipeline() -> Any:
             degraded_flags=stack["degraded_flags"],
             settings=stack["settings"],
             agent_task_service=_get_agent_task_service(),
+            agent_artifact_service=_get_agent_artifact_service(),
         )
     return _pipeline
 

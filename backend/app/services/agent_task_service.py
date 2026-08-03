@@ -361,15 +361,15 @@ class AgentTaskService:
                 if row.tenant_id != tenant_id:
                     raise AgentTaskDeniedError("cross-tenant retry denied", details={"task_id": task_id})
                 status = AgentTaskStatus(row.status)
-                if status is not AgentTaskStatus.FAILED:
-                    raise AgentTaskDeniedError(
-                        "only failed tasks may retry",
-                        details={"task_id": task_id, "status": status.value},
-                    )
                 if row.side_effect_status == SideEffectStatus.UNKNOWN.value:
                     raise AgentTaskDeniedError(
                         "side_effect unknown — manual resolution required",
                         details={"task_id": task_id},
+                    )
+                if status not in {AgentTaskStatus.FAILED, AgentTaskStatus.EXPIRED}:
+                    raise AgentTaskDeniedError(
+                        "only failed or expired tasks may retry",
+                        details={"task_id": task_id, "status": status.value},
                     )
                 validate_agent_task_transition(status, AgentTaskStatus.QUEUED, allow_retry=True)
                 row.status = AgentTaskStatus.QUEUED.value

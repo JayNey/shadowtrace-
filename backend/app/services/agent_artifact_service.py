@@ -160,6 +160,12 @@ class AgentArtifactService:
                             "artifact event_id mismatch",
                             details={"task_id": claim.task_id, "event_id": event_id},
                         )
+                    status = AgentTaskStatus(task_row.status)
+                    if status is not AgentTaskStatus.RUNNING:
+                        raise AgentTaskDeniedError(
+                            "artifact write requires running task",
+                            details={"task_id": claim.task_id, "status": status.value},
+                        )
                     if task_row.claim_owner != claim.worker_principal:
                         raise AgentTaskDeniedError(
                             "stale worker: claim_owner mismatch",
@@ -177,12 +183,6 @@ class AgentArtifactService:
                                 "task_id": claim.task_id,
                                 "expected_attempt": task_row.attempt,
                             },
-                        )
-                    status = AgentTaskStatus(task_row.status)
-                    if status is not AgentTaskStatus.RUNNING:
-                        raise AgentTaskDeniedError(
-                            "artifact write requires running task",
-                            details={"task_id": claim.task_id, "status": status.value},
                         )
 
                     existing = await _load_existing_artifact(

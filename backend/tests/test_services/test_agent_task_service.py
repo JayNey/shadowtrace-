@@ -172,7 +172,7 @@ async def test_claim_start_complete_happy_path(task_service: AgentTaskService) -
             tenant_id="tenant-a",
         )
     )
-    running = await task_service.start(claim)
+    running = await task_service.start(claim, tenant_id="tenant-a")
     assert running.status is AgentTaskStatus.RUNNING
     done = await task_service.complete(claim)
     assert done.status is AgentTaskStatus.COMPLETED
@@ -406,10 +406,10 @@ async def test_attempt_history_recorded(
 
 
 @pytest.mark.asyncio
-async def test_cross_tenant_idempotency_key_denied(task_service: AgentTaskService) -> None:
+async def test_cross_tenant_idempotency_key_isolated_per_tenant(task_service: AgentTaskService) -> None:
     event_id = f"evt-at-{ _sfx() }"
     key = f"idem-{ _sfx() }"
-    await task_service.enqueue(_enqueue_request(event_id=event_id, idempotency_key=key))
+    first = await task_service.enqueue(_enqueue_request(event_id=event_id, idempotency_key=key))
     other = AgentTaskEnqueueRequest(
         event_id=event_id,
         tenant_id="tenant-b",
@@ -421,8 +421,10 @@ async def test_cross_tenant_idempotency_key_denied(task_service: AgentTaskServic
         ),
         idempotency_key=key,
     )
-    with pytest.raises(AgentTaskDeniedError, match="cross-tenant"):
-        await task_service.enqueue(other)
+    second = await task_service.enqueue(other)
+    assert first.task_id != second.task_id
+    assert first.tenant_id == "tenant-a"
+    assert second.tenant_id == "tenant-b"
 
 
 @pytest.mark.asyncio
@@ -447,6 +449,44 @@ async def test_failed_task_retry_claim_complete_cycle(task_service: AgentTaskSer
         AgentTaskClaimRequest(
             task_id=task.task_id,
             worker_principal="worker-a",
+            tenant_id="tenant-a",
+        )
+    )
+    await task_service.start(claim2, tenant_id="tenant-a")
+    done = await task_service.complete(claim2)
+    assert done.status is AgentTaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_expired_task_requeue_claim_complete_cycle(
+    task_service: AgentTaskService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = f"evt-at-{ _sfx() }"
+    task = await task_service.enqueue(
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+    )
+    claim = await task_service.claim(
+        AgentTaskClaimRequest(
+            task_id=task.task_id,
+            worker_principal="worker-a",
+            tenant_id="tenant-a",
+            lease_seconds=60,
+        )
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.AgentTaskORM, task.task_id)
+            assert row is not None
+            row.lease_expires_at = datetime.now(tz=UTC) - timedelta(seconds=30)
+    expired = await task_service.expire_stale_claim(task.task_id, tenant_id="tenant-a")
+    assert expired.status is AgentTaskStatus.EXPIRED
+    retried = await task_service.retry_to_queue(task.task_id, tenant_id="tenant-a")
+    assert retried.status is AgentTaskStatus.QUEUED
+    claim2 = await task_service.claim(
+        AgentTaskClaimRequest(
+            task_id=task.task_id,
+            worker_principal="worker-b",
             tenant_id="tenant-a",
         )
     )

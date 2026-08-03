@@ -58,12 +58,14 @@ from app.orchestration.writeback_recovery_handler import (
     writeback_recovery_graph_node,
 )
 from app.services.analysis_only_pipeline import run_rag_stage
+from app.services.agent_task_coordinator import run_risk_score_with_ledger
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService, apply_flag_to_list
 from app.services.evidence_query_plan_service import extract_evidence_plan_inputs
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
 from app.services.state_machine_service import StateMachineService
+from app.services.tenant_resolution import resolve_tenant_id
 from app.services.working_memory import WorkingMemory
 
 logger = logging.getLogger(__name__)
@@ -933,17 +935,46 @@ def build_investigation_graph(
             EventStatus.SCORING,
             reason="investigation:score",
         )
-        result = await risk_agent.execute(
-            RiskAgentInput(
-                event_id=state["event_id"],
-                triage_result=TriageResult.model_validate(state["triage_result"]),
-                evidence_output=EvidenceOutput.model_validate(state["evidence_output"]),
-                graph_output=graph_output,
-                rag_output=rag_output,
+        tenant_id = resolve_tenant_id(state.get("source_snapshot"))
+        if tenant_id is None:
+            context_store = services.get("context_store")
+            if context_store is not None:
+                try:
+                    source_snapshot = await context_store.get(state["event_id"], "source_snapshot")
+                    tenant_id = resolve_tenant_id(source_snapshot)
+                except Exception:
+                    logger.debug(
+                        "risk_node tenant resolution failed for event=%s",
+                        state["event_id"],
+                        exc_info=True,
+                    )
+
+        async def _execute_risk() -> RiskAssessment:
+            result = await risk_agent.execute(
+                RiskAgentInput(
+                    event_id=state["event_id"],
+                    triage_result=TriageResult.model_validate(state["triage_result"]),
+                    evidence_output=EvidenceOutput.model_validate(state["evidence_output"]),
+                    graph_output=graph_output,
+                    rag_output=rag_output,
+                )
             )
-        )
-        if not isinstance(result, RiskAssessment):
-            raise TypeError("risk_agent must return RiskAssessment")
+            if not isinstance(result, RiskAssessment):
+                raise TypeError("risk_agent must return RiskAssessment")
+            return result
+
+        if tenant_id:
+            result = await run_risk_score_with_ledger(
+                services.get("agent_task_service"),
+                services.get("agent_artifact_service"),
+                event_id=state["event_id"],
+                tenant_id=tenant_id,
+                worker_principal="investigation:workflow_graph",
+                idempotency_key=f"risk-score:{state['event_id']}",
+                execute=_execute_risk,
+            )
+        else:
+            result = await _execute_risk()
         defer_response = bool(state.get("defer_response_execution"))
         if defer_response:
             risk_status = EventStatus.SCORING

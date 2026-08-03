@@ -63,6 +63,27 @@ def test_terminal_transition_rejected() -> None:
         validate_agent_task_transition(AgentTaskStatus.COMPLETED, AgentTaskStatus.RUNNING)
 
 
+def test_failed_to_queued_rejected_without_retry_flag() -> None:
+    with pytest.raises(ValueError, match="terminal"):
+        validate_agent_task_transition(AgentTaskStatus.FAILED, AgentTaskStatus.QUEUED)
+
+
+def test_failed_to_queued_allowed_with_retry() -> None:
+    validate_agent_task_transition(
+        AgentTaskStatus.FAILED,
+        AgentTaskStatus.QUEUED,
+        allow_retry=True,
+    )
+
+
+def test_expired_to_queued_allowed_with_retry() -> None:
+    validate_agent_task_transition(
+        AgentTaskStatus.EXPIRED,
+        AgentTaskStatus.QUEUED,
+        allow_retry=True,
+    )
+
+
 def test_projection_rejects_injection() -> None:
     svc = ContentProjectionService(max_bytes=4096)
     with pytest.raises(ValidationError, match="injection"):
