@@ -74,6 +74,24 @@ async def test_build_investigation_agents_wires_retrieval_pipeline(
     )
     monkeypatch.setattr("app.agents.memory_agent.MemoryAgent", lambda **_k: MagicMock())
 
+    from app.playbook.resources import LoadedPlaybookResources
+
+    mock_playbook_resources = LoadedPlaybookResources(
+        status="ready",
+        mode="test",
+        playbook_kb_service=MagicMock(),
+        playbook_release_service=MagicMock(),
+        active_release_id="pbrel-test",
+    )
+    monkeypatch.setattr(
+        "app.playbook.resources.get_loaded_playbook_resources",
+        lambda **_kwargs: mock_playbook_resources,
+    )
+    monkeypatch.setattr(
+        "app.playbook.resources.probe_playbook_resources",
+        AsyncMock(return_value=mock_playbook_resources),
+    )
+
     reset_loaded_retrieval_resources()
     deps.reset_deps()
     try:
