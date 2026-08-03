@@ -177,6 +177,48 @@ def test_jurisdiction_mismatch_not_applicable() -> None:
     assert citation.applicability_reason is ApplicabilityReasonCode.JURISDICTION_MISMATCH
 
 
+def test_industry_mismatch_not_applicable() -> None:
+    citation = evaluate_control_applicability(
+        profile=_profile(frameworks=("nist_csf",)).model_copy(
+            update={"industry_codes": ("retail",)}
+        ),
+        control=_control(),
+        release_id="krel-test",
+    )
+    assert citation.applicability_status is ApplicabilityStatus.NOT_APPLICABLE
+    assert citation.applicability_reason is ApplicabilityReasonCode.INDUSTRY_MISMATCH
+
+
+def test_applicability_ignores_agent_hints() -> None:
+    profile = _profile(frameworks=("iso27001",))
+    without_hints = evaluate_control_applicability(
+        profile=profile,
+        control=_control(),
+        release_id="krel-test",
+    )
+    with_hints = evaluate_control_applicability(
+        profile=profile,
+        control=_control(),
+        release_id="krel-test",
+        hints=PolicyApplicabilityHints(framework_ids=["nist_csf"]),
+    )
+    assert without_hints == with_hints
+
+
+def test_technique_citations_missing_profile_use_non_renderable_sentinel() -> None:
+    citations = build_technique_policy_citations(
+        technique_id="T1059",
+        release_id="krel-test",
+        mappings=[],
+        controls_by_id={},
+        profile=None,
+    )
+    assert len(citations) == 1
+    assert citations[0].control_id == "unknown:profile_missing"
+    assert citations[0].text_locator == "unknown:profile_missing"
+    assert citations[0].framework_id == "unknown"
+
+
 def test_technique_citations_control_not_in_release_returns_typed_citation() -> None:
     mapping = AttackControlMapping(
         mapping_id="map-approved-missing-control",

@@ -47,6 +47,25 @@ def test_validate_policy_bundle_rejects_unknown_mapping_control() -> None:
     assert any("unknown control_id" in err for err in result.errors)
 
 
+def test_validate_policy_bundle_rejects_mapping_framework_mismatch() -> None:
+    bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    control_id = bundle["controls"][0]["control_id"]
+    bundle["mappings"].append(
+        {
+            "mapping_id": "map-framework-mismatch",
+            "technique_id": "T9999",
+            "control_id": control_id,
+            "framework_id": "iso27001",
+            "approval_state": "approved",
+            "mapping_version": "1.0",
+            "provenance": "test",
+        }
+    )
+    result = validate_policy_bundle(bundle)
+    assert result.ok is False
+    assert any("framework_id" in err and "does not match" in err for err in result.errors)
+
+
 def test_fixture_contains_candidate_and_approved_mappings() -> None:
     bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     result = validate_policy_bundle(bundle)

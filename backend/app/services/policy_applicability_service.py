@@ -18,6 +18,9 @@ from app.models.policy_query_plan import PolicyQueryPlan
 from app.models.policy_release import PolicyControl
 
 _MISSING_CONTROL_LOCATOR = "unknown:control_not_in_release"
+_PROFILE_MISSING_FRAMEWORK = "unknown"
+_PROFILE_MISSING_CONTROL_ID = "unknown:profile_missing"
+_PROFILE_MISSING_LOCATOR = "unknown:profile_missing"
 
 
 def compute_policy_query_plan_hash(payload: dict[str, object]) -> str:
@@ -30,6 +33,7 @@ def _framework_allowed(profile: OrganizationPolicyProfile, framework_id: str) ->
 
 
 def _jurisdiction_compatible(profile: OrganizationPolicyProfile, control: PolicyControl) -> bool:
+    """Empty control jurisdiction_codes means universal scope within allowed framework."""
     if not profile.jurisdiction_codes:
         return True
     if not control.jurisdiction_codes:
@@ -38,6 +42,7 @@ def _jurisdiction_compatible(profile: OrganizationPolicyProfile, control: Policy
 
 
 def _industry_compatible(profile: OrganizationPolicyProfile, control: PolicyControl) -> bool:
+    """Empty control industry_codes means universal scope within allowed framework."""
     if not profile.industry_codes:
         return True
     if not control.industry_codes:
@@ -164,10 +169,10 @@ def build_technique_policy_citations(
     if profile is None:
         return [
             PolicyCitation(
-                framework_id="not_evaluated",
+                framework_id=_PROFILE_MISSING_FRAMEWORK,
                 release_id=release_id,
-                control_id="not_evaluated",
-                text_locator="not_evaluated",
+                control_id=_PROFILE_MISSING_CONTROL_ID,
+                text_locator=_PROFILE_MISSING_LOCATOR,
                 applicability_status=ApplicabilityStatus.NOT_EVALUATED,
                 applicability_reason=ApplicabilityReasonCode.PROFILE_MISSING,
                 technique_id=technique_id,

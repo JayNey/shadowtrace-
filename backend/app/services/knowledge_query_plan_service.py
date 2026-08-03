@@ -27,6 +27,8 @@ def resolve_knowledge_query_plan(
     embedding_release_id: str,
     trace_id: str,
     kb_name: str | None = None,
+    tenant_id: str = "",
+    principal: str = "",
 ) -> KnowledgeQueryPlan:
     """Build an immutable query plan pinned to explicit release ids."""
     resolved_kb = kb_name or corpus_to_kb_name(corpus_id)
@@ -38,6 +40,8 @@ def resolve_knowledge_query_plan(
         active_release_id=active_release_id,
         embedding_release_id=embedding_release_id,
         trace_id=trace_id,
+        tenant_id=tenant_id.strip(),
+        principal=principal.strip(),
         pinned_at=datetime.now(UTC),
     )
 

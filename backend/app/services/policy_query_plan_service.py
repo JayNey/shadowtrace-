@@ -29,8 +29,9 @@ async def validate_pinned_policy_query_plan(
     *,
     tenant_id: str,
     principal: str,
+    authorized_tenant_id: str | None = None,
 ) -> OrganizationPolicyProfile | None:
-    """Ensure a pinned plan still matches the tenant's effective profile revision."""
+    """Load the profile revision pinned on the plan (not the current effective revision)."""
     normalized_tenant = tenant_id.strip()
     normalized_principal = principal.strip()
     if plan.tenant_id.strip() != normalized_tenant:
@@ -46,12 +47,14 @@ async def validate_pinned_policy_query_plan(
                 "plan_principal": plan.principal,
             },
         )
-    profile = await profile_service.get_effective_profile(
+    if plan.profile_id is None or plan.profile_revision is None:
+        return None
+    return await profile_service.validate_profile_revision(
         tenant_id=normalized_tenant,
-        principal=normalized_principal,
+        profile_id=plan.profile_id,
+        profile_revision=plan.profile_revision,
+        authorized_tenant_id=authorized_tenant_id,
     )
-    assert_plan_profile_consistency(plan, profile)
-    return profile
 
 
 async def resolve_active_policy_query_plan(
@@ -83,6 +86,8 @@ async def resolve_active_policy_query_plan(
         embedding_release_id=embedding_release_id,
         trace_id=trace_id,
         kb_name=POLICY_KB_NAME,
+        tenant_id=tenant_id.strip(),
+        principal=principal.strip(),
     )
     plan = build_policy_query_plan(
         tenant_id=tenant_id,

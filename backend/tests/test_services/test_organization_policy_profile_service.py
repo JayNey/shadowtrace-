@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -159,4 +160,52 @@ async def test_upsert_profile_requires_actor_principal(
                 owner_principal="owner-a",
             ),
             actor_principal="",
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_concurrent_first_upsert_profile_single_lineage(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_profile_tables: None,
+) -> None:
+    service = OrganizationPolicyProfileService(session_factory)
+    tenant_id = f"tenant-concurrent-{uuid.uuid4().hex[:8]}"
+    request = OrganizationPolicyProfileUpsertRequest(
+        tenant_id=tenant_id,
+        owner_principal="owner-a",
+        framework_allowlist=("nist_csf",),
+    )
+    first, second = await asyncio.gather(
+        service.upsert_profile(request, actor_principal="admin-a"),
+        service.upsert_profile(request, actor_principal="admin-a"),
+    )
+    profile_ids = {first.profile_id, second.profile_id}
+    assert len(profile_ids) == 1
+    revisions = sorted({first.revision, second.revision})
+    assert revisions == [1, 2]
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_get_effective_profile_rejects_cross_tenant_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_profile_tables: None,
+) -> None:
+    service = OrganizationPolicyProfileService(session_factory)
+    tenant_id = f"tenant-profile-{uuid.uuid4().hex[:8]}"
+    await service.upsert_profile(
+        OrganizationPolicyProfileUpsertRequest(
+            tenant_id=tenant_id,
+            owner_principal="owner-a",
+            framework_allowlist=("nist_csf",),
+        ),
+        actor_principal="admin-a",
+        authorized_tenant_id=tenant_id,
+    )
+    with pytest.raises(ValidationError, match="cross-tenant"):
+        await service.get_effective_profile(
+            tenant_id=tenant_id,
+            principal="owner-a",
+            authorized_tenant_id="tenant-other",
         )

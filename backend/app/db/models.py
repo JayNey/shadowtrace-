@@ -1152,6 +1152,11 @@ class OrganizationPolicyProfileORM(Base):
             "revision",
             name="uq_organization_policy_profile_tenant_profile_revision",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "revision",
+            name="uq_organization_policy_profile_tenant_revision",
+        ),
         Index("ix_organization_policy_profile_tenant_revision", "tenant_id", "revision"),
     )
 

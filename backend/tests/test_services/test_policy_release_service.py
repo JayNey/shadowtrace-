@@ -156,6 +156,8 @@ async def test_stage_activate_and_pin_policy_release(
     )
     assert plan is not None
     assert plan.knowledge_plan.active_release_id == active.release_id
+    assert plan.knowledge_plan.tenant_id == tenant_id
+    assert plan.knowledge_plan.principal == "principal-policy"
     assert plan.profile_revision == 1
     assert plan.plan_hash
 
@@ -340,7 +342,47 @@ async def test_resolve_control_ref_rejects_content_hash_mismatch(
 
 @pytest.mark.asyncio
 @requires_postgres
-async def test_validate_pinned_policy_query_plan_rejects_stale_profile(
+async def test_resolve_control_ref_rejects_framework_drift(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_policy_tables: None,
+) -> None:
+    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    provenance = KnowledgeReleaseProvenance.model_validate(
+        default_policy_provenance(str(DATA_FILE))
+    )
+    staged = await release_service.stage_policy_bundle(
+        bundle,
+        release_version="v1",
+        provenance=provenance,
+    )
+    active = await release_service.activate_release(staged.release_id)
+    async with session_factory() as session:
+        obj = await session.scalar(
+            select(orm.PolicyReleaseObjectORM).where(
+                orm.PolicyReleaseObjectORM.release_id == active.release_id,
+            )
+        )
+        assert obj is not None
+        from app.models.policy_release import PolicyControl
+
+        control = PolicyControl.model_validate(obj.payload)
+    ref = PolicyControlRef(
+        control_id=control.control_id,
+        framework_id="iso27001",
+        release_id=active.release_id,
+        release_version=active.release_version,
+        content_hash=compute_policy_control_hash(control),
+        bundle_content_hash=active.content_hash,
+        text_locator=control.text_locator,
+    )
+    with pytest.raises(ValidationError, match="framework mismatch"):
+        await release_service.resolve_control_ref(ref)
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_validate_pinned_policy_query_plan_uses_historical_revision(
     session_factory: async_sessionmaker[AsyncSession],
     clean_policy_tables: None,
 ) -> None:
@@ -383,10 +425,12 @@ async def test_validate_pinned_policy_query_plan_rejects_stale_profile(
         ),
         actor_principal="principal-policy",
     )
-    with pytest.raises(ValidationError, match="profile revision mismatch"):
-        await validate_pinned_policy_query_plan(
-            plan,
-            profile_service,
-            tenant_id=tenant_id,
-            principal="principal-policy",
-        )
+    pinned_profile = await validate_pinned_policy_query_plan(
+        plan,
+        profile_service,
+        tenant_id=tenant_id,
+        principal="principal-policy",
+    )
+    assert pinned_profile is not None
+    assert pinned_profile.revision == 1
+    assert pinned_profile.framework_allowlist == ("nist_csf",)

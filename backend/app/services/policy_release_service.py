@@ -326,7 +326,24 @@ class PolicyReleaseService:
                 "policy control content hash mismatch",
                 details={"control_id": ref.control_id, "reason": "content_hash_mismatch"},
             )
-        return PolicyControl.model_validate(obj.payload), release
+        control = PolicyControl.model_validate(obj.payload)
+        if ref.framework_id != control.framework_id:
+            raise ValidationError(
+                "policy control framework mismatch",
+                details={
+                    "control_id": ref.control_id,
+                    "reason": "framework_id_mismatch",
+                },
+            )
+        if ref.text_locator != control.text_locator:
+            raise ValidationError(
+                "policy control text locator mismatch",
+                details={
+                    "control_id": ref.control_id,
+                    "reason": "text_locator_mismatch",
+                },
+            )
+        return control, release
 
     async def list_approved_mappings(
         self,
