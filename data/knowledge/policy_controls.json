@@ -1,0 +1,44 @@
+{
+  "controls": [
+    {
+      "control_id": "ctrl-a1b2c3d4",
+      "framework_id": "nist_csf",
+      "control_family": "PR.AC",
+      "title": "Identity and Access Management",
+      "requirement_text": "Identities and credentials are issued, managed, verified, revoked, and audited for authorized devices, users, and processes.",
+      "text_locator": "NIST-CSF:PR.AC-1",
+      "jurisdiction_codes": ["US"],
+      "industry_codes": ["finance", "healthcare"]
+    },
+    {
+      "control_id": "ctrl-b2c3d4e5",
+      "framework_id": "nist_csf",
+      "control_family": "DE.CM",
+      "title": "Security Continuous Monitoring",
+      "requirement_text": "The information system and assets are monitored to identify cybersecurity events and verify the effectiveness of protective measures.",
+      "text_locator": "NIST-CSF:DE.CM-1",
+      "jurisdiction_codes": ["US", "EU"],
+      "industry_codes": ["finance"]
+    }
+  ],
+  "mappings": [
+    {
+      "mapping_id": "map-t1059-ac001",
+      "technique_id": "T1059",
+      "control_id": "ctrl-a1b2c3d4",
+      "framework_id": "nist_csf",
+      "approval_state": "approved",
+      "mapping_version": "1.0",
+      "provenance": "curated_baseline_v1"
+    },
+    {
+      "mapping_id": "map-t1059-de001",
+      "technique_id": "T1059",
+      "control_id": "ctrl-b2c3d4e5",
+      "framework_id": "nist_csf",
+      "approval_state": "candidate",
+      "mapping_version": "1.0",
+      "provenance": "model_suggestion_shadow_v1"
+    }
+  ]
+}

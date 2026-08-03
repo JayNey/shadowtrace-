@@ -57,7 +57,7 @@ def _sanitize_hint_list(values: list[str]) -> list[str]:
 
 
 def resolve_allowed_corpora_for_kbs(kb_names: list[str]) -> frozenset[str]:
-    """Map requested KB names to server-known corpus ids (#635 policy deferred)."""
+    """Map requested KB names to server-known corpus ids."""
     corpora: set[str] = set()
     for kb_name in kb_names:
         corpus_id = kb_name_to_corpus(kb_name)

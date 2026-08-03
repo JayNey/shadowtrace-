@@ -1,0 +1,107 @@
+{
+  "additionalProperties": false,
+  "description": "Tenant applicability profile — resolved by server auth, not agent hints.",
+  "properties": {
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "profile_id": {
+      "pattern": "^opp-[0-9a-fA-F]{8}$",
+      "title": "Profile Id",
+      "type": "string"
+    },
+    "tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "revision": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "owner_principal": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Owner Principal",
+      "type": "string"
+    },
+    "framework_allowlist": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Framework Allowlist",
+      "type": "array"
+    },
+    "jurisdiction_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Jurisdiction Codes",
+      "type": "array"
+    },
+    "industry_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Industry Codes",
+      "type": "array"
+    },
+    "effective_at": {
+      "format": "date-time",
+      "title": "Effective At",
+      "type": "string"
+    },
+    "approved_by": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Approved By"
+    },
+    "audit_note": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Audit Note"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "profile_id",
+    "tenant_id",
+    "owner_principal",
+    "effective_at",
+    "created_at",
+    "updated_at"
+  ],
+  "title": "OrganizationPolicyProfile",
+  "type": "object"
+}

@@ -207,6 +207,11 @@ from app.models.playbook_release import (
     PlaybookRef,
     ResolvedPlaybook,
 )
+from app.models.attack_control_mapping import AttackControlMapping
+from app.models.organization_policy_profile import OrganizationPolicyProfile
+from app.models.policy_citation import PolicyApplicabilityHints, PolicyCitation
+from app.models.policy_query_plan import PolicyQueryPlan
+from app.models.policy_release import PolicyControl, PolicyControlRef
 from app.models.tool_call_grant import (
     BoundExecutionPrincipal,
     SafeToolProjection,
@@ -503,6 +508,14 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "PlaybookRef": PlaybookRef,
     "PlaybookActionTemplateSnapshot": PlaybookActionTemplateSnapshot,
     "ResolvedPlaybook": ResolvedPlaybook,
+    # policy/control corpus (ISSUE-129 / #635)
+    "AttackControlMapping": AttackControlMapping,
+    "OrganizationPolicyProfile": OrganizationPolicyProfile,
+    "PolicyCitation": PolicyCitation,
+    "PolicyApplicabilityHints": PolicyApplicabilityHints,
+    "PolicyControl": PolicyControl,
+    "PolicyControlRef": PolicyControlRef,
+    "PolicyQueryPlan": PolicyQueryPlan,
     # shadow query pivot (ISSUE-135 / #641)
     "ShadowRun": ShadowRun,
     "ShadowRunProvenance": ShadowRunProvenance,

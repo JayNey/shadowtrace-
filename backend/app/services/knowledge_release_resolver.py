@@ -17,6 +17,7 @@ from app.models.knowledge_release import (
     KnowledgeReleaseProvenance,
 )
 from app.models.playbook_release import PLAYBOOK_CORPUS_ID, PLAYBOOK_KB_NAME
+from app.models.policy_release import POLICY_CORPUS_ID, POLICY_KB_NAME
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -111,6 +112,8 @@ def corpus_to_kb_name(corpus_id: str) -> str | None:
         return ATTACK_KB_NAME
     if corpus_id == PLAYBOOK_CORPUS_ID:
         return PLAYBOOK_KB_NAME
+    if corpus_id == POLICY_CORPUS_ID:
+        return POLICY_KB_NAME
     return None
 
 
@@ -119,6 +122,8 @@ def kb_name_to_corpus(kb_name: str) -> str | None:
         return ATTACK_CORPUS_ID
     if kb_name == PLAYBOOK_KB_NAME:
         return PLAYBOOK_CORPUS_ID
+    if kb_name == POLICY_KB_NAME:
+        return POLICY_CORPUS_ID
     return None
 
 

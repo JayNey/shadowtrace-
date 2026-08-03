@@ -1,0 +1,102 @@
+{
+  "$defs": {
+    "KnowledgeReleaseLifecycleState": {
+      "description": "Release lifecycle — activation/retirement are server-owned transitions.",
+      "enum": [
+        "draft",
+        "staged",
+        "active",
+        "retired",
+        "failed"
+      ],
+      "title": "KnowledgeReleaseLifecycleState",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Immutable control version/hash reference — not a bare control_id string.",
+  "properties": {
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "control_id": {
+      "pattern": "^ctrl-[0-9a-fA-F]{8}$",
+      "title": "Control Id",
+      "type": "string"
+    },
+    "framework_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Framework Id",
+      "type": "string"
+    },
+    "release_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Release Id",
+      "type": "string"
+    },
+    "release_version": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Release Version",
+      "type": "string"
+    },
+    "content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Content Hash",
+      "type": "string"
+    },
+    "bundle_content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Bundle Content Hash",
+      "type": "string"
+    },
+    "text_locator": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Text Locator",
+      "type": "string"
+    },
+    "revision": {
+      "default": 1,
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "corpus_id": {
+      "default": "policy_control",
+      "minLength": 1,
+      "title": "Corpus Id",
+      "type": "string"
+    },
+    "lifecycle_state": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KnowledgeReleaseLifecycleState"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Release lifecycle at pin time (audit only)"
+    }
+  },
+  "required": [
+    "control_id",
+    "framework_id",
+    "release_id",
+    "release_version",
+    "content_hash",
+    "bundle_content_hash",
+    "text_locator"
+  ],
+  "title": "PolicyControlRef",
+  "type": "object"
+}

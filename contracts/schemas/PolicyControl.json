@@ -1,0 +1,65 @@
+{
+  "additionalProperties": false,
+  "description": "One immutable control object within a policy release bundle.",
+  "properties": {
+    "control_id": {
+      "pattern": "^ctrl-[0-9a-fA-F]{8}$",
+      "title": "Control Id",
+      "type": "string"
+    },
+    "framework_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Framework Id",
+      "type": "string"
+    },
+    "control_family": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Control Family",
+      "type": "string"
+    },
+    "title": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Title",
+      "type": "string"
+    },
+    "requirement_text": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "title": "Requirement Text",
+      "type": "string"
+    },
+    "text_locator": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Text Locator",
+      "type": "string"
+    },
+    "jurisdiction_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Jurisdiction Codes",
+      "type": "array"
+    },
+    "industry_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Industry Codes",
+      "type": "array"
+    }
+  },
+  "required": [
+    "control_id",
+    "framework_id",
+    "control_family",
+    "title",
+    "requirement_text",
+    "text_locator"
+  ],
+  "title": "PolicyControl",
+  "type": "object"
+}

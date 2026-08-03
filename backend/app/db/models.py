@@ -1141,6 +1141,98 @@ class PlaybookReleaseObjectORM(Base):
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
 
 
+class OrganizationPolicyProfileORM(Base):
+    """Server-owned tenant policy applicability profile (ISSUE-129 / #635)."""
+
+    __tablename__ = "organization_policy_profile"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "profile_id",
+            "revision",
+            name="uq_organization_policy_profile_tenant_profile_revision",
+        ),
+        Index("ix_organization_policy_profile_tenant_revision", "tenant_id", "revision"),
+    )
+
+    profile_row_id: Mapped[str] = mapped_column(String, primary_key=True)
+    profile_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    tenant_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    owner_principal: Mapped[str] = mapped_column(String, nullable=False)
+    framework_allowlist: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    jurisdiction_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    industry_codes: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(_TS, nullable=False)
+    approved_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    audit_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    schema_version: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TS, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class PolicyReleaseObjectORM(Base):
+    """Immutable policy control rows bound to one policy release (ISSUE-129 / #635)."""
+
+    __tablename__ = "policy_release_object"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "control_id",
+            name="uq_policy_release_object_release_control_id",
+        ),
+    )
+
+    object_row_id: Mapped[str] = mapped_column(String, primary_key=True)
+    release_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("knowledge_release.release_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    control_id: Mapped[str] = mapped_column(String, nullable=False)
+    framework_id: Mapped[str] = mapped_column(String, nullable=False)
+    object_hash: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class AttackControlMappingORM(Base):
+    """Curated ATT&CK↔control mappings bound to one policy release."""
+
+    __tablename__ = "attack_control_mapping"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "mapping_id",
+            name="uq_attack_control_mapping_release_mapping_id",
+        ),
+        Index(
+            "ix_attack_control_mapping_release_technique",
+            "release_id",
+            "technique_id",
+        ),
+    )
+
+    mapping_row_id: Mapped[str] = mapped_column(String, primary_key=True)
+    release_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("knowledge_release.release_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    mapping_id: Mapped[str] = mapped_column(String, nullable=False)
+    technique_id: Mapped[str] = mapped_column(String, nullable=False)
+    control_id: Mapped[str] = mapped_column(String, nullable=False)
+    framework_id: Mapped[str] = mapped_column(String, nullable=False)
+    approval_state: Mapped[str] = mapped_column(String, nullable=False)
+    mapping_version: Mapped[str] = mapped_column(String, nullable=False)
+    provenance: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
 class ToolCallGrantORM(Base):
     """Authoritative ToolCallGrant ledger (ISSUE-134 / #640)."""
 

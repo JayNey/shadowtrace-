@@ -1,0 +1,145 @@
+{
+  "$defs": {
+    "ApplicabilityReasonCode": {
+      "description": "Machine-readable applicability boundary codes.",
+      "enum": [
+        "profile_missing",
+        "profile_incomplete",
+        "framework_not_allowed",
+        "jurisdiction_mismatch",
+        "industry_mismatch",
+        "mapping_not_approved",
+        "control_not_in_release",
+        "profile_revision_stale"
+      ],
+      "title": "ApplicabilityReasonCode",
+      "type": "string"
+    },
+    "ApplicabilityStatus": {
+      "description": "Server-evaluated control applicability — never a legal compliance verdict.",
+      "enum": [
+        "applicable",
+        "not_applicable",
+        "not_evaluated"
+      ],
+      "title": "ApplicabilityStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Evidence citation with exact locator and applicability boundary.",
+  "properties": {
+    "framework_id": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Framework Id",
+      "type": "string"
+    },
+    "release_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Release Id",
+      "type": "string"
+    },
+    "control_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Control Id",
+      "type": "string"
+    },
+    "text_locator": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Text Locator",
+      "type": "string"
+    },
+    "applicability_status": {
+      "$ref": "#/$defs/ApplicabilityStatus"
+    },
+    "applicability_reason": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ApplicabilityReasonCode"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "mapping_provenance": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mapping Provenance"
+    },
+    "mapping_version": {
+      "anyOf": [
+        {
+          "maxLength": 32,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Mapping Version"
+    },
+    "technique_id": {
+      "anyOf": [
+        {
+          "maxLength": 32,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Technique Id"
+    },
+    "profile_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Profile Id"
+    },
+    "profile_revision": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Profile Revision"
+    }
+  },
+  "required": [
+    "framework_id",
+    "release_id",
+    "control_id",
+    "text_locator",
+    "applicability_status"
+  ],
+  "title": "PolicyCitation",
+  "type": "object"
+}
