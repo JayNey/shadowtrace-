@@ -6,6 +6,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Match Makefile/bootstrap project naming when not exported by the caller.
+WORKTREE_ID="$(printf '%s' "$ROOT" | cksum | cut -d ' ' -f 1)"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-shadowtrace-${WORKTREE_ID}}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 MOCK_XDR_PORT="${MOCK_XDR_PORT:-8100}"
@@ -14,7 +17,6 @@ PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
 OTEL_HTTP_PORT="${OTEL_HTTP_PORT:-4318}"
 COMPOSE_FILE="${ROOT}/infra/docker-compose.yml"
 OBS_COMPOSE_FILE="${ROOT}/infra/observability/docker-compose.observability.yml"
-COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-}"
 
 compose_cmd() {
   local args=(compose)
@@ -52,6 +54,7 @@ COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" \
   COMPOSE_PROFILE="demo" \
   OBS_COMPOSE_FILE="${OBS_COMPOSE_FILE}" \
   BACKEND_PORT="${BACKEND_PORT}" \
+  PYTHON="${PYTHON:-}" \
   bash "${ROOT}/scripts/celery_worker_smoke.sh"
 
 echo "[smoke-demo] ingestion scheduler worker ..."
@@ -105,6 +108,32 @@ if [[ "${http_code}" != "405" && "${http_code}" != "404" && "${http_code}" != "2
   exit 1
 fi
 echo "  ok: backend OTEL in-network (${http_code} from collector)"
+
+echo "[smoke-demo] bootstrap telemetry in Prometheus (OTLP → collector → Prometheus) ..."
+telemetry_ok=false
+for attempt in 1 2 3 4; do
+  if curl -sf "http://127.0.0.1:${PROMETHEUS_PORT}/api/v1/label/__name__/values" \
+    | python3 -c "
+import json, sys
+names = json.load(sys.stdin).get('data', [])
+# FastAPI auto-instrumentation exports http_* metrics after bootstrap health hits.
+http_metrics = [n for n in names if n.startswith('http_') or n.startswith('http.')]
+if not http_metrics:
+    raise SystemExit(1)
+print(f'  ok: bootstrap telemetry metrics present ({len(http_metrics)} http_* series names)')
+"; then
+    telemetry_ok=true
+    break
+  fi
+  if [[ "${attempt}" -lt 4 ]]; then
+    echo "  waiting for OTLP metric export (attempt ${attempt}/4) ..."
+    sleep 5
+  fi
+done
+if [[ "${telemetry_ok}" != "true" ]]; then
+  echo "[smoke-demo] ERROR: no HTTP telemetry metrics in Prometheus after bootstrap" >&2
+  exit 1
+fi
 
 print_demo_urls
 echo "[smoke-demo] full demo smoke passed"

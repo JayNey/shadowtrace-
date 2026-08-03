@@ -71,6 +71,10 @@ down:
 
 # Remove containers AND volumes (ISSUE-088 — full reset).
 down-v:
+	@demo_running=$$($(COMPOSE_DEMO) ps -q 2>/dev/null | wc -l | tr -d ' '); \
+	if [ "$$demo_running" != "0" ]; then \
+	  echo "NOTE: demo/observability containers still running — use 'make down-demo' after 'make up-demo'." >&2; \
+	fi
 	$(COMPOSE) down -v
 
 # ---------------------------------------------------------------------------
@@ -102,7 +106,13 @@ bootstrap-demo:
 
 smoke-demo:
 	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
-	@bash "$(CURDIR)/scripts/smoke_demo.sh"
+	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
+	BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
+	MOCK_XDR_PORT="$(MOCK_XDR_PORT)" \
+	GRAFANA_PORT="$(GRAFANA_PORT)" PROMETHEUS_PORT="$(PROMETHEUS_PORT)" \
+	OTEL_HTTP_PORT="$(OTEL_HTTP_PORT)" \
+	PYTHON="$(PYTHON)" \
+	bash "$(CURDIR)/scripts/smoke_demo.sh"
 
 demo-guard-test:
 	@bash "$(CURDIR)/scripts/test_demo_mock_guard.sh"

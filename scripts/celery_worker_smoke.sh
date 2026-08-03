@@ -10,6 +10,30 @@ COMPOSE_FILE="${ROOT}/infra/docker-compose.yml"
 OBS_COMPOSE_FILE="${OBS_COMPOSE_FILE:-}"
 COMPOSE_PROFILE="${COMPOSE_PROFILE:-}"
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-}"
+PYTHON="${PYTHON:-}"
+
+if [[ -z "${PYTHON}" ]]; then
+  if [[ -x "${ROOT}/backend/.venv/bin/python" ]]; then
+    PYTHON="${ROOT}/backend/.venv/bin/python"
+  else
+    PYTHON="python3"
+  fi
+fi
+
+run_backend_python() {
+  cd "${ROOT}/backend"
+  if [[ "${PYTHON}" == *" "* ]]; then
+    # Makefile may pass multi-word interpreters (e.g. "uv run --frozen python").
+    # shellcheck disable=SC2086
+    TASK_MODE=celery REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}" \
+      CELERY_BROKER_URL="${CELERY_BROKER_URL:-redis://127.0.0.1:6379/0}" \
+      ${PYTHON} -
+  else
+    TASK_MODE=celery REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}" \
+      CELERY_BROKER_URL="${CELERY_BROKER_URL:-redis://127.0.0.1:6379/0}" \
+      "${PYTHON}" -
+  fi
+}
 
 compose_ps_worker() {
   local args=(compose)
@@ -53,10 +77,7 @@ if ! docker exec "${worker_id}" python -m celery -A app.core.celery_app inspect 
 fi
 
 echo "==> enqueue worker_ping (requires redis broker reachable from host)"
-cd "${ROOT}/backend"
-TASK_MODE=celery REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}" \
-  CELERY_BROKER_URL="${CELERY_BROKER_URL:-redis://127.0.0.1:6379/0}" \
-  .venv/bin/python - <<'PY'
+run_backend_python <<'PY'
 from app.tasks.worker_tasks import worker_ping
 
 async_result = worker_ping.apply_async(queue="investigation")
@@ -67,9 +88,7 @@ PY
 if [[ -n "${SMOKE_EVENT_ID:-}" ]]; then
   echo "==> optional run_investigation smoke for event ${SMOKE_EVENT_ID}"
   export SMOKE_EVENT_ID
-  TASK_MODE=celery REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379/0}" \
-    CELERY_BROKER_URL="${CELERY_BROKER_URL:-redis://127.0.0.1:6379/0}" \
-    .venv/bin/python - <<'PY'
+  run_backend_python <<'PY'
 import os
 
 from app.tasks.investigation_tasks import run_investigation

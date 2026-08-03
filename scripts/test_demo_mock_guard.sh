@@ -29,10 +29,12 @@ assert_passes() {
 
 assert_passes
 assert_fails "ALLOW_LIVE_SIDE_EFFECTS" ALLOW_LIVE_SIDE_EFFECTS=true
+assert_fails "ALLOW_XDR_WRITEBACK" ALLOW_XDR_WRITEBACK=true
 assert_fails "AUTO_INVESTIGATE_ENABLED" AUTO_INVESTIGATE_ENABLED=true
 assert_fails "AUTO_RESPONSE_ENABLED" AUTO_RESPONSE_ENABLED=true
 assert_fails "SIMULATION_ENABLED=false" SIMULATION_ENABLED=false
 assert_fails "SOURCE_MODE live" SOURCE_MODE=live_crowdstrike
+assert_fails "DISPOSITION_MODE live" DISPOSITION_MODE=live
 assert_fails "TOOL_MODE live" TOOL_MODE=live
 
 echo "demo_mock_guard tests passed"

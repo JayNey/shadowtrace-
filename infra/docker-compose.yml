@@ -13,6 +13,7 @@
 #
 # Usage:
 #   make up                # start core services
+#   make up WORKER=1       # start with Celery investigation worker
 #   make up-demo           # core + worker + scheduler + observability (ISSUE-141)
 #   make bootstrap         # migrate + seed demo data
 #   make down              # stop everything, keep volumes
