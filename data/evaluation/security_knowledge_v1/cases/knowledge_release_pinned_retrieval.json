@@ -18,7 +18,7 @@
     "expectation_kind": "release_pinned_retrieval",
     "critical": false,
     "expected_release_id": "kbr-2026.08.01-mock",
-    "expected_plan_hash": "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+    "expected_plan_hash": "f95ba06c293bd4765efe93c299f066d49a00dcf31fa626d453ec57abc8737441",
     "expected_degraded": false,
     "expected_empty_results": false,
     "replay_variant": "pass"

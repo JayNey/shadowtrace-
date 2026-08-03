@@ -90,6 +90,18 @@
       ],
       "default": null,
       "title": "Empty Results"
+    },
+    "dependency_degraded": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dependency Degraded"
     }
   },
   "required": [

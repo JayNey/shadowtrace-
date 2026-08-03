@@ -394,6 +394,7 @@ async def run_fixture_evaluation(
     release_refs: EvaluationReleaseRefs | None = None,
     threshold_manifest_path: Path | None = None,
     registry: ScorerRegistry | None = None,
+    dataset_dir: Path | None = None,
 ) -> EvaluationRunArtifact:
     """Convenience entry for fixture-backed datasets."""
     threshold: EvaluationThresholdManifest | None = None
@@ -401,6 +402,12 @@ async def run_fixture_evaluation(
     if threshold_manifest_path is not None:
         threshold_path_str = repo_relative_manifest_path(threshold_manifest_path)
         threshold = load_threshold_manifest(threshold_manifest_path)
+
+    resolved_release_refs = release_refs
+    if resolved_release_refs is None and dataset_dir is not None:
+        from app.evaluation.fixture_loader import load_fixture_manifest, parse_release_refs
+
+        resolved_release_refs = parse_release_refs(load_fixture_manifest(dataset_dir))
 
     runner = EvaluationRunner(truth_service, registry=registry)
     return await runner.run(
@@ -411,7 +418,7 @@ async def run_fixture_evaluation(
             dataset_content_hash=manifest.content_hash,
             seed=seed,
             code_sha=code_sha,
-            release_refs=release_refs or EvaluationReleaseRefs(),
+            release_refs=resolved_release_refs or EvaluationReleaseRefs(),
             threshold_manifest=threshold,
             threshold_manifest_path=threshold_path_str,
         )

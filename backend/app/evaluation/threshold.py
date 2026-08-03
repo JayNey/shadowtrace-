@@ -173,6 +173,34 @@ def _collect_critical_failures(
     return diffs
 
 
+def _is_unexpected_dependency_degraded(case: EvaluationCaseResult) -> bool:
+    return any(
+        result.reason_code == "required_dependency_degraded"
+        for result in case.scorer_results
+    )
+
+
+def _collect_unexpected_dependency_degraded(
+    case_results: list[EvaluationCaseResult],
+) -> list[EvaluationGateDiff]:
+    diffs: list[EvaluationGateDiff] = []
+    for case in case_results:
+        if not _is_unexpected_dependency_degraded(case):
+            continue
+        diffs.append(
+            EvaluationGateDiff(
+                field=f"dependency_degraded:{case.case_id}",
+                expected=False,
+                actual=True,
+                reason=(
+                    f"required dependency degraded on case {case.case_id} "
+                    f"(slice={case.slice_type.value})"
+                ),
+            )
+        )
+    return diffs
+
+
 def _collect_threshold_diffs(
     manifest: EvaluationThresholdManifest,
     *,
@@ -273,6 +301,21 @@ def _collect_threshold_diffs(
             require_critical_pass=manifest.require_critical_pass,
         )
     )
+
+    unexpected_degraded = _collect_unexpected_dependency_degraded(case_results)
+    if (
+        manifest.max_unexpected_dependency_degraded is not None
+        and len(unexpected_degraded) > manifest.max_unexpected_dependency_degraded
+    ):
+        diffs.extend(unexpected_degraded)
+        diffs.append(
+            EvaluationGateDiff(
+                field="unexpected_dependency_degraded_count",
+                expected=manifest.max_unexpected_dependency_degraded,
+                actual=len(unexpected_degraded),
+                reason="unexpected required dependency degraded cases exceed manifest maximum",
+            )
+        )
 
     return diffs
 

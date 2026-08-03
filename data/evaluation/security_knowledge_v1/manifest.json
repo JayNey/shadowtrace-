@@ -3,5 +3,11 @@
   "dataset_version": "2026.08.01",
   "tenant_id": "tenant-evaluation-security-knowledge",
   "schema_version": "1.0",
-  "content_hash": "00301710c03c3e0864fc64bf79db859ed8527d2e2dcba5f3744e5276ab035a84"
+  "content_hash": "bfb774109735795ad86ccc7312313c2079566eb348d55f28f38cfbb9215a3ad3",
+  "release_refs": {
+    "kb_release_id": "kbr-2026.08.01-mock",
+    "rule_release_id": "rule-eval-security-knowledge-v1",
+    "prompt_release_id": "prompt-eval-v1",
+    "config_profile": "mock_p0_security_knowledge"
+  }
 }

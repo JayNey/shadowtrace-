@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from app.models.evaluation_run import EvaluationReleaseRefs
 from app.models.evaluation_truth import (
     BenignSliceExpectation,
     EvaluationCaseTruth,
@@ -116,6 +117,14 @@ def load_fixture_manifest(dataset_dir: Path) -> dict[str, Any]:
     return payload
 
 
+def parse_release_refs(manifest: dict[str, Any]) -> EvaluationReleaseRefs:
+    """Load pinned release identifiers declared in a dataset manifest."""
+    raw = manifest.get("release_refs")
+    if not isinstance(raw, dict):
+        return EvaluationReleaseRefs()
+    return EvaluationReleaseRefs.model_validate(raw)
+
+
 def load_fixture_cases(dataset_dir: Path) -> list[dict[str, Any]]:
     cases_dir = dataset_dir / "cases"
     if not cases_dir.is_dir():
@@ -184,4 +193,5 @@ __all__ = [
     "load_fixture_cases",
     "load_fixture_dataset",
     "load_fixture_manifest",
+    "parse_release_refs",
 ]

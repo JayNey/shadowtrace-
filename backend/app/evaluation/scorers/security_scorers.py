@@ -103,6 +103,13 @@ class SecuritySliceScorer:
             return config_error
 
         observed = observation.security
+        if observed.dependency_degraded:
+            return _fail(
+                self.scorer_id,
+                "required_dependency_degraded",
+                "required security dependency degraded",
+            )
+
         if observed.expectation_kind != expectation.expectation_kind.value:
             return _fail(
                 self.scorer_id,

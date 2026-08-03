@@ -79,6 +79,18 @@
       ],
       "default": null,
       "title": "Production Store Mutated"
+    },
+    "dependency_degraded": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dependency Degraded"
     }
   },
   "required": [

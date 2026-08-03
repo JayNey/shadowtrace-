@@ -322,6 +322,16 @@ jobs:
             --threshold-manifest "${GITHUB_WORKSPACE}/data/evaluation/shadowtrace_demo_v1/threshold_manifest.json" \
             --compare-baseline "${GITHUB_WORKSPACE}/data/evaluation/shadowtrace_demo_v1/baseline_artifact.json"
 
+      - name: Run security/knowledge evaluation (report-only baseline)
+        run: |
+          uv run --frozen python -m scripts.run_evaluation \
+            --dataset-dir "${GITHUB_WORKSPACE}/data/evaluation/security_knowledge_v1" \
+            --output "${GITHUB_WORKSPACE}/artifacts/evaluation/security_knowledge_ci_run.json" \
+            --code-sha "${GITHUB_SHA}" \
+            --seed 42 \
+            --threshold-manifest "${GITHUB_WORKSPACE}/data/evaluation/security_knowledge_v1/threshold_manifest.json" \
+            --compare-baseline "${GITHUB_WORKSPACE}/data/evaluation/security_knowledge_v1/baseline_artifact.json"
+
       - name: Run mock detection evaluation (artifact-only)
         run: |
           uv run --frozen python -m scripts.run_detection_evaluation \
@@ -337,6 +347,7 @@ jobs:
           name: evaluation-run-artifact
           path: |
             artifacts/evaluation/ci_run.json
+            artifacts/evaluation/security_knowledge_ci_run.json
             artifacts/evaluation/detection_ci_run.json
           if-no-files-found: error
 

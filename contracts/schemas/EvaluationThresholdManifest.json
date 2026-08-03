@@ -141,6 +141,20 @@
       "title": "Require Critical Pass",
       "type": "boolean"
     },
+    "max_unexpected_dependency_degraded": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "When set, fail closed when unexpected dependency_degraded observations exceed this count (cases where dependency degraded but not expected).",
+      "title": "Max Unexpected Dependency Degraded"
+    },
     "quarantine": {
       "anyOf": [
         {

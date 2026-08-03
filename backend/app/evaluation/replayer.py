@@ -3,17 +3,16 @@
 Never reads production Event/Detection/Disposition tables. Produces deterministic
 observations derived from canonical truth + seed for scorer consumption.
 
-Phase-1 stub: copies adjudicated slice expectations into observations so the
-runner/scorer/gate plumbing can be validated before mock investigate replay (#631)
-is wired. ``seed`` is bound into replay notes for traceability but does not yet
-change observation outcomes.
+Threat/benign slices still echo expectations. Security/knowledge slices route
+through ``slice_replay`` adapters that simulate grant/retrieval decision paths.
 """
 
 from __future__ import annotations
 
 import hashlib
 
-from app.models.evaluation_run import CaseObservation, KnowledgeCaseObservation, SecurityCaseObservation
+from app.evaluation.slice_replay import replay_knowledge_slice, replay_security_slice
+from app.models.evaluation_run import CaseObservation
 from app.models.evaluation_truth import (
     BenignSliceExpectation,
     EvaluationCaseTruth,
@@ -30,81 +29,11 @@ def _derive_case_nonce(case_id: str, seed: int) -> int:
     return int(digest[:8], 16)
 
 
-def _invert_bool(value: bool | None, *, fail: bool) -> bool | None:
-    if value is None:
-        return None
-    return (not value) if fail else value
-
-
-def _security_observation(
-    expectation: SecuritySliceExpectation,
-    *,
-    fail: bool,
-) -> SecurityCaseObservation:
-    return SecurityCaseObservation(
-        expectation_kind=expectation.expectation_kind.value,
-        cross_tenant_denied=_invert_bool(expectation.expected_cross_tenant_denied, fail=fail),
-        grant_forgery_rejected=_invert_bool(
-            expectation.expected_grant_forgery_rejected,
-            fail=fail,
-        ),
-        grant_budget_race_rejected=_invert_bool(
-            expectation.expected_grant_budget_race_rejected,
-            fail=fail,
-        ),
-        side_effect_blocked=_invert_bool(expectation.expected_side_effect_blocked, fail=fail),
-        prompt_injection_contained=_invert_bool(
-            expectation.expected_prompt_injection_contained,
-            fail=fail,
-        ),
-        production_store_mutated=_invert_bool(
-            expectation.expected_production_store_mutated,
-            fail=fail,
-        ),
-    )
-
-
-def _knowledge_observation(
-    expectation: KnowledgeSliceExpectation,
-    *,
-    fail: bool,
-) -> KnowledgeCaseObservation:
-    release_id = expectation.expected_release_id
-    plan_hash = expectation.expected_plan_hash
-    tenant_filter = expectation.expected_tenant_filter_applied
-    citations = list(expectation.expected_citation_chunk_ids)
-    degraded = expectation.expected_degraded
-    empty_results = expectation.expected_empty_results
-
-    if fail:
-        if release_id is not None:
-            release_id = f"{release_id}-wrong"
-        if plan_hash is not None:
-            plan_hash = "0" * 64
-        if tenant_filter is not None:
-            tenant_filter = not tenant_filter
-        if citations:
-            citations = [f"{citations[0]}-wrong"]
-        degraded = not degraded
-        empty_results = not empty_results
-
-    return KnowledgeCaseObservation(
-        expectation_kind=expectation.expectation_kind.value,
-        release_id=release_id,
-        plan_hash=plan_hash,
-        tenant_filter_applied=tenant_filter,
-        citation_chunk_ids=citations,
-        degraded=degraded,
-        empty_results=empty_results,
-        chunk_count=0 if empty_results else max(len(citations), 1),
-    )
-
-
 class MockDeterministicReplayer:
     """Deterministic mock replay for evaluation cases."""
 
     replay_mode = "mock_deterministic"
-    replay_fidelity = "echo_truth_stub"
+    replay_fidelity = "slice_adapter_stub"
 
     def replay(self, truth: EvaluationCaseTruth, *, seed: int) -> CaseObservation:
         slice_type = SliceType(truth.slice_expectation.slice_type)
@@ -153,9 +82,9 @@ class MockDeterministicReplayer:
                 case_id=truth.case_id,
                 slice_type=slice_type,
                 observation_available=True,
-                security=_security_observation(expectation, fail=fail),
+                security=replay_security_slice(expectation, fail=fail),
                 replay_notes=(
-                    f"mock_deterministic:security:{expectation.replay_variant};"
+                    f"slice_adapter:security:{expectation.replay_variant};"
                     f"seed={seed};n={nonce:x}"
                 ),
             )
@@ -167,9 +96,14 @@ class MockDeterministicReplayer:
                 case_id=truth.case_id,
                 slice_type=slice_type,
                 observation_available=True,
-                knowledge=_knowledge_observation(expectation, fail=fail),
+                knowledge=replay_knowledge_slice(
+                    expectation,
+                    case_id=truth.case_id,
+                    seed=seed,
+                    fail=fail,
+                ),
                 replay_notes=(
-                    f"mock_deterministic:knowledge:{expectation.replay_variant};"
+                    f"slice_adapter:knowledge:{expectation.replay_variant};"
                     f"seed={seed};n={nonce:x}"
                 ),
             )

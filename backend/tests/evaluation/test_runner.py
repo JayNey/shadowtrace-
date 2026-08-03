@@ -132,7 +132,7 @@ async def test_demo_dataset_run_is_deterministic(
     assert first.aggregates.unevaluable_count == 1
     assert first.aggregates.error_count == 0
     assert first.status == EvaluationRunStatus.COMPLETED
-    assert first.config.replay_fidelity == "echo_truth_stub"
+    assert first.config.replay_fidelity == "slice_adapter_stub"
     assert first.gate is not None
     assert first.gate.verdict == GateVerdict.PASS
 

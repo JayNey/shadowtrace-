@@ -81,11 +81,16 @@ async def _run(args: argparse.Namespace) -> int:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.evaluation.diff import diff_against_baseline
+    from app.evaluation.fixture_loader import load_fixture_manifest, parse_release_refs
     from app.evaluation.runner import run_fixture_evaluation
-    from app.models.evaluation_run import EvaluationReleaseRefs, EvaluationRunArtifact
+    from app.models.evaluation_run import EvaluationRunArtifact
     from app.services.evaluation_truth_service import EvaluationTruthService
 
     dataset_dir = Path(args.dataset_dir)
+    manifest_raw = load_fixture_manifest(dataset_dir)
+    release_refs = parse_release_refs(manifest_raw)
+    if args.config_profile != "mock_p0":
+        release_refs = release_refs.model_copy(update={"config_profile": args.config_profile})
     threshold_path: Path | None
     if args.threshold_manifest:
         threshold_path = Path(args.threshold_manifest)
@@ -110,8 +115,9 @@ async def _run(args: argparse.Namespace) -> int:
         manifest,
         seed=args.seed,
         code_sha=resolve_code_sha(args.code_sha),
-        release_refs=EvaluationReleaseRefs(config_profile=args.config_profile),
+        release_refs=release_refs,
         threshold_manifest_path=threshold_path,
+        dataset_dir=dataset_dir,
     )
 
     output_path = Path(args.output)

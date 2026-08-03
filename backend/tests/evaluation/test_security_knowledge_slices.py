@@ -35,6 +35,7 @@ from app.models.evaluation_run import (
     EvaluationScorerResult,
     EvaluationThresholdManifest,
     GateVerdict,
+    KnowledgeCaseObservation,
     ScorerOutcome,
 )
 from app.models.evaluation_truth import (
@@ -241,6 +242,111 @@ def test_security_scorer_rejects_incomplete_expectation_config() -> None:
 
 
 @pytest.mark.evaluation
+def test_knowledge_scorer_rejects_incomplete_expectation_config() -> None:
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="knowledge-incomplete",
+        slice_expectation=KnowledgeSliceExpectation(
+            expectation_kind=KnowledgeExpectationKind.CITATION_CORRECTNESS,
+            expected_citation_chunk_ids=[],
+            expected_degraded=False,
+            expected_empty_results=False,
+        ),
+        label_provenance=_provenance(),
+    )
+    observation = MockDeterministicReplayer().replay(truth, seed=1)
+    result = KnowledgeSliceScorer().score(
+        truth,
+        observation,
+        ctx=ScorerContext(seed=1, dataset_id="dataset-test", dataset_version="v1"),
+    )
+    assert result.outcome == ScorerOutcome.FAIL
+    assert result.reason_code == "invalid_expectation_config"
+
+
+@pytest.mark.evaluation
+def test_slice_replay_derives_plan_hash_for_release_pinned() -> None:
+    from app.evaluation.slice_replay import derive_plan_hash
+
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="knowledge-release-pinned",
+        slice_expectation=KnowledgeSliceExpectation(
+            expectation_kind=KnowledgeExpectationKind.RELEASE_PINNED_RETRIEVAL,
+            expected_release_id="kbr-2026.08.01-mock",
+            expected_degraded=False,
+            expected_empty_results=False,
+        ),
+        label_provenance=_provenance(),
+    )
+    observation = MockDeterministicReplayer().replay(truth, seed=42)
+    assert observation.knowledge is not None
+    expected_hash = derive_plan_hash(
+        release_id="kbr-2026.08.01-mock",
+        case_id="knowledge-release-pinned",
+        seed=42,
+    )
+    assert observation.knowledge.plan_hash == expected_hash
+
+
+@pytest.mark.evaluation
+def test_gate_fail_closed_on_unexpected_dependency_degraded() -> None:
+    threshold = EvaluationThresholdManifest(
+        manifest_version="test",
+        dataset_id="security_knowledge_v1",
+        max_unexpected_dependency_degraded=0,
+        required_gate=True,
+    )
+    gate = evaluate_gate(
+        threshold,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=1,
+            pass_count=0,
+            fail_count=1,
+            unevaluable_count=0,
+            error_count=0,
+            pass_rate=0.0,
+        ),
+        case_results=[
+            EvaluationCaseResult(
+                case_id="knowledge-degraded-unexpected",
+                truth_id="truth-1",
+                truth_revision=1,
+                truth_content_hash="a" * 64,
+                slice_type=SliceType.KNOWLEDGE,
+                observation=CaseObservation(
+                    case_id="knowledge-degraded-unexpected",
+                    slice_type=SliceType.KNOWLEDGE,
+                    observation_available=True,
+                    knowledge=KnowledgeCaseObservation(
+                        expectation_kind="tenant_filter",
+                        tenant_filter_applied=True,
+                        degraded=False,
+                        empty_results=False,
+                        dependency_degraded=True,
+                    ),
+                ),
+                scorer_results=[
+                    EvaluationScorerResult(
+                        scorer_id="knowledge_retrieval",
+                        outcome=ScorerOutcome.FAIL,
+                        reason_code="required_dependency_degraded",
+                    )
+                ],
+                case_status=EvaluationRunStatus.FAILED,
+            )
+        ],
+        registry=default_scorer_registry(),
+    )
+    assert gate.verdict == GateVerdict.FAIL_CLOSED
+    assert any(diff.field == "unexpected_dependency_degraded_count" for diff in gate.diffs)
+
+
+@pytest.mark.evaluation
 def test_gate_max_unevaluable_exceeded() -> None:
     threshold = EvaluationThresholdManifest(
         manifest_version="test",
@@ -325,8 +431,11 @@ async def test_security_knowledge_dataset_run_passes(
         seed=42,
         code_sha="deadbeef",
         threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+        dataset_dir=DATASET_DIR,
     )
 
+    assert artifact.config.replay_fidelity == "slice_adapter_stub"
+    assert artifact.config.release_refs.kb_release_id == "kbr-2026.08.01-mock"
     assert artifact.aggregates.case_count == 10
     assert artifact.aggregates.pass_count == 10
     assert artifact.aggregates.fail_count == 0
@@ -379,8 +488,8 @@ async def test_critical_failure_overrides_high_pass_rate(
         seed=42,
         code_sha="deadbeef",
         threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+        dataset_dir=DATASET_DIR,
     )
-
     assert artifact.aggregates.pass_rate > 0.0
     assert artifact.aggregates.fail_count >= 1
     assert artifact.status == EvaluationRunStatus.FAILED
@@ -594,6 +703,7 @@ async def test_runner_scorer_exception_surfaces_as_error(
         code_sha="deadbeef",
         threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
         registry=registry,
+        dataset_dir=DATASET_DIR,
     )
 
     security_case = next(c for c in artifact.case_results if c.case_id == truth.case_id)
@@ -604,3 +714,31 @@ async def test_runner_scorer_exception_surfaces_as_error(
     assert artifact.aggregates.error_count >= 1
     assert artifact.gate is not None
     assert artifact.gate.verdict in {GateVerdict.FAIL, GateVerdict.FAIL_CLOSED}
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+@requires_postgres
+async def test_committed_security_knowledge_baseline_matches_fixture_run(
+    truth_service: EvaluationTruthService,
+    loaded_dataset: tuple,
+) -> None:
+    import json
+
+    from app.evaluation.diff import diff_against_baseline
+    from app.models.evaluation_run import EvaluationRunArtifact
+
+    _, manifest = loaded_dataset
+    baseline_path = DATASET_DIR / "baseline_artifact.json"
+    baseline = EvaluationRunArtifact.model_validate(
+        json.loads(baseline_path.read_text(encoding="utf-8"))
+    )
+    candidate = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="evaluation-baseline-v1",
+        threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+        dataset_dir=DATASET_DIR,
+    )
+    assert diff_against_baseline(baseline, candidate) == []

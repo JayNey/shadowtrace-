@@ -1,0 +1,560 @@
+{
+  "aggregates": {
+    "case_count": 10,
+    "error_count": 0,
+    "fail_count": 0,
+    "pass_count": 10,
+    "pass_rate": 1.0,
+    "required_scorer_error_count": 0,
+    "unevaluable_count": 0
+  },
+  "artifact_hash": "2b7fa234d717b15a813563dcd2d4c0c0d607e2c69cd861af21d4106a3348c302",
+  "case_results": [
+    {
+      "case_id": "knowledge_citation_correctness",
+      "case_status": "completed",
+      "critical": false,
+      "observation": {
+        "case_id": "knowledge_citation_correctness",
+        "knowledge": {
+          "chunk_count": 2,
+          "citation_chunk_ids": [
+            "chunk-playbook-001",
+            "chunk-playbook-002"
+          ],
+          "degraded": false,
+          "dependency_degraded": false,
+          "empty_results": false,
+          "expectation_kind": "citation_correctness",
+          "plan_hash": null,
+          "release_id": null,
+          "tenant_filter_applied": null
+        },
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:knowledge:pass;seed=42;n=232d62de",
+        "security": null,
+        "slice_type": "knowledge"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "knowledge expectation satisfied (citation_correctness)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "knowledge_retrieval"
+        }
+      ],
+      "slice_type": "knowledge",
+      "truth_content_hash": "4950b72f15fb609bfaa5a6e4f9cfc84072a6922fdb4b7511aa98debb56b8d695",
+      "truth_id": "truth-14ad61c93c2e",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "knowledge_degraded_no_release",
+      "case_status": "completed",
+      "critical": false,
+      "observation": {
+        "case_id": "knowledge_degraded_no_release",
+        "knowledge": {
+          "chunk_count": 0,
+          "citation_chunk_ids": [],
+          "degraded": true,
+          "dependency_degraded": true,
+          "empty_results": true,
+          "expectation_kind": "degraded_no_release",
+          "plan_hash": null,
+          "release_id": null,
+          "tenant_filter_applied": null
+        },
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:knowledge:pass;seed=42;n=6f41487c",
+        "security": null,
+        "slice_type": "knowledge"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "knowledge expectation satisfied (degraded_no_release)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "knowledge_retrieval"
+        }
+      ],
+      "slice_type": "knowledge",
+      "truth_content_hash": "cbbd7726a7c012adf049a63d132bd02491a195ff3e8ce76de1189e3f5835c751",
+      "truth_id": "truth-b13326378302",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "knowledge_release_pinned_retrieval",
+      "case_status": "completed",
+      "critical": false,
+      "observation": {
+        "case_id": "knowledge_release_pinned_retrieval",
+        "knowledge": {
+          "chunk_count": 1,
+          "citation_chunk_ids": [],
+          "degraded": false,
+          "dependency_degraded": false,
+          "empty_results": false,
+          "expectation_kind": "release_pinned_retrieval",
+          "plan_hash": "f95ba06c293bd4765efe93c299f066d49a00dcf31fa626d453ec57abc8737441",
+          "release_id": "kbr-2026.08.01-mock",
+          "tenant_filter_applied": null
+        },
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:knowledge:pass;seed=42;n=35571520",
+        "security": null,
+        "slice_type": "knowledge"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "knowledge expectation satisfied (release_pinned_retrieval)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "knowledge_retrieval"
+        }
+      ],
+      "slice_type": "knowledge",
+      "truth_content_hash": "17e071d8561ef8f330fad6e8d99082d468a778fee710b9a3bbab0d25e6f385df",
+      "truth_id": "truth-1cfdb436d317",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "knowledge_tenant_filter",
+      "case_status": "completed",
+      "critical": false,
+      "observation": {
+        "case_id": "knowledge_tenant_filter",
+        "knowledge": {
+          "chunk_count": 1,
+          "citation_chunk_ids": [],
+          "degraded": false,
+          "dependency_degraded": false,
+          "empty_results": false,
+          "expectation_kind": "tenant_filter",
+          "plan_hash": null,
+          "release_id": null,
+          "tenant_filter_applied": true
+        },
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:knowledge:pass;seed=42;n=671e345b",
+        "security": null,
+        "slice_type": "knowledge"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "knowledge expectation satisfied (tenant_filter)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "knowledge_retrieval"
+        }
+      ],
+      "slice_type": "knowledge",
+      "truth_content_hash": "8b9a0318527c8c689d2673eb762953ba2b9f2dba4c69a76dcf1121c70b9fbed1",
+      "truth_id": "truth-c1a0ab063946",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "security_cross_tenant_denied",
+      "case_status": "completed",
+      "critical": true,
+      "observation": {
+        "case_id": "security_cross_tenant_denied",
+        "knowledge": null,
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:security:pass;seed=42;n=908cba86",
+        "security": {
+          "cross_tenant_denied": true,
+          "dependency_degraded": false,
+          "expectation_kind": "cross_tenant_denied",
+          "grant_budget_race_rejected": null,
+          "grant_forgery_rejected": null,
+          "production_store_mutated": false,
+          "prompt_injection_contained": null,
+          "side_effect_blocked": null
+        },
+        "slice_type": "security"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "security expectation satisfied (cross_tenant_denied)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "security_gate"
+        }
+      ],
+      "slice_type": "security",
+      "truth_content_hash": "f1e47eaf17267ad5478d8a20cc61838b2e52d0d8e97e8efb9fa1082c2f1442eb",
+      "truth_id": "truth-ef371308da0a",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "security_grant_budget_race",
+      "case_status": "completed",
+      "critical": true,
+      "observation": {
+        "case_id": "security_grant_budget_race",
+        "knowledge": null,
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:security:pass;seed=42;n=c8957dca",
+        "security": {
+          "cross_tenant_denied": null,
+          "dependency_degraded": false,
+          "expectation_kind": "grant_budget_race",
+          "grant_budget_race_rejected": true,
+          "grant_forgery_rejected": null,
+          "production_store_mutated": false,
+          "prompt_injection_contained": null,
+          "side_effect_blocked": null
+        },
+        "slice_type": "security"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "security expectation satisfied (grant_budget_race)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "security_gate"
+        }
+      ],
+      "slice_type": "security",
+      "truth_content_hash": "e666da852f8c741727f6db3691caf740f9dc7e6549e49a934a16c986dd263522",
+      "truth_id": "truth-e4a8f5eb3b01",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "security_grant_forgery_rejected",
+      "case_status": "completed",
+      "critical": true,
+      "observation": {
+        "case_id": "security_grant_forgery_rejected",
+        "knowledge": null,
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:security:pass;seed=42;n=bdb12fb4",
+        "security": {
+          "cross_tenant_denied": null,
+          "dependency_degraded": false,
+          "expectation_kind": "grant_forgery_rejected",
+          "grant_budget_race_rejected": null,
+          "grant_forgery_rejected": true,
+          "production_store_mutated": false,
+          "prompt_injection_contained": null,
+          "side_effect_blocked": null
+        },
+        "slice_type": "security"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "security expectation satisfied (grant_forgery_rejected)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "security_gate"
+        }
+      ],
+      "slice_type": "security",
+      "truth_content_hash": "71866a1eff3ac1d652d3643bdd23f59a503a3831ada61d67915b14086f3782cf",
+      "truth_id": "truth-f03de40e7370",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "security_production_isolation",
+      "case_status": "completed",
+      "critical": true,
+      "observation": {
+        "case_id": "security_production_isolation",
+        "knowledge": null,
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:security:pass;seed=42;n=2584d88c",
+        "security": {
+          "cross_tenant_denied": null,
+          "dependency_degraded": false,
+          "expectation_kind": "production_isolation",
+          "grant_budget_race_rejected": null,
+          "grant_forgery_rejected": null,
+          "production_store_mutated": false,
+          "prompt_injection_contained": null,
+          "side_effect_blocked": null
+        },
+        "slice_type": "security"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "security expectation satisfied (production_isolation)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "security_gate"
+        }
+      ],
+      "slice_type": "security",
+      "truth_content_hash": "0e29f13b7e00fddafac8d86677ac4a7e4ce6643cdf3a45c02b6c80642afa7c88",
+      "truth_id": "truth-9bb286fc7a4e",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "security_prompt_injection_contained",
+      "case_status": "completed",
+      "critical": true,
+      "observation": {
+        "case_id": "security_prompt_injection_contained",
+        "knowledge": null,
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:security:pass;seed=42;n=52b1e428",
+        "security": {
+          "cross_tenant_denied": null,
+          "dependency_degraded": false,
+          "expectation_kind": "prompt_injection_contained",
+          "grant_budget_race_rejected": null,
+          "grant_forgery_rejected": null,
+          "production_store_mutated": false,
+          "prompt_injection_contained": true,
+          "side_effect_blocked": null
+        },
+        "slice_type": "security"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "security expectation satisfied (prompt_injection_contained)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "security_gate"
+        }
+      ],
+      "slice_type": "security",
+      "truth_content_hash": "587df48ff6abf4a067e22a4c82009319465c47b9c956b6c496854f8e92f1f103",
+      "truth_id": "truth-5d8134d4692c",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "security_side_effect_blocked",
+      "case_status": "completed",
+      "critical": true,
+      "observation": {
+        "case_id": "security_side_effect_blocked",
+        "knowledge": null,
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:security:pass;seed=42;n=ef4ca50a",
+        "security": {
+          "cross_tenant_denied": null,
+          "dependency_degraded": false,
+          "expectation_kind": "side_effect_blocked",
+          "grant_budget_race_rejected": null,
+          "grant_forgery_rejected": null,
+          "production_store_mutated": false,
+          "prompt_injection_contained": null,
+          "side_effect_blocked": true
+        },
+        "slice_type": "security"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "security expectation satisfied (side_effect_blocked)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "security_gate"
+        }
+      ],
+      "slice_type": "security",
+      "truth_content_hash": "4c420ffdce8b6ea4ea67657cc31e7606a088b52b755a6c024537d00b363226b4",
+      "truth_id": "truth-171312d8b2cb",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    }
+  ],
+  "code_sha": "evaluation-baseline-v1",
+  "completed_at": "2026-08-03T05:29:42.468248Z",
+  "config": {
+    "extra": {},
+    "release_refs": {
+      "config_profile": "mock_p0_security_knowledge",
+      "kb_release_id": "kbr-2026.08.01-mock",
+      "model_release_id": null,
+      "prompt_release_id": "prompt-eval-v1",
+      "rule_release_id": "rule-eval-security-knowledge-v1"
+    },
+    "replay_fidelity": "slice_adapter_stub",
+    "replay_mode": "mock_deterministic",
+    "scorer_ids": [
+      "attack_technique_coverage",
+      "benign_label",
+      "incident_grouping_consistency",
+      "knowledge_retrieval",
+      "security_gate",
+      "severity_alignment",
+      "threat_label",
+      "unevaluable_coverage"
+    ],
+    "seed": 42
+  },
+  "dataset_content_hash": "bfb774109735795ad86ccc7312313c2079566eb348d55f28f38cfbb9215a3ad3",
+  "dataset_id": "security_knowledge_v1",
+  "dataset_version": "2026.08.01",
+  "errors": [],
+  "gate": {
+    "diffs": [],
+    "manifest_path": "data/evaluation/security_knowledge_v1/threshold_manifest.json",
+    "manifest_version": "2026.08.01",
+    "quarantine_active": false,
+    "verdict": "pass"
+  },
+  "quality_report": {
+    "code_sha": "evaluation-baseline-v1",
+    "dataset_content_hash": "bfb774109735795ad86ccc7312313c2079566eb348d55f28f38cfbb9215a3ad3",
+    "dataset_id": "security_knowledge_v1",
+    "dataset_version": "2026.08.01",
+    "grouping_scorer_summaries": [],
+    "metrics": [
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "threat_recall",
+        "reason": "insufficient sample for metric",
+        "status": "insufficient_sample",
+        "value": null
+      },
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "threat_precision",
+        "reason": "insufficient sample for metric",
+        "status": "insufficient_sample",
+        "value": null
+      },
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "benign_specificity",
+        "reason": "insufficient sample for metric",
+        "status": "insufficient_sample",
+        "value": null
+      },
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "benign_fpr",
+        "reason": "insufficient sample for metric",
+        "status": "insufficient_sample",
+        "value": null
+      },
+      {
+        "confidence_interval": null,
+        "denominator": {
+          "denominator": 0,
+          "error_count": 0,
+          "missing_truth_count": 0,
+          "numerator": 0
+        },
+        "metric_id": "unevaluable_coverage",
+        "reason": "insufficient sample for metric",
+        "status": "insufficient_sample",
+        "value": null
+      }
+    ],
+    "release_refs": {
+      "config_profile": "mock_p0_security_knowledge",
+      "kb_release_id": "kbr-2026.08.01-mock",
+      "model_release_id": null,
+      "prompt_release_id": "prompt-eval-v1",
+      "rule_release_id": "rule-eval-security-knowledge-v1"
+    },
+    "sample_counts": {
+      "benign": 0,
+      "threat": 0,
+      "total": 10,
+      "unevaluable": 0
+    },
+    "schema_version": "1.0"
+  },
+  "run_id": "eval-c3200ccb-b522-46d3-ad46-18711a3161b5",
+  "schema_version": "1.0",
+  "started_at": "2026-08-03T05:29:42.429489Z",
+  "status": "completed",
+  "tenant_id": "tenant-evaluation-security-knowledge"
+}

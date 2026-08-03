@@ -63,11 +63,11 @@ class EvaluationRunConfig(BaseModel):
     seed: int = Field(..., ge=0)
     replay_mode: str = Field(default="mock_deterministic", min_length=1)
     replay_fidelity: str = Field(
-        default="echo_truth_stub",
+        default="slice_adapter_stub",
         min_length=1,
         description=(
-            "Replay fidelity label. Phase-1 uses echo_truth_stub until investigate "
-            "replay (#631) is wired; do not treat green runs as agent quality proof."
+            "Replay fidelity label. Threat/benign echo expectations; security/knowledge "
+            "use slice_adapter_stub until investigate replay (#631) is wired."
         ),
     )
     release_refs: EvaluationReleaseRefs = Field(default_factory=EvaluationReleaseRefs)
@@ -87,6 +87,7 @@ class SecurityCaseObservation(BaseModel):
     side_effect_blocked: bool | None = None
     prompt_injection_contained: bool | None = None
     production_store_mutated: bool | None = None
+    dependency_degraded: bool | None = None
 
 
 class KnowledgeCaseObservation(BaseModel):
@@ -102,6 +103,7 @@ class KnowledgeCaseObservation(BaseModel):
     degraded: bool | None = None
     chunk_count: int | None = Field(default=None, ge=0)
     empty_results: bool | None = None
+    dependency_degraded: bool | None = None
 
 
 class CaseObservation(BaseModel):
@@ -238,6 +240,14 @@ class EvaluationThresholdManifest(BaseModel):
     require_critical_pass: bool = Field(
         default=True,
         description="Fail closed when any critical case does not complete successfully.",
+    )
+    max_unexpected_dependency_degraded: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "When set, fail closed when unexpected dependency_degraded observations "
+            "exceed this count (cases where dependency degraded but not expected)."
+        ),
     )
     quarantine: EvaluationQuarantinePolicy | None = None
 

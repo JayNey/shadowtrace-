@@ -4,7 +4,20 @@ from __future__ import annotations
 
 from app.evaluation.scorers.base import ScorerContext
 from app.models.evaluation_run import CaseObservation, EvaluationScorerResult, ScorerOutcome
-from app.models.evaluation_truth import EvaluationCaseTruth, KnowledgeSliceExpectation, SliceType
+from app.models.evaluation_truth import (
+    EvaluationCaseTruth,
+    KnowledgeExpectationKind,
+    KnowledgeSliceExpectation,
+    SliceType,
+)
+
+
+_KIND_REQUIRED_FIELDS: dict[KnowledgeExpectationKind, tuple[str, ...]] = {
+    KnowledgeExpectationKind.RELEASE_PINNED_RETRIEVAL: ("expected_release_id",),
+    KnowledgeExpectationKind.CITATION_CORRECTNESS: ("expected_citation_chunk_ids",),
+    KnowledgeExpectationKind.TENANT_FILTER: ("expected_tenant_filter_applied",),
+    KnowledgeExpectationKind.DEGRADED_NO_RELEASE: ("expected_degraded",),
+}
 
 
 def _pass(scorer_id: str, message: str = "") -> EvaluationScorerResult:
@@ -42,6 +55,37 @@ def _error(scorer_id: str, reason_code: str, message: str) -> EvaluationScorerRe
     )
 
 
+def _validate_expectation_config(
+    scorer_id: str,
+    expectation: KnowledgeSliceExpectation,
+) -> EvaluationScorerResult | None:
+    required = _KIND_REQUIRED_FIELDS.get(expectation.expectation_kind, ())
+    for field_name in required:
+        value = getattr(expectation, field_name)
+        if field_name == "expected_citation_chunk_ids":
+            if not value:
+                return _fail(
+                    scorer_id,
+                    "invalid_expectation_config",
+                    f"{expectation.expectation_kind.value} requires non-empty "
+                    f"{field_name}",
+                )
+            continue
+        if field_name == "expected_degraded" and value is not True:
+            return _fail(
+                scorer_id,
+                "invalid_expectation_config",
+                f"{expectation.expectation_kind.value} requires {field_name}=True",
+            )
+        if value is None:
+            return _fail(
+                scorer_id,
+                "invalid_expectation_config",
+                f"{expectation.expectation_kind.value} requires {field_name}",
+            )
+    return None
+
+
 class KnowledgeSliceScorer:
     """Compare structured knowledge observations against canonical expectations."""
 
@@ -61,7 +105,18 @@ class KnowledgeSliceScorer:
             return _unevaluable(self.scorer_id, "missing_observation", "no knowledge observation")
 
         expectation = truth.slice_expectation
+        config_error = _validate_expectation_config(self.scorer_id, expectation)
+        if config_error is not None:
+            return config_error
+
         observed = observation.knowledge
+        if observed.dependency_degraded and not expectation.expected_degraded:
+            return _fail(
+                self.scorer_id,
+                "required_dependency_degraded",
+                "required knowledge dependency degraded without expected degraded outcome",
+            )
+
         if observed.expectation_kind != expectation.expectation_kind.value:
             return _fail(
                 self.scorer_id,
