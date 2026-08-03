@@ -56,8 +56,16 @@ def build_approval_binding_detail(action: Action) -> dict[str, Any]:
 
 def validate_approval_binding(action: Action, detail: dict[str, Any] | None) -> None:
     """Fail closed when plan/playbook content drifted after approval was recorded."""
-    if detail is None:
+    if action.playbook_ref is None:
         return
+    if detail is None:
+        raise ValidationError(
+            "approval binding missing for playbook-pinned action",
+            details={
+                "action_id": action.action_id,
+                "reason": "binding_detail_missing",
+            },
+        )
     bound_revision = detail.get("plan_revision")
     if isinstance(bound_revision, int) and bound_revision != action.plan_revision:
         raise ValidationError(
@@ -79,19 +87,26 @@ def validate_approval_binding(action: Action, detail: dict[str, Any] | None) -> 
             },
         )
     bound_hash = detail.get("playbook_binding_hash")
-    if isinstance(bound_hash, str) and bound_hash:
-        current_hash = compute_playbook_binding_hash(
-            playbook_ref=action.playbook_ref,
-            template_snapshot=action.action_template_snapshot,
+    if not isinstance(bound_hash, str) or not bound_hash:
+        raise ValidationError(
+            "approval binding missing playbook hash for playbook-pinned action",
+            details={
+                "action_id": action.action_id,
+                "reason": "playbook_binding_hash_missing",
+            },
         )
-        if current_hash != bound_hash:
-            raise ValidationError(
-                "approval binding stale: playbook binding changed",
-                details={
-                    "action_id": action.action_id,
-                    "reason": "playbook_binding_mismatch",
-                },
-            )
+    current_hash = compute_playbook_binding_hash(
+        playbook_ref=action.playbook_ref,
+        template_snapshot=action.action_template_snapshot,
+    )
+    if current_hash != bound_hash:
+        raise ValidationError(
+            "approval binding stale: playbook binding changed",
+            details={
+                "action_id": action.action_id,
+                "reason": "playbook_binding_mismatch",
+            },
+        )
 
 
 __all__ = [

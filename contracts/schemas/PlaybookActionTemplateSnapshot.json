@@ -1,0 +1,60 @@
+{
+  "$defs": {
+    "ActionLevel": {
+      "enum": [
+        "l0",
+        "l1",
+        "l2",
+        "l3",
+        "l4",
+        "l5"
+      ],
+      "title": "ActionLevel",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Bounded typed action template pinned at plan materialization time.",
+  "properties": {
+    "step_order": {
+      "minimum": 1,
+      "title": "Step Order",
+      "type": "integer"
+    },
+    "tool_name": {
+      "minLength": 1,
+      "title": "Tool Name",
+      "type": "string"
+    },
+    "action_level": {
+      "$ref": "#/$defs/ActionLevel"
+    },
+    "action_name": {
+      "minLength": 1,
+      "title": "Action Name",
+      "type": "string"
+    },
+    "required_capabilities": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Required Capabilities",
+      "type": "array"
+    },
+    "template_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Template Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "step_order",
+    "tool_name",
+    "action_level",
+    "action_name",
+    "template_hash"
+  ],
+  "title": "PlaybookActionTemplateSnapshot",
+  "type": "object"
+}

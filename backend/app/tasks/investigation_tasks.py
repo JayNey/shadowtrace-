@@ -32,10 +32,12 @@ def _release_celery_task_loop_resources() -> None:
     """Strategy B (#623): drop loop-bound clients after each asyncio.run task."""
     from app.api.v1.deps import reset_investigation_stack_cache
     from app.core.embedding.factory import reset_embedding_client
+    from app.playbook.resources import reset_playbook_resources_cache
     from app.rag.resources import reset_loaded_retrieval_resources
 
     reset_investigation_stack_cache()
     reset_loaded_retrieval_resources()
+    reset_playbook_resources_cache()
     reset_embedding_client()
 
 

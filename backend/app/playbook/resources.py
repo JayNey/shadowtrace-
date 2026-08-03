@@ -221,6 +221,80 @@ async def probe_playbook_resources(
     )
 
 
+async def check_playbook_resources(settings: Settings | None = None) -> dict[str, object]:
+    """Sanitized readiness for /health playbook_resources block."""
+    cfg = settings or get_settings()
+    provider = peek_session_provider()
+    postgres = "error"
+    session_pool = "unknown"
+    if provider is not None:
+        session_pool = provider.pool_policy
+        try:
+            postgres = "ok" if await provider.ping_postgres() else "error"
+        except Exception:  # noqa: BLE001 — health must never raise
+            postgres = "error"
+
+    if cfg.app_env.strip().lower() == "production" and cfg.playbook_fixture_fallback:
+        return {
+            "status": "unavailable",
+            "mode": "production",
+            "active_release_id": "",
+            "postgres": postgres,
+            "session_pool": session_pool,
+            "fixture_fallback_enabled": True,
+            "reasons": ["playbook_fixture_fallback_forbidden_in_production"],
+        }
+
+    if postgres != "ok" or provider is None:
+        reasons: list[str] = []
+        if provider is None:
+            reasons.append("session_provider_missing")
+        if postgres != "ok":
+            reasons.append("postgres_unavailable")
+        return {
+            "status": "unavailable",
+            "mode": "unconfigured",
+            "active_release_id": "",
+            "postgres": postgres,
+            "session_pool": session_pool,
+            "fixture_fallback_enabled": cfg.playbook_fixture_fallback,
+            "reasons": reasons or ["playbook_unavailable"],
+        }
+
+    try:
+        from app.core.embedding.factory import get_embedding_client
+
+        embed_service = get_embedding_client(settings=cfg)
+        session_factory = provider.session_factory()
+        loaded = get_loaded_playbook_resources(
+            settings=cfg,
+            session_factory=session_factory,
+            embed_service=embed_service,
+        )
+        probed = await probe_playbook_resources(loaded, settings=cfg)
+    except Exception:  # noqa: BLE001 — health must never raise
+        logger.debug("playbook health probe failed", exc_info=True)
+        return {
+            "status": "unavailable",
+            "mode": "error",
+            "active_release_id": "",
+            "postgres": postgres,
+            "session_pool": session_pool,
+            "fixture_fallback_enabled": cfg.playbook_fixture_fallback,
+            "reasons": ["playbook_probe_failed"],
+        }
+
+    return {
+        "status": probed.status,
+        "mode": probed.mode,
+        "active_release_id": probed.active_release_id,
+        "postgres": postgres,
+        "session_pool": session_pool,
+        "fixture_fallback_enabled": cfg.playbook_fixture_fallback,
+        "reasons": list(probed.reasons),
+    }
+
+
 def reset_playbook_resources_cache() -> None:
     global _resources, _resources_key
     _resources = None
@@ -230,6 +304,7 @@ def reset_playbook_resources_cache() -> None:
 __all__ = [
     "LoadedPlaybookResources",
     "build_playbook_services",
+    "check_playbook_resources",
     "get_loaded_playbook_resources",
     "probe_playbook_resources",
     "reset_playbook_resources_cache",

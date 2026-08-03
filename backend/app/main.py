@@ -88,10 +88,12 @@ async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
         await dispose_session_provider()
         try:
             from app.core.embedding.factory import close_embedding_client
+            from app.playbook.resources import reset_playbook_resources_cache
             from app.rag.resources import reset_loaded_retrieval_resources
 
             await close_embedding_client()
             reset_loaded_retrieval_resources()
+            reset_playbook_resources_cache()
         except Exception:
             logger.warning("Retrieval resource shutdown failed", exc_info=True)
         try:

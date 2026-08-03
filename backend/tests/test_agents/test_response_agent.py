@@ -575,6 +575,102 @@ async def test_playbook_path_used_when_available() -> None:
     assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
 
 
+@pytest.mark.asyncio
+async def test_playbook_release_service_path_used_when_wired() -> None:
+    from app.models.knowledge_release import KnowledgeReleaseLifecycleState
+    from app.models.playbook_release import PlaybookRef
+
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(event_type=EventType.ACCOUNT_ANOMALY))
+    ref = PlaybookRef.model_validate(_playbook_ref("pb-a1b2c3d4"))
+    wm.values[(event_id, "rag_output")] = {"playbook_refs": [ref.model_dump(mode="json")]}
+    playbook = Playbook(
+        playbook_id="pb-a1b2c3d4",
+        playbook_name="Account playbook",
+        event_type=EventType.ACCOUNT_ANOMALY,
+        min_severity=Severity.HIGH,
+        steps=[
+            PlaybookStep(
+                step_order=1,
+                action_name="Disable account",
+                tool_name="disable_account",
+                action_level=ActionLevel.L3,
+            ),
+        ],
+    )
+
+    class _FakeReleaseService:
+        async def resolve_playbook_ref(
+            self,
+            playbook_ref: PlaybookRef,
+            *,
+            allow_retired: bool = False,
+        ) -> tuple[Playbook, SimpleNamespace]:
+            assert allow_retired is False
+            assert playbook_ref.playbook_id == "pb-a1b2c3d4"
+            return playbook, SimpleNamespace(
+                release_version="v1-test",
+                lifecycle_state=KnowledgeReleaseLifecycleState.ACTIVE,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(),
+        playbook_release_service=_FakeReleaseService(),
+        playbook_kb_service=_FakePlaybookKB(None),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    assert any(a.tool_name == "disable_account" for a in plan.actions)
+    assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+
+
+@pytest.mark.asyncio
+async def test_playbook_ref_validation_error_skips_legacy_fallback() -> None:
+    from app.core.errors import ValidationError as ShadowValidationError
+    from app.models.playbook_release import PlaybookRef
+
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(event_type=EventType.ACCOUNT_ANOMALY))
+    ref = PlaybookRef.model_validate(_playbook_ref("pb-a1b2c3d4"))
+    wm.values[(event_id, "rag_output")] = {"playbook_refs": [ref.model_dump(mode="json")]}
+    playbook = Playbook(
+        playbook_id="pb-a1b2c3d4",
+        playbook_name="Account playbook",
+        event_type=EventType.ACCOUNT_ANOMALY,
+        min_severity=Severity.HIGH,
+        steps=[
+            PlaybookStep(
+                step_order=1,
+                action_name="Disable account",
+                tool_name="disable_account",
+                action_level=ActionLevel.L3,
+            ),
+        ],
+    )
+
+    class _RejectingReleaseService:
+        async def resolve_playbook_ref(self, *_args: Any, **_kwargs: Any) -> tuple[Playbook, Any]:
+            raise ShadowValidationError(
+                "playbook content hash mismatch",
+                details={"reason": "content_hash_mismatch"},
+            )
+
+    agent = ResponseAgent(
+        llm_client=_FailingLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(),
+        playbook_release_service=_RejectingReleaseService(),
+        playbook_kb_service=_FakePlaybookKB(playbook),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    assert not any(a.playbook_ref is not None for a in plan.actions)
+
+
 def test_action_fingerprint_and_id_are_stable() -> None:
     fp = compute_action_fingerprint(
         event_id="evt-1",

@@ -155,6 +155,11 @@ from app.models.knowledge_release import (
     KnowledgeRelease,
     KnowledgeTypedFilter,
 )
+from app.models.playbook_release import (
+    PlaybookActionTemplateSnapshot,
+    PlaybookRef,
+    ResolvedPlaybook,
+)
 from app.models.tool_call_grant import (
     BoundExecutionPrincipal,
     SafeToolProjection,
@@ -413,6 +418,10 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "KnowledgeQueryPlanHints": KnowledgeQueryPlanHints,
     "KnowledgeQueryPlanValidationOutcome": KnowledgeQueryPlanValidationOutcome,
     "KnowledgeTypedFilter": KnowledgeTypedFilter,
+    # playbook release registry (ISSUE-139 / #645)
+    "PlaybookRef": PlaybookRef,
+    "PlaybookActionTemplateSnapshot": PlaybookActionTemplateSnapshot,
+    "ResolvedPlaybook": ResolvedPlaybook,
     # llm provider health (ISSUE-106 / #609)
     "LLMProviderHealth": LLMProviderHealth,
     "LLMProbeStatus": LLMProbeStatus,

@@ -2586,6 +2586,26 @@
             ],
             "title": "Playbook Id"
           },
+          "playbook_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaybookRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "action_template_snapshot": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlaybookActionTemplateSnapshot"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "provider_name": {
             "anyOf": [
               {
@@ -5609,6 +5629,18 @@
         ],
         "title": "InvestigationReport"
       },
+      "KnowledgeReleaseLifecycleState": {
+        "type": "string",
+        "enum": [
+          "draft",
+          "staged",
+          "active",
+          "retired",
+          "failed"
+        ],
+        "title": "KnowledgeReleaseLifecycleState",
+        "description": "Release lifecycle — activation/retirement are server-owned transitions."
+      },
       "KnowledgeResponse": {
         "properties": {
           "total": {
@@ -5788,6 +5820,127 @@
         ],
         "title": "NextRecommendedAction",
         "description": "Operator next step hint; never implies hidden auto-execution (ISSUE-103)."
+      },
+      "PlaybookActionTemplateSnapshot": {
+        "properties": {
+          "step_order": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Step Order"
+          },
+          "tool_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Tool Name"
+          },
+          "action_level": {
+            "$ref": "#/components/schemas/ActionLevel"
+          },
+          "action_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Action Name"
+          },
+          "required_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Required Capabilities"
+          },
+          "template_hash": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Template Hash"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "step_order",
+          "tool_name",
+          "action_level",
+          "action_name",
+          "template_hash"
+        ],
+        "title": "PlaybookActionTemplateSnapshot",
+        "description": "Bounded typed action template pinned at plan materialization time."
+      },
+      "PlaybookRef": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "playbook_id": {
+            "type": "string",
+            "pattern": "^pb-[0-9a-fA-F]{8}$",
+            "title": "Playbook Id"
+          },
+          "release_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Release Id"
+          },
+          "release_version": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Release Version"
+          },
+          "content_hash": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Content Hash",
+            "description": "SHA-256 of canonical playbook object JSON"
+          },
+          "bundle_content_hash": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Bundle Content Hash",
+            "description": "SHA-256 of canonical release bundle JSON"
+          },
+          "revision": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Revision",
+            "default": 1
+          },
+          "corpus_id": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Corpus Id",
+            "default": "playbook_soar"
+          },
+          "lifecycle_state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/KnowledgeReleaseLifecycleState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Release lifecycle at pin time (audit only)"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "playbook_id",
+          "release_id",
+          "release_version",
+          "content_hash",
+          "bundle_content_hash"
+        ],
+        "title": "PlaybookRef",
+        "description": "Immutable playbook version/hash reference — not a bare playbook_id string."
       },
       "ProcessEntity": {
         "properties": {

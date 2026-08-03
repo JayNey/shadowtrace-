@@ -144,6 +144,140 @@
       "title": "ImpactAssessment",
       "type": "object"
     },
+    "KnowledgeReleaseLifecycleState": {
+      "description": "Release lifecycle — activation/retirement are server-owned transitions.",
+      "enum": [
+        "draft",
+        "staged",
+        "active",
+        "retired",
+        "failed"
+      ],
+      "title": "KnowledgeReleaseLifecycleState",
+      "type": "string"
+    },
+    "PlaybookActionTemplateSnapshot": {
+      "additionalProperties": false,
+      "description": "Bounded typed action template pinned at plan materialization time.",
+      "properties": {
+        "step_order": {
+          "minimum": 1,
+          "title": "Step Order",
+          "type": "integer"
+        },
+        "tool_name": {
+          "minLength": 1,
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "action_level": {
+          "$ref": "#/$defs/ActionLevel"
+        },
+        "action_name": {
+          "minLength": 1,
+          "title": "Action Name",
+          "type": "string"
+        },
+        "required_capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required Capabilities",
+          "type": "array"
+        },
+        "template_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Template Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "step_order",
+        "tool_name",
+        "action_level",
+        "action_name",
+        "template_hash"
+      ],
+      "title": "PlaybookActionTemplateSnapshot",
+      "type": "object"
+    },
+    "PlaybookRef": {
+      "additionalProperties": false,
+      "description": "Immutable playbook version/hash reference — not a bare playbook_id string.",
+      "properties": {
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "playbook_id": {
+          "pattern": "^pb-[0-9a-fA-F]{8}$",
+          "title": "Playbook Id",
+          "type": "string"
+        },
+        "release_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Release Id",
+          "type": "string"
+        },
+        "release_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Release Version",
+          "type": "string"
+        },
+        "content_hash": {
+          "description": "SHA-256 of canonical playbook object JSON",
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Content Hash",
+          "type": "string"
+        },
+        "bundle_content_hash": {
+          "description": "SHA-256 of canonical release bundle JSON",
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Bundle Content Hash",
+          "type": "string"
+        },
+        "revision": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "corpus_id": {
+          "default": "playbook_soar",
+          "minLength": 1,
+          "title": "Corpus Id",
+          "type": "string"
+        },
+        "lifecycle_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KnowledgeReleaseLifecycleState"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Release lifecycle at pin time (audit only)"
+        }
+      },
+      "required": [
+        "playbook_id",
+        "release_id",
+        "release_version",
+        "content_hash",
+        "bundle_content_hash"
+      ],
+      "title": "PlaybookRef",
+      "type": "object"
+    },
     "SourceDisposition": {
       "description": "Normalized external disposition label; source_status_raw keeps the original.",
       "enum": [
@@ -386,6 +520,28 @@
       ],
       "default": null,
       "title": "Playbook Id"
+    },
+    "playbook_ref": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlaybookRef"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "action_template_snapshot": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PlaybookActionTemplateSnapshot"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     },
     "provider_name": {
       "anyOf": [

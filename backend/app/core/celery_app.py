@@ -39,11 +39,13 @@ def shutdown_worker_resources(**kwargs: object) -> None:
     del kwargs
     from app.core.embedding.factory import close_embedding_client
     from app.db.session_provider import dispose_session_provider
+    from app.playbook.resources import reset_playbook_resources_cache
     from app.rag.resources import reset_loaded_retrieval_resources
 
     asyncio.run(dispose_session_provider())
     asyncio.run(close_embedding_client())
     reset_loaded_retrieval_resources()
+    reset_playbook_resources_cache()
     logger.debug("Celery worker session provider + retrieval resources disposed")
 
 

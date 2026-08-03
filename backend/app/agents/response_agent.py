@@ -791,7 +791,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             try:
                 playbook, release = await self.playbook_release_service.resolve_playbook_ref(
                     playbook_refs[0],
-                    allow_retired=True,
+                    allow_retired=False,
                 )
                 pinned_ref = playbook_refs[0].model_copy(
                     update={"lifecycle_state": release.lifecycle_state},
@@ -817,8 +817,8 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     input.event_id,
                     exc,
                 )
-
-        if playbook_refs and self.playbook_kb_service is not None:
+        elif playbook_refs and self.playbook_kb_service is not None:
+            # Legacy/test bootstrap only — production wires playbook_release_service.
             playbook = await self._load_playbook_legacy(playbook_refs[0].playbook_id)
             if playbook is not None:
                 return (

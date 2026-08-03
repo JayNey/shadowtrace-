@@ -245,6 +245,110 @@ def test_approval_binding_invalidates_on_fingerprint_change() -> None:
         validate_approval_binding(mutated, detail)
 
 
+def test_approval_binding_invalidates_on_plan_revision_change() -> None:
+    from app.models.action import Action
+    from app.models.enums import ActionCategory, ActionLevel, ExecutionOwner
+    from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
+
+    ref = PlaybookRef(
+        playbook_id="pb-a1b2c3d4",
+        release_id="krel-abc",
+        release_version="v1",
+        content_hash="a" * 64,
+        bundle_content_hash="b" * 64,
+    )
+    snapshot = PlaybookActionTemplateSnapshot(
+        step_order=1,
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        action_name="Block IP",
+        template_hash="c" * 64,
+    )
+    action = Action(
+        action_id="act-001",
+        event_id="evt-001",
+        plan_revision=1,
+        action_fingerprint="fp-original",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        playbook_ref=ref,
+        action_template_snapshot=snapshot,
+    )
+    detail = build_approval_binding_detail(action)
+    mutated = action.model_copy(update={"plan_revision": 2})
+    with pytest.raises(ValidationError, match="plan revision changed"):
+        validate_approval_binding(mutated, detail)
+
+
+def test_approval_binding_invalidates_on_playbook_hash_change() -> None:
+    from app.models.action import Action
+    from app.models.enums import ActionCategory, ActionLevel, ExecutionOwner
+    from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
+
+    ref = PlaybookRef(
+        playbook_id="pb-a1b2c3d4",
+        release_id="krel-abc",
+        release_version="v1",
+        content_hash="a" * 64,
+        bundle_content_hash="b" * 64,
+    )
+    snapshot = PlaybookActionTemplateSnapshot(
+        step_order=1,
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        action_name="Block IP",
+        template_hash="c" * 64,
+    )
+    action = Action(
+        action_id="act-001",
+        event_id="evt-001",
+        plan_revision=1,
+        action_fingerprint="fp-original",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        playbook_ref=ref,
+        action_template_snapshot=snapshot,
+    )
+    detail = build_approval_binding_detail(action)
+    mutated_ref = ref.model_copy(update={"content_hash": "d" * 64})
+    mutated = action.model_copy(update={"playbook_ref": mutated_ref})
+    with pytest.raises(ValidationError, match="playbook binding changed"):
+        validate_approval_binding(mutated, detail)
+
+
+def test_approval_binding_requires_detail_for_playbook_pinned_action() -> None:
+    from app.models.action import Action
+    from app.models.enums import ActionCategory, ActionLevel, ExecutionOwner
+    from app.models.playbook_release import PlaybookRef
+
+    action = Action(
+        action_id="act-001",
+        event_id="evt-001",
+        plan_revision=1,
+        action_fingerprint="fp-original",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        playbook_ref=PlaybookRef(
+            playbook_id="pb-a1b2c3d4",
+            release_id="krel-abc",
+            release_version="v1",
+            content_hash="a" * 64,
+            bundle_content_hash="b" * 64,
+        ),
+    )
+    with pytest.raises(ValidationError, match="binding missing"):
+        validate_approval_binding(action, None)
+
+
 def test_compute_playbook_binding_hash_stable() -> None:
     from app.models.enums import ActionLevel
     from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef

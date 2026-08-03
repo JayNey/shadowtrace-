@@ -64,6 +64,13 @@ async def check_llm_provider(settings: Settings | None = None) -> dict[str, obje
     return await _check_llm(settings)
 
 
+async def _check_playbook_resources(settings: Settings | None = None) -> dict[str, object]:
+    """Return sanitized PlaybookKB resource readiness (ISSUE-139 / #645)."""
+    from app.playbook.resources import check_playbook_resources
+
+    return await check_playbook_resources(settings)
+
+
 async def _check_loaded_resources(settings: Settings | None = None) -> dict[str, object]:
     """Return sanitized retrieval resource readiness (ISSUE-138)."""
     from app.rag.resources import check_loaded_resources
@@ -119,6 +126,7 @@ async def health(
     embedding_provider = await check_embedding_provider()
     llm_provider = await check_llm_provider(settings)
     loaded_resources = await _check_loaded_resources(settings)
+    playbook_resources = await _check_playbook_resources(settings)
 
     # NOTE: capability values below are UNVERIFIED placeholders for the Mock
     # phase. Once real adapters land they must be replaced with actual
@@ -168,6 +176,10 @@ async def health(
     embedding_ok = embedding_provider.get("status") == "ok"
     llm_ok = llm_provider.get("status") == "ok"
     loaded_ok = loaded_resources.get("status") == "ready"
+    playbook_ok = playbook_resources.get("status") == "ready"
+    playbook_required = settings.app_env.strip().lower() == "production" or (
+        settings.playbook_release_require_active
+    )
     llm_required = bool(settings.llm_required)
     celery_task_mode = str(celery_health.get("task_mode", "background"))
     celery_broker_status = str(celery_health.get("broker", "error"))
@@ -177,6 +189,8 @@ async def health(
     if not hard_deps_ok or not embedding_ok:
         overall = "degraded"
     elif not loaded_ok:
+        overall = "degraded"
+    elif playbook_required and not playbook_ok:
         overall = "degraded"
     elif llm_required and not llm_ok:
         overall = "degraded"
@@ -196,6 +210,7 @@ async def health(
         "redis": redis_status,
         "embedding_provider": embedding_provider,
         "loaded_resources": loaded_resources,
+        "playbook_resources": playbook_resources,
         "llm": llm_provider,
         "celery": celery_health,
         "source_adapter": source_adapter,

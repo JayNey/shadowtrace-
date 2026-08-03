@@ -886,11 +886,13 @@ def reset_deps() -> None:
     global _memory_governance, _decision_record_service, _tool_call_grant_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
+    from app.playbook.resources import reset_playbook_resources_cache
     from app.rag.resources import reset_loaded_retrieval_resources
     from app.services.evidence_projection import reset_evidence_projection_default
 
     reset_embedding_client()
     reset_loaded_retrieval_resources()
+    reset_playbook_resources_cache()
     reset_evidence_projection_default()
     _redis_client = None
     _context_store = None
