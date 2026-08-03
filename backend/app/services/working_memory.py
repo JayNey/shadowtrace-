@@ -31,6 +31,7 @@ FIELD_OWNERSHIP: dict[str, str] = {
     "event": "EventService",
     "source_snapshot": "EventService",
     "source_sync_state": "SourceIngester",
+    "detection_context_snapshot": "DetectionContextProjector",
     "triage_result": "TriageAgent",
     "false_positive_match": "FalsePositiveMatcher",
     "fp_adjudication": "PostEvidenceFpAdjudicator",

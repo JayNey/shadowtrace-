@@ -528,6 +528,37 @@ export default function EventDetailPage() {
           )}
         </Card>
       </Col>
+      <Col span={24}>
+        <Card title="Detection Context 溯源" size="small">
+          {event.detection_context_snapshot ? (
+            <Descriptions column={1} size="small">
+              <Descriptions.Item label="snapshot_id">
+                {event.detection_context_snapshot.snapshot_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="revision">
+                {event.detection_context_snapshot.revision}
+              </Descriptions.Item>
+              <Descriptions.Item label="content_hash">
+                {event.detection_context_snapshot.content_hash}
+              </Descriptions.Item>
+              <Descriptions.Item label="promotion_id">
+                {event.detection_context_snapshot.promotion_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="promotion_link_revision">
+                {event.detection_context_snapshot.promotion_link_revision}
+              </Descriptions.Item>
+              <Descriptions.Item label="event_revision">
+                {event.detection_context_snapshot.event_revision}
+              </Descriptions.Item>
+              <Descriptions.Item label="created_at">
+                {event.detection_context_snapshot.created_at ?? "暂无数据"}
+              </Descriptions.Item>
+            </Descriptions>
+          ) : (
+            <Typography.Text type="secondary">暂无 detection context snapshot</Typography.Text>
+          )}
+        </Card>
+      </Col>
     </Row>
   );
 

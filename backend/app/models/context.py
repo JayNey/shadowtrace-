@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.action import ImpactAssessment
+from app.models.detection_context_snapshot import DetectionContextSnapshotRef
 from app.models.disposition import (
     DispositionCommand,
     DispositionReceipt,
@@ -41,6 +42,7 @@ class EventContext(BaseModel):
     # --- source state family ---
     source_snapshot: dict[str, Any] | None = None
     source_sync_state: SourceObjectState | None = None
+    detection_context_snapshot: DetectionContextSnapshotRef | None = None
 
     # --- internal orchestration / agent outputs (typed in later issues) ---
     triage_result: dict[str, Any] | None = None

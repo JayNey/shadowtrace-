@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -49,6 +51,11 @@ from app.services.event_service import EventService, ingest_result_to_typed
 MAX_PROMOTION_INGEST_RETRIES = 5
 PAYLOAD_RETRY_COUNT_KEY = "ingest_retry_count"
 
+if TYPE_CHECKING:
+    from app.services.detection_context_projector import DetectionContextProjector
+
+logger = logging.getLogger(__name__)
+
 
 def build_promotion_key(
     *,
@@ -75,6 +82,7 @@ class DetectionPromotionService:
         source_ingester: SourceIngester,
         derived_connectors: DerivedDetectionConnectorService | None = None,
         rule_service: DetectionRuleService | None = None,
+        context_projector: DetectionContextProjector | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._session_factory = session_factory
@@ -83,7 +91,33 @@ class DetectionPromotionService:
         self._ingester = source_ingester
         self._derived = derived_connectors or DerivedDetectionConnectorService(session_factory)
         self._rules = rule_service or DetectionRuleService(session_factory)
+        self._context_projector = context_projector
         self._now = now or (lambda: datetime.now(UTC))
+
+    async def _maybe_project_detection_context(self, record: DetectionPromotionRecord) -> None:
+        if self._context_projector is None:
+            return
+        if record.status is not DetectionPromotionStatus.COMPLETED or record.event_id is None:
+            return
+        try:
+            await self._context_projector.project_from_promotion(
+                record.promotion_id,
+                tenant_id=record.tenant_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "detection context projection failed promotion_id=%s: %s",
+                record.promotion_id,
+                exc,
+            )
+
+    async def _finalize_promotion(
+        self,
+        result: DetectionPromotionResult,
+    ) -> DetectionPromotionResult:
+        finalized = self._finalize_promotion_result(result)
+        await self._maybe_project_detection_context(finalized.record)
+        return finalized
 
     async def promote_candidate(
         self,
@@ -138,7 +172,7 @@ class DetectionPromotionService:
         existing = await self._get_by_promotion_key(promotion_key)
         if existing is not None:
             if existing.status is DetectionPromotionStatus.COMPLETED:
-                return self._finalize_promotion_result(
+                return await self._finalize_promotion(
                     DetectionPromotionResult(
                         promotion_id=existing.promotion_id,
                         status=existing.status,
@@ -147,7 +181,7 @@ class DetectionPromotionService:
                         resumed=True,
                     )
                 )
-            return self._finalize_promotion_result(
+            return await self._finalize_promotion(
                 await self._resume(existing, artifact, decision, candidate)
             )
 
@@ -185,7 +219,7 @@ class DetectionPromotionService:
             updated_at=self._now(),
         )
         record = await self._insert_ledger(record)
-        return self._finalize_promotion_result(
+        return await self._finalize_promotion(
             await self._advance(record, artifact, decision, candidate, package_row)
         )
 

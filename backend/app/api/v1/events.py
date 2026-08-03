@@ -565,6 +565,44 @@ async def list_events(
 # --------------------------------------------------------------------------- #
 
 
+async def _load_detection_context_summary(
+    *,
+    event_id: str,
+    tenant_id: str,
+) -> s.DetectionContextSnapshotSummary | None:
+    try:
+        from app.models.detection_context_snapshot import DetectionContextSnapshotQuery
+        from app.services.detection_context_service import DetectionContextService
+
+        service = DetectionContextService(_get_session_factory())
+        result = await service.query_snapshots(
+            DetectionContextSnapshotQuery(
+                tenant_id=tenant_id,
+                event_id=event_id,
+                latest_only=True,
+            )
+        )
+        if not result.items:
+            return None
+        snapshot = result.items[0]
+        return s.DetectionContextSnapshotSummary(
+            snapshot_id=snapshot.snapshot_id,
+            revision=snapshot.revision,
+            content_hash=snapshot.content_hash,
+            promotion_id=snapshot.promotion_id,
+            promotion_link_revision=snapshot.promotion_link_revision,
+            event_revision=snapshot.event_revision,
+            created_at=snapshot.created_at,
+        )
+    except Exception:
+        logger.debug(
+            "detection context summary unavailable event_id=%s",
+            event_id,
+            exc_info=True,
+        )
+        return None
+
+
 @router.get("/events/{event_id}", response_model=s.EventDetailResponse)
 async def get_event(
     event_id: str,
@@ -591,12 +629,18 @@ async def get_event(
             # DB unavailable: leave writeback info as defaults.
             readiness = WritebackReadiness.CAPABILITY_UNKNOWN
 
+    detection_context_summary = await _load_detection_context_summary(
+        event_id=event_id,
+        tenant_id=event.creation_source_ref.source_tenant_id,
+    )
+
     return s.EventDetailResponse(
         event=event,
         writeback_required=required,
         writeback_readiness=readiness,
         writeback_overall_status=wb_status,
         pending_writeback_count=pending_count,
+        detection_context_snapshot=detection_context_summary,
         **_guidance_fields(event, get_settings()),
     )
 

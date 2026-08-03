@@ -13,6 +13,7 @@ from app.models.agent_io import (
     TriageResult,
     VerificationResult,
 )
+from app.models.detection_context_snapshot import DetectionContextSnapshot
 from app.models.enums import ActionCategory, FinalVerdict, Severity
 from app.models.evidence import EvidenceGap
 from app.models.report import ReportSection
@@ -129,6 +130,7 @@ class ReportSectionBuilder:
         impact_assessments: list[ImpactAssessment] | list[dict[str, Any]] | None = None,
         source_snapshot: dict[str, Any] | None = None,
         triage_degraded: dict[str, Any] | None = None,
+        detection_context_snapshot: DetectionContextSnapshot | None = None,
     ) -> list[ReportSection]:
         # Prefer triage entities; otherwise derive labels from evidence raw/related.
         account_lines, asset_lines, process_lines, file_lines, external_lines = self._entity_lines(
@@ -148,6 +150,7 @@ class ReportSectionBuilder:
             replan_count=replan_count,
             source_snapshot=source_snapshot,
             triage_degraded=triage_degraded,
+            detection_context_snapshot=detection_context_snapshot,
         )
         severity_level = (
             f"severity={risk_assessment.severity.value}\n"
@@ -173,7 +176,11 @@ class ReportSectionBuilder:
             source_snapshot=source_snapshot,
             risk_assessment=risk_assessment,
         )
-        attack_mapping = self._attack_mapping(evidence_output, rag_output)
+        attack_mapping = self._attack_mapping(
+            evidence_output,
+            rag_output,
+            detection_context_snapshot=detection_context_snapshot,
+        )
         executed = self._executed_actions(response_actions)
         verification = self._verification_results(verification_result)
         recommendations = self._recommendations(
@@ -191,6 +198,7 @@ class ReportSectionBuilder:
             evidence_output=evidence_output,
             response_actions=response_actions,
             content_sha256=content_sha256,
+            detection_context_snapshot=detection_context_snapshot,
         )
 
         contents: dict[str, str] = {
@@ -238,6 +246,11 @@ class ReportSectionBuilder:
                 "content_sha256": content_sha256,
                 "evidence_count": len(evidence_output.evidence_list),
                 "response_action_count": len(response_actions),
+                "detection_context_snapshot_id": (
+                    detection_context_snapshot.snapshot_id
+                    if detection_context_snapshot is not None
+                    else None
+                ),
             },
         }
 
@@ -355,6 +368,7 @@ class ReportSectionBuilder:
         replan_count: int = 0,
         source_snapshot: dict[str, Any] | None = None,
         triage_degraded: dict[str, Any] | None = None,
+        detection_context_snapshot: DetectionContextSnapshot | None = None,
     ) -> str:
         event_type = triage_result.event_type.value if triage_result else "unknown"
         reasoning = (triage_result.reasoning if triage_result else "") or ""
@@ -368,6 +382,22 @@ class ReportSectionBuilder:
             f"collection_status: {evidence_output.collection_status.value}",
             f"evidence_limited: {risk_assessment.evidence_limited}",
         ]
+        if detection_context_snapshot is not None:
+            lines.extend(
+                [
+                    f"detection_context_snapshot_id: {detection_context_snapshot.snapshot_id}",
+                    f"detection_context_revision: {detection_context_snapshot.revision}",
+                    f"detection_context_hash: {detection_context_snapshot.content_hash}",
+                    f"detection_promotion_id: {detection_context_snapshot.promotion_id}",
+                    f"detection_matched_value: {detection_context_snapshot.scores.matched_value}",
+                    f"detection_operator: {detection_context_snapshot.scores.operator}",
+                ]
+            )
+            if detection_context_snapshot.scores.detection_score is not None:
+                lines.append(
+                    "detection_score: "
+                    f"{detection_context_snapshot.scores.detection_score:.4f}"
+                )
         if triage_result is not None and triage_result.degraded:
             lines.append("triage_degraded: true")
             for reason in triage_result.degradation_reasons:
@@ -607,7 +637,20 @@ class ReportSectionBuilder:
         self,
         evidence_output: EvidenceOutput,
         rag_output: dict[str, Any] | None,
+        *,
+        detection_context_snapshot: DetectionContextSnapshot | None = None,
     ) -> str:
+        if detection_context_snapshot is not None and detection_context_snapshot.attack_refs:
+            techniques = [
+                (
+                    f"{ref.technique_id} {ref.technique_name}".strip()
+                    if ref.technique_name
+                    else ref.technique_id
+                )
+                for ref in detection_context_snapshot.attack_refs
+            ]
+            return _bullet(techniques, "暂无 ATT&CK 技术映射")
+
         techniques: list[str] = []
         for item in evidence_output.evidence_list:
             if item.mitre_technique:
@@ -775,6 +818,7 @@ class ReportSectionBuilder:
         evidence_output: EvidenceOutput,
         response_actions: list[Action],
         content_sha256: str | None,
+        detection_context_snapshot: DetectionContextSnapshot | None = None,
     ) -> str:
         lines = [
             f"event_id={event_id}",
@@ -783,6 +827,16 @@ class ReportSectionBuilder:
             f"success_sources={','.join(evidence_output.success_sources) or '-'}",
             f"failed_sources={','.join(evidence_output.failed_sources) or '-'}",
         ]
+        if detection_context_snapshot is not None:
+            lines.extend(
+                [
+                    f"detection_context_snapshot_id={detection_context_snapshot.snapshot_id}",
+                    f"detection_context_revision={detection_context_snapshot.revision}",
+                    f"detection_context_hash={detection_context_snapshot.content_hash}",
+                    f"detection_promotion_id={detection_context_snapshot.promotion_id}",
+                    f"detection_promotion_link_revision={detection_context_snapshot.promotion_link_revision}",
+                ]
+            )
         if content_sha256:
             lines.append(f"content_sha256={content_sha256}")
         return "\n".join(lines)

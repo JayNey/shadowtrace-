@@ -157,12 +157,27 @@ class EventListResponse(PageMeta):
     items: list[EventListItem] = Field(default_factory=list)
 
 
+class DetectionContextSnapshotSummary(BaseModel):
+    """Read-only detection context provenance for event detail UI (#633)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str
+    revision: int = Field(..., ge=1)
+    content_hash: str
+    promotion_id: str
+    promotion_link_revision: int = Field(..., ge=1)
+    event_revision: int = Field(..., ge=1)
+    created_at: datetime | None = None
+
+
 class EventDetailResponse(BaseModel):
     event: SecurityEvent
     writeback_required: bool
     writeback_readiness: WritebackReadiness
     writeback_overall_status: WritebackStatus | None = None
     pending_writeback_count: int = 0
+    detection_context_snapshot: DetectionContextSnapshotSummary | None = None
     analysis_only_complete: bool = False
     execution_substate: ExecutionSubstate = ExecutionSubstate.NONE
     response_phase_state: ResponsePhaseState = ResponsePhaseState.NOT_STARTED

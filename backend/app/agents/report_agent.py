@@ -173,6 +173,8 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         if not isinstance(triage_degraded, dict):
             triage_degraded = None
 
+        detection_context_snapshot = await self._load_detection_context_snapshot(input.event_id)
+
         draft_sections = self.section_builder.build(
             event_id=input.event_id,
             evidence_output=input.evidence_output,
@@ -189,6 +191,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             impact_assessments=impact_assessments,
             source_snapshot=source_snapshot,
             triage_degraded=triage_degraded,
+            detection_context_snapshot=detection_context_snapshot,
         )
         title = self.section_builder.default_title(triage, input.event_id)
         summary = self.section_builder.default_summary(
@@ -579,6 +582,35 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         except Exception:
             logger.debug("optional WM read failed key=%s", key, exc_info=True)
             return None
+
+    async def _load_detection_context_snapshot(self, event_id: str):
+        from app.models.detection_context_snapshot import DetectionContextSnapshotRef
+
+        raw_ref = await self._read_optional(event_id, "detection_context_snapshot")
+        if raw_ref is None:
+            return None
+        try:
+            ref = (
+                raw_ref
+                if isinstance(raw_ref, DetectionContextSnapshotRef)
+                else DetectionContextSnapshotRef.model_validate(raw_ref)
+            )
+        except Exception:
+            logger.debug("invalid detection_context_snapshot ref", exc_info=True)
+            return None
+        if self.event_service is None or not hasattr(self.event_service, "_session_factory"):
+            return None
+        from app.services.detection_context_service import DetectionContextService
+
+        service = DetectionContextService(self.event_service._session_factory)
+        event = await self.event_service.get_event(event_id)
+        tenant_id = (
+            event.creation_source_ref.source_tenant_id
+            if event is not None and event.creation_source_ref is not None
+            else None
+        )
+        snapshot = await service.get_snapshot(ref.snapshot_id, tenant_id=tenant_id)
+        return snapshot
 
     async def _write_context(self, event_id: str, report: InvestigationReport) -> None:
         if self.working_memory is None:

@@ -588,12 +588,23 @@ export type ExecutionSubstate =
   | "waiting_writeback"
   | "manual_resolution";
 
+export interface DetectionContextSnapshotSummary {
+  snapshot_id: string;
+  revision: number;
+  content_hash: string;
+  promotion_id: string;
+  promotion_link_revision: number;
+  event_revision: number;
+  created_at?: string | null;
+}
+
 export interface EventDetailResponse {
   event: SecurityEvent;
   writeback_required: boolean;
   writeback_readiness: WritebackReadiness;
   writeback_overall_status: WritebackStatus | null;
   pending_writeback_count: number;
+  detection_context_snapshot?: DetectionContextSnapshotSummary | null;
   analysis_only_complete?: boolean;
   execution_substate?: ExecutionSubstate;
   response_phase_state?: ResponsePhaseState;
