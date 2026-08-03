@@ -1,0 +1,14 @@
+{
+  "dataset_id": "agentic_coordination_v1",
+  "dataset_version": "2026.08.03",
+  "tenant_id": "tenant-evaluation-agentic-coordination",
+  "schema_version": "1.0",
+  "content_hash": "345207084b204c7db74bfd5dac6aee06fc8a7a3a8127800703b2e5b69eb95e83",
+  "release_refs": {
+    "kb_release_id": "kbr-2026.08.03-mock",
+    "rule_release_id": "rule-eval-agentic-coordination-v1",
+    "prompt_release_id": "prompt-eval-v1",
+    "config_profile": "mock_p0_agentic_coordination"
+  },
+  "evaluation_notes": "ISSUE-136 Phase B (agentic/ReAct shadow) and Phase C (coordination/crash) deterministic cases."
+}

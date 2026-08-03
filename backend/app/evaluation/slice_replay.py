@@ -9,8 +9,17 @@ from __future__ import annotations
 
 import hashlib
 
-from app.models.evaluation_run import KnowledgeCaseObservation, SecurityCaseObservation
+from app.models.evaluation_run import (
+    AgenticCaseObservation,
+    CoordinationCaseObservation,
+    KnowledgeCaseObservation,
+    SecurityCaseObservation,
+)
 from app.models.evaluation_truth import (
+    AgenticExpectationKind,
+    AgenticSliceExpectation,
+    CoordinationExpectationKind,
+    CoordinationSliceExpectation,
     KnowledgeExpectationKind,
     KnowledgeSliceExpectation,
     SecurityExpectationKind,
@@ -198,8 +207,186 @@ def replay_knowledge_slice(
     )
 
 
+def _simulate_agentic_shadow(
+    expectation: AgenticSliceExpectation,
+    *,
+    fail: bool,
+) -> AgenticCaseObservation:
+    """Simulate ReAct shadow pivot decision paths (mock-only)."""
+    kind = expectation.expectation_kind
+    dependency_degraded = False
+    production_store_mutated = expectation.expected_production_store_mutated
+    shadow_namespace_used: bool | None = None
+    pivot_completed: bool | None = None
+    typed_artifact_produced: bool | None = None
+    step_count_within_bounds: bool | None = None
+    evidence_refs_valid: bool | None = None
+    raw_cot_persisted: bool | None = None
+    cross_tenant_denied: bool | None = None
+    budget_race_rejected: bool | None = None
+    degraded_fail_closed: bool | None = None
+    unsupported_tool_denied: bool | None = None
+
+    if kind is AgenticExpectationKind.SHADOW_ISOLATION:
+        shadow_namespace_used = True
+        production_store_mutated = False
+    elif kind is AgenticExpectationKind.BOUNDED_PIVOT_SUCCESS:
+        shadow_namespace_used = True
+        pivot_completed = True
+        typed_artifact_produced = True
+        step_count_within_bounds = True
+    elif kind is AgenticExpectationKind.EVIDENCE_FIDELITY:
+        evidence_refs_valid = True
+        typed_artifact_produced = True
+    elif kind is AgenticExpectationKind.NO_RAW_COT:
+        raw_cot_persisted = False
+    elif kind is AgenticExpectationKind.SHADOW_CROSS_TENANT_DENIED:
+        cross_tenant_denied = True
+    elif kind is AgenticExpectationKind.SHADOW_BUDGET_RACE:
+        budget_race_rejected = True
+    elif kind is AgenticExpectationKind.SHADOW_DEGRADED_FAIL_CLOSED:
+        degraded_fail_closed = True
+        dependency_degraded = True
+    elif kind is AgenticExpectationKind.SHADOW_UNSUPPORTED_TOOL_DENIED:
+        unsupported_tool_denied = True
+
+    if fail:
+        production_store_mutated = True
+        if shadow_namespace_used is not None:
+            shadow_namespace_used = False
+        if pivot_completed is not None:
+            pivot_completed = False
+        if typed_artifact_produced is not None:
+            typed_artifact_produced = False
+        if step_count_within_bounds is not None:
+            step_count_within_bounds = False
+        if evidence_refs_valid is not None:
+            evidence_refs_valid = False
+        if raw_cot_persisted is not None:
+            raw_cot_persisted = True
+        if cross_tenant_denied is not None:
+            cross_tenant_denied = False
+        if budget_race_rejected is not None:
+            budget_race_rejected = False
+        if degraded_fail_closed is not None:
+            degraded_fail_closed = False
+            dependency_degraded = False
+        if unsupported_tool_denied is not None:
+            unsupported_tool_denied = False
+
+    return AgenticCaseObservation(
+        expectation_kind=kind.value,
+        production_store_mutated=production_store_mutated,
+        shadow_namespace_used=shadow_namespace_used,
+        pivot_completed=pivot_completed,
+        typed_artifact_produced=typed_artifact_produced,
+        step_count_within_bounds=step_count_within_bounds,
+        evidence_refs_valid=evidence_refs_valid,
+        raw_cot_persisted=raw_cot_persisted,
+        cross_tenant_denied=cross_tenant_denied,
+        budget_race_rejected=budget_race_rejected,
+        degraded_fail_closed=degraded_fail_closed,
+        unsupported_tool_denied=unsupported_tool_denied,
+        dependency_degraded=dependency_degraded,
+    )
+
+
+def _simulate_coordination_ledger(
+    expectation: CoordinationSliceExpectation,
+    *,
+    fail: bool,
+) -> CoordinationCaseObservation:
+    """Simulate typed task/artifact coordination paths (mock-only)."""
+    kind = expectation.expectation_kind
+    dependency_degraded = False
+    stale_fencing_denied: bool | None = None
+    duplicate_logical_artifact: bool | None = None
+    content_hash_match: bool | None = None
+    attempt_recorded: bool | None = None
+    cross_tenant_denied: bool | None = None
+    projection_rejected: bool | None = None
+    forged_grant_rejected: bool | None = None
+    terminal_transition_idempotent: bool | None = None
+    manual_resolution_required: bool | None = None
+    blind_retry_blocked: bool | None = None
+
+    if kind is CoordinationExpectationKind.STALE_FENCING_DENIED:
+        stale_fencing_denied = True
+    elif kind is CoordinationExpectationKind.ARTIFACT_IDEMPOTENT_REPLAY:
+        duplicate_logical_artifact = False
+        content_hash_match = True
+    elif kind is CoordinationExpectationKind.ATTEMPT_HISTORY_AUDITABLE:
+        attempt_recorded = True
+    elif kind is CoordinationExpectationKind.CROSS_TENANT_TASK_DENIED:
+        cross_tenant_denied = True
+    elif kind is CoordinationExpectationKind.PROMPT_INJECTION_PROJECTION_DENIED:
+        projection_rejected = True
+    elif kind is CoordinationExpectationKind.FORGED_GRANT_DENIED:
+        forged_grant_rejected = True
+    elif kind is CoordinationExpectationKind.CRASH_RETRY_NO_DUPLICATE_TERMINAL:
+        terminal_transition_idempotent = True
+    elif kind is CoordinationExpectationKind.SIDE_EFFECT_UNKNOWN_MANUAL:
+        manual_resolution_required = True
+        blind_retry_blocked = True
+
+    if fail:
+        if stale_fencing_denied is not None:
+            stale_fencing_denied = False
+        if duplicate_logical_artifact is not None:
+            duplicate_logical_artifact = True
+        if content_hash_match is not None:
+            content_hash_match = False
+        if attempt_recorded is not None:
+            attempt_recorded = False
+        if cross_tenant_denied is not None:
+            cross_tenant_denied = False
+        if projection_rejected is not None:
+            projection_rejected = False
+        if forged_grant_rejected is not None:
+            forged_grant_rejected = False
+        if terminal_transition_idempotent is not None:
+            terminal_transition_idempotent = False
+        if manual_resolution_required is not None:
+            manual_resolution_required = False
+        if blind_retry_blocked is not None:
+            blind_retry_blocked = False
+
+    return CoordinationCaseObservation(
+        expectation_kind=kind.value,
+        stale_fencing_denied=stale_fencing_denied,
+        duplicate_logical_artifact=duplicate_logical_artifact,
+        content_hash_match=content_hash_match,
+        attempt_recorded=attempt_recorded,
+        cross_tenant_denied=cross_tenant_denied,
+        projection_rejected=projection_rejected,
+        forged_grant_rejected=forged_grant_rejected,
+        terminal_transition_idempotent=terminal_transition_idempotent,
+        manual_resolution_required=manual_resolution_required,
+        blind_retry_blocked=blind_retry_blocked,
+        dependency_degraded=dependency_degraded,
+    )
+
+
+def replay_agentic_slice(
+    expectation: AgenticSliceExpectation,
+    *,
+    fail: bool,
+) -> AgenticCaseObservation:
+    return _simulate_agentic_shadow(expectation, fail=fail)
+
+
+def replay_coordination_slice(
+    expectation: CoordinationSliceExpectation,
+    *,
+    fail: bool,
+) -> CoordinationCaseObservation:
+    return _simulate_coordination_ledger(expectation, fail=fail)
+
+
 __all__ = [
     "derive_plan_hash",
+    "replay_agentic_slice",
+    "replay_coordination_slice",
     "replay_knowledge_slice",
     "replay_security_slice",
 ]

@@ -1,0 +1,180 @@
+{
+  "$defs": {
+    "AgenticExpectationKind": {
+      "description": "Typed ReAct shadow pivot expectations (#642 Phase B / #641).",
+      "enum": [
+        "shadow_isolation",
+        "bounded_pivot_success",
+        "evidence_fidelity",
+        "no_raw_cot",
+        "shadow_cross_tenant_denied",
+        "shadow_budget_race",
+        "shadow_degraded_fail_closed",
+        "shadow_unsupported_tool_denied"
+      ],
+      "title": "AgenticExpectationKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "ReAct shadow pivot expectations \u2014 isolation, bounded pivot, evidence fidelity.",
+  "properties": {
+    "slice_type": {
+      "const": "agentic",
+      "default": "agentic",
+      "title": "Slice Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "expectation_kind": {
+      "$ref": "#/$defs/AgenticExpectationKind"
+    },
+    "critical": {
+      "default": true,
+      "title": "Critical",
+      "type": "boolean"
+    },
+    "expected_production_store_mutated": {
+      "default": false,
+      "title": "Expected Production Store Mutated",
+      "type": "boolean"
+    },
+    "expected_shadow_namespace_used": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Shadow Namespace Used"
+    },
+    "expected_pivot_completed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Pivot Completed"
+    },
+    "expected_typed_artifact_produced": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Typed Artifact Produced"
+    },
+    "expected_step_count_within_bounds": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Step Count Within Bounds"
+    },
+    "expected_evidence_refs_valid": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Evidence Refs Valid"
+    },
+    "expected_raw_cot_persisted": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Raw Cot Persisted"
+    },
+    "expected_cross_tenant_denied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Cross Tenant Denied"
+    },
+    "expected_budget_race_rejected": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Budget Race Rejected"
+    },
+    "expected_degraded_fail_closed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Degraded Fail Closed"
+    },
+    "expected_unsupported_tool_denied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Unsupported Tool Denied"
+    },
+    "replay_variant": {
+      "default": "pass",
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Replay Variant",
+      "type": "string"
+    }
+  },
+  "required": [
+    "expectation_kind"
+  ],
+  "title": "AgenticSliceExpectation",
+  "type": "object"
+}

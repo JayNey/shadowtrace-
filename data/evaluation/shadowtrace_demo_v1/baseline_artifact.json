@@ -8,14 +8,16 @@
     "required_scorer_error_count": 0,
     "unevaluable_count": 1
   },
-  "artifact_hash": "71a5c518f56dc8a96b505e1cb9e1c405f1a945024a1e1eb15e22ef3c93f07078",
+  "artifact_hash": "c679378a364714edb10a1436dcddfc2ae29681d24e23531f16e7e8147eee5fa2",
   "case_results": [
     {
       "case_id": "malicious_process_exfil",
       "case_status": "completed",
       "critical": false,
       "observation": {
+        "agentic": null,
         "case_id": "malicious_process_exfil",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [
@@ -71,7 +73,9 @@
       "case_status": "unevaluable",
       "critical": false,
       "observation": {
+        "agentic": null,
         "case_id": "partial_telemetry_unknown",
+        "coordination": null,
         "knowledge": null,
         "observation_available": false,
         "observed_attack_techniques": [],
@@ -103,7 +107,9 @@
       "case_status": "completed",
       "critical": false,
       "observation": {
+        "agentic": null,
         "case_id": "scheduled_task_benign",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
@@ -153,7 +159,7 @@
     }
   ],
   "code_sha": "evaluation-baseline-v1",
-  "completed_at": "2026-08-03T06:06:04.712134Z",
+  "completed_at": "2026-08-03T12:51:19.829999Z",
   "config": {
     "extra": {},
     "release_refs": {
@@ -166,8 +172,10 @@
     "replay_fidelity": "echo_truth_stub",
     "replay_mode": "mock_deterministic",
     "scorer_ids": [
+      "agentic_shadow",
       "attack_technique_coverage",
       "benign_label",
+      "coordination_ledger",
       "incident_grouping_consistency",
       "knowledge_retrieval",
       "security_gate",
@@ -326,9 +334,9 @@
     },
     "schema_version": "1.0"
   },
-  "run_id": "eval-43c7fdd3-f083-4aa3-8b83-6a7eb8fc1086",
+  "run_id": "eval-a8520bec-0c2a-4c35-8e9b-139b4e354086",
   "schema_version": "1.0",
-  "started_at": "2026-08-03T06:06:04.707316Z",
+  "started_at": "2026-08-03T12:51:19.741286Z",
   "status": "completed",
   "tenant_id": "tenant-evaluation-demo"
 }

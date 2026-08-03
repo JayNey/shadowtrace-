@@ -1,0 +1,16 @@
+{
+  "manifest_version": "2026.08.03",
+  "dataset_id": "agentic_coordination_v1",
+  "dataset_version": "2026.08.03",
+  "required_scorers": [
+    "agentic_shadow",
+    "coordination_ledger"
+  ],
+  "min_pass_rate": 1.0,
+  "max_error_count": 0,
+  "max_unevaluable_count": 0,
+  "max_unexpected_dependency_degraded": 0,
+  "min_case_count": 16,
+  "required_gate": false,
+  "require_critical_pass": true
+}

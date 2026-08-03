@@ -107,6 +107,45 @@ class KnowledgeCaseObservation(BaseModel):
     dependency_degraded: bool | None = None
 
 
+class AgenticCaseObservation(BaseModel):
+    """Structured ReAct shadow replay observation for #642 Phase B scorers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expectation_kind: str = Field(..., min_length=1, max_length=64)
+    production_store_mutated: bool | None = None
+    shadow_namespace_used: bool | None = None
+    pivot_completed: bool | None = None
+    typed_artifact_produced: bool | None = None
+    step_count_within_bounds: bool | None = None
+    evidence_refs_valid: bool | None = None
+    raw_cot_persisted: bool | None = None
+    cross_tenant_denied: bool | None = None
+    budget_race_rejected: bool | None = None
+    degraded_fail_closed: bool | None = None
+    unsupported_tool_denied: bool | None = None
+    dependency_degraded: bool | None = None
+
+
+class CoordinationCaseObservation(BaseModel):
+    """Structured task/artifact replay observation for #642 Phase C scorers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expectation_kind: str = Field(..., min_length=1, max_length=64)
+    stale_fencing_denied: bool | None = None
+    duplicate_logical_artifact: bool | None = None
+    content_hash_match: bool | None = None
+    attempt_recorded: bool | None = None
+    cross_tenant_denied: bool | None = None
+    projection_rejected: bool | None = None
+    forged_grant_rejected: bool | None = None
+    terminal_transition_idempotent: bool | None = None
+    manual_resolution_required: bool | None = None
+    blind_retry_blocked: bool | None = None
+    dependency_degraded: bool | None = None
+
+
 class CaseObservation(BaseModel):
     """Deterministic mock-replay observation for one evaluation case."""
 
@@ -123,6 +162,8 @@ class CaseObservation(BaseModel):
     replay_notes: str = Field(default="", max_length=512)
     security: SecurityCaseObservation | None = None
     knowledge: KnowledgeCaseObservation | None = None
+    agentic: AgenticCaseObservation | None = None
+    coordination: CoordinationCaseObservation | None = None
 
 
 class EvaluationScorerResult(BaseModel):

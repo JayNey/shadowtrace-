@@ -1,0 +1,35 @@
+{
+  "case_id": "agentic_shadow_isolation",
+  "case_version": 1,
+  "source_tenant_id": "tenant-alpha",
+  "source_product": "mock_xdr",
+  "connector_id": "mock-xdr-primary",
+  "observation_refs": [
+    {
+      "ref_type": "shadow_fixture",
+      "ref_id": "shadow_namespace_probe",
+      "source_product": "mock_xdr",
+      "connector_id": "mock-xdr-primary"
+    }
+  ],
+  "slice_expectation": {
+    "slice_type": "agentic",
+    "schema_version": "1.1",
+    "expectation_kind": "shadow_isolation",
+    "critical": true,
+    "expected_shadow_namespace_used": true,
+    "expected_production_store_mutated": false,
+    "replay_variant": "pass"
+  },
+  "label_provenance": {
+    "adjudicator": "evaluation-curator",
+    "adjudicated_at": "2026-08-03T12:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "ISSUE-136 Phase B/C deterministic case."
+  },
+  "operational_mapping": {
+    "mapping_version": "1.0",
+    "notes": "Shadow replay anchor only; not ground truth."
+  },
+  "retention_policy": "evaluation_standard"
+}

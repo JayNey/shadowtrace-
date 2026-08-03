@@ -12,7 +12,9 @@ from typing import Any
 
 from app.models.evaluation_run import EvaluationReleaseRefs
 from app.models.evaluation_truth import (
+    AgenticSliceExpectation,
     BenignSliceExpectation,
+    CoordinationSliceExpectation,
     EvaluationCaseTruth,
     EvaluationDatasetManifest,
     KnowledgeSliceExpectation,
@@ -38,7 +40,9 @@ _SLICE_BUILDERS: dict[
         | BenignSliceExpectation
         | UnevaluableSliceExpectation
         | SecuritySliceExpectation
-        | KnowledgeSliceExpectation,
+        | KnowledgeSliceExpectation
+        | AgenticSliceExpectation
+        | CoordinationSliceExpectation,
     ],
 ] = {
     SliceType.THREAT.value: ThreatSliceExpectation.model_validate,
@@ -46,6 +50,8 @@ _SLICE_BUILDERS: dict[
     SliceType.UNEVALUABLE.value: UnevaluableSliceExpectation.model_validate,
     SliceType.SECURITY.value: SecuritySliceExpectation.model_validate,
     SliceType.KNOWLEDGE.value: KnowledgeSliceExpectation.model_validate,
+    SliceType.AGENTIC.value: AgenticSliceExpectation.model_validate,
+    SliceType.COORDINATION.value: CoordinationSliceExpectation.model_validate,
 }
 
 

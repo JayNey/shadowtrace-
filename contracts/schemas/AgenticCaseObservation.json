@@ -1,0 +1,161 @@
+{
+  "additionalProperties": false,
+  "description": "Structured ReAct shadow replay observation for #642 Phase B scorers.",
+  "properties": {
+    "expectation_kind": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Expectation Kind",
+      "type": "string"
+    },
+    "production_store_mutated": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Production Store Mutated"
+    },
+    "shadow_namespace_used": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Shadow Namespace Used"
+    },
+    "pivot_completed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pivot Completed"
+    },
+    "typed_artifact_produced": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Typed Artifact Produced"
+    },
+    "step_count_within_bounds": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Step Count Within Bounds"
+    },
+    "evidence_refs_valid": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Refs Valid"
+    },
+    "raw_cot_persisted": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Raw Cot Persisted"
+    },
+    "cross_tenant_denied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cross Tenant Denied"
+    },
+    "budget_race_rejected": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Budget Race Rejected"
+    },
+    "degraded_fail_closed": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Degraded Fail Closed"
+    },
+    "unsupported_tool_denied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Unsupported Tool Denied"
+    },
+    "dependency_degraded": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dependency Degraded"
+    }
+  },
+  "required": [
+    "expectation_kind"
+  ],
+  "title": "AgenticCaseObservation",
+  "type": "object"
+}

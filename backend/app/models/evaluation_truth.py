@@ -31,6 +31,8 @@ class SliceType(StrEnum):
     UNEVALUABLE = "unevaluable"
     SECURITY = "security"
     KNOWLEDGE = "knowledge"
+    AGENTIC = "agentic"
+    COORDINATION = "coordination"
 
 
 class SecurityExpectationKind(StrEnum):
@@ -52,6 +54,32 @@ class KnowledgeExpectationKind(StrEnum):
     CITATION_CORRECTNESS = "citation_correctness"
     TENANT_FILTER = "tenant_filter"
     DEGRADED_NO_RELEASE = "degraded_no_release"
+
+
+class AgenticExpectationKind(StrEnum):
+    """Typed ReAct shadow pivot expectations (#642 Phase B / #641)."""
+
+    SHADOW_ISOLATION = "shadow_isolation"
+    BOUNDED_PIVOT_SUCCESS = "bounded_pivot_success"
+    EVIDENCE_FIDELITY = "evidence_fidelity"
+    NO_RAW_COT = "no_raw_cot"
+    SHADOW_CROSS_TENANT_DENIED = "shadow_cross_tenant_denied"
+    SHADOW_BUDGET_RACE = "shadow_budget_race"
+    SHADOW_DEGRADED_FAIL_CLOSED = "shadow_degraded_fail_closed"
+    SHADOW_UNSUPPORTED_TOOL_DENIED = "shadow_unsupported_tool_denied"
+
+
+class CoordinationExpectationKind(StrEnum):
+    """Typed task/artifact coordination expectations (#642 Phase C / #639)."""
+
+    STALE_FENCING_DENIED = "stale_fencing_denied"
+    ARTIFACT_IDEMPOTENT_REPLAY = "artifact_idempotent_replay"
+    ATTEMPT_HISTORY_AUDITABLE = "attempt_history_auditable"
+    CROSS_TENANT_TASK_DENIED = "cross_tenant_task_denied"
+    PROMPT_INJECTION_PROJECTION_DENIED = "prompt_injection_projection_denied"
+    FORGED_GRANT_DENIED = "forged_grant_denied"
+    CRASH_RETRY_NO_DUPLICATE_TERMINAL = "crash_retry_no_duplicate_terminal"
+    SIDE_EFFECT_UNKNOWN_MANUAL = "side_effect_unknown_manual"
 
 
 class TruthObservationRef(BaseModel):
@@ -184,12 +212,59 @@ class KnowledgeSliceExpectation(BaseModel):
     replay_variant: str = Field(default="pass", min_length=1, max_length=32)
 
 
+class AgenticSliceExpectation(BaseModel):
+    """ReAct shadow pivot expectations — isolation, bounded pivot, evidence fidelity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slice_type: Literal["agentic"] = "agentic"
+    schema_version: str = Field(default=SLICE_EXPECTATION_SCHEMA_VERSION_1_1, min_length=1)
+    expectation_kind: AgenticExpectationKind
+    critical: bool = Field(default=True)
+    expected_production_store_mutated: bool = False
+    expected_shadow_namespace_used: bool | None = None
+    expected_pivot_completed: bool | None = None
+    expected_typed_artifact_produced: bool | None = None
+    expected_step_count_within_bounds: bool | None = None
+    expected_evidence_refs_valid: bool | None = None
+    expected_raw_cot_persisted: bool | None = None
+    expected_cross_tenant_denied: bool | None = None
+    expected_budget_race_rejected: bool | None = None
+    expected_degraded_fail_closed: bool | None = None
+    expected_unsupported_tool_denied: bool | None = None
+    replay_variant: str = Field(default="pass", min_length=1, max_length=32)
+
+
+class CoordinationSliceExpectation(BaseModel):
+    """Task/artifact coordination expectations — fencing, replay, crash recovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slice_type: Literal["coordination"] = "coordination"
+    schema_version: str = Field(default=SLICE_EXPECTATION_SCHEMA_VERSION_1_1, min_length=1)
+    expectation_kind: CoordinationExpectationKind
+    critical: bool = Field(default=True)
+    expected_stale_fencing_denied: bool | None = None
+    expected_duplicate_logical_artifact: bool | None = None
+    expected_content_hash_match: bool | None = None
+    expected_attempt_recorded: bool | None = None
+    expected_cross_tenant_denied: bool | None = None
+    expected_projection_rejected: bool | None = None
+    expected_forged_grant_rejected: bool | None = None
+    expected_terminal_transition_idempotent: bool | None = None
+    expected_manual_resolution_required: bool | None = None
+    expected_blind_retry_blocked: bool | None = None
+    replay_variant: str = Field(default="pass", min_length=1, max_length=32)
+
+
 SliceExpectation = Annotated[
     ThreatSliceExpectation
     | BenignSliceExpectation
     | UnevaluableSliceExpectation
     | SecuritySliceExpectation
-    | KnowledgeSliceExpectation,
+    | KnowledgeSliceExpectation
+    | AgenticSliceExpectation
+    | CoordinationSliceExpectation,
     Field(discriminator="slice_type"),
 ]
 
@@ -276,7 +351,11 @@ class EvaluationDatasetManifest(BaseModel):
 
 
 __all__ = [
+    "AgenticExpectationKind",
+    "AgenticSliceExpectation",
     "BenignSliceExpectation",
+    "CoordinationExpectationKind",
+    "CoordinationSliceExpectation",
     "EVALUATION_TRUTH_SCHEMA_VERSION",
     "EvaluationCaseTruth",
     "EvaluationDatasetManifest",

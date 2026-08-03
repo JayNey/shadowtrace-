@@ -22,7 +22,9 @@ from app.core.sanitization import redact_sensitive_text
 from app.db import models as orm
 from app.models.evaluation_truth import (
     EVALUATION_TRUTH_SCHEMA_VERSION,
+    AgenticSliceExpectation,
     BenignSliceExpectation,
+    CoordinationSliceExpectation,
     EvaluationCaseTruth,
     EvaluationDatasetManifest,
     EvaluationTruthListResult,
@@ -117,6 +119,8 @@ def _parse_slice_expectation(raw: Any) -> SliceExpectation:
             UnevaluableSliceExpectation,
             SecuritySliceExpectation,
             KnowledgeSliceExpectation,
+            AgenticSliceExpectation,
+            CoordinationSliceExpectation,
         ),
     ):
         return raw
@@ -133,6 +137,10 @@ def _parse_slice_expectation(raw: Any) -> SliceExpectation:
         return SecuritySliceExpectation.model_validate(raw)
     if slice_type == SliceType.KNOWLEDGE.value:
         return KnowledgeSliceExpectation.model_validate(raw)
+    if slice_type == SliceType.AGENTIC.value:
+        return AgenticSliceExpectation.model_validate(raw)
+    if slice_type == SliceType.COORDINATION.value:
+        return CoordinationSliceExpectation.model_validate(raw)
     raise ValidationError(f"unsupported slice_type: {slice_type!r}")
 
 

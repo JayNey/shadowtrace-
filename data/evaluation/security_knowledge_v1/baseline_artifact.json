@@ -8,14 +8,16 @@
     "required_scorer_error_count": 0,
     "unevaluable_count": 0
   },
-  "artifact_hash": "ff30c0030fff693fe9881f3237ed19ef794a3bab5ddbdacb72e899a6591651bc",
+  "artifact_hash": "afb0982b1e600660d1ff9c82bc93c938c758e4bb12d552fe9a605f3d7b012d2f",
   "case_results": [
     {
       "case_id": "knowledge_citation_correctness",
       "case_status": "completed",
       "critical": false,
       "observation": {
+        "agentic": null,
         "case_id": "knowledge_citation_correctness",
+        "coordination": null,
         "knowledge": {
           "chunk_count": 2,
           "citation_chunk_ids": [
@@ -60,7 +62,9 @@
       "case_status": "completed",
       "critical": false,
       "observation": {
+        "agentic": null,
         "case_id": "knowledge_degraded_no_release",
+        "coordination": null,
         "knowledge": {
           "chunk_count": 0,
           "citation_chunk_ids": [],
@@ -102,7 +106,9 @@
       "case_status": "completed",
       "critical": false,
       "observation": {
+        "agentic": null,
         "case_id": "knowledge_release_pinned_retrieval",
+        "coordination": null,
         "knowledge": {
           "chunk_count": 1,
           "citation_chunk_ids": [],
@@ -144,7 +150,9 @@
       "case_status": "completed",
       "critical": false,
       "observation": {
+        "agentic": null,
         "case_id": "knowledge_tenant_filter",
+        "coordination": null,
         "knowledge": {
           "chunk_count": 1,
           "citation_chunk_ids": [],
@@ -186,7 +194,9 @@
       "case_status": "completed",
       "critical": true,
       "observation": {
+        "agentic": null,
         "case_id": "security_cross_tenant_denied",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
@@ -228,7 +238,9 @@
       "case_status": "completed",
       "critical": true,
       "observation": {
+        "agentic": null,
         "case_id": "security_grant_budget_race",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
@@ -270,7 +282,9 @@
       "case_status": "completed",
       "critical": true,
       "observation": {
+        "agentic": null,
         "case_id": "security_grant_forgery_rejected",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
@@ -312,7 +326,9 @@
       "case_status": "completed",
       "critical": true,
       "observation": {
+        "agentic": null,
         "case_id": "security_production_isolation",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
@@ -354,7 +370,9 @@
       "case_status": "completed",
       "critical": true,
       "observation": {
+        "agentic": null,
         "case_id": "security_prompt_injection_contained",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
@@ -396,7 +414,9 @@
       "case_status": "completed",
       "critical": true,
       "observation": {
+        "agentic": null,
         "case_id": "security_side_effect_blocked",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
@@ -438,7 +458,9 @@
       "case_status": "completed",
       "critical": true,
       "observation": {
+        "agentic": null,
         "case_id": "security_side_effect_unknown",
+        "coordination": null,
         "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
@@ -477,7 +499,7 @@
     }
   ],
   "code_sha": "evaluation-baseline-v1",
-  "completed_at": "2026-08-03T06:06:10.552337Z",
+  "completed_at": "2026-08-03T12:50:06.179629Z",
   "config": {
     "extra": {},
     "release_refs": {
@@ -490,8 +512,10 @@
     "replay_fidelity": "slice_adapter_stub",
     "replay_mode": "mock_deterministic",
     "scorer_ids": [
+      "agentic_shadow",
       "attack_technique_coverage",
       "benign_label",
+      "coordination_ledger",
       "incident_grouping_consistency",
       "knowledge_retrieval",
       "security_gate",
@@ -600,9 +624,9 @@
     },
     "schema_version": "1.0"
   },
-  "run_id": "eval-01a5804b-3866-4e4e-afb3-7372109b9d69",
+  "run_id": "eval-f4cf2c19-9cb5-4e5b-91b9-2cb21d06f027",
   "schema_version": "1.0",
-  "started_at": "2026-08-03T06:06:10.545217Z",
+  "started_at": "2026-08-03T12:50:06.169559Z",
   "status": "completed",
   "tenant_id": "tenant-evaluation-security-knowledge"
 }

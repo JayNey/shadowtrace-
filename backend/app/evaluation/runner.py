@@ -36,6 +36,8 @@ from app.models.evaluation_run import (
     ScorerOutcome,
 )
 from app.models.evaluation_truth import (
+    AgenticSliceExpectation,
+    CoordinationSliceExpectation,
     EvaluationCaseTruth,
     EvaluationDatasetManifest,
     EvaluationTruthQuery,
@@ -56,6 +58,10 @@ def _case_critical(truth: EvaluationCaseTruth) -> bool:
     if isinstance(expectation, SecuritySliceExpectation):
         return expectation.critical
     if isinstance(expectation, KnowledgeSliceExpectation):
+        return expectation.critical
+    if isinstance(expectation, AgenticSliceExpectation):
+        return expectation.critical
+    if isinstance(expectation, CoordinationSliceExpectation):
         return expectation.critical
     return False
 

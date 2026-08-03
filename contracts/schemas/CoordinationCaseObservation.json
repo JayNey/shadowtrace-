@@ -1,0 +1,149 @@
+{
+  "additionalProperties": false,
+  "description": "Structured task/artifact replay observation for #642 Phase C scorers.",
+  "properties": {
+    "expectation_kind": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Expectation Kind",
+      "type": "string"
+    },
+    "stale_fencing_denied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Stale Fencing Denied"
+    },
+    "duplicate_logical_artifact": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Duplicate Logical Artifact"
+    },
+    "content_hash_match": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Content Hash Match"
+    },
+    "attempt_recorded": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Attempt Recorded"
+    },
+    "cross_tenant_denied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cross Tenant Denied"
+    },
+    "projection_rejected": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Projection Rejected"
+    },
+    "forged_grant_rejected": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Forged Grant Rejected"
+    },
+    "terminal_transition_idempotent": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Terminal Transition Idempotent"
+    },
+    "manual_resolution_required": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Manual Resolution Required"
+    },
+    "blind_retry_blocked": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Blind Retry Blocked"
+    },
+    "dependency_degraded": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dependency Degraded"
+    }
+  },
+  "required": [
+    "expectation_kind"
+  ],
+  "title": "CoordinationCaseObservation",
+  "type": "object"
+}

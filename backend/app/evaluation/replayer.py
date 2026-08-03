@@ -11,10 +11,17 @@ from __future__ import annotations
 
 import hashlib
 
-from app.evaluation.slice_replay import replay_knowledge_slice, replay_security_slice
+from app.evaluation.slice_replay import (
+    replay_agentic_slice,
+    replay_coordination_slice,
+    replay_knowledge_slice,
+    replay_security_slice,
+)
 from app.models.evaluation_run import CaseObservation
 from app.models.evaluation_truth import (
+    AgenticSliceExpectation,
     BenignSliceExpectation,
+    CoordinationSliceExpectation,
     EvaluationCaseTruth,
     KnowledgeSliceExpectation,
     SecuritySliceExpectation,
@@ -36,7 +43,14 @@ _ECHO_SLICES = frozenset(
         SliceType.UNEVALUABLE,
     }
 )
-_ADAPTER_SLICES = frozenset({SliceType.SECURITY, SliceType.KNOWLEDGE})
+_ADAPTER_SLICES = frozenset(
+    {
+        SliceType.SECURITY,
+        SliceType.KNOWLEDGE,
+        SliceType.AGENTIC,
+        SliceType.COORDINATION,
+    }
+)
 
 
 def resolve_replay_fidelity(truths: list[EvaluationCaseTruth]) -> str:
@@ -129,6 +143,34 @@ class MockDeterministicReplayer:
                 ),
                 replay_notes=(
                     f"slice_adapter:knowledge:{expectation.replay_variant};"
+                    f"seed={seed};n={nonce:x}"
+                ),
+            )
+
+        if isinstance(truth.slice_expectation, AgenticSliceExpectation):
+            expectation = truth.slice_expectation
+            fail = expectation.replay_variant == "fail"
+            return CaseObservation(
+                case_id=truth.case_id,
+                slice_type=slice_type,
+                observation_available=True,
+                agentic=replay_agentic_slice(expectation, fail=fail),
+                replay_notes=(
+                    f"slice_adapter:agentic:{expectation.replay_variant};"
+                    f"seed={seed};n={nonce:x}"
+                ),
+            )
+
+        if isinstance(truth.slice_expectation, CoordinationSliceExpectation):
+            expectation = truth.slice_expectation
+            fail = expectation.replay_variant == "fail"
+            return CaseObservation(
+                case_id=truth.case_id,
+                slice_type=slice_type,
+                observation_available=True,
+                coordination=replay_coordination_slice(expectation, fail=fail),
+                replay_notes=(
+                    f"slice_adapter:coordination:{expectation.replay_variant};"
                     f"seed={seed};n={nonce:x}"
                 ),
             )

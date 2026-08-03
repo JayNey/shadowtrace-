@@ -1,0 +1,34 @@
+{
+  "case_id": "coordination_stale_fencing_denied",
+  "case_version": 1,
+  "source_tenant_id": "tenant-alpha",
+  "source_product": "mock_xdr",
+  "connector_id": "mock-xdr-primary",
+  "observation_refs": [
+    {
+      "ref_type": "coordination_fixture",
+      "ref_id": "stale_worker_terminal_write",
+      "source_product": "mock_xdr",
+      "connector_id": "mock-xdr-primary"
+    }
+  ],
+  "slice_expectation": {
+    "slice_type": "coordination",
+    "schema_version": "1.1",
+    "expectation_kind": "stale_fencing_denied",
+    "critical": true,
+    "expected_stale_fencing_denied": true,
+    "replay_variant": "pass"
+  },
+  "label_provenance": {
+    "adjudicator": "evaluation-curator",
+    "adjudicated_at": "2026-08-03T12:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "ISSUE-136 Phase B/C deterministic case."
+  },
+  "operational_mapping": {
+    "mapping_version": "1.0",
+    "notes": "Shadow replay anchor only; not ground truth."
+  },
+  "retention_policy": "evaluation_standard"
+}
