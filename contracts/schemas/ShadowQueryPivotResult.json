@@ -92,7 +92,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Outcome of one shadow pivot \u2014 production stores remain untouched.",
+  "description": "Outcome of one shadow pivot — production stores remain untouched.",
   "properties": {
     "shadow_run_id": {
       "title": "Shadow Run Id",

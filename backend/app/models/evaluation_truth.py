@@ -37,9 +37,10 @@ class SecurityExpectationKind(StrEnum):
     """Typed security slice expectations (Phase A deterministic cases)."""
 
     CROSS_TENANT_DENIED = "cross_tenant_denied"
-    GRANT_FORGERY_REJECTED = "grant_forgery_rejected"
+    GRANT_FORGERY_REJECTED = "grant_forgery_rejected"  # Issue alias: approval forgery
     GRANT_BUDGET_RACE = "grant_budget_race"
     SIDE_EFFECT_BLOCKED = "side_effect_blocked"
+    SIDE_EFFECT_UNKNOWN = "side_effect_unknown"
     PROMPT_INJECTION_CONTAINED = "prompt_injection_contained"
     PRODUCTION_ISOLATION = "production_isolation"
 
@@ -159,6 +160,7 @@ class SecuritySliceExpectation(BaseModel):
     expected_grant_forgery_rejected: bool | None = None
     expected_grant_budget_race_rejected: bool | None = None
     expected_side_effect_blocked: bool | None = None
+    expected_side_effect_unknown_contained: bool | None = None
     expected_prompt_injection_contained: bool | None = None
     expected_production_store_mutated: bool = False
     replay_variant: str = Field(default="pass", min_length=1, max_length=32)

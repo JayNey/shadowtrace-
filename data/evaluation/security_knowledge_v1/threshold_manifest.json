@@ -10,6 +10,7 @@
   "max_error_count": 0,
   "max_unevaluable_count": 0,
   "max_unexpected_dependency_degraded": 0,
+  "min_case_count": 11,
   "required_gate": false,
   "require_critical_pass": true
 }

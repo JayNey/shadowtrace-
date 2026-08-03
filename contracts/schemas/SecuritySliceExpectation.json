@@ -7,6 +7,7 @@
         "grant_forgery_rejected",
         "grant_budget_race",
         "side_effect_blocked",
+        "side_effect_unknown",
         "prompt_injection_contained",
         "production_isolation"
       ],
@@ -15,7 +16,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Security gate expectations \u2014 cross-tenant, grant, side-effect, isolation.",
+  "description": "Security gate expectations — cross-tenant, grant, side-effect, isolation.",
   "properties": {
     "slice_type": {
       "const": "security",
@@ -84,6 +85,18 @@
       ],
       "default": null,
       "title": "Expected Side Effect Blocked"
+    },
+    "expected_side_effect_unknown_contained": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Side Effect Unknown Contained"
     },
     "expected_prompt_injection_contained": {
       "anyOf": [

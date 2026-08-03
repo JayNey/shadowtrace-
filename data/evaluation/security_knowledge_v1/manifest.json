@@ -3,11 +3,12 @@
   "dataset_version": "2026.08.01",
   "tenant_id": "tenant-evaluation-security-knowledge",
   "schema_version": "1.0",
-  "content_hash": "bfb774109735795ad86ccc7312313c2079566eb348d55f28f38cfbb9215a3ad3",
+  "content_hash": "502eb4cd3a7c155162618b2b14a1a2c57157f7d62c5fa31ac62599c60ab021ce",
   "release_refs": {
     "kb_release_id": "kbr-2026.08.01-mock",
     "rule_release_id": "rule-eval-security-knowledge-v1",
     "prompt_release_id": "prompt-eval-v1",
     "config_profile": "mock_p0_security_knowledge"
-  }
+  },
+  "evaluation_notes": "release_pinned expected_plan_hash is pinned to replay seed=42 and case_id knowledge_release_pinned_retrieval."
 }

@@ -56,6 +56,18 @@
       "default": null,
       "title": "Side Effect Blocked"
     },
+    "side_effect_unknown_contained": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Side Effect Unknown Contained"
+    },
     "prompt_injection_contained": {
       "anyOf": [
         {

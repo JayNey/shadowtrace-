@@ -155,6 +155,20 @@
       "description": "When set, fail closed when unexpected dependency_degraded observations exceed this count (cases where dependency degraded but not expected).",
       "title": "Max Unexpected Dependency Degraded"
     },
+    "min_case_count": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "When set, fail closed when evaluated case_count is below this minimum.",
+      "title": "Min Case Count"
+    },
     "quarantine": {
       "anyOf": [
         {

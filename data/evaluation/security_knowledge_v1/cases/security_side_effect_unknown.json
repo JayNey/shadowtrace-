@@ -1,5 +1,5 @@
 {
-  "case_id": "security_grant_forgery_rejected",
+  "case_id": "security_side_effect_unknown",
   "case_version": 1,
   "source_tenant_id": "tenant-alpha",
   "source_product": "mock_xdr",
@@ -7,7 +7,7 @@
   "observation_refs": [
     {
       "ref_type": "security_fixture",
-      "ref_id": "forged_grant_token",
+      "ref_id": "unknown_side_effect_status",
       "source_product": "mock_xdr",
       "connector_id": "mock-xdr-primary"
     }
@@ -15,9 +15,9 @@
   "slice_expectation": {
     "slice_type": "security",
     "schema_version": "1.1",
-    "expectation_kind": "grant_forgery_rejected",
+    "expectation_kind": "side_effect_unknown",
     "critical": true,
-    "expected_grant_forgery_rejected": true,
+    "expected_side_effect_unknown_contained": true,
     "expected_production_store_mutated": false,
     "replay_variant": "pass"
   },
@@ -25,7 +25,7 @@
     "adjudicator": "evaluation-curator",
     "adjudicated_at": "2026-08-01T08:00:00+00:00",
     "source_kind": "imported_fixture",
-    "revision_notes": "Deterministic grant forgery (Issue alias: approval forgery) rejection gate case."
+    "revision_notes": "UNKNOWN side-effect status must fail closed without production mutation."
   },
   "operational_mapping": {
     "mapping_version": "1.0",

@@ -32,6 +32,7 @@ def _simulate_grant_boundary(
     """Simulate ToolCallGrant / tenant boundary mediation (mock-only)."""
     kind = expectation.expectation_kind
     dependency_degraded = False
+    side_effect_unknown_contained: bool | None = None
 
     if kind is SecurityExpectationKind.CROSS_TENANT_DENIED:
         cross_tenant_denied = True
@@ -56,6 +57,13 @@ def _simulate_grant_boundary(
         grant_forgery_rejected = None
         grant_budget_race_rejected = None
         side_effect_blocked = True
+        prompt_injection_contained = None
+    elif kind is SecurityExpectationKind.SIDE_EFFECT_UNKNOWN:
+        cross_tenant_denied = None
+        grant_forgery_rejected = None
+        grant_budget_race_rejected = None
+        side_effect_blocked = None
+        side_effect_unknown_contained = True
         prompt_injection_contained = None
     elif kind is SecurityExpectationKind.PROMPT_INJECTION_CONTAINED:
         cross_tenant_denied = None
@@ -82,6 +90,8 @@ def _simulate_grant_boundary(
             grant_budget_race_rejected = False
         if side_effect_blocked is not None:
             side_effect_blocked = False
+        if side_effect_unknown_contained is not None:
+            side_effect_unknown_contained = False
         if prompt_injection_contained is not None:
             prompt_injection_contained = False
 
@@ -91,6 +101,7 @@ def _simulate_grant_boundary(
         grant_forgery_rejected=grant_forgery_rejected,
         grant_budget_race_rejected=grant_budget_race_rejected,
         side_effect_blocked=side_effect_blocked,
+        side_effect_unknown_contained=side_effect_unknown_contained,
         prompt_injection_contained=prompt_injection_contained,
         production_store_mutated=production_store_mutated,
         dependency_degraded=dependency_degraded,

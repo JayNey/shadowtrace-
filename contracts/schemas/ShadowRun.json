@@ -2,7 +2,7 @@
   "$defs": {
     "ShadowRunProvenance": {
       "additionalProperties": false,
-      "description": "Server-owned run provenance \u2014 no client trust.",
+      "description": "Server-owned run provenance — no client trust.",
       "properties": {
         "trigger": {
           "minLength": 1,

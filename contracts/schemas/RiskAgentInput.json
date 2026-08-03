@@ -1249,7 +1249,7 @@
             }
           ],
           "default": null,
-          "description": "Pinned knowledge + embedding release ids for this request (ISSUE-128)",
+          "description": "Release-pinned query plans keyed by kb_name (attack_kb, playbook_kb)",
           "title": "Knowledge Query Plan"
         },
         "degraded": {

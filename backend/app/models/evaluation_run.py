@@ -85,6 +85,7 @@ class SecurityCaseObservation(BaseModel):
     grant_forgery_rejected: bool | None = None
     grant_budget_race_rejected: bool | None = None
     side_effect_blocked: bool | None = None
+    side_effect_unknown_contained: bool | None = None
     prompt_injection_contained: bool | None = None
     production_store_mutated: bool | None = None
     dependency_degraded: bool | None = None
@@ -248,6 +249,11 @@ class EvaluationThresholdManifest(BaseModel):
             "When set, fail closed when unexpected dependency_degraded observations "
             "exceed this count (cases where dependency degraded but not expected)."
         ),
+    )
+    min_case_count: int | None = Field(
+        default=None,
+        ge=1,
+        description="When set, fail closed when evaluated case_count is below this minimum.",
     )
     quarantine: EvaluationQuarantinePolicy | None = None
 

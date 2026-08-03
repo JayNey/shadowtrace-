@@ -506,7 +506,9 @@
       "enum": [
         "cross_tenant_denied",
         "grant_forgery_rejected",
+        "grant_budget_race",
         "side_effect_blocked",
+        "side_effect_unknown",
         "prompt_injection_contained",
         "production_isolation"
       ],
@@ -561,6 +563,18 @@
           "default": null,
           "title": "Expected Grant Forgery Rejected"
         },
+        "expected_grant_budget_race_rejected": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Grant Budget Race Rejected"
+        },
         "expected_side_effect_blocked": {
           "anyOf": [
             {
@@ -572,6 +586,18 @@
           ],
           "default": null,
           "title": "Expected Side Effect Blocked"
+        },
+        "expected_side_effect_unknown_contained": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Side Effect Unknown Contained"
         },
         "expected_prompt_injection_contained": {
           "anyOf": [

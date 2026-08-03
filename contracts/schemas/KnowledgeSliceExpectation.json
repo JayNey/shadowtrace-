@@ -13,7 +13,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "Knowledge retrieval expectations \u2014 release pinning, citation, filters.",
+  "description": "Knowledge retrieval expectations — release pinning, citation, filters.",
   "properties": {
     "slice_type": {
       "const": "knowledge",

@@ -249,6 +249,18 @@
           ],
           "default": null,
           "title": "Empty Results"
+        },
+        "dependency_degraded": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dependency Degraded"
         }
       },
       "required": [
@@ -303,6 +315,18 @@
           "default": null,
           "title": "Grant Forgery Rejected"
         },
+        "grant_budget_race_rejected": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grant Budget Race Rejected"
+        },
         "side_effect_blocked": {
           "anyOf": [
             {
@@ -314,6 +338,18 @@
           ],
           "default": null,
           "title": "Side Effect Blocked"
+        },
+        "side_effect_unknown_contained": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Side Effect Unknown Contained"
         },
         "prompt_injection_contained": {
           "anyOf": [
@@ -338,6 +374,18 @@
           ],
           "default": null,
           "title": "Production Store Mutated"
+        },
+        "dependency_degraded": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dependency Degraded"
         }
       },
       "required": [

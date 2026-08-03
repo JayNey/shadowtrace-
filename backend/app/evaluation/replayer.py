@@ -29,11 +29,36 @@ def _derive_case_nonce(case_id: str, seed: int) -> int:
     return int(digest[:8], 16)
 
 
+_ECHO_SLICES = frozenset(
+    {
+        SliceType.THREAT,
+        SliceType.BENIGN,
+        SliceType.UNEVALUABLE,
+    }
+)
+_ADAPTER_SLICES = frozenset({SliceType.SECURITY, SliceType.KNOWLEDGE})
+
+
+def resolve_replay_fidelity(truths: list[EvaluationCaseTruth]) -> str:
+    """Label replay fidelity for a dataset run based on slice mix."""
+    slice_types = {_slice_type(truth) for truth in truths}
+    uses_echo = bool(slice_types & _ECHO_SLICES)
+    uses_adapter = bool(slice_types & _ADAPTER_SLICES)
+    if uses_echo and uses_adapter:
+        return "mixed_echo_and_slice_adapter"
+    if uses_adapter:
+        return "slice_adapter_stub"
+    return "echo_truth_stub"
+
+
+def _slice_type(truth: EvaluationCaseTruth) -> SliceType:
+    return SliceType(truth.slice_expectation.slice_type)
+
+
 class MockDeterministicReplayer:
     """Deterministic mock replay for evaluation cases."""
 
     replay_mode = "mock_deterministic"
-    replay_fidelity = "slice_adapter_stub"
 
     def replay(self, truth: EvaluationCaseTruth, *, seed: int) -> CaseObservation:
         slice_type = SliceType(truth.slice_expectation.slice_type)
@@ -116,4 +141,4 @@ class MockDeterministicReplayer:
         )
 
 
-__all__ = ["MockDeterministicReplayer"]
+__all__ = ["MockDeterministicReplayer", "resolve_replay_fidelity"]

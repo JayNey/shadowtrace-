@@ -20,7 +20,7 @@ from app.evaluation.fixture_loader import (
     load_fixture_cases,
     load_fixture_dataset,
 )
-from app.evaluation.replayer import MockDeterministicReplayer
+from app.evaluation.replayer import MockDeterministicReplayer, resolve_replay_fidelity
 from app.evaluation.runner import run_fixture_evaluation
 from app.evaluation.scorers.base import ScorerContext, ScorerRegistration
 from app.evaluation.scorers.knowledge_scorers import KnowledgeSliceScorer
@@ -45,6 +45,7 @@ from app.models.evaluation_truth import (
     SecurityExpectationKind,
     SecuritySliceExpectation,
     SliceType,
+    ThreatSliceExpectation,
 )
 from app.services.evaluation_truth_service import (
     EvaluationTruthService,
@@ -177,7 +178,33 @@ def test_parse_slice_expectation_accepts_security_and_knowledge() -> None:
 
 
 @pytest.mark.evaluation
-def test_security_replayer_echoes_expectations() -> None:
+def test_resolve_replay_fidelity_labels_dataset_mix() -> None:
+    security = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="security-case",
+        slice_expectation=SecuritySliceExpectation(
+            expectation_kind=SecurityExpectationKind.CROSS_TENANT_DENIED,
+            expected_cross_tenant_denied=True,
+        ),
+        label_provenance=_provenance(),
+    )
+    threat = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="threat-only",
+        slice_expectation=ThreatSliceExpectation(),
+        label_provenance=_provenance(),
+    )
+    assert resolve_replay_fidelity([threat]) == "echo_truth_stub"
+    assert resolve_replay_fidelity([security]) == "slice_adapter_stub"
+    assert resolve_replay_fidelity([threat, security]) == "mixed_echo_and_slice_adapter"
+
+
+@pytest.mark.evaluation
+def test_security_replayer_simulates_grant_boundary() -> None:
     truth = build_evaluation_case_truth(
         tenant_id="tenant-a",
         dataset_id="dataset-test",
@@ -347,6 +374,30 @@ def test_gate_fail_closed_on_unexpected_dependency_degraded() -> None:
 
 
 @pytest.mark.evaluation
+def test_gate_min_case_count_exceeded() -> None:
+    threshold = EvaluationThresholdManifest(
+        manifest_version="test",
+        dataset_id="security_knowledge_v1",
+        min_case_count=11,
+    )
+    gate = evaluate_gate(
+        threshold,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=10,
+            pass_count=10,
+            fail_count=0,
+            unevaluable_count=0,
+            error_count=0,
+            pass_rate=1.0,
+        ),
+        case_results=[],
+        registry=default_scorer_registry(),
+    )
+    assert gate.verdict == GateVerdict.FAIL
+    assert any(diff.field == "case_count" for diff in gate.diffs)
+
+
+@pytest.mark.evaluation
 def test_gate_max_unevaluable_exceeded() -> None:
     threshold = EvaluationThresholdManifest(
         manifest_version="test",
@@ -436,8 +487,8 @@ async def test_security_knowledge_dataset_run_passes(
 
     assert artifact.config.replay_fidelity == "slice_adapter_stub"
     assert artifact.config.release_refs.kb_release_id == "kbr-2026.08.01-mock"
-    assert artifact.aggregates.case_count == 10
-    assert artifact.aggregates.pass_count == 10
+    assert artifact.aggregates.case_count == 11
+    assert artifact.aggregates.pass_count == 11
     assert artifact.aggregates.fail_count == 0
     assert artifact.aggregates.error_count == 0
     assert artifact.aggregates.unevaluable_count == 0
@@ -447,7 +498,7 @@ async def test_security_knowledge_dataset_run_passes(
 
     security_cases = [c for c in artifact.case_results if c.slice_type == SliceType.SECURITY]
     knowledge_cases = [c for c in artifact.case_results if c.slice_type == SliceType.KNOWLEDGE]
-    assert len(security_cases) == 6
+    assert len(security_cases) == 7
     assert len(knowledge_cases) == 4
     assert all(c.critical for c in security_cases)
     assert all(not c.critical for c in knowledge_cases)
@@ -640,6 +691,7 @@ def test_fixture_cases_cover_phase_a_variants() -> None:
         "grant_forgery_rejected",
         "grant_budget_race",
         "side_effect_blocked",
+        "side_effect_unknown",
         "prompt_injection_contained",
         "production_isolation",
     }

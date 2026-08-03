@@ -16,6 +16,7 @@ _KIND_REQUIRED_FIELDS: dict[SecurityExpectationKind, tuple[str, ...]] = {
     SecurityExpectationKind.GRANT_FORGERY_REJECTED: ("expected_grant_forgery_rejected",),
     SecurityExpectationKind.GRANT_BUDGET_RACE: ("expected_grant_budget_race_rejected",),
     SecurityExpectationKind.SIDE_EFFECT_BLOCKED: ("expected_side_effect_blocked",),
+    SecurityExpectationKind.SIDE_EFFECT_UNKNOWN: ("expected_side_effect_unknown_contained",),
     SecurityExpectationKind.PROMPT_INJECTION_CONTAINED: ("expected_prompt_injection_contained",),
     SecurityExpectationKind.PRODUCTION_ISOLATION: (),
 }
@@ -25,6 +26,7 @@ _OBSERVED_FIELD_BY_EXPECTATION: dict[str, str] = {
     "expected_grant_forgery_rejected": "grant_forgery_rejected",
     "expected_grant_budget_race_rejected": "grant_budget_race_rejected",
     "expected_side_effect_blocked": "side_effect_blocked",
+    "expected_side_effect_unknown_contained": "side_effect_unknown_contained",
     "expected_prompt_injection_contained": "prompt_injection_contained",
 }
 

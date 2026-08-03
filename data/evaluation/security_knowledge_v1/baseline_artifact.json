@@ -1,14 +1,14 @@
 {
   "aggregates": {
-    "case_count": 10,
+    "case_count": 11,
     "error_count": 0,
     "fail_count": 0,
-    "pass_count": 10,
+    "pass_count": 11,
     "pass_rate": 1.0,
     "required_scorer_error_count": 0,
     "unevaluable_count": 0
   },
-  "artifact_hash": "2b7fa234d717b15a813563dcd2d4c0c0d607e2c69cd861af21d4106a3348c302",
+  "artifact_hash": "ff30c0030fff693fe9881f3237ed19ef794a3bab5ddbdacb72e899a6591651bc",
   "case_results": [
     {
       "case_id": "knowledge_citation_correctness",
@@ -203,7 +203,8 @@
           "grant_forgery_rejected": null,
           "production_store_mutated": false,
           "prompt_injection_contained": null,
-          "side_effect_blocked": null
+          "side_effect_blocked": null,
+          "side_effect_unknown_contained": null
         },
         "slice_type": "security"
       },
@@ -217,7 +218,7 @@
         }
       ],
       "slice_type": "security",
-      "truth_content_hash": "f1e47eaf17267ad5478d8a20cc61838b2e52d0d8e97e8efb9fa1082c2f1442eb",
+      "truth_content_hash": "01a2c338bbd3a62046a40775352a4008390b67efbe2f2b71f4e39feea3da23e4",
       "truth_id": "truth-ef371308da0a",
       "truth_revision": 1,
       "unevaluable_reason": null
@@ -244,7 +245,8 @@
           "grant_forgery_rejected": null,
           "production_store_mutated": false,
           "prompt_injection_contained": null,
-          "side_effect_blocked": null
+          "side_effect_blocked": null,
+          "side_effect_unknown_contained": null
         },
         "slice_type": "security"
       },
@@ -258,7 +260,7 @@
         }
       ],
       "slice_type": "security",
-      "truth_content_hash": "e666da852f8c741727f6db3691caf740f9dc7e6549e49a934a16c986dd263522",
+      "truth_content_hash": "88ab5c16be3696901a3fecd80f1694d4582f42edbabd5e4b6f19d929a3830f22",
       "truth_id": "truth-e4a8f5eb3b01",
       "truth_revision": 1,
       "unevaluable_reason": null
@@ -285,7 +287,8 @@
           "grant_forgery_rejected": true,
           "production_store_mutated": false,
           "prompt_injection_contained": null,
-          "side_effect_blocked": null
+          "side_effect_blocked": null,
+          "side_effect_unknown_contained": null
         },
         "slice_type": "security"
       },
@@ -299,7 +302,7 @@
         }
       ],
       "slice_type": "security",
-      "truth_content_hash": "71866a1eff3ac1d652d3643bdd23f59a503a3831ada61d67915b14086f3782cf",
+      "truth_content_hash": "c9c53f0ef21c062d435773f3df2ef061dfcaca439fb0c94f2ca37e9f38fef173",
       "truth_id": "truth-f03de40e7370",
       "truth_revision": 1,
       "unevaluable_reason": null
@@ -326,7 +329,8 @@
           "grant_forgery_rejected": null,
           "production_store_mutated": false,
           "prompt_injection_contained": null,
-          "side_effect_blocked": null
+          "side_effect_blocked": null,
+          "side_effect_unknown_contained": null
         },
         "slice_type": "security"
       },
@@ -340,7 +344,7 @@
         }
       ],
       "slice_type": "security",
-      "truth_content_hash": "0e29f13b7e00fddafac8d86677ac4a7e4ce6643cdf3a45c02b6c80642afa7c88",
+      "truth_content_hash": "f5af9b59a485f619a126e754732299ca91c2453e9ff181b3457fffddb2357e67",
       "truth_id": "truth-9bb286fc7a4e",
       "truth_revision": 1,
       "unevaluable_reason": null
@@ -367,7 +371,8 @@
           "grant_forgery_rejected": null,
           "production_store_mutated": false,
           "prompt_injection_contained": true,
-          "side_effect_blocked": null
+          "side_effect_blocked": null,
+          "side_effect_unknown_contained": null
         },
         "slice_type": "security"
       },
@@ -381,7 +386,7 @@
         }
       ],
       "slice_type": "security",
-      "truth_content_hash": "587df48ff6abf4a067e22a4c82009319465c47b9c956b6c496854f8e92f1f103",
+      "truth_content_hash": "bde5f8c9a7eb980b9c7c585fbbf5de263f9d98d15cd3cd527ac0789ea446ff75",
       "truth_id": "truth-5d8134d4692c",
       "truth_revision": 1,
       "unevaluable_reason": null
@@ -408,7 +413,8 @@
           "grant_forgery_rejected": null,
           "production_store_mutated": false,
           "prompt_injection_contained": null,
-          "side_effect_blocked": true
+          "side_effect_blocked": true,
+          "side_effect_unknown_contained": null
         },
         "slice_type": "security"
       },
@@ -422,14 +428,56 @@
         }
       ],
       "slice_type": "security",
-      "truth_content_hash": "4c420ffdce8b6ea4ea67657cc31e7606a088b52b755a6c024537d00b363226b4",
+      "truth_content_hash": "e601297970cd71b60a791f1334b71c2006581d83ec0e231980664ebd3fb64f28",
       "truth_id": "truth-171312d8b2cb",
+      "truth_revision": 1,
+      "unevaluable_reason": null
+    },
+    {
+      "case_id": "security_side_effect_unknown",
+      "case_status": "completed",
+      "critical": true,
+      "observation": {
+        "case_id": "security_side_effect_unknown",
+        "knowledge": null,
+        "observation_available": true,
+        "observed_attack_techniques": [],
+        "observed_case_label": null,
+        "observed_final_verdict": null,
+        "observed_incident_group_id": null,
+        "observed_risk_score": null,
+        "replay_notes": "slice_adapter:security:pass;seed=42;n=38cbbbc6",
+        "security": {
+          "cross_tenant_denied": null,
+          "dependency_degraded": false,
+          "expectation_kind": "side_effect_unknown",
+          "grant_budget_race_rejected": null,
+          "grant_forgery_rejected": null,
+          "production_store_mutated": false,
+          "prompt_injection_contained": null,
+          "side_effect_blocked": null,
+          "side_effect_unknown_contained": true
+        },
+        "slice_type": "security"
+      },
+      "scorer_results": [
+        {
+          "details": {},
+          "message": "security expectation satisfied (side_effect_unknown)",
+          "outcome": "pass",
+          "reason_code": "",
+          "scorer_id": "security_gate"
+        }
+      ],
+      "slice_type": "security",
+      "truth_content_hash": "b1c21f551be6a6b37c5a8d22276aad0f870bb401c895bf85e7549adbe8cecada",
+      "truth_id": "truth-93d2ce782536",
       "truth_revision": 1,
       "unevaluable_reason": null
     }
   ],
   "code_sha": "evaluation-baseline-v1",
-  "completed_at": "2026-08-03T05:29:42.468248Z",
+  "completed_at": "2026-08-03T06:06:10.552337Z",
   "config": {
     "extra": {},
     "release_refs": {
@@ -453,7 +501,7 @@
     ],
     "seed": 42
   },
-  "dataset_content_hash": "bfb774109735795ad86ccc7312313c2079566eb348d55f28f38cfbb9215a3ad3",
+  "dataset_content_hash": "502eb4cd3a7c155162618b2b14a1a2c57157f7d62c5fa31ac62599c60ab021ce",
   "dataset_id": "security_knowledge_v1",
   "dataset_version": "2026.08.01",
   "errors": [],
@@ -466,7 +514,7 @@
   },
   "quality_report": {
     "code_sha": "evaluation-baseline-v1",
-    "dataset_content_hash": "bfb774109735795ad86ccc7312313c2079566eb348d55f28f38cfbb9215a3ad3",
+    "dataset_content_hash": "502eb4cd3a7c155162618b2b14a1a2c57157f7d62c5fa31ac62599c60ab021ce",
     "dataset_id": "security_knowledge_v1",
     "dataset_version": "2026.08.01",
     "grouping_scorer_summaries": [],
@@ -547,14 +595,14 @@
     "sample_counts": {
       "benign": 0,
       "threat": 0,
-      "total": 10,
+      "total": 11,
       "unevaluable": 0
     },
     "schema_version": "1.0"
   },
-  "run_id": "eval-c3200ccb-b522-46d3-ad46-18711a3161b5",
+  "run_id": "eval-01a5804b-3866-4e4e-afb3-7372109b9d69",
   "schema_version": "1.0",
-  "started_at": "2026-08-03T05:29:42.429489Z",
+  "started_at": "2026-08-03T06:06:10.545217Z",
   "status": "completed",
   "tenant_id": "tenant-evaluation-security-knowledge"
 }

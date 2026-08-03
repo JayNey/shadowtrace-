@@ -118,7 +118,10 @@ def load_fixture_manifest(dataset_dir: Path) -> dict[str, Any]:
 
 
 def parse_release_refs(manifest: dict[str, Any]) -> EvaluationReleaseRefs:
-    """Load pinned release identifiers declared in a dataset manifest."""
+    """Load pinned release identifiers from a raw fixture manifest.
+
+    ``release_refs`` is a fixture-only field (not persisted on ``EvaluationDatasetManifest``).
+    """
     raw = manifest.get("release_refs")
     if not isinstance(raw, dict):
         return EvaluationReleaseRefs()

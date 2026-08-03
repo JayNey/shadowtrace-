@@ -15,7 +15,7 @@ from app.core.errors import ValidationError
 from app.evaluation.artifact import finalize_artifact
 from app.evaluation.paths import repo_relative_manifest_path
 from app.evaluation.quality_metrics import build_quality_report
-from app.evaluation.replayer import MockDeterministicReplayer
+from app.evaluation.replayer import MockDeterministicReplayer, resolve_replay_fidelity
 from app.evaluation.scorers.base import ScorerContext
 from app.evaluation.scorers.registry import ScorerRegistry, default_scorer_registry
 from app.evaluation.threshold import (
@@ -264,6 +264,7 @@ class EvaluationRunner:
         await self._validate_dataset_content_hash(request)
         truths = await self._load_truths(request)
         scorer_ids = self._resolve_scorers(request)
+        replay_fidelity = resolve_replay_fidelity(truths)
         ctx = ScorerContext(
             seed=request.seed,
             dataset_id=request.dataset_id,
@@ -273,7 +274,7 @@ class EvaluationRunner:
         config = EvaluationRunConfig(
             seed=request.seed,
             replay_mode=self._replayer.replay_mode,
-            replay_fidelity=getattr(self._replayer, "replay_fidelity", "echo_truth_stub"),
+            replay_fidelity=replay_fidelity,
             release_refs=request.release_refs,
             scorer_ids=scorer_ids,
         )

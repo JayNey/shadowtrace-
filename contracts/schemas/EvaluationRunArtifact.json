@@ -495,8 +495,8 @@
           "type": "string"
         },
         "replay_fidelity": {
-          "default": "echo_truth_stub",
-          "description": "Replay fidelity label. Phase-1 uses echo_truth_stub until investigate replay (#631) is wired; do not treat green runs as agent quality proof.",
+          "default": "slice_adapter_stub",
+          "description": "Replay fidelity label. Threat/benign echo expectations; security/knowledge use slice_adapter_stub until investigate replay (#631) is wired.",
           "minLength": 1,
           "title": "Replay Fidelity",
           "type": "string"
@@ -717,6 +717,18 @@
           ],
           "default": null,
           "title": "Empty Results"
+        },
+        "dependency_degraded": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dependency Degraded"
         }
       },
       "required": [
@@ -872,6 +884,18 @@
           "default": null,
           "title": "Grant Forgery Rejected"
         },
+        "grant_budget_race_rejected": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grant Budget Race Rejected"
+        },
         "side_effect_blocked": {
           "anyOf": [
             {
@@ -883,6 +907,18 @@
           ],
           "default": null,
           "title": "Side Effect Blocked"
+        },
+        "side_effect_unknown_contained": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Side Effect Unknown Contained"
         },
         "prompt_injection_contained": {
           "anyOf": [
@@ -907,6 +943,18 @@
           ],
           "default": null,
           "title": "Production Store Mutated"
+        },
+        "dependency_degraded": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dependency Degraded"
         }
       },
       "required": [

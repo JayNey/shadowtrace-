@@ -277,6 +277,16 @@ def _collect_threshold_diffs(
             )
         )
 
+    if manifest.min_case_count is not None and aggregates.case_count < manifest.min_case_count:
+        diffs.append(
+            EvaluationGateDiff(
+                field="case_count",
+                expected=manifest.min_case_count,
+                actual=aggregates.case_count,
+                reason="case_count below manifest minimum (insufficient sample)",
+            )
+        )
+
     if (
         manifest.max_unevaluable_count is not None
         and aggregates.unevaluable_count > manifest.max_unevaluable_count

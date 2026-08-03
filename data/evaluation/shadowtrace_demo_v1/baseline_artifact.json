@@ -8,13 +8,15 @@
     "required_scorer_error_count": 0,
     "unevaluable_count": 1
   },
-  "artifact_hash": "5b6b99b223dd9cd5e6b5e464936180a90ea39f5c3aba46e4c8871389ce041e5c",
+  "artifact_hash": "71a5c518f56dc8a96b505e1cb9e1c405f1a945024a1e1eb15e22ef3c93f07078",
   "case_results": [
     {
       "case_id": "malicious_process_exfil",
       "case_status": "completed",
+      "critical": false,
       "observation": {
         "case_id": "malicious_process_exfil",
+        "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [
           "T1059",
@@ -25,6 +27,7 @@
         "observed_incident_group_id": "incident-malicious-process-001",
         "observed_risk_score": 85,
         "replay_notes": "mock_deterministic:threat;seed=42;n=f837bb5c",
+        "security": null,
         "slice_type": "threat"
       },
       "scorer_results": [
@@ -66,8 +69,10 @@
     {
       "case_id": "partial_telemetry_unknown",
       "case_status": "unevaluable",
+      "critical": false,
       "observation": {
         "case_id": "partial_telemetry_unknown",
+        "knowledge": null,
         "observation_available": false,
         "observed_attack_techniques": [],
         "observed_case_label": null,
@@ -75,6 +80,7 @@
         "observed_incident_group_id": null,
         "observed_risk_score": null,
         "replay_notes": "unevaluable:insufficient_observations;seed=42;n=47aea8c3",
+        "security": null,
         "slice_type": "unevaluable"
       },
       "scorer_results": [
@@ -95,8 +101,10 @@
     {
       "case_id": "scheduled_task_benign",
       "case_status": "completed",
+      "critical": false,
       "observation": {
         "case_id": "scheduled_task_benign",
+        "knowledge": null,
         "observation_available": true,
         "observed_attack_techniques": [],
         "observed_case_label": "false_positive",
@@ -104,6 +112,7 @@
         "observed_incident_group_id": null,
         "observed_risk_score": null,
         "replay_notes": "mock_deterministic:benign;seed=42;n=3bbc7f70",
+        "security": null,
         "slice_type": "benign"
       },
       "scorer_results": [
@@ -144,7 +153,7 @@
     }
   ],
   "code_sha": "evaluation-baseline-v1",
-  "completed_at": "2026-07-31T10:22:57.890891Z",
+  "completed_at": "2026-08-03T06:06:04.712134Z",
   "config": {
     "extra": {},
     "release_refs": {
@@ -160,6 +169,8 @@
       "attack_technique_coverage",
       "benign_label",
       "incident_grouping_consistency",
+      "knowledge_retrieval",
+      "security_gate",
       "severity_alignment",
       "threat_label",
       "unevaluable_coverage"
@@ -315,9 +326,9 @@
     },
     "schema_version": "1.0"
   },
-  "run_id": "eval-811cdd47-ae23-420f-9f39-e7746a986539",
+  "run_id": "eval-43c7fdd3-f083-4aa3-8b83-6a7eb8fc1086",
   "schema_version": "1.0",
-  "started_at": "2026-07-31T10:22:57.883004Z",
+  "started_at": "2026-08-03T06:06:04.707316Z",
   "status": "completed",
   "tenant_id": "tenant-evaluation-demo"
 }
