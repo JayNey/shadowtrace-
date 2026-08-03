@@ -1253,3 +1253,34 @@ def test_report_section_builder_includes_detection_context_provenance() -> None:
     assert snapshot.content_hash in overview.content
     assert appendix.data["detection_context_snapshot_id"] == snapshot.snapshot_id
     assert "T1059" in attack_mapping.content
+
+
+@pytest.mark.asyncio
+async def test_report_agent_skips_detection_context_when_tenant_unknown() -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.agents.report_agent import ReportAgent
+    from app.models.detection_context_snapshot import DetectionContextSnapshotRef
+    from app.models.security_event import SecurityEvent
+
+    event_id = "evt-no-tenant"
+    ref = DetectionContextSnapshotRef(
+        snapshot_id="dctx-test123456",
+        revision=1,
+        content_hash="a" * 64,
+        promotion_id="dprom-test",
+        promotion_link_revision=1,
+        event_revision=1,
+    )
+    wm = AsyncMock()
+    wm.read = AsyncMock(return_value=ref.model_dump(mode="json"))
+    event = MagicMock()
+    event.creation_source_ref = None
+    event_service = AsyncMock()
+    event_service.get_event = AsyncMock(return_value=event)
+    event_service._session_factory = MagicMock()
+
+    agent = ReportAgent(event_service=event_service, working_memory=wm)
+    snapshot = await agent._load_detection_context_snapshot(event_id)
+    assert snapshot is None
+    event_service._session_factory.assert_not_called()

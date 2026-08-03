@@ -598,6 +598,13 @@ export interface DetectionContextSnapshotSummary {
   created_at?: string | null;
 }
 
+export interface DetectionContextProjectionErrorSummary {
+  promotion_id: string;
+  reason: string;
+  message: string;
+  recorded_at?: string | null;
+}
+
 export interface EventDetailResponse {
   event: SecurityEvent;
   writeback_required: boolean;
@@ -605,6 +612,7 @@ export interface EventDetailResponse {
   writeback_overall_status: WritebackStatus | null;
   pending_writeback_count: number;
   detection_context_snapshot?: DetectionContextSnapshotSummary | null;
+  detection_context_projection_error?: DetectionContextProjectionErrorSummary | null;
   analysis_only_complete?: boolean;
   execution_substate?: ExecutionSubstate;
   response_phase_state?: ResponsePhaseState;

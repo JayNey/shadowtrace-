@@ -570,11 +570,11 @@ async def _load_detection_context_summary(
     event_id: str,
     tenant_id: str,
 ) -> s.DetectionContextSnapshotSummary | None:
-    try:
-        from app.models.detection_context_snapshot import DetectionContextSnapshotQuery
-        from app.services.detection_context_service import DetectionContextService
+    from app.api.v1.deps import get_detection_context_service
+    from app.models.detection_context_snapshot import DetectionContextSnapshotQuery
 
-        service = DetectionContextService(_get_session_factory())
+    try:
+        service = get_detection_context_service()
         result = await service.query_snapshots(
             DetectionContextSnapshotQuery(
                 tenant_id=tenant_id,
@@ -594,10 +594,66 @@ async def _load_detection_context_summary(
             event_revision=snapshot.event_revision,
             created_at=snapshot.created_at,
         )
-    except Exception:
-        logger.debug(
-            "detection context summary unavailable event_id=%s",
+    except Exception as exc:
+        logger.warning(
+            "detection context summary load failed event_id=%s tenant_id=%s: %s",
             event_id,
+            tenant_id,
+            exc,
+            exc_info=True,
+        )
+        return None
+
+
+async def _load_detection_context_projection_error(
+    *,
+    event_id: str,
+    tenant_id: str,
+) -> s.DetectionContextProjectionErrorSummary | None:
+    from sqlalchemy import select
+
+    from app.api.v1.deps import _get_session_factory
+    from app.db.orm.detection_promotion import DetectionPromotionORM
+    from app.services.detection_promotion_service import PAYLOAD_PROJECTION_ERROR_KEY
+
+    try:
+        async with _get_session_factory()() as session:
+            row = await session.scalar(
+                select(DetectionPromotionORM)
+                .where(
+                    DetectionPromotionORM.event_id == event_id,
+                    DetectionPromotionORM.tenant_id == tenant_id,
+                )
+                .order_by(DetectionPromotionORM.updated_at.desc())
+                .limit(1)
+            )
+        if row is None:
+            return None
+        payload = dict(row.payload or {})
+        error = payload.get(PAYLOAD_PROJECTION_ERROR_KEY)
+        if not isinstance(error, dict):
+            return None
+        reason = str(error.get("reason") or "context_projection_failed")
+        message = str(error.get("message") or "")
+        recorded_at = error.get("at")
+        parsed_at = None
+        if isinstance(recorded_at, str):
+            try:
+                parsed_at = datetime.fromisoformat(recorded_at)
+            except ValueError:
+                parsed_at = None
+        return s.DetectionContextProjectionErrorSummary(
+            promotion_id=row.promotion_id,
+            reason=reason,
+            message=message,
+            recorded_at=parsed_at,
+        )
+    except Exception as exc:
+        logger.warning(
+            "detection context projection error load failed event_id=%s tenant_id=%s: %s",
+            event_id,
+            tenant_id,
+            exc,
             exc_info=True,
         )
         return None
@@ -629,10 +685,23 @@ async def get_event(
             # DB unavailable: leave writeback info as defaults.
             readiness = WritebackReadiness.CAPABILITY_UNKNOWN
 
-    detection_context_summary = await _load_detection_context_summary(
-        event_id=event_id,
-        tenant_id=event.creation_source_ref.source_tenant_id,
+    tenant_id = (
+        event.creation_source_ref.source_tenant_id
+        if event.creation_source_ref is not None
+        else None
     )
+    detection_context_summary = None
+    detection_context_projection_error = None
+    if tenant_id is not None:
+        detection_context_summary = await _load_detection_context_summary(
+            event_id=event_id,
+            tenant_id=tenant_id,
+        )
+        if detection_context_summary is None:
+            detection_context_projection_error = await _load_detection_context_projection_error(
+                event_id=event_id,
+                tenant_id=tenant_id,
+            )
 
     return s.EventDetailResponse(
         event=event,
@@ -641,6 +710,7 @@ async def get_event(
         writeback_overall_status=wb_status,
         pending_writeback_count=pending_count,
         detection_context_snapshot=detection_context_summary,
+        detection_context_projection_error=detection_context_projection_error,
         **_guidance_fields(event, get_settings()),
     )
 

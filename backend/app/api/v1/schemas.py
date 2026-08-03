@@ -171,6 +171,17 @@ class DetectionContextSnapshotSummary(BaseModel):
     created_at: datetime | None = None
 
 
+class DetectionContextProjectionErrorSummary(BaseModel):
+    """Latest detection context projection failure for an event (#633)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    promotion_id: str
+    reason: str
+    message: str
+    recorded_at: datetime | None = None
+
+
 class EventDetailResponse(BaseModel):
     event: SecurityEvent
     writeback_required: bool
@@ -178,6 +189,7 @@ class EventDetailResponse(BaseModel):
     writeback_overall_status: WritebackStatus | None = None
     pending_writeback_count: int = 0
     detection_context_snapshot: DetectionContextSnapshotSummary | None = None
+    detection_context_projection_error: DetectionContextProjectionErrorSummary | None = None
     analysis_only_complete: bool = False
     execution_substate: ExecutionSubstate = ExecutionSubstate.NONE
     response_phase_state: ResponsePhaseState = ResponsePhaseState.NOT_STARTED

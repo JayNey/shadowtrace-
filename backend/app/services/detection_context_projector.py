@@ -18,7 +18,10 @@ from app.models.detection_context_snapshot import (
 from app.models.detection_promotion import DetectionPromotionStatus
 from app.models.detection_rule import DetectionRuleDefinition
 from app.models.feature_snapshot import FeatureSnapshot
-from app.services.context_service import append_context_journal_in_session
+from app.services.context_service import (
+    append_context_journal_in_session,
+    unwrap_journal_value,
+)
 from app.services.detection_context_resolver import (
     DetectionContextResolver,
     build_detection_context_snapshot,
@@ -199,6 +202,11 @@ class DetectionContextProjector:
             tenant_id=tenant_id,
             snapshot_ids=list(candidate.provenance.snapshot_ids or []),
         )
+        if package_row is None:
+            projection_errors = [
+                *projection_errors,
+                f"missing_package:{promotion.package_id}",
+            ]
 
         revision, supersedes = await self._snapshots.next_revision(
             session,
@@ -224,11 +232,11 @@ class DetectionContextProjector:
         )
         if existing is not None:
             stored = DetectionContextSnapshot.model_validate(existing.body)
-            await self._write_context_ref(session, promotion.event_id, stored)
+            await self._write_context_ref(session, promotion.event_id, stored, force=False)
             return stored.model_copy(update={"created_at": existing.created_at})
 
         persisted = await self._snapshots.persist_in_session(session, snapshot)
-        await self._write_context_ref(session, promotion.event_id, persisted)
+        await self._write_context_ref(session, promotion.event_id, persisted, force=True)
         return persisted
 
     async def _load_feature_snapshots(
@@ -261,13 +269,30 @@ class DetectionContextProjector:
         session: AsyncSession,
         event_id: str,
         snapshot: DetectionContextSnapshot,
+        *,
+        force: bool = True,
     ) -> None:
         ref = DetectionContextResolver.snapshot_to_context_ref(snapshot)
+        ref_payload = ref.model_dump(mode="json")
+        if not force:
+            existing_row = await session.scalar(
+                select(orm.EventContextJournal.value)
+                .where(
+                    orm.EventContextJournal.event_id == event_id,
+                    orm.EventContextJournal.field_name == "detection_context_snapshot",
+                )
+                .order_by(orm.EventContextJournal.version.desc())
+                .limit(1)
+            )
+            if existing_row is not None:
+                current = unwrap_journal_value(existing_row)
+                if current == ref_payload:
+                    return
         await append_context_journal_in_session(
             session,
             event_id,
             "detection_context_snapshot",
-            ref.model_dump(mode="json"),
+            ref_payload,
         )
 
     async def get_latest_ref_for_event(

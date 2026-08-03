@@ -524,6 +524,22 @@ async def test_get_event_surfaces_failed_writeback_status(
 
 
 @pytest.mark.asyncio
+async def test_get_event_returns_detail_without_detection_context_for_manual_event(
+    client: TestClient,
+    event_service: EventService,
+) -> None:
+    """Manual/file events should return detail without detection context fields."""
+    event_id = await _create_test_event(event_service, title="Manual event no dctx")
+
+    resp = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["event"]["event_id"] == event_id
+    assert data["detection_context_snapshot"] is None
+    assert data["detection_context_projection_error"] is None
+
+
+@pytest.mark.asyncio
 async def test_get_event_404_for_unknown_id(
     client: TestClient,
 ) -> None:

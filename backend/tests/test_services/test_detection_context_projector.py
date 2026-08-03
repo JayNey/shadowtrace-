@@ -113,6 +113,8 @@ async def clean_detection_context_tables(
             await session.execute(delete(orm.Evidence))
             await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
+            await session.execute(delete(orm.EventContextJournal))
+            await session.execute(delete(orm.EventContextFieldVersion))
             await session.execute(delete(orm.SecurityEvent))
     await clear_detection_tables(session_factory)
     yield
@@ -166,6 +168,7 @@ async def promotion_service_with_projector(
 async def test_projector_happy_path_after_promotion(
     session_factory: async_sessionmaker[AsyncSession],
     promotion_service_with_projector: DetectionPromotionService,
+    redis_client: RedisClient,
 ) -> None:
     fixture_index = load_detection_fixture_index(DATASET_DIR)
     replay = fixture_index.by_case_id["threat_event_match"]
@@ -224,12 +227,39 @@ async def test_projector_happy_path_after_promotion(
     assert snapshot.content_hash
     assert snapshot.revision == 1
 
+    store = EventContextStore(redis_client, session_factory)
+    ctx = await store.rebuild_context(event_id)
+    assert ctx.detection_context_snapshot is not None
+    assert ctx.detection_context_snapshot.snapshot_id == snapshot.snapshot_id
+
+    async with session_factory() as session:
+        journal_versions = list(
+            await session.scalars(
+                select(orm.EventContextJournal.version).where(
+                    orm.EventContextJournal.event_id == event_id,
+                    orm.EventContextJournal.field_name == "detection_context_snapshot",
+                )
+            )
+        )
+    assert len(journal_versions) == 1
+
     projected = await DetectionContextProjector(session_factory).project_from_promotion(
         promotion.record.promotion_id,
         tenant_id=seeded.source_tenant_id,
     )
     assert projected is not None
     assert projected.snapshot_id == snapshot.snapshot_id
+
+    async with session_factory() as session:
+        journal_versions_after_idempotent = list(
+            await session.scalars(
+                select(orm.EventContextJournal.version).where(
+                    orm.EventContextJournal.event_id == event_id,
+                    orm.EventContextJournal.field_name == "detection_context_snapshot",
+                )
+            )
+        )
+    assert journal_versions_after_idempotent == journal_versions
 
     replay = await promotion_service_with_projector.promote_candidate(
         artifact,
@@ -606,3 +636,143 @@ async def test_promotion_records_projection_failure_on_blocked_projection(
         assert DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value in (
             row.reason_codes or []
         )
+
+
+@pytest.mark.asyncio
+async def test_projector_fail_closed_package_hash_mismatch(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service_with_projector: DetectionPromotionService,
+) -> None:
+    seeded, _candidate, _artifact, _decision, promotion = await _seed_completed_promotion(
+        session_factory,
+        promotion_service_with_projector,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(DetectionPromotionORM, promotion.record.promotion_id)
+            assert row is not None
+            row.package_content_hash = "f" * 64
+
+    projector = DetectionContextProjector(session_factory)
+    with pytest.raises(ValidationError, match="package hash mismatch"):
+        await projector.project_from_promotion(
+            promotion.record.promotion_id,
+            tenant_id=seeded.source_tenant_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_projector_appends_revision_on_second_promotion(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service_with_projector: DetectionPromotionService,
+) -> None:
+    seeded, _candidate, _artifact, _decision, promotion = await _seed_completed_promotion(
+        session_factory,
+        promotion_service_with_projector,
+    )
+    assert promotion.ingest_result is not None
+    event_id = promotion.ingest_result.event_id
+    assert event_id is not None
+
+    service = DetectionContextService(session_factory)
+    first = await service.query_snapshots(
+        DetectionContextSnapshotQuery(
+            tenant_id=seeded.source_tenant_id,
+            event_id=event_id,
+            latest_only=True,
+        )
+    )
+    assert first.total == 1
+    first_snapshot = first.items[0]
+    assert first_snapshot.revision == 1
+
+    async with session_factory() as session:
+        async with session.begin():
+            first_row = await session.get(DetectionPromotionORM, promotion.record.promotion_id)
+            assert first_row is not None
+            session.add(
+                DetectionPromotionORM(
+                    promotion_id="dprom-revision-2-test",
+                    tenant_id=first_row.tenant_id,
+                    promotion_key=f"{first_row.promotion_key}|link2",
+                    status=DetectionPromotionStatus.COMPLETED.value,
+                    decision_id=first_row.decision_id,
+                    candidate_detection_id=first_row.candidate_detection_id,
+                    candidate_content_hash=first_row.candidate_content_hash,
+                    package_id=first_row.package_id,
+                    package_version=first_row.package_version,
+                    package_content_hash=first_row.package_content_hash,
+                    detection_scope_id=first_row.detection_scope_id,
+                    scope_revision_id=first_row.scope_revision_id,
+                    derived_connector_id=first_row.derived_connector_id,
+                    source_record_id=first_row.source_record_id,
+                    event_id=first_row.event_id,
+                    link_revision=2,
+                    ingest_result=dict(first_row.ingest_result or {}),
+                    reason_codes=list(first_row.reason_codes or []),
+                    reason_message=first_row.reason_message,
+                    payload=dict(first_row.payload or {}),
+                )
+            )
+
+    projector = DetectionContextProjector(session_factory)
+    second_snapshot = await projector.project_from_promotion(
+        "dprom-revision-2-test",
+        tenant_id=seeded.source_tenant_id,
+    )
+    assert second_snapshot is not None
+    assert second_snapshot.revision == 2
+    assert second_snapshot.supersedes_snapshot_id == first_snapshot.snapshot_id
+
+    latest = await service.query_snapshots(
+        DetectionContextSnapshotQuery(
+            tenant_id=seeded.source_tenant_id,
+            event_id=event_id,
+            latest_only=True,
+        )
+    )
+    assert latest.total == 1
+    assert latest.items[0].snapshot_id == second_snapshot.snapshot_id
+
+
+@pytest.mark.asyncio
+async def test_get_event_detail_includes_detection_context_snapshot_summary(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service_with_projector: DetectionPromotionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from app.api.v1.deps import reset_deps
+    from app.core.config import get_settings
+    from app.main import app
+
+    monkeypatch.setenv(
+        "DEV_AUTH_TOKENS",
+        json.dumps({"analyst-token": {"subject": "analyst-1", "roles": ["analyst"]}}),
+    )
+    get_settings.cache_clear()
+    reset_deps()
+
+    seeded, _candidate, _artifact, _decision, promotion = await _seed_completed_promotion(
+        session_factory,
+        promotion_service_with_projector,
+    )
+    assert promotion.ingest_result is not None
+    event_id = promotion.ingest_result.event_id
+    assert event_id is not None
+
+    client = TestClient(app)
+    resp = client.get(
+        f"/api/v1/events/{event_id}",
+        headers={"Authorization": "Bearer analyst-token"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    summary = data.get("detection_context_snapshot")
+    assert summary is not None
+    assert summary["promotion_id"] == promotion.record.promotion_id
+    assert summary["revision"] == 1
+    assert data.get("detection_context_projection_error") is None

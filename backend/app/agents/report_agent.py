@@ -609,6 +609,12 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             if event is not None and event.creation_source_ref is not None
             else None
         )
+        if tenant_id is None:
+            logger.debug(
+                "skip detection context snapshot load: tenant unknown event_id=%s",
+                event_id,
+            )
+            return None
         snapshot = await service.get_snapshot(ref.snapshot_id, tenant_id=tenant_id)
         return snapshot
 

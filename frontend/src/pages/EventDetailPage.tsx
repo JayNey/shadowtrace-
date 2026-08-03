@@ -554,6 +554,21 @@ export default function EventDetailPage() {
                 {event.detection_context_snapshot.created_at ?? "暂无数据"}
               </Descriptions.Item>
             </Descriptions>
+          ) : event.detection_context_projection_error ? (
+            <Descriptions column={1} size="small">
+              <Descriptions.Item label="promotion_id">
+                {event.detection_context_projection_error.promotion_id}
+              </Descriptions.Item>
+              <Descriptions.Item label="reason">
+                {event.detection_context_projection_error.reason}
+              </Descriptions.Item>
+              <Descriptions.Item label="message">
+                {event.detection_context_projection_error.message}
+              </Descriptions.Item>
+              <Descriptions.Item label="recorded_at">
+                {event.detection_context_projection_error.recorded_at ?? "暂无数据"}
+              </Descriptions.Item>
+            </Descriptions>
           ) : (
             <Typography.Text type="secondary">暂无 detection context snapshot</Typography.Text>
           )}

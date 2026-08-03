@@ -55,6 +55,7 @@ _memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
 _detection_governance: Any = None  # DetectionGovernanceService (ISSUE-125)
 _detection_promotion: Any = None  # DetectionPromotionService (ISSUE-124)
 _detection_context_projector: Any = None  # DetectionContextProjector (ISSUE-127)
+_detection_context_service: Any = None  # DetectionContextService (ISSUE-127)
 _decision_record_service: Any = None  # DecisionRecordService (ISSUE-131)
 _tool_call_grant_service: Any = None  # ToolCallGrantService (ISSUE-134)
 
@@ -279,6 +280,16 @@ def get_detection_context_projector() -> Any:
             governance=get_detection_governance_service(),
         )
     return _detection_context_projector
+
+
+def get_detection_context_service() -> Any:
+    """Return the shared detection context snapshot store (ISSUE-127)."""
+    global _detection_context_service
+    if _detection_context_service is None:
+        from app.services.detection_context_service import DetectionContextService
+
+        _detection_context_service = DetectionContextService(_get_session_factory())
+    return _detection_context_service
 
 
 async def get_detection_promotion_service() -> Any:
@@ -940,7 +951,7 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
-    global _memory_governance, _detection_governance, _detection_promotion, _detection_context_projector, _decision_record_service, _tool_call_grant_service
+    global _memory_governance, _detection_governance, _detection_promotion, _detection_context_projector, _detection_context_service, _decision_record_service, _tool_call_grant_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
     from app.playbook.resources import reset_playbook_resources_cache
@@ -981,5 +992,6 @@ def reset_deps() -> None:
     _detection_governance = None
     _detection_promotion = None
     _detection_context_projector = None
+    _detection_context_service = None
     _decision_record_service = None
     _tool_call_grant_service = None
