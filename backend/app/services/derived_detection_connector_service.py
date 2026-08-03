@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 
-from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -17,6 +16,7 @@ from app.models.detection_promotion import (
     DerivedDetectionConnectorRecord,
 )
 from app.models.detection_scope import DetectionScopeConnectorSet
+from app.models.enums import ConnectorStatus
 from app.services.detection_scope_resolver import DetectionScopeResolver
 
 
@@ -137,13 +137,14 @@ class DerivedDetectionConnectorService:
             )
             connector.connector_metadata = metadata
             connector.disposition_policy_default = record.disposition_policy
+            connector.status = ConnectorStatus.ONLINE.value
             return
         session.add(
             orm.SourceConnector(
                 connector_id=record.connector_id,
                 source_product=source_product,
                 display_name=f"Derived detection ({record.detection_scope_id})",
-                status="active",
+                status=ConnectorStatus.ONLINE.value,
                 disposition_policy_default=record.disposition_policy,
                 connector_metadata={
                     "source_tenant_id": record.source_tenant_id,

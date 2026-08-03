@@ -33,8 +33,9 @@ from app.models.detection_rule import (
     CandidateDetection,
     DetectionRuleRuntimeState,
 )
-from app.models.detection_scope import DetectionScopeLifecycleState
+from app.models.detection_scope import DetectionScopeLifecycleState, DetectionScopeRevision
 from app.services.candidate_source_projection import candidate_to_source_alert
+from app.services.derived_detection_connector_service import DerivedDetectionConnectorService
 from app.services.detection_governance_binding import validate_decision_artifact_binding
 from app.services.detection_governance_service import DetectionGovernanceService
 from app.services.detection_rule_runtime import row_to_candidate_detection
@@ -42,8 +43,11 @@ from app.services.detection_rule_service import (
     DetectionRuleService,
     row_to_detection_rule_package,
 )
-from app.services.derived_detection_connector_service import DerivedDetectionConnectorService
-from app.services.event_service import EventService, IngestResult, ingest_result_to_typed
+from app.services.detection_scope_service import DetectionScopeService
+from app.services.event_service import EventService, ingest_result_to_typed
+
+MAX_PROMOTION_INGEST_RETRIES = 5
+PAYLOAD_RETRY_COUNT_KEY = "ingest_retry_count"
 
 
 def build_promotion_key(
@@ -136,7 +140,6 @@ class DetectionPromotionService:
                     ingest_result=existing.ingest_result,
                     resumed=True,
                 )
-            package_row = await self._load_package_row(candidate.package_id, request.tenant_id)
             return await self._resume(existing, artifact, decision, candidate)
 
         package_row = await self._load_package_row(candidate.package_id, request.tenant_id)
@@ -202,9 +205,10 @@ class DetectionPromotionService:
         *,
         resumed: bool = False,
     ) -> DetectionPromotionResult:
-        scope_revision = await self._load_active_scope_revision(
-            record.detection_scope_id,
-            record.tenant_id,
+        scope_revision = await self._load_pinned_scope_revision(
+            scope_revision_id=record.scope_revision_id,
+            detection_scope_id=record.detection_scope_id,
+            tenant_id=record.tenant_id,
         )
         derived = await self._derived.ensure_connector(
             source_tenant_id=record.tenant_id,
@@ -227,24 +231,24 @@ class DetectionPromotionService:
                 derived_connector=derived,
                 promotion_id=record.promotion_id,
             )
-            ingest = await self._ingester.ingest_source_alert(
-                alert,
-                source_type=DERIVED_DETECTION_SOURCE_TYPE,
-            )
+            try:
+                ingest = await self._ingester.ingest_source_alert(
+                    alert,
+                    source_type=DERIVED_DETECTION_SOURCE_TYPE,
+                )
+            except Exception as exc:
+                return await self._ingest_failure_result(
+                    record,
+                    message=f"{type(exc).__name__}: {exc}",
+                    resumed=resumed,
+                )
             typed = ingest_result_to_typed(ingest)
             if not typed.accepted or typed.event_id is None:
-                failed = await self._mark_failed(
+                return await self._ingest_failure_result(
                     record,
-                    reason_codes=[DetectionPromotionReasonCode.INGEST_FAILED],
-                    reason_message=typed.error_message or "ingest did not produce event_id",
-                    status=DetectionPromotionStatus.RETRY,
-                )
-                return DetectionPromotionResult(
-                    promotion_id=failed.promotion_id,
-                    status=failed.status,
-                    record=failed,
-                    ingest_result=typed,
+                    message=typed.error_message or "ingest did not produce event_id",
                     resumed=resumed,
+                    ingest_result=typed,
                 )
             record = await self._update_ledger(
                 record,
@@ -257,11 +261,14 @@ class DetectionPromotionService:
             typed = record.ingest_result
             if typed is None or typed.event_id is None:
                 raise ValidationError("promotion ledger missing ingest result at event_link step")
+            link_revision = record.link_revision
+            if record.event_id is not None and record.event_id != typed.event_id:
+                link_revision += 1
             record = await self._update_ledger(
                 record,
                 status=DetectionPromotionStatus.EVENT_LINKED,
                 event_id=typed.event_id,
-                link_revision=record.link_revision,
+                link_revision=link_revision,
             )
 
         if record.status is DetectionPromotionStatus.EVENT_LINKED:
@@ -301,6 +308,16 @@ class DetectionPromotionService:
         )
 
     @staticmethod
+    def _artifact_approved_candidate_keys(
+        artifact: DetectionEvaluationArtifact,
+    ) -> set[tuple[str, str]]:
+        approved: set[tuple[str, str]] = set()
+        for case in artifact.case_results:
+            for listed in case.observation.candidates:
+                approved.add((listed.candidate_detection_id, listed.content_hash))
+        return approved
+
+    @staticmethod
     def _validate_candidate_binding(
         decision: DetectionGovernanceDecision,
         artifact: DetectionEvaluationArtifact,
@@ -310,6 +327,12 @@ class DetectionPromotionService:
         if candidate.detection_scope_id != bound.detection_scope_id:
             raise ValidationError(
                 "promotion blocked: detection scope mismatch",
+                details={"reason": DetectionPromotionReasonCode.SCOPE_MISMATCH.value},
+            )
+        binding_scope_revision_id = decision.candidate_binding.scope_revision_id
+        if binding_scope_revision_id and bound.scope_revision_id != binding_scope_revision_id:
+            raise ValidationError(
+                "promotion blocked: scope revision binding mismatch",
                 details={"reason": DetectionPromotionReasonCode.SCOPE_MISMATCH.value},
             )
         if candidate.package_id != bound.package_id:
@@ -322,6 +345,30 @@ class DetectionPromotionService:
                 "promotion blocked: package version mismatch",
                 details={"reason": DetectionPromotionReasonCode.CANDIDATE_BINDING_MISMATCH.value},
             )
+        if bound.rule_ids and candidate.rule_id not in bound.rule_ids:
+            raise ValidationError(
+                "promotion blocked: candidate rule not in governance binding",
+                details={"reason": DetectionPromotionReasonCode.CANDIDATE_BINDING_MISMATCH.value},
+            )
+        provenance = candidate.provenance
+        if bound.model_release_id is not None:
+            if provenance.model_release_id != bound.model_release_id:
+                raise ValidationError(
+                    "promotion blocked: model release id mismatch",
+                    details={
+                        "reason": DetectionPromotionReasonCode.CANDIDATE_BINDING_MISMATCH.value,
+                    },
+                )
+            if (
+                bound.model_release_hash is not None
+                and provenance.model_release_hash != bound.model_release_hash
+            ):
+                raise ValidationError(
+                    "promotion blocked: model release hash mismatch",
+                    details={
+                        "reason": DetectionPromotionReasonCode.CANDIDATE_BINDING_MISMATCH.value,
+                    },
+                )
         if not candidate.shadow_only:
             raise ValidationError(
                 "promotion blocked: candidate is not shadow-only",
@@ -332,7 +379,16 @@ class DetectionPromotionService:
                 "promotion blocked: tenant isolation failed",
                 details={"reason": DetectionGovernanceReasonCode.TENANT_ISOLATION_FAILED.value},
             )
-        _ = artifact
+        approved = DetectionPromotionService._artifact_approved_candidate_keys(artifact)
+        if approved:
+            key = (candidate.candidate_detection_id, candidate.content_hash)
+            if key not in approved:
+                raise ValidationError(
+                    "promotion blocked: candidate not in evaluation artifact",
+                    details={
+                        "reason": DetectionPromotionReasonCode.CANDIDATE_BINDING_MISMATCH.value,
+                    },
+                )
 
     async def _load_candidate(
         self,
@@ -363,31 +419,106 @@ class DetectionPromotionService:
                 )
             return row
 
-    async def _load_active_scope_revision(
+    async def _load_pinned_scope_revision(
         self,
+        *,
+        scope_revision_id: str | None,
         detection_scope_id: str,
         tenant_id: str,
-    ):
-        from app.services.detection_scope_service import _row_to_revision
-
-        async with self._session_factory() as session:
-            row = await session.scalar(
-                select(orm.DetectionScopeRevision)
-                .where(
-                    orm.DetectionScopeRevision.detection_scope_id == detection_scope_id,
-                    orm.DetectionScopeRevision.source_tenant_id == tenant_id,
-                    orm.DetectionScopeRevision.lifecycle_state
-                    == DetectionScopeLifecycleState.ACTIVE.value,
-                )
-                .order_by(orm.DetectionScopeRevision.revision.desc())
-                .limit(1)
+    ) -> DetectionScopeRevision:
+        if not scope_revision_id:
+            raise ValidationError(
+                "promotion blocked: governance decision missing scope_revision_id",
+                details={
+                    "reason": DetectionPromotionReasonCode.SCOPE_MISMATCH.value,
+                    "detection_scope_id": detection_scope_id,
+                },
             )
-            if row is None:
-                raise ValidationError(
-                    "promotion blocked: active detection scope revision not found",
-                    details={"detection_scope_id": detection_scope_id},
+        scope_service = DetectionScopeService(self._session_factory)
+        revision = await scope_service.get_revision(scope_revision_id)
+        if revision is None:
+            raise ValidationError(
+                "promotion blocked: pinned detection scope revision not found",
+                details={
+                    "reason": DetectionPromotionReasonCode.SCOPE_MISMATCH.value,
+                    "scope_revision_id": scope_revision_id,
+                },
+            )
+        if revision.detection_scope_id != detection_scope_id:
+            raise ValidationError(
+                "promotion blocked: pinned scope revision scope mismatch",
+                details={
+                    "reason": DetectionPromotionReasonCode.SCOPE_MISMATCH.value,
+                    "scope_revision_id": scope_revision_id,
+                    "expected_detection_scope_id": detection_scope_id,
+                    "actual_detection_scope_id": revision.detection_scope_id,
+                },
+            )
+        if revision.identity.source_tenant_id != tenant_id:
+            raise ValidationError(
+                "promotion blocked: pinned scope revision tenant mismatch",
+                details={
+                    "reason": DetectionPromotionReasonCode.SCOPE_MISMATCH.value,
+                    "scope_revision_id": scope_revision_id,
+                },
+            )
+        if revision.lifecycle_state is not DetectionScopeLifecycleState.ACTIVE:
+            raise ValidationError(
+                "promotion blocked: pinned scope revision is not active",
+                details={
+                    "reason": DetectionPromotionReasonCode.SCOPE_MISMATCH.value,
+                    "scope_revision_id": scope_revision_id,
+                    "lifecycle_state": revision.lifecycle_state.value,
+                },
+            )
+        return revision
+
+    async def _ingest_failure_result(
+        self,
+        record: DetectionPromotionRecord,
+        *,
+        message: str,
+        resumed: bool,
+        ingest_result: TypedIngestResult | None = None,
+    ) -> DetectionPromotionResult:
+        retry_count = await self._increment_ingest_retry_count(record.promotion_id)
+        status = (
+            DetectionPromotionStatus.DEAD
+            if retry_count >= MAX_PROMOTION_INGEST_RETRIES
+            else DetectionPromotionStatus.RETRY
+        )
+        failed = await self._mark_failed(
+            record,
+            reason_codes=[DetectionPromotionReasonCode.INGEST_FAILED],
+            reason_message=message,
+            status=status,
+        )
+        return DetectionPromotionResult(
+            promotion_id=failed.promotion_id,
+            status=failed.status,
+            record=failed,
+            ingest_result=ingest_result,
+            resumed=resumed,
+        )
+
+    async def _increment_ingest_retry_count(self, promotion_id: str) -> int:
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    DetectionPromotionORM,
+                    promotion_id,
+                    with_for_update=True,
                 )
-            return _row_to_revision(row)
+                if row is None:
+                    raise ResourceNotFoundError(
+                        "promotion ledger row not found",
+                        details={"promotion_id": promotion_id},
+                    )
+                payload = dict(row.payload or {})
+                count = int(payload.get(PAYLOAD_RETRY_COUNT_KEY, 0)) + 1
+                payload[PAYLOAD_RETRY_COUNT_KEY] = count
+                row.payload = payload
+                return count
 
     async def _get_by_promotion_key(
         self,

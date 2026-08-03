@@ -6,6 +6,7 @@ import os
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -19,11 +20,11 @@ from app.core.auth import Principal
 from app.core.errors import ValidationError
 from app.core.redis_client import RedisClient
 from app.db import models as orm
+from app.db.orm.detection_governance import DetectionGovernanceDecisionORM
 from app.db.orm.detection_promotion import (
     DerivedDetectionConnectorORM,
     DetectionPromotionORM,
 )
-from app.db.orm.detection_governance import DetectionGovernanceDecisionORM
 from app.evaluation.detection.artifact import finalize_detection_artifact
 from app.evaluation.detection.fixture_loader import load_detection_fixture_index
 from app.evaluation.detection.fixture_seeder import (
@@ -34,14 +35,20 @@ from app.evaluation.detection.fixture_seeder import (
 from app.ingestion.source_ingester import SourceIngester
 from app.models.detection_evaluation import (
     DetectionCandidateRefs,
+    DetectionCaseObservation,
+    DetectionCaseResult,
     DetectionEvaluationArtifact,
     DetectionEvaluationConfig,
     DetectionResourceSummary,
     DetectionTenantSafetySummary,
 )
 from app.models.detection_governance import (
+    DetectionGovernanceCandidateBinding,
+    DetectionGovernanceDecision,
     DetectionGovernanceDecisionKind,
     DetectionGovernanceDecisionRequest,
+    DetectionGovernanceEvaluationBinding,
+    DetectionGovernanceThresholdBinding,
 )
 from app.models.detection_promotion import (
     DetectionPromotionRequest,
@@ -49,8 +56,12 @@ from app.models.detection_promotion import (
     SourceIngestCorrelationOutcome,
     SourceIngestLinkDisposition,
 )
-from app.models.detection_rule import DetectionRuleRuntimeState, RuleOperatorKind
-from app.models.enums import EventType, Severity, SourceObjectKind
+from app.models.detection_rule import (
+    CandidateDetectionProvenance,
+    DetectionRuleRuntimeState,
+    RuleOperatorKind,
+)
+from app.models.enums import ConnectorStatus, EventType, Severity, SourceObjectKind
 from app.models.evaluation_quality import (
     EvaluationQualityReport,
     MetricDenominator,
@@ -64,6 +75,7 @@ from app.models.evaluation_run import (
     EvaluationRunStatus,
     GateVerdict,
 )
+from app.models.evaluation_truth import SliceType
 from app.models.source import SourceReference
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService
@@ -77,6 +89,7 @@ from app.services.detection_promotion_service import (
 )
 from app.services.detection_rule_runtime import DetectionRuleRuntimeService
 from app.services.detection_rule_service import DetectionRuleService
+from app.services.detection_scope_service import DetectionScopeService
 from app.services.event_service import EventService, IngestableSource, ingest_result_to_typed
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -87,6 +100,10 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace",
 )
+
+
+def _reviewer_principal(tenant_id: str) -> Principal:
+    return Principal(subject="reviewer@test", roles=["admin"], tenant_id=tenant_id)
 
 
 def _postgres_reachable() -> bool:
@@ -361,7 +378,7 @@ async def test_promotion_happy_path_creates_event_and_completes_ledger(
         candidate_set_hash="c" * 64,
     )
 
-    principal = Principal(subject="reviewer@test", roles=["admin"], tenant_id=seeded.source_tenant_id)
+    principal = _reviewer_principal(seeded.source_tenant_id)
     governance = DetectionGovernanceService(session_factory)
     decision = await governance.record_decision(
         principal,
@@ -471,7 +488,7 @@ async def test_promotion_crash_recovery_from_source_persisted(
         candidate_refs=candidate_refs,
         candidate_set_hash="c" * 64,
     )
-    principal = Principal(subject="reviewer@test", roles=["admin"], tenant_id=seeded.source_tenant_id)
+    principal = _reviewer_principal(seeded.source_tenant_id)
     governance = DetectionGovernanceService(session_factory)
     decision = await governance.record_decision(
         principal,
@@ -555,3 +572,387 @@ async def test_promotion_crash_recovery_from_source_persisted(
             )
         )
     assert len(rows) == 1
+
+
+def test_validate_candidate_binding_rejects_rule_not_in_governance_binding() -> None:
+    from app.models.detection_rule import CandidateDetection
+
+    sample = CandidateDetection(
+        candidate_detection_id="cand-x",
+        source_tenant_id="tenant-a",
+        detection_scope_id="scope-a",
+        package_id="pkg-a",
+        package_version=1,
+        rule_id="rule-not-approved",
+        rule_version=1,
+        operator=RuleOperatorKind.EVENT_MATCH,
+        group_key={"entity_type": "account", "entity_id": "alice"},
+        cutoff_at=datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC),
+        window_kind="rolling",
+        matched_value=1.0,
+        severity="high",
+        provenance=CandidateDetectionProvenance(),
+        content_hash="a" * 64,
+        idempotency_key="idem-1",
+    )
+    refs = DetectionCandidateRefs(
+        package_id=sample.package_id,
+        package_version=sample.package_version,
+        package_content_hash="b" * 64,
+        rule_ids=["rule-approved"],
+        feature_contract_version="1.0",
+        detection_scope_id=sample.detection_scope_id,
+        scope_revision_id="dsrev-1",
+    )
+    decision = DetectionGovernanceDecision(
+        decision_id="dgov-1",
+        tenant_id=sample.source_tenant_id,
+        decision=DetectionGovernanceDecisionKind.APPROVE,
+        candidate_binding=DetectionGovernanceCandidateBinding(
+            candidate_set_hash="c" * 64,
+            candidate_refs=refs,
+            feature_contract_version="1.0",
+            detection_scope_id=sample.detection_scope_id,
+            scope_revision_id="dsrev-1",
+        ),
+        evaluation_binding=DetectionGovernanceEvaluationBinding(
+            evaluation_id="eval-1",
+            dataset_id="ds",
+            dataset_version="1",
+            dataset_content_hash="d" * 64,
+            artifact_hash="e" * 64,
+            code_sha="abc1234",
+        ),
+        threshold_binding=DetectionGovernanceThresholdBinding(
+            manifest_version="2026.08.02",
+            manifest_path=str(THRESHOLD_PATH),
+        ),
+        binding_hash="f" * 64,
+        policy_version="1.0",
+        reviewer_subject="reviewer@test",
+        decided_at=datetime(2026, 8, 1, 16, 0, 0, tzinfo=UTC),
+    )
+    artifact = DetectionEvaluationArtifact(
+        evaluation_id="eval-1",
+        tenant_id=sample.source_tenant_id,
+        dataset_id="ds",
+        dataset_version="1",
+        dataset_content_hash="d" * 64,
+        code_sha="abc1234",
+        config=DetectionEvaluationConfig(
+            seed=42,
+            cutoff_at=datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC),
+            candidate_refs=refs,
+            candidate_set_hash="c" * 64,
+        ),
+        started_at=datetime(2026, 8, 1, 15, 0, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 8, 1, 15, 5, 0, tzinfo=UTC),
+        status=EvaluationRunStatus.COMPLETED,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=0,
+            pass_count=0,
+            fail_count=0,
+            error_count=0,
+            unevaluable_count=0,
+            pass_rate=1.0,
+            required_scorer_error_count=0,
+        ),
+    )
+    with pytest.raises(ValidationError, match="rule not in governance binding"):
+        DetectionPromotionService._validate_candidate_binding(decision, artifact, sample)
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_fail_closed_when_pinned_scope_revision_retired(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+) -> None:
+    fixture_index = load_detection_fixture_index(DATASET_DIR)
+    replay = fixture_index.by_case_id["threat_event_match"]
+    seeded = await seed_detection_replay_fixture(session_factory, replay)
+    runtime = DetectionRuleRuntimeService(session_factory)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    result = await runtime.execute_shadow(
+        source_tenant_id=seeded.source_tenant_id,
+        package_id=seeded.package_id,
+        cutoff_at=cutoff,
+    )
+    candidate = result.candidates[0]
+    candidate_refs = build_candidate_refs(replay, seeded)
+    artifact = _artifact_for_seeded(
+        seeded=seeded,
+        candidate_refs=candidate_refs,
+        candidate_set_hash="c" * 64,
+    )
+    principal = _reviewer_principal(seeded.source_tenant_id)
+    governance = DetectionGovernanceService(session_factory)
+    decision = await governance.record_decision(
+        principal,
+        artifact,
+        DetectionGovernanceDecisionRequest(
+            decision=DetectionGovernanceDecisionKind.APPROVE,
+            reason_note="approved before scope retire",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    scope_service = DetectionScopeService(session_factory)
+    await scope_service.retire_revision(seeded.scope_revision_id)
+
+    with pytest.raises(ValidationError, match="pinned scope revision is not active"):
+        await promotion_service.promote_candidate(
+            artifact,
+            DetectionPromotionRequest(
+                tenant_id=seeded.source_tenant_id,
+                candidate_detection_id=candidate.candidate_detection_id,
+                decision_id=decision.decision_id,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_rejects_candidate_not_listed_in_artifact(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+) -> None:
+    fixture_index = load_detection_fixture_index(DATASET_DIR)
+    replay = fixture_index.by_case_id["threat_event_match"]
+    seeded = await seed_detection_replay_fixture(session_factory, replay)
+    runtime = DetectionRuleRuntimeService(session_factory)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    result = await runtime.execute_shadow(
+        source_tenant_id=seeded.source_tenant_id,
+        package_id=seeded.package_id,
+        cutoff_at=cutoff,
+    )
+    assert len(result.candidates) >= 1
+    candidate = result.candidates[0]
+    listed = candidate.model_copy(
+        update={"candidate_detection_id": "dcand-listed", "content_hash": "1" * 64}
+    )
+    candidate_refs = build_candidate_refs(replay, seeded)
+    artifact = _artifact_for_seeded(
+        seeded=seeded,
+        candidate_refs=candidate_refs,
+        candidate_set_hash="c" * 64,
+    )
+    artifact = artifact.model_copy(
+        update={
+            "case_results": [
+                DetectionCaseResult(
+                    case_id="case-1",
+                    truth_id="truth-1",
+                    truth_revision=1,
+                    truth_content_hash="a" * 64,
+                    slice_type=SliceType.THREAT,
+                    observation=DetectionCaseObservation(
+                        case_id="case-1",
+                        slice_type=SliceType.THREAT,
+                        candidates=[listed],
+                    ),
+                    case_status=EvaluationRunStatus.COMPLETED,
+                )
+            ]
+        }
+    )
+    artifact = finalize_detection_artifact(artifact)
+    principal = _reviewer_principal(seeded.source_tenant_id)
+    governance = DetectionGovernanceService(session_factory)
+    decision = await governance.record_decision(
+        principal,
+        artifact,
+        DetectionGovernanceDecisionRequest(
+            decision=DetectionGovernanceDecisionKind.APPROVE,
+            reason_note="approved with explicit candidate list",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    with pytest.raises(ValidationError, match="candidate not in evaluation artifact"):
+        await promotion_service.promote_candidate(
+            artifact,
+            DetectionPromotionRequest(
+                tenant_id=seeded.source_tenant_id,
+                candidate_detection_id=candidate.candidate_detection_id,
+                decision_id=decision.decision_id,
+            ),
+        )
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_marks_retry_when_ingest_raises(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: RedisClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = EventContextStore(redis_client, session_factory)
+    degraded = DegradedFlagService(store, session_factory)
+    events = EventService(session_factory, store, degraded_flags=degraded)
+    ingester = SourceIngester(events, session_factory, source_mode="mock_xdr")
+    ingester.ingest_source_alert = AsyncMock(side_effect=RuntimeError("ingest unavailable"))
+    promotion = DetectionPromotionService(
+        session_factory,
+        event_service=events,
+        source_ingester=ingester,
+    )
+
+    fixture_index = load_detection_fixture_index(DATASET_DIR)
+    replay = fixture_index.by_case_id["threat_event_match"]
+    seeded = await seed_detection_replay_fixture(session_factory, replay)
+    runtime = DetectionRuleRuntimeService(session_factory)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    result = await runtime.execute_shadow(
+        source_tenant_id=seeded.source_tenant_id,
+        package_id=seeded.package_id,
+        cutoff_at=cutoff,
+    )
+    candidate = result.candidates[0]
+    candidate_refs = build_candidate_refs(replay, seeded)
+    artifact = _artifact_for_seeded(
+        seeded=seeded,
+        candidate_refs=candidate_refs,
+        candidate_set_hash="c" * 64,
+    )
+    principal = _reviewer_principal(seeded.source_tenant_id)
+    governance = DetectionGovernanceService(session_factory)
+    decision = await governance.record_decision(
+        principal,
+        artifact,
+        DetectionGovernanceDecisionRequest(
+            decision=DetectionGovernanceDecisionKind.APPROVE,
+            reason_note="approved for ingest failure test",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    monkeypatch.setattr(
+        "app.services.detection_promotion_service.MAX_PROMOTION_INGEST_RETRIES",
+        3,
+    )
+    outcome = await promotion.promote_candidate(
+        artifact,
+        DetectionPromotionRequest(
+            tenant_id=seeded.source_tenant_id,
+            candidate_detection_id=candidate.candidate_detection_id,
+            decision_id=decision.decision_id,
+        ),
+    )
+    assert outcome.status is DetectionPromotionStatus.RETRY
+    assert outcome.record.reason_codes
+    assert outcome.record.reason_codes[0].value == "ingest_failed"
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_promotion_dead_after_retry_budget(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: RedisClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = EventContextStore(redis_client, session_factory)
+    degraded = DegradedFlagService(store, session_factory)
+    events = EventService(session_factory, store, degraded_flags=degraded)
+    ingester = SourceIngester(events, session_factory, source_mode="mock_xdr")
+    ingester.ingest_source_alert = AsyncMock(side_effect=RuntimeError("ingest unavailable"))
+    promotion = DetectionPromotionService(
+        session_factory,
+        event_service=events,
+        source_ingester=ingester,
+    )
+    monkeypatch.setattr(
+        "app.services.detection_promotion_service.MAX_PROMOTION_INGEST_RETRIES",
+        1,
+    )
+
+    fixture_index = load_detection_fixture_index(DATASET_DIR)
+    replay = fixture_index.by_case_id["threat_event_match"]
+    seeded = await seed_detection_replay_fixture(session_factory, replay)
+    runtime = DetectionRuleRuntimeService(session_factory)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    result = await runtime.execute_shadow(
+        source_tenant_id=seeded.source_tenant_id,
+        package_id=seeded.package_id,
+        cutoff_at=cutoff,
+    )
+    candidate = result.candidates[0]
+    candidate_refs = build_candidate_refs(replay, seeded)
+    artifact = _artifact_for_seeded(
+        seeded=seeded,
+        candidate_refs=candidate_refs,
+        candidate_set_hash="c" * 64,
+    )
+    principal = _reviewer_principal(seeded.source_tenant_id)
+    governance = DetectionGovernanceService(session_factory)
+    decision = await governance.record_decision(
+        principal,
+        artifact,
+        DetectionGovernanceDecisionRequest(
+            decision=DetectionGovernanceDecisionKind.APPROVE,
+            reason_note="approved for dead-letter test",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    outcome = await promotion.promote_candidate(
+        artifact,
+        DetectionPromotionRequest(
+            tenant_id=seeded.source_tenant_id,
+            candidate_detection_id=candidate.candidate_detection_id,
+            decision_id=decision.decision_id,
+        ),
+    )
+    assert outcome.status is DetectionPromotionStatus.DEAD
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_derived_connector_source_row_uses_online_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    promotion_service: DetectionPromotionService,
+) -> None:
+    fixture_index = load_detection_fixture_index(DATASET_DIR)
+    replay = fixture_index.by_case_id["threat_event_match"]
+    seeded = await seed_detection_replay_fixture(session_factory, replay)
+    runtime = DetectionRuleRuntimeService(session_factory)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    result = await runtime.execute_shadow(
+        source_tenant_id=seeded.source_tenant_id,
+        package_id=seeded.package_id,
+        cutoff_at=cutoff,
+    )
+    candidate = result.candidates[0]
+    candidate_refs = build_candidate_refs(replay, seeded)
+    artifact = _artifact_for_seeded(
+        seeded=seeded,
+        candidate_refs=candidate_refs,
+        candidate_set_hash="c" * 64,
+    )
+    principal = _reviewer_principal(seeded.source_tenant_id)
+    governance = DetectionGovernanceService(session_factory)
+    decision = await governance.record_decision(
+        principal,
+        artifact,
+        DetectionGovernanceDecisionRequest(
+            decision=DetectionGovernanceDecisionKind.APPROVE,
+            reason_note="approved for connector status test",
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    outcome = await promotion_service.promote_candidate(
+        artifact,
+        DetectionPromotionRequest(
+            tenant_id=seeded.source_tenant_id,
+            candidate_detection_id=candidate.candidate_detection_id,
+            decision_id=decision.decision_id,
+        ),
+    )
+    connector_id = outcome.record.derived_connector_id
+    assert connector_id is not None
+    async with session_factory() as session:
+        row = await session.get(orm.SourceConnector, connector_id)
+    assert row is not None
+    assert row.status == ConnectorStatus.ONLINE.value

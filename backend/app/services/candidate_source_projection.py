@@ -57,7 +57,7 @@ def candidate_to_source_alert(
         "promotion_id": promotion_id,
         "candidate_detection_id": candidate.candidate_detection_id,
         "candidate_content_hash": candidate.content_hash,
-        "package_content_hash": candidate.provenance.model_dump(mode="json"),
+        "provenance_snapshot": candidate.provenance.model_dump(mode="json"),
         "group_key": candidate.group_key,
         "provenance": candidate.provenance.model_dump(mode="json"),
     }

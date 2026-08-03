@@ -603,6 +603,14 @@ def test_runtime_transitions_fail_closed() -> None:
         DetectionRuleRuntimeState.VALIDATED,
         DetectionRuleRuntimeState.SHADOW_ACTIVE,
     )
+    assert allowed_runtime_transition(
+        DetectionRuleRuntimeState.SHADOW_ACTIVE,
+        DetectionRuleRuntimeState.PRODUCTION_ACTIVE,
+    )
+    assert not allowed_runtime_transition(
+        DetectionRuleRuntimeState.PRODUCTION_ACTIVE,
+        DetectionRuleRuntimeState.SHADOW_ACTIVE,
+    )
 
 
 def test_event_match_operator_golden() -> None:
