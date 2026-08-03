@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 BASE="http://127.0.0.1:${BACKEND_PORT}/api/v1"
 COMPOSE_FILE="${ROOT}/infra/docker-compose.yml"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-}"
 
 echo "==> health (expect celery.worker ok when worker profile is up)"
 curl -sf "${BASE}/health" | python3 -m json.tool | grep -A6 '"celery"'
@@ -17,7 +18,7 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 1
 fi
 
-worker_id="$(docker compose -f "${COMPOSE_FILE}" ps -q worker 2>/dev/null | head -1 || true)"
+worker_id="$(docker compose ${COMPOSE_PROJECT_NAME:+--project-name "$COMPOSE_PROJECT_NAME"} -f "${COMPOSE_FILE}" ps -q worker 2>/dev/null | head -1 || true)"
 if [[ -z "${worker_id}" ]]; then
   echo "ERROR: worker container not found — enqueue smoke requires a healthy worker"
   echo "Run: make up WORKER=1"

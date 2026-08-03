@@ -32,6 +32,27 @@ make smoke-bootstrap
 
 启动后在前端 **事件看板** 可见 3 个演示事件；`make bootstrap` 会自动对 `new` 状态事件 POST `/investigate`，也可在前端手动再次触发。
 
+### Mock 全栈 Demo（ISSUE-141）
+
+一键启动 **core + investigation worker + ingestion scheduler + observability**（Mock-only，容器内 OTEL 走 `http://otel-collector:4318`）：
+
+```bash
+make up-demo
+make bootstrap-demo    # 或 make bootstrap
+make smoke-demo        # exit 0 并打印 URL/端口表
+```
+
+与默认路径的区别：
+
+| 启动方式 | 包含服务 | OTEL |
+|----------|----------|------|
+| `make up` | core only | 关（默认） |
+| `make up WORKER=1` | core + worker | 可选，需手工启 observability |
+| `make up SCHEDULER=1` | core + scheduler | 可选 |
+| `make up-demo` | core + worker + scheduler + otel-collector + prometheus + grafana | 默认开，in-network |
+
+**约束：** demo profile 为 Mock-only。存在 `.env.live` 或 `ALLOW_LIVE_SIDE_EFFECTS=true` / 非 mock `SOURCE_MODE` 时 `make up-demo` / `make smoke-demo` **fail closed**。
+
 ---
 
 ## 常用命令
@@ -44,6 +65,12 @@ make smoke-bootstrap
 | `make bootstrap` | 迁移 + mock-xdr 种子 + SourceAdapter 摄取 + 自动触发研判 |
 | `make bootstrap LOAD_KB=true` | 同上 + 加载知识库（约 30-60 秒） |
 | `make smoke-bootstrap` | bootstrap 后冒烟：health + ≥3 事件 + 前端反代 |
+| `make up-demo` | **Mock 全栈 demo**（core + worker + scheduler + observability，ISSUE-141） |
+| `make bootstrap-demo` | 同 `make bootstrap`（demo 栈迁移/种子） |
+| `make smoke-demo` | demo 全栈冒烟：bootstrap + worker + scheduler + Grafana/Prometheus |
+| `make down-demo` | 停止 demo 栈（含 observability） |
+| `make up-observability` | 仅启动 OTEL/Prometheus/Grafana（不含 app） |
+| `make down-observability` | 停止 observability 栈 |
 | `make down` | 停止并移除容器（**数据卷保留**） |
 | `make down-v` | 停止并移除容器 + **删除所有数据卷** |
 | `make test` | 运行后端 pytest 健康检查测试 |
@@ -129,6 +156,13 @@ NEO4J_ENABLED=true
 | OpenSearch | 9200 | 可选，需 `--profile optional` |
 | Neo4j HTTP | 7474 | 可选，需 `--profile optional` |
 | Neo4j Bolt | 7687 | 可选，需 `--profile optional` |
+| OTLP HTTP | 4318 | observability / `make up-demo` |
+| OTLP gRPC | 4317 | observability / `make up-demo` |
+| Prometheus | 9090 | observability / `make up-demo` |
+| Grafana | 3001 | observability / `make up-demo`（admin / shadowtrace） |
+| OTEL metrics | 8889 | collector Prometheus exporter |
+
+端口可通过 `infra/.env` 或 Makefile 变量覆盖（见 `infra/.env.example`）。
 
 ---
 
@@ -290,10 +324,16 @@ make bootstrap
 
 默认关闭（`OTEL_ENABLED=false`），对业务零影响。启用时需同时配置 **API 进程**与 **Celery worker**（若使用 `--profile worker`）。
 
+**推荐（demo 全栈）：** 使用 `make up-demo`，自动合并 app + observability compose，并将容器内 OTLP 指向 `http://otel-collector:4318`（无需 `host.docker.internal`）。
+
 ### 1. 启动 observability 栈
 
 ```bash
-docker compose -f infra/observability/docker-compose.observability.yml up -d
+# 仅 observability（app 需另行 make up）
+make up-observability
+
+# 或 demo 一键（app + worker + scheduler + observability）
+make up-demo
 ```
 
 - Grafana: http://localhost:3001 （admin / shadowtrace）

@@ -7,12 +7,13 @@
 # Optional profiles:
 #   --profile worker     Celery investigation worker
 #   --profile scheduler  Celery Beat + ingestion worker (ISSUE-107)
+#   --profile demo       Full mock demo: worker + scheduler (+ observability via make up-demo)
 #   --profile optional   OpenSearch + Neo4j
 # Live mode: copy infra/.env.live.example → ../.env.live (compose auto-loads when present)
 #
 # Usage:
 #   make up                # start core services
-#   make up WORKER=1       # start with Celery worker
+#   make up-demo           # core + worker + scheduler + observability (ISSUE-141)
 #   make bootstrap         # migrate + seed demo data
 #   make down              # stop everything, keep volumes
 # ============================================================================
@@ -180,7 +181,7 @@ services:
   #   docker compose --profile worker up -d
   # --------------------------------------------------------------------------
   worker:
-    profiles: ["worker"]
+    profiles: ["worker", "demo"]
     build:
       context: ..
       dockerfile: backend/Dockerfile
@@ -244,7 +245,7 @@ services:
   # after changing BEHAVIOR_OBSERVATION_RETRY_* or related beat schedule flags.
   # --------------------------------------------------------------------------
   scheduler-beat:
-    profiles: ["scheduler"]
+    profiles: ["scheduler", "demo"]
     build:
       context: ..
       dockerfile: backend/Dockerfile
@@ -289,7 +290,7 @@ services:
         condition: service_healthy
 
   scheduler-worker:
-    profiles: ["scheduler"]
+    profiles: ["scheduler", "demo"]
     build:
       context: ..
       dockerfile: backend/Dockerfile

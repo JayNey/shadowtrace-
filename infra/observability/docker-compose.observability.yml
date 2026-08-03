@@ -1,16 +1,10 @@
-# Optional observability stack (ISSUE-092).
+# Optional observability stack (ISSUE-092 / ISSUE-141 demo via ``make up-demo``).
 #
-# Usage (standalone — does not start the ShadowTrace app):
-#   docker compose -f infra/observability/docker-compose.observability.yml up -d
+# Standalone:
+#   make up-observability
 #
-# Point the backend at the collector:
-#   OTEL_ENABLED=true
-#   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
-#
-# Celery worker (compose --profile worker) needs the same OTEL_* vars;
-# see docs/deployment.md §可选：OpenTelemetry 可观测性.
-# Grafana: http://localhost:3001  (admin / shadowtrace)
-# Prometheus: http://localhost:9090
+# Full mock demo (app + worker + scheduler + this stack):
+#   make up-demo
 
 services:
   otel-collector:

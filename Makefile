@@ -9,14 +9,37 @@ REDIS_PORT ?= 6379
 BACKEND_PORT ?= 8000
 FRONTEND_PORT ?= 3000
 MOCK_XDR_PORT ?= 8100
+OTEL_HTTP_PORT ?= 4318
+OTEL_GRPC_PORT ?= 4317
+OTEL_PROMETHEUS_PORT ?= 8889
+PROMETHEUS_PORT ?= 9090
+GRAFANA_PORT ?= 3001
 
 COMPOSE_FILE := $(CURDIR)/infra/docker-compose.yml
+OBS_COMPOSE_FILE := $(CURDIR)/infra/observability/docker-compose.observability.yml
 COMPOSE := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 	POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \
 	BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
 	MOCK_XDR_PORT="$(MOCK_XDR_PORT)" \
 	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
 	-f "$(COMPOSE_FILE)"
+
+# Demo profile (ISSUE-141): core + worker + scheduler + observability; in-network OTEL.
+DEMO_OTEL_ENABLED ?= true
+DEMO_OTEL_ENDPOINT ?= http://otel-collector:4318
+COMPOSE_DEMO := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
+	POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \
+	BACKEND_PORT="$(BACKEND_PORT)" FRONTEND_PORT="$(FRONTEND_PORT)" \
+	MOCK_XDR_PORT="$(MOCK_XDR_PORT)" \
+	OTEL_HTTP_PORT="$(OTEL_HTTP_PORT)" OTEL_GRPC_PORT="$(OTEL_GRPC_PORT)" \
+	OTEL_PROMETHEUS_PORT="$(OTEL_PROMETHEUS_PORT)" PROMETHEUS_PORT="$(PROMETHEUS_PORT)" \
+	GRAFANA_PORT="$(GRAFANA_PORT)" \
+	OTEL_ENABLED="$(DEMO_OTEL_ENABLED)" \
+	OTEL_EXPORTER_OTLP_ENDPOINT="$(DEMO_OTEL_ENDPOINT)" \
+	TASK_MODE=celery \
+	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
+	-f "$(COMPOSE_FILE)" -f "$(OBS_COMPOSE_FILE)" \
+	--profile demo
 
 # Optional: set WORKER=1 to include the Celery investigation worker (sets TASK_MODE=celery).
 WORKER ?=
@@ -34,7 +57,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -57,6 +80,36 @@ bootstrap:
 
 smoke-bootstrap:
 	@bash "$(CURDIR)/scripts/smoke_bootstrap.sh"
+
+# ---------------------------------------------------------------------------
+# Mock demo full stack (ISSUE-141 / #647): core + worker + scheduler + OTEL
+# Default ``make up`` / ``make bootstrap`` unchanged.
+# ---------------------------------------------------------------------------
+up-demo:
+	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
+	$(COMPOSE_DEMO) up -d --build
+
+down-demo:
+	$(COMPOSE_DEMO) down
+
+bootstrap-demo: bootstrap
+
+smoke-demo:
+	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
+	@bash "$(CURDIR)/scripts/smoke_demo.sh"
+
+up-observability:
+	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
+	OTEL_HTTP_PORT="$(OTEL_HTTP_PORT)" OTEL_GRPC_PORT="$(OTEL_GRPC_PORT)" \
+	OTEL_PROMETHEUS_PORT="$(OTEL_PROMETHEUS_PORT)" PROMETHEUS_PORT="$(PROMETHEUS_PORT)" \
+	GRAFANA_PORT="$(GRAFANA_PORT)" \
+	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
+	-f "$(OBS_COMPOSE_FILE)" up -d
+
+down-observability:
+	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
+	docker compose --project-name "$(COMPOSE_PROJECT_NAME)" \
+	-f "$(OBS_COMPOSE_FILE)" down
 
 # LLM provider smoke (ISSUE-106): optional outbound when LLM_MODE=openai_compatible.
 llm-smoke:

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Full mock demo stack smoke (ISSUE-141 / #647).
+#
+# Prerequisites: make up-demo && make bootstrap
+# Checks: core health/events, Celery worker, ingestion scheduler, observability URLs.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BACKEND_PORT="${BACKEND_PORT:-8000}"
+FRONTEND_PORT="${FRONTEND_PORT:-3000}"
+MOCK_XDR_PORT="${MOCK_XDR_PORT:-8100}"
+GRAFANA_PORT="${GRAFANA_PORT:-3001}"
+PROMETHEUS_PORT="${PROMETHEUS_PORT:-9090}"
+OTEL_HTTP_PORT="${OTEL_HTTP_PORT:-4318}"
+COMPOSE_FILE="${ROOT}/infra/docker-compose.yml"
+OBS_COMPOSE_FILE="${ROOT}/infra/observability/docker-compose.observability.yml"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-}"
+
+compose_cmd() {
+  local args=(compose)
+  if [[ -n "${COMPOSE_PROJECT_NAME}" ]]; then
+    args+=(--project-name "${COMPOSE_PROJECT_NAME}")
+  fi
+  args+=(-f "${COMPOSE_FILE}" -f "${OBS_COMPOSE_FILE}" --profile demo "$@")
+  docker "${args[@]}"
+}
+
+print_demo_urls() {
+  cat <<EOF
+
+[demo] Service URLs (host ports):
+  Frontend:       http://127.0.0.1:${FRONTEND_PORT}/
+  Backend API:    http://127.0.0.1:${BACKEND_PORT}/api/v1/health
+  Backend docs:   http://127.0.0.1:${BACKEND_PORT}/docs
+  Mock XDR:       http://127.0.0.1:${MOCK_XDR_PORT}/mock-xdr/v1/health
+  Grafana:        http://127.0.0.1:${GRAFANA_PORT}/  (admin / shadowtrace)
+  Prometheus:     http://127.0.0.1:${PROMETHEUS_PORT}/
+  OTLP HTTP:      http://127.0.0.1:${OTEL_HTTP_PORT}/
+
+EOF
+}
+
+echo "[smoke-demo] core bootstrap smoke ..."
+BACKEND_PORT="${BACKEND_PORT}" FRONTEND_PORT="${FRONTEND_PORT}" MOCK_XDR_PORT="${MOCK_XDR_PORT}" \
+  bash "${ROOT}/scripts/smoke_bootstrap.sh"
+
+echo "[smoke-demo] celery investigation worker ..."
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" BACKEND_PORT="${BACKEND_PORT}" \
+  bash "${ROOT}/scripts/celery_worker_smoke.sh"
+
+echo "[smoke-demo] ingestion scheduler worker ..."
+scheduler_id="$(compose_cmd ps -q scheduler-worker 2>/dev/null | head -1 || true)"
+if [[ -z "${scheduler_id}" ]]; then
+  echo "[smoke-demo] ERROR: scheduler-worker container not found (run make up-demo)" >&2
+  exit 1
+fi
+scheduler_host="$(docker exec "${scheduler_id}" hostname)"
+if ! docker exec "${scheduler_id}" python -m celery -A app.core.celery_app inspect ping \
+  -d "ingestion-scheduler@${scheduler_host}" -t 10; then
+  echo "[smoke-demo] ERROR: scheduler-worker celery ping failed" >&2
+  exit 1
+fi
+beat_id="$(compose_cmd ps -q scheduler-beat 2>/dev/null | head -1 || true)"
+if [[ -z "${beat_id}" ]]; then
+  echo "[smoke-demo] ERROR: scheduler-beat container not found" >&2
+  exit 1
+fi
+if ! docker exec "${beat_id}" pgrep -f 'celery.*beat' >/dev/null; then
+  echo "[smoke-demo] ERROR: scheduler-beat process not running" >&2
+  exit 1
+fi
+echo "  ok: scheduler beat + ingestion worker healthy"
+
+echo "[smoke-demo] observability stack ..."
+curl -sf "http://127.0.0.1:${PROMETHEUS_PORT}/-/ready" >/dev/null
+curl -sf "http://127.0.0.1:${GRAFANA_PORT}/api/health" >/dev/null
+echo "  ok: prometheus + grafana reachable"
+
+print_demo_urls
+echo "[smoke-demo] full demo smoke passed"

@@ -1,0 +1,26 @@
+# Optional mock demo full-stack smoke (ISSUE-141 / #647).
+# Manual workflow_dispatch only — not a required PR gate.
+name: demo-smoke-nightly
+
+on:
+  workflow_dispatch:
+
+jobs:
+  demo-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start demo stack
+        run: make up-demo
+
+      - name: Bootstrap demo data
+        run: make bootstrap-demo
+
+      - name: Run demo smoke
+        run: make smoke-demo
+
+      - name: Tear down demo stack
+        if: always()
+        run: make down-demo
