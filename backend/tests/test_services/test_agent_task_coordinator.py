@@ -20,6 +20,7 @@ from app.models.agent_task import (
 )
 from app.models.enums import Severity
 from app.services.agent_task_coordinator import run_risk_score_with_ledger
+from app.services.content_projection_service import ContentProjectionService
 
 
 def _risk(*, score: int = 85) -> RiskAssessment:
@@ -57,6 +58,21 @@ def _queued_task(*, task_id: str = "task-risk-002") -> AgentTask:
         goal=AgentTaskGoal(task_type=AgentTaskType.RISK_SCORE),
         status=AgentTaskStatus.QUEUED,
         idempotency_key="idem-risk-002",
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _manual_task(*, task_id: str = "task-risk-manual") -> AgentTask:
+    now = datetime.now(UTC)
+    return AgentTask(
+        task_id=task_id,
+        event_id="evt-001",
+        tenant_id="tenant-a",
+        task_type=AgentTaskType.RISK_SCORE,
+        goal=AgentTaskGoal(task_type=AgentTaskType.RISK_SCORE),
+        status=AgentTaskStatus.MANUAL,
+        idempotency_key="idem-risk-manual",
         created_at=now,
         updated_at=now,
     )
@@ -118,13 +134,21 @@ async def test_completed_task_replays_cached_artifact_without_execute() -> None:
 
 
 @pytest.mark.asyncio
-async def test_completed_task_without_artifact_falls_back_to_execute() -> None:
+async def test_completed_task_without_artifact_reconciles_and_reruns_ledger() -> None:
     task = _completed_task()
+    requeued = _queued_task(task_id=task.task_id)
+    claim = _claim(task_id=task.task_id)
     fresh = _risk(score=88)
     task_service = MagicMock()
     task_service.enqueue = AsyncMock(return_value=task)
+    task_service.reconcile_completed_without_artifact = AsyncMock()
+    task_service.retry_to_queue = AsyncMock(return_value=requeued)
+    task_service.claim = AsyncMock(return_value=claim)
+    task_service.start = AsyncMock()
+    task_service.complete = AsyncMock()
     artifact_service = MagicMock()
     artifact_service.load_latest = AsyncMock(return_value=None)
+    artifact_service.persist = AsyncMock()
     execute = AsyncMock(return_value=fresh)
 
     result = await run_risk_score_with_ledger(
@@ -138,11 +162,14 @@ async def test_completed_task_without_artifact_falls_back_to_execute() -> None:
     )
 
     assert result.risk_score == 88
+    task_service.reconcile_completed_without_artifact.assert_awaited_once()
+    task_service.retry_to_queue.assert_awaited_once()
     execute.assert_awaited_once()
+    task_service.complete.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_artifact_persist_failure_marks_task_failed_not_completed() -> None:
+async def test_artifact_persist_failure_marks_task_failed_and_raises() -> None:
     task = _queued_task()
     claim = _claim(task_id=task.task_id)
     fresh = _risk()
@@ -156,20 +183,69 @@ async def test_artifact_persist_failure_marks_task_failed_not_completed() -> Non
     artifact_service.persist = AsyncMock(side_effect=RuntimeError("db write failed"))
     execute = AsyncMock(return_value=fresh)
 
-    result = await run_risk_score_with_ledger(
-        task_service,
-        artifact_service,
-        event_id="evt-001",
-        tenant_id="tenant-a",
-        worker_principal="worker-a",
-        idempotency_key="idem-risk-002",
-        execute=execute,
-    )
+    with pytest.raises(AgentTaskDeniedError, match="artifact persist failed"):
+        await run_risk_score_with_ledger(
+            task_service,
+            artifact_service,
+            event_id="evt-001",
+            tenant_id="tenant-a",
+            worker_principal="worker-a",
+            idempotency_key="idem-risk-002",
+            execute=execute,
+        )
 
-    assert result.risk_score == 85
     task_service.fail.assert_awaited_once()
     task_service.complete.assert_not_awaited()
     assert "artifact_persist_failed" in task_service.fail.await_args.kwargs["error_summary"]
+
+
+@pytest.mark.asyncio
+async def test_execute_failure_marks_task_failed_and_reraises() -> None:
+    task = _queued_task()
+    claim = _claim(task_id=task.task_id)
+    task_service = MagicMock()
+    task_service.enqueue = AsyncMock(return_value=task)
+    task_service.claim = AsyncMock(return_value=claim)
+    task_service.start = AsyncMock()
+    task_service.fail = AsyncMock()
+    task_service.complete = AsyncMock()
+    execute = AsyncMock(side_effect=RuntimeError("risk agent failed"))
+
+    with pytest.raises(RuntimeError, match="risk agent failed"):
+        await run_risk_score_with_ledger(
+            task_service,
+            MagicMock(),
+            event_id="evt-001",
+            tenant_id="tenant-a",
+            worker_principal="worker-a",
+            idempotency_key="idem-risk-002",
+            execute=execute,
+        )
+
+    task_service.fail.assert_awaited_once()
+    assert "execute_failed" in task_service.fail.await_args.kwargs["error_summary"]
+    task_service.complete.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_terminal_task_denies_re_execution() -> None:
+    task = _manual_task()
+    task_service = MagicMock()
+    task_service.enqueue = AsyncMock(return_value=task)
+    execute = AsyncMock(return_value=_risk())
+
+    with pytest.raises(AgentTaskDeniedError, match="terminal task cannot re-execute"):
+        await run_risk_score_with_ledger(
+            task_service,
+            MagicMock(),
+            event_id="evt-001",
+            tenant_id="tenant-a",
+            worker_principal="worker-a",
+            idempotency_key="idem-risk-manual",
+            execute=execute,
+        )
+
+    execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -246,4 +322,36 @@ async def test_unavailable_ledger_degrades_to_execute() -> None:
     )
 
     assert result.risk_score == 66
+    execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_projection_service_validates_bounded_context_before_execute() -> None:
+    task = _queued_task()
+    claim = _claim(task_id=task.task_id)
+    task_service = MagicMock()
+    task_service.enqueue = AsyncMock(return_value=task)
+    task_service.claim = AsyncMock(return_value=claim)
+    task_service.start = AsyncMock()
+    task_service.complete = AsyncMock()
+    artifact_service = MagicMock()
+    artifact_service.persist = AsyncMock()
+    projection_service = ContentProjectionService(max_bytes=4096)
+    execute = AsyncMock(return_value=_risk())
+
+    await run_risk_score_with_ledger(
+        task_service,
+        artifact_service,
+        event_id="evt-001",
+        tenant_id="tenant-a",
+        worker_principal="worker-a",
+        idempotency_key="idem-risk-002",
+        content_projection_service=projection_service,
+        projection_fields={
+            "evidence_output": {"summary": "bounded evidence slice"},
+            "triage_result": {"entities": []},
+        },
+        execute=execute,
+    )
+
     execute.assert_awaited_once()

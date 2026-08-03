@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.errors import AgentTaskDeniedError, AgentTaskUnavailableError, ToolCallGrantDeniedError, ValidationError
 from app.db import models as orm
 from app.models.agent_task import (
+    DEFAULT_TASK_LEASE_SECONDS,
     MAX_GOAL_PARAMETERS_BYTES,
     TERMINAL_AGENT_TASK_STATUSES,
     AgentTask,
@@ -346,6 +347,73 @@ class AgentTaskService:
                 row.claim_owner = None
                 row.fencing_token_hash = None
                 row.lease_expires_at = None
+                row.updated_at = now
+        return _task_from_row(row)
+
+    async def reconcile_stale_running(
+        self,
+        task_id: str,
+        *,
+        tenant_id: str,
+        stale_after_seconds: int = DEFAULT_TASK_LEASE_SECONDS,
+    ) -> AgentTask:
+        """Mark a stale RUNNING task FAILED when worker heartbeat is lost (sweeper)."""
+        self._require_available()
+        now = datetime.now(tz=UTC)
+        cutoff = now - timedelta(seconds=stale_after_seconds)
+        async with self._session_factory() as session:  # type: ignore[union-attr]
+            async with session.begin():
+                row = await session.get(orm.AgentTaskORM, task_id, with_for_update=True)
+                if row is None:
+                    raise AgentTaskDeniedError("unknown task_id", details={"task_id": task_id})
+                if row.tenant_id != tenant_id:
+                    raise AgentTaskDeniedError("cross-tenant reconcile denied", details={"task_id": task_id})
+                status = AgentTaskStatus(row.status)
+                if status is not AgentTaskStatus.RUNNING:
+                    raise AgentTaskDeniedError(
+                        "only running tasks may reconcile via stale sweeper",
+                        details={"task_id": task_id, "status": status.value},
+                    )
+                if row.updated_at >= cutoff:
+                    raise AgentTaskDeniedError(
+                        "running task is not stale yet",
+                        details={"task_id": task_id},
+                    )
+                row.status = AgentTaskStatus.FAILED.value
+                row.claim_owner = None
+                row.fencing_token_hash = None
+                row.lease_expires_at = None
+                row.last_error = "stale_running_sweeper"
+                row.updated_at = now
+        return _task_from_row(row)
+
+    async def reconcile_completed_without_artifact(
+        self,
+        task_id: str,
+        *,
+        tenant_id: str,
+    ) -> AgentTask:
+        """Repair COMPLETED tasks that never persisted a logical artifact (sweeper)."""
+        self._require_available()
+        now = datetime.now(tz=UTC)
+        async with self._session_factory() as session:  # type: ignore[union-attr]
+            async with session.begin():
+                row = await session.get(orm.AgentTaskORM, task_id, with_for_update=True)
+                if row is None:
+                    raise AgentTaskDeniedError("unknown task_id", details={"task_id": task_id})
+                if row.tenant_id != tenant_id:
+                    raise AgentTaskDeniedError("cross-tenant reconcile denied", details={"task_id": task_id})
+                status = AgentTaskStatus(row.status)
+                if status is not AgentTaskStatus.COMPLETED:
+                    raise AgentTaskDeniedError(
+                        "only completed tasks may reconcile missing artifact",
+                        details={"task_id": task_id, "status": status.value},
+                    )
+                row.status = AgentTaskStatus.FAILED.value
+                row.claim_owner = None
+                row.fencing_token_hash = None
+                row.lease_expires_at = None
+                row.last_error = "completed_without_artifact"
                 row.updated_at = now
         return _task_from_row(row)
 

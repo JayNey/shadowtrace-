@@ -523,3 +523,58 @@ async def test_artifact_denied_when_task_not_running(
             tenant_id="tenant-a",
             event_id=event_id,
         )
+
+
+@pytest.mark.asyncio
+async def test_reconcile_completed_without_artifact_allows_retry(
+    task_service: AgentTaskService,
+) -> None:
+    event_id = f"evt-at-{ _sfx() }"
+    task = await task_service.enqueue(
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+    )
+    claim = await task_service.claim(
+        AgentTaskClaimRequest(
+            task_id=task.task_id,
+            worker_principal="worker-a",
+            tenant_id="tenant-a",
+        )
+    )
+    await task_service.start(claim, tenant_id="tenant-a")
+    await task_service.complete(claim)
+    reconciled = await task_service.reconcile_completed_without_artifact(
+        task.task_id,
+        tenant_id="tenant-a",
+    )
+    assert reconciled.status is AgentTaskStatus.FAILED
+    retried = await task_service.retry_to_queue(task.task_id, tenant_id="tenant-a")
+    assert retried.status is AgentTaskStatus.QUEUED
+
+
+@pytest.mark.asyncio
+async def test_reconcile_stale_running_marks_failed(
+    task_service: AgentTaskService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = f"evt-at-{ _sfx() }"
+    task = await task_service.enqueue(
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+    )
+    claim = await task_service.claim(
+        AgentTaskClaimRequest(
+            task_id=task.task_id,
+            worker_principal="worker-a",
+            tenant_id="tenant-a",
+        )
+    )
+    await task_service.start(claim, tenant_id="tenant-a")
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.AgentTaskORM, task.task_id)
+            assert row is not None
+            row.updated_at = datetime.now(tz=UTC) - timedelta(hours=1)
+    reconciled = await task_service.reconcile_stale_running(task.task_id, tenant_id="tenant-a")
+    assert reconciled.status is AgentTaskStatus.FAILED
+    assert reconciled.last_error == "stale_running_sweeper"
+    retried = await task_service.retry_to_queue(task.task_id, tenant_id="tenant-a")
+    assert retried.status is AgentTaskStatus.QUEUED

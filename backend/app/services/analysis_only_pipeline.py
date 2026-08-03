@@ -197,6 +197,7 @@ class AnalysisOnlyPipeline:
         settings: Settings | None = None,
         agent_task_service: Any | None = None,
         agent_artifact_service: Any | None = None,
+        content_projection_service: Any | None = None,
     ) -> None:
         self._triage = triage_agent
         self._evidence = evidence_agent
@@ -212,6 +213,7 @@ class AnalysisOnlyPipeline:
         self._settings = settings
         self._agent_task_service = agent_task_service
         self._agent_artifact_service = agent_artifact_service
+        self._content_projection_service = content_projection_service
 
         # Back-compat aliases for ISSUE-047 unit tests.
         self.triage_agent = triage_agent
@@ -346,6 +348,14 @@ class AnalysisOnlyPipeline:
             source_snapshot = await self._context_store.get(event_id, "source_snapshot")
             tenant_id = resolve_tenant_id(source_snapshot)
         if tenant_id:
+            projection_fields: dict[str, Any] = {
+                "triage_result": triage_result.model_dump(mode="json"),
+                "evidence_output": evidence_output.model_dump(mode="json"),
+            }
+            if rag_output is not None:
+                projection_fields["rag_output"] = rag_output.model_dump(mode="json")
+            if graph_output is not None:
+                projection_fields["graph_output"] = graph_output.model_dump(mode="json")
             risk_assessment = await run_risk_score_with_ledger(
                 self._agent_task_service,
                 self._agent_artifact_service,
@@ -353,6 +363,8 @@ class AnalysisOnlyPipeline:
                 tenant_id=tenant_id,
                 worker_principal="investigation:analysis_only_pipeline",
                 idempotency_key=f"risk-score:{event_id}",
+                content_projection_service=self._content_projection_service,
+                projection_fields=projection_fields,
                 execute=lambda: self._run_risk(
                     event_id,
                     triage_result,

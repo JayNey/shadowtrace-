@@ -964,6 +964,14 @@ def build_investigation_graph(
             return result
 
         if tenant_id:
+            projection_fields: dict[str, Any] = {
+                "triage_result": state["triage_result"],
+                "evidence_output": state["evidence_output"],
+            }
+            if state.get("rag_output") is not None:
+                projection_fields["rag_output"] = state["rag_output"]
+            if state.get("graph_output") is not None:
+                projection_fields["graph_output"] = state["graph_output"]
             result = await run_risk_score_with_ledger(
                 services.get("agent_task_service"),
                 services.get("agent_artifact_service"),
@@ -971,6 +979,8 @@ def build_investigation_graph(
                 tenant_id=tenant_id,
                 worker_principal="investigation:workflow_graph",
                 idempotency_key=f"risk-score:{state['event_id']}",
+                content_projection_service=services.get("content_projection_service"),
+                projection_fields=projection_fields,
                 execute=_execute_risk,
             )
         else:

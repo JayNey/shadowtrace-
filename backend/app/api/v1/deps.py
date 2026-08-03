@@ -503,6 +503,7 @@ async def _build_production_investigation_graph(
         "convergence_guard": convergence_guard,
         "agent_task_service": _get_agent_task_service(),
         "agent_artifact_service": _get_agent_artifact_service(),
+        "content_projection_service": _get_content_projection_service(),
     }
     checkpointer = await build_checkpointer(_get_redis())
     return build_investigation_graph(agents, services, checkpointer=checkpointer)
@@ -905,6 +906,7 @@ async def get_pipeline() -> Any:
             settings=stack["settings"],
             agent_task_service=_get_agent_task_service(),
             agent_artifact_service=_get_agent_artifact_service(),
+            content_projection_service=_get_content_projection_service(),
         )
     return _pipeline
 

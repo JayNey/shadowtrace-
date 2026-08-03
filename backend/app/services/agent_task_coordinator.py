@@ -6,12 +6,13 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
-from app.core.errors import AgentTaskDeniedError, AgentTaskUnavailableError
+from app.core.errors import AgentTaskDeniedError, AgentTaskUnavailableError, ValidationError
 from app.models.agent_io import RiskAssessment
 from app.models.agent_task import (
     TERMINAL_AGENT_TASK_STATUSES,
     AgentArtifactPersistRequest,
     AgentTask,
+    AgentTaskClaim,
     AgentTaskClaimRequest,
     AgentTaskContextRef,
     AgentTaskEnqueueRequest,
@@ -21,10 +22,26 @@ from app.models.agent_task import (
 )
 from app.services.agent_artifact_service import AgentArtifactService
 from app.services.agent_task_service import AgentTaskService
+from app.services.content_projection_service import ContentProjectionService
 
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
+
+RISK_SCORE_CONTEXT_REFS: list[AgentTaskContextRef] = [
+    AgentTaskContextRef(ref_kind="event_context_field", ref_id="triage_result"),
+    AgentTaskContextRef(ref_kind="event_context_field", ref_id="evidence_output"),
+    AgentTaskContextRef(ref_kind="event_context_field", ref_id="rag_output"),
+    AgentTaskContextRef(ref_kind="event_context_field", ref_id="graph_output"),
+]
+
+_NON_RECOVERABLE_TERMINAL: frozenset[AgentTaskStatus] = frozenset(
+    {
+        AgentTaskStatus.MANUAL,
+        AgentTaskStatus.DEAD,
+        AgentTaskStatus.CANCELLED,
+    }
+)
 
 
 async def enqueue_risk_score_task(
@@ -45,12 +62,7 @@ async def enqueue_risk_score_task(
                 tenant_id=tenant_id,
                 goal=AgentTaskGoal(
                     task_type=AgentTaskType.RISK_SCORE,
-                    context_refs=[
-                        AgentTaskContextRef(ref_kind="event_context_field", ref_id="triage_result"),
-                        AgentTaskContextRef(ref_kind="event_context_field", ref_id="evidence_output"),
-                        AgentTaskContextRef(ref_kind="event_context_field", ref_id="rag_output"),
-                        AgentTaskContextRef(ref_kind="event_context_field", ref_id="graph_output"),
-                    ],
+                    context_refs=list(RISK_SCORE_CONTEXT_REFS),
                     parameters=parameters or {},
                 ),
                 idempotency_key=idempotency_key,
@@ -64,6 +76,20 @@ async def enqueue_risk_score_task(
         return None
 
 
+def _build_risk_projection(
+    content_projection_service: ContentProjectionService | None,
+    projection_fields: dict[str, Any] | None,
+) -> None:
+    """Validate bounded context slice before RiskAgent execution (Phase A)."""
+    if content_projection_service is None or not projection_fields:
+        return
+    content_projection_service.build(
+        projection_kind="risk_score_context",
+        raw_fields=projection_fields,
+        source_refs=list(RISK_SCORE_CONTEXT_REFS),
+    )
+
+
 async def _maybe_requeue_recoverable(task: AgentTask, agent_task_service: AgentTaskService, *, tenant_id: str) -> AgentTask:
     if task.status not in {AgentTaskStatus.FAILED, AgentTaskStatus.EXPIRED}:
         return task
@@ -71,6 +97,57 @@ async def _maybe_requeue_recoverable(task: AgentTask, agent_task_service: AgentT
         return await agent_task_service.retry_to_queue(task.task_id, tenant_id=tenant_id)
     except AgentTaskDeniedError:
         return task
+
+
+async def _prepare_task_for_claim(
+    task: AgentTask,
+    agent_task_service: AgentTaskService,
+    artifact_service: AgentArtifactService | None,
+    *,
+    tenant_id: str,
+) -> AgentTask | RiskAssessment:
+    """Resolve terminal/repair states before claim; return cached result when possible."""
+    if task.status in _NON_RECOVERABLE_TERMINAL:
+        raise AgentTaskDeniedError(
+            "terminal task cannot re-execute",
+            details={"task_id": task.task_id, "status": task.status.value},
+        )
+
+    if task.status is AgentTaskStatus.COMPLETED:
+        cached = await _load_completed_risk_assessment(
+            artifact_service,
+            task=task,
+            tenant_id=tenant_id,
+        )
+        if cached is not None:
+            return cached
+        logger.warning(
+            "COMPLETED AgentTask missing risk_assessment artifact; reconciling task=%s",
+            task.task_id,
+        )
+        await agent_task_service.reconcile_completed_without_artifact(task.task_id, tenant_id=tenant_id)
+        return await agent_task_service.retry_to_queue(task.task_id, tenant_id=tenant_id)
+
+    if task.status is AgentTaskStatus.RUNNING:
+        try:
+            task = await agent_task_service.reconcile_stale_running(task.task_id, tenant_id=tenant_id)
+        except AgentTaskDeniedError:
+            pass
+        if task.status is AgentTaskStatus.RUNNING:
+            raise AgentTaskDeniedError(
+                "task already running",
+                details={"task_id": task.task_id},
+            )
+
+    if task.status in TERMINAL_AGENT_TASK_STATUSES:
+        task = await _maybe_requeue_recoverable(task, agent_task_service, tenant_id=tenant_id)
+        if task.status in TERMINAL_AGENT_TASK_STATUSES:
+            raise AgentTaskDeniedError(
+                "terminal task cannot re-execute",
+                details={"task_id": task.task_id, "status": task.status.value},
+            )
+
+    return task
 
 
 async def _load_completed_risk_assessment(
@@ -102,6 +179,22 @@ async def _load_completed_risk_assessment(
         return None
 
 
+async def _fail_claim_quietly(
+    agent_task_service: AgentTaskService,
+    claim: AgentTaskClaim,
+    *,
+    error_summary: str,
+) -> None:
+    try:
+        await agent_task_service.fail(claim, error_summary=error_summary[:1024])
+    except Exception:
+        logger.warning(
+            "AgentTask fail transition failed for task=%s",
+            claim.task_id,
+            exc_info=True,
+        )
+
+
 async def run_risk_score_with_ledger(
     agent_task_service: AgentTaskService | None,
     artifact_service: AgentArtifactService | None,
@@ -112,6 +205,8 @@ async def run_risk_score_with_ledger(
     idempotency_key: str,
     execute: Callable[[], Awaitable[_T]],
     parameters: dict[str, Any] | None = None,
+    content_projection_service: ContentProjectionService | None = None,
+    projection_fields: dict[str, Any] | None = None,
 ) -> _T:
     """Run RiskAgent under a synchronous claim→start→artifact→complete ledger cycle."""
     task = await enqueue_risk_score_task(
@@ -122,26 +217,18 @@ async def run_risk_score_with_ledger(
         parameters=parameters,
     )
     if agent_task_service is None or task is None:
+        _build_risk_projection(content_projection_service, projection_fields)
         return await execute()
 
-    if task.status in TERMINAL_AGENT_TASK_STATUSES:
-        if task.status is AgentTaskStatus.COMPLETED:
-            cached = await _load_completed_risk_assessment(
-                artifact_service,
-                task=task,
-                tenant_id=tenant_id,
-            )
-            if cached is not None:
-                return cached
-            logger.warning(
-                "COMPLETED AgentTask missing risk_assessment artifact; re-executing for event=%s task=%s",
-                event_id,
-                task.task_id,
-            )
-            return await execute()
-        task = await _maybe_requeue_recoverable(task, agent_task_service, tenant_id=tenant_id)
-        if task.status in TERMINAL_AGENT_TASK_STATUSES:
-            return await execute()
+    prepared = await _prepare_task_for_claim(
+        task,
+        agent_task_service,
+        artifact_service,
+        tenant_id=tenant_id,
+    )
+    if isinstance(prepared, RiskAssessment):
+        return prepared  # type: ignore[return-value]
+    task = prepared
 
     try:
         claim = await agent_task_service.claim(
@@ -152,75 +239,83 @@ async def run_risk_score_with_ledger(
             )
         )
         await agent_task_service.start(claim, tenant_id=tenant_id)
-        result = await execute()
-        artifact_persisted = False
-        if artifact_service is not None:
-            payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
-            if isinstance(payload, dict):
-                try:
-                    await artifact_service.persist(
-                        claim,
-                        AgentArtifactPersistRequest(
-                            logical_artifact_key="risk_assessment",
-                            payload=payload,
-                            source_refs=[
-                                AgentTaskContextRef(
-                                    ref_kind="event_context_field",
-                                    ref_id="evidence_output",
-                                ),
-                                AgentTaskContextRef(
-                                    ref_kind="event_context_field",
-                                    ref_id="graph_output",
-                                ),
-                            ],
-                        ),
-                        tenant_id=tenant_id,
-                        event_id=event_id,
-                    )
-                    artifact_persisted = True
-                except Exception as exc:
-                    logger.warning(
-                        "AgentArtifact persist failed for event=%s task=%s",
-                        event_id,
-                        task.task_id,
-                        exc_info=True,
-                    )
-                    try:
-                        await agent_task_service.fail(
-                            claim,
-                            error_summary=f"artifact_persist_failed: {exc.__class__.__name__}",
-                        )
-                    except Exception:
-                        logger.warning(
-                            "AgentTask fail transition failed after artifact persist error for event=%s task=%s",
-                            event_id,
-                            task.task_id,
-                            exc_info=True,
-                        )
-                    return result
-        if artifact_service is not None and not artifact_persisted:
-            try:
-                await agent_task_service.fail(
-                    claim,
-                    error_summary="artifact_persist_skipped: non-dict payload",
-                )
-            except Exception:
-                logger.warning(
-                    "AgentTask fail transition failed after artifact skip for event=%s task=%s",
-                    event_id,
-                    task.task_id,
-                    exc_info=True,
-                )
-            return result
-        await agent_task_service.complete(claim)
-        return result
     except (AgentTaskDeniedError, AgentTaskUnavailableError) as exc:
         logger.warning(
-            "AgentTask ledger cycle degraded for event=%s: %s",
+            "AgentTask claim/start degraded for event=%s: %s",
             event_id,
             exc,
         )
+        _build_risk_projection(content_projection_service, projection_fields)
         return await execute()
 
+    _build_risk_projection(content_projection_service, projection_fields)
+    try:
+        result = await execute()
+    except Exception as exc:
+        await _fail_claim_quietly(
+            agent_task_service,
+            claim,
+            error_summary=f"execute_failed: {exc.__class__.__name__}",
+        )
+        raise
 
-__all__ = ["enqueue_risk_score_task", "run_risk_score_with_ledger"]
+    if artifact_service is None:
+        await agent_task_service.complete(claim)
+        return result
+
+    payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+    if not isinstance(payload, dict):
+        await _fail_claim_quietly(
+            agent_task_service,
+            claim,
+            error_summary="artifact_persist_skipped: non-dict payload",
+        )
+        raise AgentTaskDeniedError(
+            "artifact persist requires dict payload",
+            details={"task_id": task.task_id},
+        )
+
+    try:
+        await artifact_service.persist(
+            claim,
+            AgentArtifactPersistRequest(
+                logical_artifact_key="risk_assessment",
+                payload=payload,
+                source_refs=list(RISK_SCORE_CONTEXT_REFS),
+            ),
+            tenant_id=tenant_id,
+            event_id=event_id,
+        )
+    except ValidationError:
+        await _fail_claim_quietly(
+            agent_task_service,
+            claim,
+            error_summary="artifact_persist_validation_failed",
+        )
+        raise
+    except Exception as exc:
+        logger.warning(
+            "AgentArtifact persist failed for event=%s task=%s",
+            event_id,
+            task.task_id,
+            exc_info=True,
+        )
+        await _fail_claim_quietly(
+            agent_task_service,
+            claim,
+            error_summary=f"artifact_persist_failed: {exc.__class__.__name__}",
+        )
+        raise AgentTaskDeniedError(
+            "artifact persist failed",
+            details={"task_id": task.task_id, "reason": exc.__class__.__name__},
+        ) from exc
+
+    await agent_task_service.complete(claim)
+    return result
+
+
+__all__ = [
+    "RISK_SCORE_CONTEXT_REFS",
+    "enqueue_risk_score_task",
+    "run_risk_score_with_ledger",
+]
