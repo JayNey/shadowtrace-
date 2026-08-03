@@ -66,9 +66,18 @@ def _alembic_config() -> Config:
     return cfg
 
 
+def _run_migrations() -> None:
+    """Alembic env.py reads get_settings().database_url — sync test URL first."""
+    os.environ["DATABASE_URL"] = DATABASE_URL
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    command.upgrade(_alembic_config(), "head")
+
+
 @pytest.fixture(scope="module")
 def migrated() -> None:
-    command.upgrade(_alembic_config(), "head")
+    _run_migrations()
 
 
 @pytest_asyncio.fixture
@@ -407,6 +416,64 @@ def test_approval_binding_invalidates_on_policy_version_change() -> None:
     detail = build_approval_binding_detail(action)
     detail["policy_version"] = "stale-policy-v0"
     with pytest.raises(ValidationError, match="policy version changed"):
+        validate_approval_binding(action, detail)
+
+
+def test_approval_binding_requires_plan_revision_in_detail() -> None:
+    from app.models.action import Action
+    from app.models.enums import ActionCategory, ActionLevel, ExecutionOwner
+    from app.models.playbook_release import PlaybookRef
+
+    action = Action(
+        action_id="act-001",
+        event_id="evt-001",
+        plan_revision=1,
+        action_fingerprint="fp-original",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        playbook_ref=PlaybookRef(
+            playbook_id="pb-a1b2c3d4",
+            release_id="krel-abc",
+            release_version="v1",
+            content_hash="a" * 64,
+            bundle_content_hash="b" * 64,
+        ),
+    )
+    detail = build_approval_binding_detail(action)
+    detail.pop("plan_revision")
+    with pytest.raises(ValidationError, match="missing plan revision"):
+        validate_approval_binding(action, detail)
+
+
+def test_approval_binding_requires_action_fingerprint_in_detail() -> None:
+    from app.models.action import Action
+    from app.models.enums import ActionCategory, ActionLevel, ExecutionOwner
+    from app.models.playbook_release import PlaybookRef
+
+    action = Action(
+        action_id="act-001",
+        event_id="evt-001",
+        plan_revision=1,
+        action_fingerprint="fp-original",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        playbook_ref=PlaybookRef(
+            playbook_id="pb-a1b2c3d4",
+            release_id="krel-abc",
+            release_version="v1",
+            content_hash="a" * 64,
+            bundle_content_hash="b" * 64,
+        ),
+    )
+    detail = build_approval_binding_detail(action)
+    detail.pop("action_fingerprint")
+    with pytest.raises(ValidationError, match="missing action fingerprint"):
         validate_approval_binding(action, detail)
 
 

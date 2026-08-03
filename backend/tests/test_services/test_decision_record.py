@@ -34,9 +34,18 @@ def _alembic_config() -> Config:
     return config
 
 
+def _run_migrations() -> None:
+    """Alembic env.py reads get_settings().database_url — sync test URL first."""
+    os.environ["DATABASE_URL"] = DATABASE_URL
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    command.upgrade(_alembic_config(), "head")
+
+
 @pytest.fixture(scope="module")
 def migrated_database() -> None:
-    command.upgrade(_alembic_config(), "head")
+    _run_migrations()
 
 
 @pytest_asyncio.fixture
@@ -432,6 +441,44 @@ async def test_planner_revision_links_parent_and_supersedes(
         assert second.revision == 2
         assert second.parent_record_id == first_id
         assert second.supersedes_record_id == first_id
+
+
+@pytest.mark.asyncio
+async def test_response_agent_playbook_refs_persist_in_db(
+    service: DecisionRecordService,
+) -> None:
+    event_id = _event_id()
+    record_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="response_agent",
+        trace_id="trc-playbook-persist",
+        input_data={"event_id": event_id},
+        output_data={
+            "plan_id": "rsp-playbook1",
+            "generated_by": "template",
+            "actions": [
+                {
+                    "action_id": "act-playbook1",
+                    "action_name": "Block IP",
+                    "tool_name": "block_ip",
+                    "playbook_ref": {
+                        "playbook_id": "pb-a1b2c3d4",
+                        "release_id": "krel-abcdef012345678",
+                        "release_version": "v1-test",
+                        "content_hash": "a" * 64,
+                        "bundle_content_hash": "b" * 64,
+                    },
+                }
+            ],
+        },
+    )
+    assert record_id is not None
+    row = await service.get_by_trace_ref("trc-playbook-persist")
+    assert row is not None
+    ref_types = {(item["ref_type"], item["ref_id"]) for item in row.input_refs}
+    assert ("playbook_release_id", "krel-abcdef012345678") in ref_types
+    assert ("playbook_id", "pb-a1b2c3d4") in ref_types
+    assert row.kb_version == "v1-test"
 
 
 @pytest.mark.asyncio

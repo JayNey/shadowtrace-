@@ -91,7 +91,15 @@ def validate_approval_binding(action: Action, detail: dict[str, Any] | None) -> 
             },
         )
     bound_revision = detail.get("plan_revision")
-    if isinstance(bound_revision, int) and bound_revision != action.plan_revision:
+    if not isinstance(bound_revision, int):
+        raise ValidationError(
+            "approval binding missing plan revision for playbook-pinned action",
+            details={
+                "action_id": action.action_id,
+                "reason": "plan_revision_missing",
+            },
+        )
+    if bound_revision != action.plan_revision:
         raise ValidationError(
             "approval binding stale: plan revision changed",
             details={
@@ -102,7 +110,15 @@ def validate_approval_binding(action: Action, detail: dict[str, Any] | None) -> 
             },
         )
     bound_fingerprint = detail.get("action_fingerprint")
-    if isinstance(bound_fingerprint, str) and bound_fingerprint != action.action_fingerprint:
+    if not isinstance(bound_fingerprint, str) or not bound_fingerprint:
+        raise ValidationError(
+            "approval binding missing action fingerprint for playbook-pinned action",
+            details={
+                "action_id": action.action_id,
+                "reason": "action_fingerprint_missing",
+            },
+        )
+    if bound_fingerprint != action.action_fingerprint:
         raise ValidationError(
             "approval binding stale: action fingerprint changed",
             details={

@@ -86,9 +86,18 @@ def _alembic_config() -> Config:
     return cfg
 
 
+def _run_migrations() -> None:
+    """Alembic env.py reads get_settings().database_url — sync test URL first."""
+    os.environ["DATABASE_URL"] = DATABASE_URL
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    command.upgrade(_alembic_config(), "head")
+
+
 @pytest.fixture(scope="module")
 def migrated() -> None:
-    command.upgrade(_alembic_config(), "head")
+    _run_migrations()
 
 
 @pytest_asyncio.fixture
