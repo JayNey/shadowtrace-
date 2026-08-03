@@ -1,0 +1,33 @@
+{
+  "$defs": {
+    "KnowledgeFilterKind": {
+      "description": "Typed metadata filters applied before candidate fetch (#636).",
+      "enum": [
+        "source_id",
+        "content_type",
+        "time_after",
+        "time_before"
+      ],
+      "title": "KnowledgeFilterKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "One storage-layer metadata predicate.",
+  "properties": {
+    "kind": {
+      "$ref": "#/$defs/KnowledgeFilterKind"
+    },
+    "value": {
+      "minLength": 1,
+      "title": "Value",
+      "type": "string"
+    }
+  },
+  "required": [
+    "kind",
+    "value"
+  ],
+  "title": "KnowledgeTypedFilter",
+  "type": "object"
+}

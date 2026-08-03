@@ -146,7 +146,15 @@ from app.models.embedding import (
     VectorQueryFilter,
     VectorRecordIdentity,
 )
-from app.models.knowledge_release import KnowledgeQueryPlan, KnowledgeRelease
+from app.models.knowledge_release import (
+    KnowledgeFilterKind,
+    KnowledgeQueryBudget,
+    KnowledgeQueryPlan,
+    KnowledgeQueryPlanHints,
+    KnowledgeQueryPlanValidationOutcome,
+    KnowledgeRelease,
+    KnowledgeTypedFilter,
+)
 from app.models.tool_call_grant import (
     BoundExecutionPrincipal,
     SafeToolProjection,
@@ -398,9 +406,13 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "BoundExecutionPrincipal": BoundExecutionPrincipal,
     "ToolCallAttemptRecord": ToolCallAttemptRecord,
     "SafeToolProjection": SafeToolProjection,
-    # knowledge release registry (ISSUE-128)
+    # knowledge release registry (ISSUE-128, ISSUE-130 / #636)
     "KnowledgeRelease": KnowledgeRelease,
     "KnowledgeQueryPlan": KnowledgeQueryPlan,
+    "KnowledgeQueryBudget": KnowledgeQueryBudget,
+    "KnowledgeQueryPlanHints": KnowledgeQueryPlanHints,
+    "KnowledgeQueryPlanValidationOutcome": KnowledgeQueryPlanValidationOutcome,
+    "KnowledgeTypedFilter": KnowledgeTypedFilter,
     # llm provider health (ISSUE-106 / #609)
     "LLMProviderHealth": LLMProviderHealth,
     "LLMProbeStatus": LLMProbeStatus,

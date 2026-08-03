@@ -10,6 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.embedding.service import EmbeddingService
 from app.db.orm.knowledge import KnowledgeChunkORM
 from app.models.knowledge import KnowledgeChunk, RetrievedChunk
+from app.models.knowledge_release import KnowledgeTypedFilter
+from app.services.knowledge_store_prefilter import (
+    assert_knowledge_chunk_prefilter_in_sql,
+    embedding_release_filter_clause,
+    typed_filter_clause,
+)
 
 
 def _merge_hybrid_results(
@@ -67,9 +73,7 @@ class KnowledgeStore:
         if tenant_isolation_strict:
             clause = " AND metadata->>'tenant_id' = :tenant_id"
         else:
-            clause = (
-                " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
-            )
+            clause = " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
         return clause, {"tenant_id": tenant_id}
 
     @staticmethod
@@ -78,6 +82,33 @@ class KnowledgeStore:
             return "", {}
         clause = " AND metadata->>'release_id' = :release_id"
         return clause, {"release_id": release_id}
+
+    @classmethod
+    def compose_vector_search_sql(
+        cls,
+        *,
+        tenant_id: str | None,
+        tenant_isolation_strict: bool,
+        release_id: str | None,
+        embedding_release_id: str | None,
+        typed_filters: tuple[KnowledgeTypedFilter, ...] | list[KnowledgeTypedFilter] = (),
+    ) -> str:
+        """Return the vector_search SQL body for backend pre-filter proof (#636)."""
+        tenant_clause, _ = cls._tenant_filter_clause(
+            tenant_id,
+            tenant_isolation_strict=tenant_isolation_strict,
+        )
+        release_clause, _ = cls._release_filter_clause(release_id)
+        embedding_clause, _ = embedding_release_filter_clause(embedding_release_id)
+        filter_clause, _ = typed_filter_clause(typed_filters)
+        return f"""
+            SELECT chunk_id, kb_name, content, metadata,
+                   1.0 - (embedding <=> :q) AS score
+            FROM knowledge_chunk
+            WHERE kb_name = :kb_name{tenant_clause}{release_clause}{embedding_clause}{filter_clause}
+            ORDER BY embedding <=> :q
+            LIMIT :top_k
+            """
 
     @property
     def semantic_search_enabled(self) -> bool:
@@ -148,6 +179,8 @@ class KnowledgeStore:
         *,
         tenant_id: str | None = None,
         release_id: str | None = None,
+        embedding_release_id: str | None = None,
+        typed_filters: tuple[KnowledgeTypedFilter, ...] | list[KnowledgeTypedFilter] = (),
     ) -> list[RetrievedChunk]:
         """Cosine-similarity search across vectors in *kb_name*."""
         tenant_clause, tenant_params = self._tenant_filter_clause(
@@ -155,23 +188,27 @@ class KnowledgeStore:
             tenant_isolation_strict=self._tenant_isolation_strict,
         )
         release_clause, release_params = self._release_filter_clause(release_id)
+        embedding_clause, embedding_params = embedding_release_filter_clause(embedding_release_id)
+        filter_clause, filter_params = typed_filter_clause(typed_filters)
         params: dict[str, object] = {
             "kb_name": kb_name,
             "q": query_embedding,
             "top_k": top_k,
             **tenant_params,
             **release_params,
+            **embedding_params,
+            **filter_params,
         }
-        sql = text(
-            f"""
-            SELECT chunk_id, kb_name, content, metadata,
-                   1.0 - (embedding <=> :q) AS score
-            FROM knowledge_chunk
-            WHERE kb_name = :kb_name{tenant_clause}{release_clause}
-            ORDER BY embedding <=> :q
-            LIMIT :top_k
-            """
-        ).bindparams(
+        sql_body = self.compose_vector_search_sql(
+            tenant_id=tenant_id,
+            tenant_isolation_strict=self._tenant_isolation_strict,
+            release_id=release_id,
+            embedding_release_id=embedding_release_id,
+            typed_filters=typed_filters,
+        )
+        if release_id is not None or embedding_release_id is not None:
+            assert_knowledge_chunk_prefilter_in_sql(sql_body)
+        sql = text(sql_body).bindparams(
             bindparam("q", type_=Vector),
             bindparam("kb_name", type_=String),
             bindparam("top_k", type_=Integer),
@@ -203,9 +240,7 @@ class KnowledgeStore:
     ) -> list[RetrievedChunk]:
         """Embed *query_text* and run cosine-similarity search (ISSUE-522)."""
         query_vec = await self._embed.embed_query(query_text)
-        return await self.vector_search(
-            kb_name, query_vec, top_k=top_k, release_id=release_id
-        )
+        return await self.vector_search(kb_name, query_vec, top_k=top_k, release_id=release_id)
 
     async def keyword_search(
         self,
@@ -215,6 +250,8 @@ class KnowledgeStore:
         *,
         tenant_id: str | None = None,
         release_id: str | None = None,
+        embedding_release_id: str | None = None,
+        typed_filters: tuple[KnowledgeTypedFilter, ...] | list[KnowledgeTypedFilter] = (),
     ) -> list[RetrievedChunk]:
         """PostgreSQL full-text search across chunks in *kb_name*."""
         tenant_clause, tenant_params = self._tenant_filter_clause(
@@ -222,12 +259,16 @@ class KnowledgeStore:
             tenant_isolation_strict=self._tenant_isolation_strict,
         )
         release_clause, release_params = self._release_filter_clause(release_id)
+        embedding_clause, embedding_params = embedding_release_filter_clause(embedding_release_id)
+        filter_clause, filter_params = typed_filter_clause(typed_filters)
         params: dict[str, object] = {
             "kb_name": kb_name,
             "q": query_text,
             "top_k": top_k,
             **tenant_params,
             **release_params,
+            **embedding_params,
+            **filter_params,
         }
         sql = text(
             f"""
@@ -239,7 +280,8 @@ class KnowledgeStore:
                    ) AS score
             FROM knowledge_chunk
             WHERE kb_name = :kb_name
-              AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q){tenant_clause}{release_clause}
+              AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q)
+              {tenant_clause}{release_clause}{embedding_clause}{filter_clause}
             ORDER BY ts_rank(to_tsvector('simple', content),
                              plainto_tsquery('simple', :q)) DESC
             LIMIT :top_k

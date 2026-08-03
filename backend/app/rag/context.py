@@ -13,7 +13,7 @@ from opentelemetry import trace
 
 from app.core.config import Settings, get_settings
 from app.models.agent_io import RAGAgentInput
-from app.models.knowledge_release import KnowledgeQueryPlan
+from app.models.knowledge_release import KnowledgeQueryPlan, KnowledgeTypedFilter
 from app.services.tenant_resolution import resolve_tenant_id
 
 _NIL_UUID = "00000000-0000-0000-0000-000000000000"
@@ -57,6 +57,18 @@ class RetrievalContext:
         if self.query_plan.kb_name != kb_name:
             return None
         return self.query_plan.active_release_id
+
+    def storage_filters_for_kb(
+        self, kb_name: str
+    ) -> tuple[str | None, str | None, tuple[KnowledgeTypedFilter, ...]]:
+        """Return release_id, embedding_release_id, typed_filters when plan applies to *kb*."""
+        if self.query_plan is None or self.query_plan.kb_name != kb_name:
+            return None, None, ()
+        return (
+            self.query_plan.active_release_id,
+            self.query_plan.embedding_release_id,
+            self.query_plan.typed_filters,
+        )
 
     @classmethod
     def from_rag_input(

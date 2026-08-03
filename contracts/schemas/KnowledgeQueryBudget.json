@@ -1,0 +1,22 @@
+{
+  "additionalProperties": false,
+  "description": "Retrieval budget — server-owned; agent hints may only narrow.",
+  "properties": {
+    "top_k": {
+      "default": 5,
+      "maximum": 100,
+      "minimum": 1,
+      "title": "Top K",
+      "type": "integer"
+    },
+    "max_candidates": {
+      "default": 50,
+      "maximum": 500,
+      "minimum": 1,
+      "title": "Max Candidates",
+      "type": "integer"
+    }
+  },
+  "title": "KnowledgeQueryBudget",
+  "type": "object"
+}

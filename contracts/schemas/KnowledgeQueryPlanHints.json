@@ -1,0 +1,83 @@
+{
+  "$defs": {
+    "KnowledgeFilterKind": {
+      "description": "Typed metadata filters applied before candidate fetch (#636).",
+      "enum": [
+        "source_id",
+        "content_type",
+        "time_after",
+        "time_before"
+      ],
+      "title": "KnowledgeFilterKind",
+      "type": "string"
+    },
+    "KnowledgeTypedFilter": {
+      "additionalProperties": false,
+      "description": "One storage-layer metadata predicate.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/KnowledgeFilterKind"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "KnowledgeTypedFilter",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Agent-provided retrieval hints — validator may only narrow scope.",
+  "properties": {
+    "corpus_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Corpus Ids",
+      "type": "array"
+    },
+    "source_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Source Ids",
+      "type": "array"
+    },
+    "content_types": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Content Types",
+      "type": "array"
+    },
+    "top_k": {
+      "anyOf": [
+        {
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Top K"
+    },
+    "filters": {
+      "items": {
+        "$ref": "#/$defs/KnowledgeTypedFilter"
+      },
+      "title": "Filters",
+      "type": "array"
+    }
+  },
+  "title": "KnowledgeQueryPlanHints",
+  "type": "object"
+}

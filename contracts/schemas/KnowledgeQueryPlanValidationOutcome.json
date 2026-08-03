@@ -1,0 +1,202 @@
+{
+  "$defs": {
+    "KnowledgeFilterKind": {
+      "description": "Typed metadata filters applied before candidate fetch (#636).",
+      "enum": [
+        "source_id",
+        "content_type",
+        "time_after",
+        "time_before"
+      ],
+      "title": "KnowledgeFilterKind",
+      "type": "string"
+    },
+    "KnowledgeQueryBudget": {
+      "additionalProperties": false,
+      "description": "Retrieval budget — server-owned; agent hints may only narrow.",
+      "properties": {
+        "top_k": {
+          "default": 5,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "max_candidates": {
+          "default": 50,
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Max Candidates",
+          "type": "integer"
+        }
+      },
+      "title": "KnowledgeQueryBudget",
+      "type": "object"
+    },
+    "KnowledgeQueryPlan": {
+      "additionalProperties": false,
+      "description": "Request-scoped knowledge retrieval plan with release pinning and filters.",
+      "properties": {
+        "schema_version": {
+          "default": "1.0",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "tenant_id": {
+          "default": "",
+          "minLength": 0,
+          "title": "Tenant Id",
+          "type": "string"
+        },
+        "principal": {
+          "default": "",
+          "minLength": 0,
+          "title": "Principal",
+          "type": "string"
+        },
+        "corpus_id": {
+          "minLength": 1,
+          "title": "Corpus Id",
+          "type": "string"
+        },
+        "kb_name": {
+          "minLength": 1,
+          "title": "Kb Name",
+          "type": "string"
+        },
+        "allowed_corpora": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Corpora",
+          "type": "array"
+        },
+        "active_release_id": {
+          "minLength": 1,
+          "title": "Active Release Id",
+          "type": "string"
+        },
+        "embedding_release_id": {
+          "minLength": 1,
+          "title": "Embedding Release Id",
+          "type": "string"
+        },
+        "typed_filters": {
+          "items": {
+            "$ref": "#/$defs/KnowledgeTypedFilter"
+          },
+          "title": "Typed Filters",
+          "type": "array"
+        },
+        "budget": {
+          "$ref": "#/$defs/KnowledgeQueryBudget"
+        },
+        "trace_id": {
+          "minLength": 1,
+          "title": "Trace Id",
+          "type": "string"
+        },
+        "plan_hash": {
+          "default": "",
+          "maxLength": 64,
+          "minLength": 0,
+          "title": "Plan Hash",
+          "type": "string"
+        },
+        "pinned_at": {
+          "format": "date-time",
+          "title": "Pinned At",
+          "type": "string"
+        },
+        "rejected_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rejected Reasons",
+          "type": "array"
+        },
+        "degraded_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Degraded Reasons",
+          "type": "array"
+        }
+      },
+      "required": [
+        "corpus_id",
+        "kb_name",
+        "active_release_id",
+        "embedding_release_id",
+        "trace_id",
+        "pinned_at"
+      ],
+      "title": "KnowledgeQueryPlan",
+      "type": "object"
+    },
+    "KnowledgeTypedFilter": {
+      "additionalProperties": false,
+      "description": "One storage-layer metadata predicate.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/KnowledgeFilterKind"
+        },
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "value"
+      ],
+      "title": "KnowledgeTypedFilter",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Validator output — accepted plan or fail-closed rejection.",
+  "properties": {
+    "accepted": {
+      "title": "Accepted",
+      "type": "boolean"
+    },
+    "plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/KnowledgeQueryPlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "rejected_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Rejected Reasons",
+      "type": "array"
+    },
+    "degraded_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Degraded Reasons",
+      "type": "array"
+    },
+    "sanitized_plan_hash": {
+      "default": "",
+      "title": "Sanitized Plan Hash",
+      "type": "string"
+    }
+  },
+  "required": [
+    "accepted"
+  ],
+  "title": "KnowledgeQueryPlanValidationOutcome",
+  "type": "object"
+}

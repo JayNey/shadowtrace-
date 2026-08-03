@@ -171,6 +171,7 @@ async def test_citations_carry_pinned_release_id(
         ),
         retriever=HybridRetriever(store, embed),
         reranker=MockReranker(),
+        settings=settings,
     )
     result = await pipeline.retrieve(
         "Valid Accounts credential access",

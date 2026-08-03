@@ -86,6 +86,7 @@ def _attack_pattern_to_chunk(
     obj: dict[str, Any],
     *,
     release: KnowledgeRelease,
+    embedding_release_id: str | None = None,
 ) -> KnowledgeChunk | None:
     external_id = _extract_external_id(obj)
     if external_id is None:
@@ -116,10 +117,14 @@ def _attack_pattern_to_chunk(
         "detection": detection,
         "attack_version": attack_version,
         "corpus_id": release.corpus_id,
+        "source_id": release.source_id,
         "release_id": release.release_id,
         "object_id": external_id,
         "stix_id": obj.get("id"),
+        "content_type": "technique",
     }
+    if embedding_release_id:
+        metadata["embedding_release_id"] = embedding_release_id
     keywords = obj.get("x_shadowtrace_keywords")
     if isinstance(keywords, list):
         metadata["keywords"] = keywords
@@ -458,8 +463,15 @@ class KnowledgeReleaseService:
             )
         )
         chunks: list[KnowledgeChunk] = []
+        embedding_id = release.embedding_release_id
+        if embedding_id is None and self._settings is not None:
+            embedding_id = build_embedding_release(self._settings).release_id
         for row in rows:
-            chunk = _attack_pattern_to_chunk(row.payload, release=release)
+            chunk = _attack_pattern_to_chunk(
+                row.payload,
+                release=release,
+                embedding_release_id=embedding_id,
+            )
             if chunk is not None:
                 chunks.append(chunk)
         if chunks and self._store is not None:

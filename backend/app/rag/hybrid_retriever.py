@@ -38,6 +38,8 @@ class HybridRetriever:
         Total lists = len(queries) * len(kb_names) * 2.
         """
         fetch_k = top_k * 2
+        if context.query_plan is not None:
+            fetch_k = min(fetch_k, context.query_plan.budget.max_candidates)
         tenant_id = context.tenant_id
         logger.debug(
             "HybridRetriever tenant=%s event=%s kb_count=%d query_count=%d",
@@ -48,7 +50,7 @@ class HybridRetriever:
         )
 
         async def _search(query: str, kb: str, method: str) -> list[RetrievedChunk]:
-            release_id = context.release_id_for_kb(kb)
+            release_id, embedding_release_id, typed_filters = context.storage_filters_for_kb(kb)
             if method == "vector":
                 vec = await self._embed.embed_query(query)
                 return await self._store.vector_search(
@@ -57,6 +59,8 @@ class HybridRetriever:
                     top_k=fetch_k,
                     tenant_id=tenant_id,
                     release_id=release_id,
+                    embedding_release_id=embedding_release_id,
+                    typed_filters=typed_filters,
                 )
             return await self._store.keyword_search(
                 kb,
@@ -64,6 +68,8 @@ class HybridRetriever:
                 top_k=fetch_k,
                 tenant_id=tenant_id,
                 release_id=release_id,
+                embedding_release_id=embedding_release_id,
+                typed_filters=typed_filters,
             )
 
         tasks: list[asyncio.Task[list[RetrievedChunk]]] = []

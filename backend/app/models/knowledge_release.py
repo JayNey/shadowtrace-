@@ -1,12 +1,11 @@
-"""ATT&CK STIX knowledge release contract (ISSUE-128 / #634 Phase A)."""
+"""ATT&CK STIX knowledge release contract (ISSUE-128 / #634, ISSUE-130 / #636)."""
 
 from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 KNOWLEDGE_RELEASE_SCHEMA_VERSION = "1.0"
 ATTACK_CORPUS_ID = "attack_enterprise"
@@ -72,26 +71,110 @@ class KnowledgeRelease(BaseModel):
     failure_reason: str | None = None
 
 
-class KnowledgeQueryPlan(BaseModel):
-    """Request-scoped knowledge + embedding release pinning for retrieval."""
+KNOWLEDGE_QUERY_PLAN_SCHEMA_VERSION = "1.0"
+DEFAULT_KNOWLEDGE_TOP_K = 5
+DEFAULT_KNOWLEDGE_MAX_CANDIDATES = 50
+
+
+class KnowledgeFilterKind(StrEnum):
+    """Typed metadata filters applied before candidate fetch (#636)."""
+
+    SOURCE_ID = "source_id"
+    CONTENT_TYPE = "content_type"
+    TIME_AFTER = "time_after"
+    TIME_BEFORE = "time_before"
+
+
+class KnowledgeTypedFilter(BaseModel):
+    """One storage-layer metadata predicate."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    kind: KnowledgeFilterKind
+    value: str = Field(..., min_length=1)
+
+    @field_validator("value")
+    @classmethod
+    def _strip_value(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("filter value must be non-empty")
+        return stripped
+
+
+class KnowledgeQueryBudget(BaseModel):
+    """Retrieval budget — server-owned; agent hints may only narrow."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    top_k: int = Field(default=DEFAULT_KNOWLEDGE_TOP_K, ge=1, le=100)
+    max_candidates: int = Field(default=DEFAULT_KNOWLEDGE_MAX_CANDIDATES, ge=1, le=500)
+
+
+class KnowledgeQueryPlanHints(BaseModel):
+    """Agent-provided retrieval hints — validator may only narrow scope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    corpus_ids: list[str] = Field(default_factory=list)
+    source_ids: list[str] = Field(default_factory=list)
+    content_types: list[str] = Field(default_factory=list)
+    top_k: int | None = Field(default=None, ge=1, le=100)
+    filters: list[KnowledgeTypedFilter] = Field(default_factory=list)
+
+
+class KnowledgeQueryPlan(BaseModel):
+    """Request-scoped knowledge retrieval plan with release pinning and filters."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: str = Field(
+        default=KNOWLEDGE_QUERY_PLAN_SCHEMA_VERSION,
+        min_length=1,
+    )
+    tenant_id: str = Field(default="", min_length=0)
+    principal: str = Field(default="", min_length=0)
     corpus_id: str = Field(..., min_length=1)
     kb_name: str = Field(..., min_length=1)
+    allowed_corpora: tuple[str, ...] = Field(default_factory=tuple)
     active_release_id: str = Field(..., min_length=1)
     embedding_release_id: str = Field(..., min_length=1)
+    typed_filters: tuple[KnowledgeTypedFilter, ...] = Field(default_factory=tuple)
+    budget: KnowledgeQueryBudget = Field(default_factory=KnowledgeQueryBudget)
     trace_id: str = Field(..., min_length=1)
+    plan_hash: str = Field(default="", min_length=0, max_length=64)
     pinned_at: datetime
+    rejected_reasons: tuple[str, ...] = Field(default_factory=tuple)
+    degraded_reasons: tuple[str, ...] = Field(default_factory=tuple)
+
+
+class KnowledgeQueryPlanValidationOutcome(BaseModel):
+    """Validator output — accepted plan or fail-closed rejection."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool
+    plan: KnowledgeQueryPlan | None = None
+    rejected_reasons: list[str] = Field(default_factory=list)
+    degraded_reasons: list[str] = Field(default_factory=list)
+    sanitized_plan_hash: str = ""
 
 
 __all__ = [
     "ATTACK_CORPUS_ID",
     "ATTACK_KB_NAME",
     "ATTACK_SOURCE_ID",
+    "DEFAULT_KNOWLEDGE_MAX_CANDIDATES",
+    "DEFAULT_KNOWLEDGE_TOP_K",
+    "KNOWLEDGE_QUERY_PLAN_SCHEMA_VERSION",
     "KNOWLEDGE_RELEASE_SCHEMA_VERSION",
+    "KnowledgeFilterKind",
     "KnowledgeImportStatus",
+    "KnowledgeQueryBudget",
     "KnowledgeQueryPlan",
+    "KnowledgeQueryPlanHints",
+    "KnowledgeQueryPlanValidationOutcome",
+    "KnowledgeTypedFilter",
     "KnowledgeRelease",
     "KnowledgeReleaseLifecycleState",
     "KnowledgeReleaseProvenance",
