@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-from app.models.agent_io import GraphOutput, GraphSummary, GraphSummaryFeature, GraphRelationType
+from app.models.agent_io import GraphOutput, GraphRelationType, GraphSummary, GraphSummaryFeature
 
 _RELATION_STAGE_HINT: dict[str, float] = {
     GraphRelationType.EXECUTED.value: 55.0,

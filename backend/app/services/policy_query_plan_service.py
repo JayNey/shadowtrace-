@@ -50,9 +50,7 @@ async def validate_pinned_policy_query_plan(
     if plan.profile_id is None or plan.profile_revision is None:
         return None
     authorized = (
-        authorized_tenant_id.strip()
-        if authorized_tenant_id is not None
-        else normalized_tenant
+        authorized_tenant_id.strip() if authorized_tenant_id is not None else normalized_tenant
     )
     return await profile_service.validate_profile_revision(
         tenant_id=normalized_tenant,

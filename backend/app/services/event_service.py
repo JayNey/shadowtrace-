@@ -26,6 +26,11 @@ from app.core.event_bus import EventBus
 from app.db import models as orm
 from app.models.action import Action
 from app.models.agent_io import ResponsePlan
+from app.models.detection_promotion import (
+    SourceIngestCorrelationOutcome,
+    SourceIngestLinkDisposition,
+    TypedIngestResult,
+)
 from app.models.disposition import SourceObjectLocator
 from app.models.entities import EntitySet
 from app.models.enums import (
@@ -37,11 +42,6 @@ from app.models.enums import (
     SourceObjectKind,
 )
 from app.models.ids import canonical_source_identity, new_action_id, new_event_id
-from app.models.detection_promotion import (
-    SourceIngestCorrelationOutcome,
-    SourceIngestLinkDisposition,
-    TypedIngestResult,
-)
 from app.models.report import (
     InvestigationReport,
     observability_from_sections,
@@ -196,7 +196,7 @@ def _link_role_to_disposition(link_role: str | None) -> SourceIngestLinkDisposit
     return None
 
 
-def _bundle_correlation_outcome(bundle: "_CreateBundle") -> SourceIngestCorrelationOutcome:
+def _bundle_correlation_outcome(bundle: _CreateBundle) -> SourceIngestCorrelationOutcome:
     if bundle.idempotent:
         return SourceIngestCorrelationOutcome.IDEMPOTENT
     if bundle.promoted:
@@ -232,7 +232,7 @@ def _failed_ingest_result(exc: ValidationError, source: IngestableSource) -> Ing
     )
 
 
-def _ingest_result_from_bundle(bundle: "_CreateBundle") -> IngestResult:
+def _ingest_result_from_bundle(bundle: _CreateBundle) -> IngestResult:
     return IngestResult(
         source_record_id=bundle.source_record_id,
         event_id=bundle.event.event_id,

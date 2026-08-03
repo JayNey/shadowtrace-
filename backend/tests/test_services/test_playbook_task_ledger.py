@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -531,7 +531,9 @@ async def test_run_response_plan_stage_hash_fail_marks_manual() -> None:
     task_service.enqueue = AsyncMock(return_value=queued_task)
     task_service.claim = AsyncMock(return_value=claim)
     task_service.start = AsyncMock()
-    task_service.record_staged_artifact_hash = AsyncMock(side_effect=RuntimeError("db stage failed"))
+    task_service.record_staged_artifact_hash = AsyncMock(
+        side_effect=RuntimeError("db stage failed")
+    )
     task_service.fail = AsyncMock()
 
     artifact_service = AsyncMock(spec=AgentArtifactService)
@@ -738,7 +740,6 @@ async def test_response_plan_ledger_full_cycle_postgres(
 ) -> None:
     import os
     import uuid
-    from pathlib import Path
 
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine

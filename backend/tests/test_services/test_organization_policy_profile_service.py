@@ -74,7 +74,9 @@ async def session_factory(
 
 
 @pytest_asyncio.fixture
-async def clean_profile_tables(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
+async def clean_profile_tables(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[None]:
     async with session_factory() as session:
         async with session.begin():
             await session.execute(text("DELETE FROM organization_policy_profile"))

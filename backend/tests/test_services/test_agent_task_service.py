@@ -6,12 +6,12 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from pathlib import Path
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -130,8 +130,8 @@ def _enqueue_request(*, event_id: str, idempotency_key: str) -> AgentTaskEnqueue
 
 @pytest.mark.asyncio
 async def test_enqueue_idempotent(task_service: AgentTaskService) -> None:
-    event_id = f"evt-at-{ _sfx() }"
-    key = f"idem-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
+    key = f"idem-{_sfx()}"
     first = await task_service.enqueue(_enqueue_request(event_id=event_id, idempotency_key=key))
     second = await task_service.enqueue(_enqueue_request(event_id=event_id, idempotency_key=key))
     assert first.task_id == second.task_id
@@ -140,8 +140,8 @@ async def test_enqueue_idempotent(task_service: AgentTaskService) -> None:
 
 @pytest.mark.asyncio
 async def test_enqueue_idempotency_rejects_goal_mismatch(task_service: AgentTaskService) -> None:
-    event_id = f"evt-at-{ _sfx() }"
-    key = f"idem-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
+    key = f"idem-{_sfx()}"
     await task_service.enqueue(_enqueue_request(event_id=event_id, idempotency_key=key))
     mismatched = AgentTaskEnqueueRequest(
         event_id=event_id,
@@ -161,9 +161,9 @@ async def test_enqueue_idempotency_rejects_goal_mismatch(task_service: AgentTask
 
 @pytest.mark.asyncio
 async def test_claim_start_complete_happy_path(task_service: AgentTaskService) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -180,9 +180,9 @@ async def test_claim_start_complete_happy_path(task_service: AgentTaskService) -
 
 @pytest.mark.asyncio
 async def test_stale_fencing_token_denied(task_service: AgentTaskService) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -199,9 +199,9 @@ async def test_stale_fencing_token_denied(task_service: AgentTaskService) -> Non
 
 @pytest.mark.asyncio
 async def test_cross_tenant_claim_denied(task_service: AgentTaskService) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     with pytest.raises(AgentTaskDeniedError, match="cross-tenant"):
         await task_service.claim(
@@ -217,9 +217,9 @@ async def test_cross_tenant_claim_denied(task_service: AgentTaskService) -> None
 async def test_side_effect_unknown_enters_manual_not_blind_retry(
     task_service: AgentTaskService,
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -229,7 +229,9 @@ async def test_side_effect_unknown_enters_manual_not_blind_retry(
         )
     )
     await task_service.start(claim, tenant_id="tenant-a")
-    manual = await task_service.fail(claim, error_summary="tool outcome unknown", side_effect_unknown=True)
+    manual = await task_service.fail(
+        claim, error_summary="tool outcome unknown", side_effect_unknown=True
+    )
     assert manual.status is AgentTaskStatus.MANUAL
     assert manual.side_effect_status is SideEffectStatus.UNKNOWN
     with pytest.raises(AgentTaskDeniedError, match="manual resolution"):
@@ -241,9 +243,9 @@ async def test_artifact_idempotent_logical_key(
     task_service: AgentTaskService,
     artifact_service: AgentArtifactService,
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -281,9 +283,9 @@ async def test_artifact_idempotent_replay_rejects_content_hash_mismatch(
     task_service: AgentTaskService,
     artifact_service: AgentArtifactService,
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -327,9 +329,9 @@ async def test_claim_reclaims_after_lease_expiry(
     task_service: AgentTaskService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     first_claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -360,9 +362,9 @@ async def test_claim_reclaims_after_lease_expiry(
 async def test_terminal_complete_idempotent(
     task_service: AgentTaskService,
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -383,9 +385,9 @@ async def test_attempt_history_recorded(
     task_service: AgentTaskService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -406,9 +408,11 @@ async def test_attempt_history_recorded(
 
 
 @pytest.mark.asyncio
-async def test_cross_tenant_idempotency_key_isolated_per_tenant(task_service: AgentTaskService) -> None:
-    event_id = f"evt-at-{ _sfx() }"
-    key = f"idem-{ _sfx() }"
+async def test_cross_tenant_idempotency_key_isolated_per_tenant(
+    task_service: AgentTaskService,
+) -> None:
+    event_id = f"evt-at-{_sfx()}"
+    key = f"idem-{_sfx()}"
     first = await task_service.enqueue(_enqueue_request(event_id=event_id, idempotency_key=key))
     other = AgentTaskEnqueueRequest(
         event_id=event_id,
@@ -429,9 +433,9 @@ async def test_cross_tenant_idempotency_key_isolated_per_tenant(task_service: Ag
 
 @pytest.mark.asyncio
 async def test_failed_task_retry_claim_complete_cycle(task_service: AgentTaskService) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -462,9 +466,9 @@ async def test_expired_task_requeue_claim_complete_cycle(
     task_service: AgentTaskService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -474,6 +478,7 @@ async def test_expired_task_requeue_claim_complete_cycle(
             lease_seconds=60,
         )
     )
+    assert claim.status is AgentTaskStatus.CLAIMED
     async with session_factory() as session:
         async with session.begin():
             row = await session.get(orm.AgentTaskORM, task.task_id)
@@ -500,9 +505,9 @@ async def test_artifact_denied_when_task_not_running(
     task_service: AgentTaskService,
     artifact_service: AgentArtifactService,
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -529,9 +534,9 @@ async def test_artifact_denied_when_task_not_running(
 async def test_reconcile_completed_without_artifact_allows_retry(
     task_service: AgentTaskService,
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(
@@ -556,9 +561,9 @@ async def test_reconcile_stale_running_marks_failed(
     task_service: AgentTaskService,
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    event_id = f"evt-at-{ _sfx() }"
+    event_id = f"evt-at-{_sfx()}"
     task = await task_service.enqueue(
-        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
     claim = await task_service.claim(
         AgentTaskClaimRequest(

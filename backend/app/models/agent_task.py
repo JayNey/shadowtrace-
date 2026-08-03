@@ -93,7 +93,10 @@ class AgentTaskContextRef(BaseModel):
 
     @model_validator(mode="after")
     def _validate_ref(self) -> AgentTaskContextRef:
-        if self.ref_kind == "event_context_field" and self.ref_id not in ALLOWLISTED_EVENT_CONTEXT_FIELDS:
+        if (
+            self.ref_kind == "event_context_field"
+            and self.ref_id not in ALLOWLISTED_EVENT_CONTEXT_FIELDS
+        ):
             raise ValueError(f"event_context_field ref not allowlisted: {self.ref_id}")
         if self.ref_kind == "artifact" and self.ref_id not in ALLOWLISTED_ARTIFACT_LOGICAL_KEYS:
             raise ValueError(f"artifact ref not allowlisted: {self.ref_id}")
@@ -130,7 +133,9 @@ class ContentProjection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = Field(default=CONTENT_PROJECTION_SCHEMA_VERSION, min_length=1, max_length=16)
+    schema_version: str = Field(
+        default=CONTENT_PROJECTION_SCHEMA_VERSION, min_length=1, max_length=16
+    )
     projection_kind: str = Field(min_length=1, max_length=64)
     fields: dict[str, Any] = Field(default_factory=dict)
     source_refs: list[AgentTaskContextRef] = Field(default_factory=list, max_length=16)
@@ -250,7 +255,11 @@ def validate_agent_task_transition(
     if current is target:
         return
     allowed: dict[AgentTaskStatus, set[AgentTaskStatus]] = {
-        AgentTaskStatus.QUEUED: {AgentTaskStatus.CLAIMED, AgentTaskStatus.CANCELLED, AgentTaskStatus.EXPIRED},
+        AgentTaskStatus.QUEUED: {
+            AgentTaskStatus.CLAIMED,
+            AgentTaskStatus.CANCELLED,
+            AgentTaskStatus.EXPIRED,
+        },
         AgentTaskStatus.CLAIMED: {
             AgentTaskStatus.RUNNING,
             AgentTaskStatus.QUEUED,

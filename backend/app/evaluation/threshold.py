@@ -175,8 +175,7 @@ def _collect_critical_failures(
 
 def _is_unexpected_dependency_degraded(case: EvaluationCaseResult) -> bool:
     return any(
-        result.reason_code == "required_dependency_degraded"
-        for result in case.scorer_results
+        result.reason_code == "required_dependency_degraded" for result in case.scorer_results
     )
 
 

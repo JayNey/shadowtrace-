@@ -236,9 +236,7 @@ class AttackStoryline(BaseModel):
     generated_by: StorylineGeneratedBy
     schema_version: str = Field(default="1.0", min_length=1, max_length=16)
     claim_refs: list[StorylineClaimRef] = Field(default_factory=list)
-    grounding_status: StorylineGroundingStatus = (
-        StorylineGroundingStatus.LEGACY_EVIDENCE_GROUNDED
-    )
+    grounding_status: StorylineGroundingStatus = StorylineGroundingStatus.LEGACY_EVIDENCE_GROUNDED
 
 
 # --------------------------------------------------------------------------- #

@@ -151,7 +151,9 @@ class SecuritySliceScorer:
                 "production stores mutated contrary to expectation",
             )
 
-        return _pass(self.scorer_id, f"security expectation satisfied ({expectation.expectation_kind.value})")
+        return _pass(
+            self.scorer_id, f"security expectation satisfied ({expectation.expectation_kind.value})"
+        )
 
 
 __all__ = ["SecuritySliceScorer"]

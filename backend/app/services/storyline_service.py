@@ -26,9 +26,9 @@ from app.models.agent_io import (
     StorylinePhaseName,
     TimelineEntry,
 )
-from app.services.storyline_claim_refs import attach_storyline_claim_refs
 from app.models.enums import Severity
 from app.models.ids import new_storyline_id
+from app.services.storyline_claim_refs import attach_storyline_claim_refs
 
 logger = logging.getLogger(__name__)
 

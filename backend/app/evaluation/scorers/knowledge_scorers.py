@@ -11,7 +11,6 @@ from app.models.evaluation_truth import (
     SliceType,
 )
 
-
 _KIND_REQUIRED_FIELDS: dict[KnowledgeExpectationKind, tuple[str, ...]] = {
     KnowledgeExpectationKind.RELEASE_PINNED_RETRIEVAL: ("expected_release_id",),
     KnowledgeExpectationKind.CITATION_CORRECTNESS: ("expected_citation_chunk_ids",),
@@ -67,8 +66,7 @@ def _validate_expectation_config(
                 return _fail(
                     scorer_id,
                     "invalid_expectation_config",
-                    f"{expectation.expectation_kind.value} requires non-empty "
-                    f"{field_name}",
+                    f"{expectation.expectation_kind.value} requires non-empty {field_name}",
                 )
             continue
         if field_name == "expected_degraded" and value is not True:
@@ -160,7 +158,9 @@ class KnowledgeSliceScorer:
                 )
 
         if observed.degraded is None:
-            return _fail(self.scorer_id, "missing_observed_field", "observation missing degraded flag")
+            return _fail(
+                self.scorer_id, "missing_observed_field", "observation missing degraded flag"
+            )
         if observed.degraded != expectation.expected_degraded:
             return _fail(
                 self.scorer_id,
@@ -178,7 +178,10 @@ class KnowledgeSliceScorer:
             return _fail(
                 self.scorer_id,
                 "empty_results_mismatch",
-                f"empty_results={observed.empty_results} expected={expectation.expected_empty_results}",
+                (
+                    f"empty_results={observed.empty_results} "
+                    f"expected={expectation.expected_empty_results}"
+                ),
             )
 
         return _pass(

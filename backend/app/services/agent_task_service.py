@@ -13,7 +13,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.errors import AgentTaskDeniedError, AgentTaskUnavailableError, ToolCallGrantDeniedError, ValidationError
+from app.core.errors import (
+    AgentTaskDeniedError,
+    AgentTaskUnavailableError,
+    ToolCallGrantDeniedError,
+    ValidationError,
+)
 from app.db import models as orm
 from app.models.agent_task import (
     DEFAULT_TASK_LEASE_SECONDS,
@@ -299,7 +304,9 @@ class AgentTaskService:
             async with session.begin():
                 row = await session.get(orm.AgentTaskORM, claim.task_id, with_for_update=True)
                 if row is None:
-                    raise AgentTaskDeniedError("unknown task_id", details={"task_id": claim.task_id})
+                    raise AgentTaskDeniedError(
+                        "unknown task_id", details={"task_id": claim.task_id}
+                    )
                 if row.tenant_id != tenant_id:
                     raise AgentTaskDeniedError(
                         "cross-tenant staged hash denied",
@@ -338,7 +345,9 @@ class AgentTaskService:
             require_status={AgentTaskStatus.RUNNING},
             terminal=True,
             error_summary=error_summary[:1024],
-            side_effect_status=SideEffectStatus.UNKNOWN if side_effect_unknown else SideEffectStatus.NONE,
+            side_effect_status=SideEffectStatus.UNKNOWN
+            if side_effect_unknown
+            else SideEffectStatus.NONE,
         )
 
     async def cancel(self, claim: AgentTaskClaim) -> AgentTask:
@@ -376,7 +385,9 @@ class AgentTaskService:
                 if row is None:
                     raise AgentTaskDeniedError("unknown task_id", details={"task_id": task_id})
                 if row.tenant_id != tenant_id:
-                    raise AgentTaskDeniedError("cross-tenant expire denied", details={"task_id": task_id})
+                    raise AgentTaskDeniedError(
+                        "cross-tenant expire denied", details={"task_id": task_id}
+                    )
                 status = AgentTaskStatus(row.status)
                 if status is not AgentTaskStatus.CLAIMED:
                     raise AgentTaskDeniedError(
@@ -413,7 +424,9 @@ class AgentTaskService:
                 if row is None:
                     raise AgentTaskDeniedError("unknown task_id", details={"task_id": task_id})
                 if row.tenant_id != tenant_id:
-                    raise AgentTaskDeniedError("cross-tenant reconcile denied", details={"task_id": task_id})
+                    raise AgentTaskDeniedError(
+                        "cross-tenant reconcile denied", details={"task_id": task_id}
+                    )
                 status = AgentTaskStatus(row.status)
                 if status is not AgentTaskStatus.RUNNING:
                     raise AgentTaskDeniedError(
@@ -448,7 +461,9 @@ class AgentTaskService:
                 if row is None:
                     raise AgentTaskDeniedError("unknown task_id", details={"task_id": task_id})
                 if row.tenant_id != tenant_id:
-                    raise AgentTaskDeniedError("cross-tenant reconcile denied", details={"task_id": task_id})
+                    raise AgentTaskDeniedError(
+                        "cross-tenant reconcile denied", details={"task_id": task_id}
+                    )
                 status = AgentTaskStatus(row.status)
                 if status is not AgentTaskStatus.COMPLETED:
                     raise AgentTaskDeniedError(
@@ -473,7 +488,9 @@ class AgentTaskService:
                 if row is None:
                     raise AgentTaskDeniedError("unknown task_id", details={"task_id": task_id})
                 if row.tenant_id != tenant_id:
-                    raise AgentTaskDeniedError("cross-tenant retry denied", details={"task_id": task_id})
+                    raise AgentTaskDeniedError(
+                        "cross-tenant retry denied", details={"task_id": task_id}
+                    )
                 status = AgentTaskStatus(row.status)
                 if row.side_effect_status == SideEffectStatus.UNKNOWN.value:
                     raise AgentTaskDeniedError(
@@ -522,7 +539,9 @@ class AgentTaskService:
             async with session.begin():
                 row = await session.get(orm.AgentTaskORM, claim.task_id, with_for_update=True)
                 if row is None:
-                    raise AgentTaskDeniedError("unknown task_id", details={"task_id": claim.task_id})
+                    raise AgentTaskDeniedError(
+                        "unknown task_id", details={"task_id": claim.task_id}
+                    )
 
                 current = AgentTaskStatus(row.status)
                 if current in TERMINAL_AGENT_TASK_STATUSES:
@@ -556,7 +575,11 @@ class AgentTaskService:
                 if current not in require_status:
                     raise AgentTaskDeniedError(
                         "invalid task status for transition",
-                        details={"task_id": claim.task_id, "status": current.value, "target": target.value},
+                        details={
+                            "task_id": claim.task_id,
+                            "status": current.value,
+                            "target": target.value,
+                        },
                     )
 
                 validate_agent_task_transition(current, target)

@@ -126,7 +126,8 @@ class AgenticSliceScorer:
         observed = observation.agentic
         if (
             observed.dependency_degraded
-            and expectation.expectation_kind is not AgenticExpectationKind.SHADOW_DEGRADED_FAIL_CLOSED
+            and expectation.expectation_kind
+            is not AgenticExpectationKind.SHADOW_DEGRADED_FAIL_CLOSED
         ):
             return _fail(
                 self.scorer_id,

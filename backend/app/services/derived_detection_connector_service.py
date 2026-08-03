@@ -27,9 +27,7 @@ def build_derived_detection_connector_id(
     adapter_kind: str = DERIVED_DETECTION_ADAPTER_KIND,
     adapter_version: str = DERIVED_DETECTION_ADAPTER_VERSION,
 ) -> str:
-    material = (
-        f"{source_tenant_id}|{detection_scope_id}|{adapter_kind}|{adapter_version}"
-    )
+    material = f"{source_tenant_id}|{detection_scope_id}|{adapter_kind}|{adapter_version}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:12]
     return f"ddet-{digest}"
 

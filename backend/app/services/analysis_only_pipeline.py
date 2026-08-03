@@ -44,8 +44,8 @@ from app.models.entities import EntitySet
 from app.models.enums import DispositionPolicy, EventStatus, FinalVerdict
 from app.models.report import InvestigationReport
 from app.models.workflow import TransitionContext
-from app.services.event_service import EventService, StateMachinePort
 from app.services.agent_task_coordinator import run_risk_score_with_ledger
+from app.services.event_service import EventService, StateMachinePort
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
 from app.services.tenant_resolution import resolve_tenant_id

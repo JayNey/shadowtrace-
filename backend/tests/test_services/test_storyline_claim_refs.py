@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from app.models.agent_io import (
     AttackStoryline,
     StorylineGeneratedBy,
@@ -12,7 +14,10 @@ from app.models.agent_io import (
     StorylinePhaseName,
     TimelineEntry,
 )
-from app.services.storyline_claim_refs import attach_storyline_claim_refs, build_storyline_claim_refs
+from app.services.storyline_claim_refs import (
+    attach_storyline_claim_refs,
+    build_storyline_claim_refs,
+)
 
 
 def _storyline(*, evidence_id: str = "evd-00000001") -> AttackStoryline:

@@ -24,15 +24,18 @@ from app.models.knowledge_release import KnowledgeReleaseLifecycleState, Knowled
 from app.models.organization_policy_profile import OrganizationPolicyProfileUpsertRequest
 from app.models.policy_citation import ApplicabilityStatus
 from app.models.policy_release import POLICY_CORPUS_ID, PolicyControlRef
+from app.services.knowledge_release_resolver import kb_name_to_corpus
 from app.services.organization_policy_profile_service import OrganizationPolicyProfileService
 from app.services.policy_applicability_service import build_technique_policy_citations
 from app.services.policy_query_plan_service import (
     resolve_active_policy_query_plan,
     validate_pinned_policy_query_plan,
 )
-from app.services.policy_release_resolver import compute_policy_control_hash, default_policy_provenance
+from app.services.policy_release_resolver import (
+    compute_policy_control_hash,
+    default_policy_provenance,
+)
 from app.services.policy_release_service import PolicyReleaseService
-from app.services.knowledge_release_resolver import kb_name_to_corpus
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 REPO_ROOT = BACKEND_DIR.parent
@@ -94,7 +97,9 @@ async def session_factory(
 
 
 @pytest_asyncio.fixture
-async def clean_policy_tables(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
+async def clean_policy_tables(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> AsyncIterator[None]:
     async with session_factory() as session:
         async with session.begin():
             await session.execute(text("DELETE FROM attack_control_mapping"))
@@ -257,7 +262,9 @@ async def test_stage_policy_bundle_idempotent_replay(
     session_factory: async_sessionmaker[AsyncSession],
     clean_policy_tables: None,
 ) -> None:
-    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    release_service = PolicyReleaseService(
+        session_factory, settings=Settings(embedding_mode="mock")
+    )
     bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     provenance = KnowledgeReleaseProvenance.model_validate(
         default_policy_provenance(str(DATA_FILE))
@@ -281,7 +288,9 @@ async def test_activate_rejects_failed_release(
     session_factory: async_sessionmaker[AsyncSession],
     clean_policy_tables: None,
 ) -> None:
-    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    release_service = PolicyReleaseService(
+        session_factory, settings=Settings(embedding_mode="mock")
+    )
     bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     provenance = KnowledgeReleaseProvenance.model_validate(
         default_policy_provenance(str(DATA_FILE))
@@ -306,7 +315,9 @@ async def test_resolve_control_ref_rejects_content_hash_mismatch(
     session_factory: async_sessionmaker[AsyncSession],
     clean_policy_tables: None,
 ) -> None:
-    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    release_service = PolicyReleaseService(
+        session_factory, settings=Settings(embedding_mode="mock")
+    )
     bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     provenance = KnowledgeReleaseProvenance.model_validate(
         default_policy_provenance(str(DATA_FILE))
@@ -346,7 +357,9 @@ async def test_resolve_control_ref_rejects_framework_drift(
     session_factory: async_sessionmaker[AsyncSession],
     clean_policy_tables: None,
 ) -> None:
-    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    release_service = PolicyReleaseService(
+        session_factory, settings=Settings(embedding_mode="mock")
+    )
     bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     provenance = KnowledgeReleaseProvenance.model_validate(
         default_policy_provenance(str(DATA_FILE))
@@ -442,7 +455,9 @@ async def test_activate_retires_previous_active_policy_release(
     session_factory: async_sessionmaker[AsyncSession],
     clean_policy_tables: None,
 ) -> None:
-    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    release_service = PolicyReleaseService(
+        session_factory, settings=Settings(embedding_mode="mock")
+    )
     bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     provenance = KnowledgeReleaseProvenance.model_validate(
         default_policy_provenance(str(DATA_FILE))
@@ -476,7 +491,9 @@ async def test_stage_policy_bundle_rejects_incomplete_replay(
     session_factory: async_sessionmaker[AsyncSession],
     clean_policy_tables: None,
 ) -> None:
-    release_service = PolicyReleaseService(session_factory, settings=Settings(embedding_mode="mock"))
+    release_service = PolicyReleaseService(
+        session_factory, settings=Settings(embedding_mode="mock")
+    )
     bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     provenance = KnowledgeReleaseProvenance.model_validate(
         default_policy_provenance(str(DATA_FILE))

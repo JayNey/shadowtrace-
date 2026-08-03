@@ -131,7 +131,9 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
                 output,
                 reason=f"graph_persist_failed: {self.last_persist_error}",
             )
-            await self._mark_degraded(event_id, reason=output.degraded_reason or "graph_persist_failed")
+            await self._mark_degraded(
+                event_id, reason=output.degraded_reason or "graph_persist_failed"
+            )
         else:
             output = self._finalize_output(output)
 

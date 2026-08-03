@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.core.errors import AgentTaskDeniedError, AgentTaskUnavailableError, ToolCallGrantDeniedError, ValidationError
+from app.core.errors import (
+    AgentTaskDeniedError,
+    AgentTaskUnavailableError,
+    ToolCallGrantDeniedError,
+    ValidationError,
+)
 from app.db import models as orm
 from app.models.agent_task import (
     MAX_ARTIFACT_PAYLOAD_BYTES,
@@ -52,9 +57,7 @@ def test_goal_rejects_non_allowlisted_context_ref() -> None:
     with pytest.raises(ValueError, match="allowlisted"):
         AgentTaskGoal(
             task_type=AgentTaskType.EVIDENCE_COLLECT,
-            context_refs=[
-                AgentTaskContextRef(ref_kind="event_context_field", ref_id="raw_prompt")
-            ],
+            context_refs=[AgentTaskContextRef(ref_kind="event_context_field", ref_id="raw_prompt")],
         )
 
 
@@ -278,9 +281,7 @@ async def test_start_rejects_forged_grant() -> None:
     factory.return_value.__aexit__ = AsyncMock(return_value=None)
 
     grant_service = AsyncMock()
-    grant_service.load_grant = AsyncMock(
-        side_effect=ToolCallGrantDeniedError("forged grant token")
-    )
+    grant_service.load_grant = AsyncMock(side_effect=ToolCallGrantDeniedError("forged grant token"))
 
     service = AgentTaskService(session_factory=factory, grant_service=grant_service)
     claim = AgentTaskClaim(
@@ -394,4 +395,3 @@ async def test_record_staged_artifact_hash_persists_in_goal_parameters() -> None
     )
     staged = row.goal["parameters"][STAGED_ARTIFACT_HASHES_KEY]
     assert staged["response_plan"] == content_hash
-

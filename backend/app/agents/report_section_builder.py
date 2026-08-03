@@ -395,8 +395,7 @@ class ReportSectionBuilder:
             )
             if detection_context_snapshot.scores.detection_score is not None:
                 lines.append(
-                    "detection_score: "
-                    f"{detection_context_snapshot.scores.detection_score:.4f}"
+                    f"detection_score: {detection_context_snapshot.scores.detection_score:.4f}"
                 )
         if triage_result is not None and triage_result.degraded:
             lines.append("triage_degraded: true")

@@ -136,9 +136,7 @@ class DetectionContextService:
                 return DetectionContextSnapshotListResult(total=len(items), items=items)
 
             total = await session.scalar(
-                select(func.count())
-                .select_from(DetectionContextSnapshotORM)
-                .where(and_(*filters))
+                select(func.count()).select_from(DetectionContextSnapshotORM).where(and_(*filters))
             )
             rows = list(
                 await session.scalars(

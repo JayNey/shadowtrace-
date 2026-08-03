@@ -21,12 +21,12 @@ from app.core.auth import Principal
 from app.core.errors import ValidationError
 from app.core.redis_client import RedisClient
 from app.db import models as orm
+from app.db.orm.approval import ApprovalRecordORM
 from app.db.orm.detection_governance import DetectionGovernanceDecisionORM
 from app.db.orm.detection_promotion import (
     DerivedDetectionConnectorORM,
     DetectionPromotionORM,
 )
-from app.db.orm.approval import ApprovalRecordORM
 from app.evaluation.detection.artifact import finalize_detection_artifact
 from app.evaluation.detection.fixture_loader import load_detection_fixture_index
 from app.evaluation.detection.fixture_seeder import (
@@ -237,8 +237,8 @@ def test_ingest_result_to_typed_maps_provisional_fields() -> None:
 
 
 def test_bundle_correlation_outcome_merged_for_related_link() -> None:
-    from app.services.event_service import _CreateBundle, _bundle_correlation_outcome
     from app.db import models as orm
+    from app.services.event_service import _bundle_correlation_outcome, _CreateBundle
 
     event = orm.SecurityEvent(event_id="evt-merge", row_version=3)
     bundle = _CreateBundle(

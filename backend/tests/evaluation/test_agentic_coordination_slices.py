@@ -23,7 +23,11 @@ from app.evaluation.runner import run_fixture_evaluation
 from app.evaluation.scorers.agentic_scorers import AgenticSliceScorer
 from app.evaluation.scorers.base import ScorerContext
 from app.evaluation.scorers.coordination_scorers import CoordinationSliceScorer
-from app.evaluation.scorers.registry import ScorerRegistration, ScorerRegistry, default_scorer_registry
+from app.evaluation.scorers.registry import (
+    ScorerRegistration,
+    ScorerRegistry,
+    default_scorer_registry,
+)
 from app.evaluation.threshold import evaluate_gate
 from app.models.evaluation_run import (
     AgenticCaseObservation,
@@ -900,7 +904,9 @@ async def test_agentic_coordination_dataset_runs_all_cases(
     assert artifact.aggregates.error_count == 0
     assert artifact.gate is not None
     assert artifact.gate.verdict == GateVerdict.PASS
-    assert all(result.case_status == EvaluationRunStatus.COMPLETED for result in artifact.case_results)
+    assert all(
+        result.case_status == EvaluationRunStatus.COMPLETED for result in artifact.case_results
+    )
     assert {result.slice_type for result in artifact.case_results} == {
         SliceType.AGENTIC,
         SliceType.COORDINATION,

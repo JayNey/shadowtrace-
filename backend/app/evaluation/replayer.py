@@ -123,8 +123,7 @@ class MockDeterministicReplayer:
                 observation_available=True,
                 security=replay_security_slice(expectation, fail=fail),
                 replay_notes=(
-                    f"slice_adapter:security:{expectation.replay_variant};"
-                    f"seed={seed};n={nonce:x}"
+                    f"slice_adapter:security:{expectation.replay_variant};seed={seed};n={nonce:x}"
                 ),
             )
 
@@ -142,8 +141,7 @@ class MockDeterministicReplayer:
                     fail=fail,
                 ),
                 replay_notes=(
-                    f"slice_adapter:knowledge:{expectation.replay_variant};"
-                    f"seed={seed};n={nonce:x}"
+                    f"slice_adapter:knowledge:{expectation.replay_variant};seed={seed};n={nonce:x}"
                 ),
             )
 
@@ -156,8 +154,7 @@ class MockDeterministicReplayer:
                 observation_available=True,
                 agentic=replay_agentic_slice(expectation, fail=fail),
                 replay_notes=(
-                    f"slice_adapter:agentic:{expectation.replay_variant};"
-                    f"seed={seed};n={nonce:x}"
+                    f"slice_adapter:agentic:{expectation.replay_variant};seed={seed};n={nonce:x}"
                 ),
             )
 

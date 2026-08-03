@@ -103,9 +103,7 @@ def validate_policy_bundle(data: dict[str, Any]) -> PolicyBundleValidationResult
             errors.append(f"duplicate mapping_id {mapping.mapping_id}")
             continue
         if mapping.control_id not in control_ids:
-            errors.append(
-                f"mappings[{idx}] references unknown control_id {mapping.control_id}"
-            )
+            errors.append(f"mappings[{idx}] references unknown control_id {mapping.control_id}")
             continue
         control = next(c for c in controls if c.control_id == mapping.control_id)
         if mapping.framework_id != control.framework_id:

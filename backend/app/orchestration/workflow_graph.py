@@ -57,8 +57,11 @@ from app.orchestration.writeback_recovery_handler import (
     WritebackRecoveryHandler,
     writeback_recovery_graph_node,
 )
+from app.services.agent_task_coordinator import (
+    run_response_plan_with_ledger,
+    run_risk_score_with_ledger,
+)
 from app.services.analysis_only_pipeline import run_rag_stage
-from app.services.agent_task_coordinator import run_response_plan_with_ledger, run_risk_score_with_ledger
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService, apply_flag_to_list
 from app.services.evidence_query_plan_service import extract_evidence_plan_inputs
@@ -1043,7 +1046,9 @@ def build_investigation_graph(
                 context_store = services.get("context_store")
                 if context_store is not None:
                     try:
-                        source_snapshot = await context_store.get(state["event_id"], "source_snapshot")
+                        source_snapshot = await context_store.get(
+                            state["event_id"], "source_snapshot"
+                        )
                         tenant_id = resolve_tenant_id(source_snapshot)
                     except Exception:
                         logger.debug(

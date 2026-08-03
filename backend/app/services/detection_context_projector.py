@@ -190,10 +190,12 @@ class DetectionContextProjector:
 
         await session.execute(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": _event_projection_lock_key(
-                tenant_id=tenant_id,
-                event_id=promotion.event_id,
-            )},
+            {
+                "lock_key": _event_projection_lock_key(
+                    tenant_id=tenant_id,
+                    event_id=promotion.event_id,
+                )
+            },
         )
 
         package_row = await session.scalar(
@@ -315,9 +317,7 @@ class DetectionContextProjector:
         )
         by_id = {row.snapshot_id: row_to_feature_snapshot(row) for row in rows}
         missing = [sid for sid in snapshot_ids if sid not in by_id]
-        errors = [
-            f"missing_feature_snapshot:{snapshot_id}" for snapshot_id in missing
-        ]
+        errors = [f"missing_feature_snapshot:{snapshot_id}" for snapshot_id in missing]
         snapshots = [by_id[sid] for sid in snapshot_ids if sid in by_id]
         return snapshots, errors
 

@@ -398,9 +398,7 @@ class PolicyReleaseService:
                 )
             )
             if technique_id is not None:
-                query = query.where(
-                    orm.AttackControlMappingORM.technique_id == technique_id
-                )
+                query = query.where(orm.AttackControlMappingORM.technique_id == technique_id)
             rows = await session.scalars(query)
             return [
                 AttackControlMapping(

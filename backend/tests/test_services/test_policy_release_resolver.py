@@ -5,8 +5,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from app.models.attack_control_mapping import MappingApprovalState
 from app.services.policy_release_resolver import validate_policy_bundle
 

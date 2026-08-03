@@ -719,7 +719,8 @@ class SourceIngester:
         )
         if not await self._project_behavior_observation(result.source_record_id):
             logger.warning(
-                "behavior observation projection degraded after promotion ingest source_record_id=%s",
+                "behavior observation projection degraded after promotion ingest "
+                "source_record_id=%s",
                 result.source_record_id,
             )
         return result

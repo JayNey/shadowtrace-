@@ -149,7 +149,9 @@ class AgentArtifactService:
         try:
             async with self._session_factory() as session:  # type: ignore[union-attr]
                 async with session.begin():
-                    task_row = await session.get(orm.AgentTaskORM, claim.task_id, with_for_update=True)
+                    task_row = await session.get(
+                        orm.AgentTaskORM, claim.task_id, with_for_update=True
+                    )
                     if task_row is None:
                         raise AgentTaskDeniedError(
                             "unknown task_id",

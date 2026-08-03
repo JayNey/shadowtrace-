@@ -47,8 +47,8 @@ from app.services.detection_context_resolver import (
 from app.services.detection_context_service import DetectionContextService
 from app.services.detection_governance_service import DetectionGovernanceService
 from app.services.detection_promotion_service import (
-    DetectionPromotionService,
     PAYLOAD_PROJECTION_ERROR_KEY,
+    DetectionPromotionService,
 )
 from app.services.detection_rule_runtime import DetectionRuleRuntimeService
 from app.services.event_service import EventService
@@ -57,9 +57,7 @@ from tests.test_services.test_detection_promotion import (
     THRESHOLD_PATH,
     _artifact_for_seeded,
     _reviewer_principal,
-    migrated_database,
     requires_postgres,
-    session_factory,
 )
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
@@ -637,9 +635,7 @@ async def test_promotion_records_projection_failure_on_blocked_projection(
             row.reason_codes or []
         )
     assert promotion.context_projection_error is not None
-    assert (
-        promotion.context_projection_error.reason == "candidate_content_hash_mismatch"
-    )
+    assert promotion.context_projection_error.reason == "candidate_content_hash_mismatch"
     assert "candidate hash mismatch" in promotion.context_projection_error.message
 
 

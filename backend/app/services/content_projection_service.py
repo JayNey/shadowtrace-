@@ -100,7 +100,10 @@ class ContentProjectionService:
         source_refs: list[AgentTaskContextRef],
     ) -> ContentProjection:
         for ref in source_refs:
-            if ref.ref_kind == "event_context_field" and ref.ref_id not in ALLOWLISTED_EVENT_CONTEXT_FIELDS:
+            if (
+                ref.ref_kind == "event_context_field"
+                and ref.ref_id not in ALLOWLISTED_EVENT_CONTEXT_FIELDS
+            ):
                 raise ValidationError(
                     f"projection source ref not allowlisted: {ref.ref_id}",
                     error_code="validation_error",

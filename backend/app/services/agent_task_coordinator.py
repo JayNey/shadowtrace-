@@ -101,7 +101,9 @@ def _build_risk_projection(
     )
 
 
-async def _maybe_requeue_recoverable(task: AgentTask, agent_task_service: AgentTaskService, *, tenant_id: str) -> AgentTask:
+async def _maybe_requeue_recoverable(
+    task: AgentTask, agent_task_service: AgentTaskService, *, tenant_id: str
+) -> AgentTask:
     if task.status not in {AgentTaskStatus.FAILED, AgentTaskStatus.EXPIRED}:
         return task
     try:
@@ -136,12 +138,16 @@ async def _prepare_task_for_claim(
             "COMPLETED AgentTask missing risk_assessment artifact; reconciling task=%s",
             task.task_id,
         )
-        await agent_task_service.reconcile_completed_without_artifact(task.task_id, tenant_id=tenant_id)
+        await agent_task_service.reconcile_completed_without_artifact(
+            task.task_id, tenant_id=tenant_id
+        )
         return await agent_task_service.retry_to_queue(task.task_id, tenant_id=tenant_id)
 
     if task.status is AgentTaskStatus.RUNNING:
         try:
-            task = await agent_task_service.reconcile_stale_running(task.task_id, tenant_id=tenant_id)
+            task = await agent_task_service.reconcile_stale_running(
+                task.task_id, tenant_id=tenant_id
+            )
         except AgentTaskDeniedError:
             pass
         if task.status is AgentTaskStatus.RUNNING:
@@ -418,12 +424,16 @@ async def _prepare_response_plan_task_for_claim(
             "COMPLETED AgentTask missing response_plan artifact; reconciling task=%s",
             task.task_id,
         )
-        await agent_task_service.reconcile_completed_without_artifact(task.task_id, tenant_id=tenant_id)
+        await agent_task_service.reconcile_completed_without_artifact(
+            task.task_id, tenant_id=tenant_id
+        )
         return await agent_task_service.retry_to_queue(task.task_id, tenant_id=tenant_id)
 
     if task.status is AgentTaskStatus.RUNNING:
         try:
-            task = await agent_task_service.reconcile_stale_running(task.task_id, tenant_id=tenant_id)
+            task = await agent_task_service.reconcile_stale_running(
+                task.task_id, tenant_id=tenant_id
+            )
         except AgentTaskDeniedError:
             pass
         if task.status is AgentTaskStatus.RUNNING:

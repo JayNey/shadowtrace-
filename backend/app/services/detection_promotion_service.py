@@ -66,10 +66,7 @@ def build_promotion_key(
     decision_id: str,
     package_version: int,
 ) -> str:
-    return (
-        f"{candidate_detection_id}|{candidate_content_hash}|"
-        f"v{package_version}|{decision_id}"
-    )
+    return f"{candidate_detection_id}|{candidate_content_hash}|v{package_version}|{decision_id}"
 
 
 class DetectionPromotionService:
@@ -727,9 +724,7 @@ class DetectionPromotionService:
             event_id=record.event_id,
             link_revision=record.link_revision,
             ingest_result=(
-                record.ingest_result.model_dump(mode="json")
-                if record.ingest_result
-                else None
+                record.ingest_result.model_dump(mode="json") if record.ingest_result else None
             ),
             reason_codes=[code.value for code in record.reason_codes],
             reason_message=record.reason_message,
@@ -764,8 +759,7 @@ class DetectionPromotionService:
             payload["ingest_result"] = payload["ingest_result"].model_dump(mode="json")
         if payload.get("reason_codes"):
             payload["reason_codes"] = [
-                code.value if hasattr(code, "value") else code
-                for code in payload["reason_codes"]
+                code.value if hasattr(code, "value") else code for code in payload["reason_codes"]
             ]
         updated = DetectionPromotionRecord.model_validate(payload)
         updated = updated.model_copy(update={"updated_at": self._now()})
@@ -844,9 +838,7 @@ def _row_to_record(row: DetectionPromotionORM) -> DetectionPromotionRecord:
         event_id=row.event_id,
         link_revision=int(row.link_revision),
         ingest_result=ingest,
-        reason_codes=[
-            DetectionPromotionReasonCode(code) for code in (row.reason_codes or [])
-        ],
+        reason_codes=[DetectionPromotionReasonCode(code) for code in (row.reason_codes or [])],
         reason_message=row.reason_message or "",
         created_at=row.created_at,
         updated_at=row.updated_at,
