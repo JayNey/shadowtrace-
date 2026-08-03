@@ -1,0 +1,172 @@
+{
+  "$defs": {
+    "SourceIngestCorrelationOutcome": {
+      "description": "Canonical correlation outcome produced exclusively by EventService.",
+      "enum": [
+        "created",
+        "merged",
+        "duplicate",
+        "idempotent",
+        "promoted",
+        "related_only"
+      ],
+      "title": "SourceIngestCorrelationOutcome",
+      "type": "string"
+    },
+    "SourceIngestLinkDisposition": {
+      "description": "Link role disposition surfaced on typed ingest results.",
+      "enum": [
+        "primary",
+        "provisional",
+        "related"
+      ],
+      "title": "SourceIngestLinkDisposition",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "EventService-owned ingest result contract extended for #629.",
+  "properties": {
+    "source_record_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Record Id",
+      "type": "string"
+    },
+    "event_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Id"
+    },
+    "accepted": {
+      "default": true,
+      "title": "Accepted",
+      "type": "boolean"
+    },
+    "created": {
+      "default": false,
+      "title": "Created",
+      "type": "boolean"
+    },
+    "promoted": {
+      "default": false,
+      "title": "Promoted",
+      "type": "boolean"
+    },
+    "related_only": {
+      "default": false,
+      "title": "Related Only",
+      "type": "boolean"
+    },
+    "idempotent": {
+      "default": false,
+      "title": "Idempotent",
+      "type": "boolean"
+    },
+    "duplicate": {
+      "default": false,
+      "title": "Duplicate",
+      "type": "boolean"
+    },
+    "source_object_id": {
+      "anyOf": [
+        {
+          "maxLength": 256,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Object Id"
+    },
+    "source_revision": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Source Revision"
+    },
+    "correlation_outcome": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceIngestCorrelationOutcome"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "event_revision": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Event Revision"
+    },
+    "link_disposition": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceIngestLinkDisposition"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Code"
+    },
+    "error_message": {
+      "anyOf": [
+        {
+          "maxLength": 512,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Error Message"
+    }
+  },
+  "required": [
+    "source_record_id"
+  ],
+  "title": "TypedIngestResult",
+  "type": "object"
+}

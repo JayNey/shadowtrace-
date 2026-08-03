@@ -519,7 +519,11 @@ def allowed_runtime_transition(
             DetectionRuleRuntimeState.SHADOW_ACTIVE,
             DetectionRuleRuntimeState.DISABLED,
         },
-        DetectionRuleRuntimeState.SHADOW_ACTIVE: {DetectionRuleRuntimeState.DISABLED},
+        DetectionRuleRuntimeState.SHADOW_ACTIVE: {
+            DetectionRuleRuntimeState.PRODUCTION_ACTIVE,
+            DetectionRuleRuntimeState.DISABLED,
+        },
+        DetectionRuleRuntimeState.PRODUCTION_ACTIVE: {DetectionRuleRuntimeState.DISABLED},
         DetectionRuleRuntimeState.DISABLED: set(),
     }
     return target in transitions.get(current, set())

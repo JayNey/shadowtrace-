@@ -108,6 +108,13 @@ from app.models.detection_governance import (
     DetectionGovernanceRevokeRequest,
     DetectionGovernanceThresholdBinding,
 )
+from app.models.detection_promotion import (
+    DerivedDetectionConnectorRecord,
+    DetectionPromotionRecord,
+    DetectionPromotionRequest,
+    DetectionPromotionResult,
+    TypedIngestResult,
+)
 from app.models.detection_rule import (
     CandidateDetection,
     CandidateDetectionListResult,
@@ -404,6 +411,12 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "DetectionGovernancePromotionGateResult": DetectionGovernancePromotionGateResult,
     "DetectionGovernanceRevokeRequest": DetectionGovernanceRevokeRequest,
     "DetectionGovernanceThresholdBinding": DetectionGovernanceThresholdBinding,
+    # detection promotion (ISSUE-124 / #629)
+    "DerivedDetectionConnectorRecord": DerivedDetectionConnectorRecord,
+    "DetectionPromotionRecord": DetectionPromotionRecord,
+    "DetectionPromotionRequest": DetectionPromotionRequest,
+    "DetectionPromotionResult": DetectionPromotionResult,
+    "TypedIngestResult": TypedIngestResult,
     # evaluation truth (ISSUE-113)
     "EvaluationCaseTruth": EvaluationCaseTruth,
     "EvaluationDatasetManifest": EvaluationDatasetManifest,

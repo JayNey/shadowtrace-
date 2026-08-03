@@ -37,6 +37,11 @@ from app.models.enums import (
     SourceObjectKind,
 )
 from app.models.ids import canonical_source_identity, new_action_id, new_event_id
+from app.models.detection_promotion import (
+    SourceIngestCorrelationOutcome,
+    SourceIngestLinkDisposition,
+    TypedIngestResult,
+)
 from app.models.report import (
     InvestigationReport,
     observability_from_sections,
@@ -148,6 +153,78 @@ class IngestResult:
     promoted: bool = False
     related_only: bool = False
     idempotent: bool = False
+    source_object_id: str | None = None
+    source_revision: int | None = None
+    correlation_outcome: SourceIngestCorrelationOutcome | None = None
+    event_revision: int | None = None
+    link_disposition: SourceIngestLinkDisposition | None = None
+    error_code: str | None = None
+    error_message: str | None = None
+
+    @property
+    def duplicate(self) -> bool:
+        return self.idempotent
+
+
+def ingest_result_to_typed(result: IngestResult) -> TypedIngestResult:
+    return TypedIngestResult(
+        source_record_id=result.source_record_id,
+        event_id=result.event_id,
+        accepted=result.accepted,
+        created=result.created,
+        promoted=result.promoted,
+        related_only=result.related_only,
+        idempotent=result.idempotent,
+        duplicate=result.duplicate,
+        source_object_id=result.source_object_id,
+        source_revision=result.source_revision,
+        correlation_outcome=result.correlation_outcome,
+        event_revision=result.event_revision,
+        link_disposition=result.link_disposition,
+        error_code=result.error_code,
+        error_message=result.error_message,
+    )
+
+
+def _link_role_to_disposition(link_role: str | None) -> SourceIngestLinkDisposition | None:
+    if link_role == LINK_ROLE_PROVISIONAL:
+        return SourceIngestLinkDisposition.PROVISIONAL
+    if link_role == LINK_ROLE_PRIMARY:
+        return SourceIngestLinkDisposition.PRIMARY
+    if link_role == LINK_ROLE_RELATED:
+        return SourceIngestLinkDisposition.RELATED
+    return None
+
+
+def _bundle_correlation_outcome(bundle: "_CreateBundle") -> SourceIngestCorrelationOutcome:
+    if bundle.idempotent:
+        return SourceIngestCorrelationOutcome.IDEMPOTENT
+    if bundle.promoted:
+        return SourceIngestCorrelationOutcome.PROMOTED
+    if bundle.related_only:
+        return SourceIngestCorrelationOutcome.RELATED_ONLY
+    if bundle.created:
+        return SourceIngestCorrelationOutcome.CREATED
+    if bundle.link_role == LINK_ROLE_RELATED:
+        return SourceIngestCorrelationOutcome.MERGED
+    return SourceIngestCorrelationOutcome.DUPLICATE
+
+
+def _ingest_result_from_bundle(bundle: "_CreateBundle") -> IngestResult:
+    return IngestResult(
+        source_record_id=bundle.source_record_id,
+        event_id=bundle.event.event_id,
+        accepted=True,
+        created=bundle.created,
+        promoted=bundle.promoted,
+        related_only=bundle.related_only,
+        idempotent=bundle.idempotent,
+        source_object_id=bundle.source_object_id,
+        source_revision=bundle.source_revision,
+        correlation_outcome=_bundle_correlation_outcome(bundle),
+        event_revision=int(bundle.event.row_version or 1),
+        link_disposition=_link_role_to_disposition(bundle.link_role),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +245,9 @@ class _CreateBundle:
     idempotent: bool = False
     merged_event_ids: tuple[str, ...] = ()
     intent_ids: tuple[str, ...] = ()
+    source_object_id: str | None = None
+    source_revision: int | None = None
+    link_role: str | None = None
 
 
 def stable_source_record_id(*, identity: str) -> str:
@@ -392,15 +472,7 @@ class EventService:
             self._investigation_intent.schedule_dispatch()
         for merged_event_id in bundle.merged_event_ids:
             await self._store.delete_cached_context(merged_event_id)
-        return IngestResult(
-            source_record_id=bundle.source_record_id,
-            event_id=bundle.event.event_id,
-            accepted=True,
-            created=bundle.created,
-            promoted=bundle.promoted,
-            related_only=bundle.related_only,
-            idempotent=bundle.idempotent,
-        )
+        return _ingest_result_from_bundle(bundle)
 
     async def create_event_from_source(
         self, primary_ref: SourceReference, **kwargs: Any
@@ -1477,6 +1549,9 @@ class EventService:
                         source_record_id=source_record_id,
                         created=False,
                         idempotent=True,
+                        source_object_id=ref.source_object_id,
+                        source_revision=int(obj.current_state_version),
+                        link_role=existing_link.role,
                     )
 
                 # Related Alert/Log/Asset with verified incident_ref → link to parent event.
@@ -1520,6 +1595,9 @@ class EventService:
                     source_record_id=source_record_id,
                     created=True,
                     intent_ids=(intent_id,) if intent_id else (),
+                    source_object_id=ref.source_object_id,
+                    source_revision=int(obj.current_state_version),
+                    link_role=link_role,
                 )
 
     async def _ensure_connector(

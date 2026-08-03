@@ -28,6 +28,7 @@ class DetectionRuleRuntimeState(StrEnum):
     DRAFT = "draft"
     VALIDATED = "validated"
     SHADOW_ACTIVE = "shadow_active"
+    PRODUCTION_ACTIVE = "production_active"
     DISABLED = "disabled"
 
 

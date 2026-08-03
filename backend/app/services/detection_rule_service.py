@@ -258,6 +258,31 @@ class DetectionRuleService:
             target_state=DetectionRuleRuntimeState.SHADOW_ACTIVE,
         )
 
+    async def promote_to_production(
+        self,
+        *,
+        source_tenant_id: str,
+        package_id: str,
+    ) -> DetectionRulePackage:
+        return await self._transition(
+            source_tenant_id=source_tenant_id,
+            package_id=package_id,
+            target_state=DetectionRuleRuntimeState.PRODUCTION_ACTIVE,
+        )
+
+    async def transition_runtime_state(
+        self,
+        *,
+        source_tenant_id: str,
+        package_id: str,
+        target_state: DetectionRuleRuntimeState,
+    ) -> DetectionRulePackage:
+        return await self._transition(
+            source_tenant_id=source_tenant_id,
+            package_id=package_id,
+            target_state=target_state,
+        )
+
     async def disable_package(
         self,
         *,

@@ -38,6 +38,7 @@ from app.services.behavior_observation_projection import BehaviorObservationProj
 from app.services.event_service import (
     EventService,
     IngestableSource,
+    IngestResult,
     should_apply_source_update,
     stable_source_record_id,
 )
@@ -704,6 +705,23 @@ class SourceIngester:
                 error_category="projection_failed",
                 detail={"adapter": adapter.name, "type": type(exc).__name__},
             )
+
+    async def ingest_source_alert(
+        self,
+        alert: SourceAlert,
+        *,
+        source_type: str,
+    ) -> IngestResult:
+        """Canonical single-alert ingest — surfaces EventService typed IngestResult unchanged."""
+        result = await self._events.ingest_source_object(
+            source_to_ingestable(alert, source_type=source_type)
+        )
+        if not await self._project_behavior_observation(result.source_record_id):
+            logger.warning(
+                "behavior observation projection degraded after promotion ingest source_record_id=%s",
+                result.source_record_id,
+            )
+        return result
 
     async def _ingest_one(self, item: Any, *, source_type: str) -> tuple[bool, bool]:
         behavior_failed = False

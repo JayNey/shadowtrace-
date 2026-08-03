@@ -1,0 +1,38 @@
+{
+  "additionalProperties": false,
+  "description": "Input to promote one immutable shadow candidate after governance approval.",
+  "properties": {
+    "tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "candidate_detection_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Candidate Detection Id",
+      "type": "string"
+    },
+    "decision_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional explicit governance decision; resolved from gate when omitted.",
+      "title": "Decision Id"
+    }
+  },
+  "required": [
+    "tenant_id",
+    "candidate_detection_id"
+  ],
+  "title": "DetectionPromotionRequest",
+  "type": "object"
+}

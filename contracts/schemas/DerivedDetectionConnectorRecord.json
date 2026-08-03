@@ -1,0 +1,67 @@
+{
+  "additionalProperties": false,
+  "description": "Persisted derived connector identity bound to one detection scope.",
+  "properties": {
+    "connector_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Connector Id",
+      "type": "string"
+    },
+    "source_tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Source Tenant Id",
+      "type": "string"
+    },
+    "detection_scope_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Detection Scope Id",
+      "type": "string"
+    },
+    "scope_revision_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scope Revision Id"
+    },
+    "adapter_kind": {
+      "default": "derived_detection",
+      "minLength": 1,
+      "title": "Adapter Kind",
+      "type": "string"
+    },
+    "adapter_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Adapter Version",
+      "type": "string"
+    },
+    "disposition_policy": {
+      "default": "not_required",
+      "description": "Derived connectors must not pollute production checkpoint/writeback.",
+      "title": "Disposition Policy",
+      "type": "string"
+    },
+    "metadata": {
+      "additionalProperties": true,
+      "title": "Metadata",
+      "type": "object"
+    }
+  },
+  "required": [
+    "connector_id",
+    "source_tenant_id",
+    "detection_scope_id"
+  ],
+  "title": "DerivedDetectionConnectorRecord",
+  "type": "object"
+}
