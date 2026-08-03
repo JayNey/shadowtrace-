@@ -1,4 +1,11 @@
-"""KnowledgeStore: pgvector-backed chunk upsert and similarity retrieval (ISSUE-041)."""
+"""KnowledgeStore: pgvector-backed chunk upsert and similarity retrieval (ISSUE-041).
+
+#636 Phase A note: tenant/release/embedding pre-filters enforced on ``vector_search`` /
+``keyword_search`` when callers pass scoped parameters. ``RetrievalPipeline`` with a
+validated ``KnowledgeQueryPlan`` is the supported path for release-pinned retrieval.
+Legacy helpers ``vector_search_query`` / ``hybrid_search`` do not apply plan validation
+(#644 production wiring). Graph retrieval is not implemented in Phase A.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +19,7 @@ from app.db.orm.knowledge import KnowledgeChunkORM
 from app.models.knowledge import KnowledgeChunk, RetrievedChunk
 from app.models.knowledge_release import KnowledgeTypedFilter
 from app.services.knowledge_store_prefilter import (
+    assert_knowledge_chunk_keyword_prefilter_in_sql,
     assert_knowledge_chunk_prefilter_in_sql,
     embedding_release_filter_clause,
     typed_filter_clause,
@@ -107,6 +115,40 @@ class KnowledgeStore:
             FROM knowledge_chunk
             WHERE kb_name = :kb_name{tenant_clause}{release_clause}{embedding_clause}{filter_clause}
             ORDER BY embedding <=> :q
+            LIMIT :top_k
+            """
+
+    @classmethod
+    def compose_keyword_search_sql(
+        cls,
+        *,
+        tenant_id: str | None,
+        tenant_isolation_strict: bool,
+        release_id: str | None,
+        embedding_release_id: str | None,
+        typed_filters: tuple[KnowledgeTypedFilter, ...] | list[KnowledgeTypedFilter] = (),
+    ) -> str:
+        """Return the keyword_search SQL body for backend pre-filter proof (#636)."""
+        tenant_clause, _ = cls._tenant_filter_clause(
+            tenant_id,
+            tenant_isolation_strict=tenant_isolation_strict,
+        )
+        release_clause, _ = cls._release_filter_clause(release_id)
+        embedding_clause, _ = embedding_release_filter_clause(embedding_release_id)
+        filter_clause, _ = typed_filter_clause(typed_filters)
+        return f"""
+            SELECT chunk_id, kb_name, content, metadata,
+                   GREATEST(
+                       ts_rank(to_tsvector('simple', content),
+                               plainto_tsquery('simple', :q)),
+                       0.5
+                   ) AS score
+            FROM knowledge_chunk
+            WHERE kb_name = :kb_name
+              AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q)
+              {tenant_clause}{release_clause}{embedding_clause}{filter_clause}
+            ORDER BY ts_rank(to_tsvector('simple', content),
+                             plainto_tsquery('simple', :q)) DESC
             LIMIT :top_k
             """
 
@@ -270,23 +312,16 @@ class KnowledgeStore:
             **embedding_params,
             **filter_params,
         }
-        sql = text(
-            f"""
-            SELECT chunk_id, kb_name, content, metadata,
-                   GREATEST(
-                       ts_rank(to_tsvector('simple', content),
-                               plainto_tsquery('simple', :q)),
-                       0.5
-                   ) AS score
-            FROM knowledge_chunk
-            WHERE kb_name = :kb_name
-              AND to_tsvector('simple', content) @@ plainto_tsquery('simple', :q)
-              {tenant_clause}{release_clause}{embedding_clause}{filter_clause}
-            ORDER BY ts_rank(to_tsvector('simple', content),
-                             plainto_tsquery('simple', :q)) DESC
-            LIMIT :top_k
-            """
+        sql_body = self.compose_keyword_search_sql(
+            tenant_id=tenant_id,
+            tenant_isolation_strict=self._tenant_isolation_strict,
+            release_id=release_id,
+            embedding_release_id=embedding_release_id,
+            typed_filters=typed_filters,
         )
+        if release_id is not None or embedding_release_id is not None:
+            assert_knowledge_chunk_keyword_prefilter_in_sql(sql_body)
+        sql = text(sql_body)
         async with self._session_factory() as session:
             result = await session.execute(
                 sql,

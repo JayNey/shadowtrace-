@@ -66,6 +66,19 @@ def test_validate_rejects_missing_tenant() -> None:
     assert "missing_tenant_id" in outcome.rejected_reasons
 
 
+def test_validate_rejects_missing_principal() -> None:
+    active_emb = _active_embedding_release_id()
+    outcome = validate_knowledge_query_plan(
+        _base_plan(embedding_release_id=active_emb),
+        tenant_id="tenant-a",
+        principal="",
+        kb_names=["attack_kb"],
+        active_embedding_release_id=active_emb,
+    )
+    assert outcome.accepted is False
+    assert "missing_principal" in outcome.rejected_reasons
+
+
 def test_validate_rejects_embedding_release_mismatch() -> None:
     active_emb = _active_embedding_release_id()
     outcome = validate_knowledge_query_plan(

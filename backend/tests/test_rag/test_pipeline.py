@@ -505,6 +505,46 @@ class TestPipelineDegradation:
         assert "knowledge_query_plan_rejected" in result.degraded_steps
         assert "embedding_release_incompatible" in result.degraded_steps
 
+    @pytest.mark.asyncio
+    async def test_rejects_plan_kb_not_in_requested_scope(self) -> None:
+        from datetime import UTC, datetime
+
+        from app.core.config import Settings
+        from app.core.embedding.release import build_embedding_release
+        from app.models.knowledge_release import ATTACK_CORPUS_ID, KnowledgeQueryPlan
+
+        settings = Settings(EMBEDDING_MODE="mock")
+        active_emb = build_embedding_release(settings).release_id
+        plan = KnowledgeQueryPlan(
+            corpus_id=ATTACK_CORPUS_ID,
+            kb_name="attack_kb",
+            active_release_id="krel-plan-test",
+            embedding_release_id=active_emb,
+            trace_id="trace-kb-mismatch",
+            pinned_at=datetime.now(UTC),
+        )
+        context = RetrievalContext(
+            tenant_id="local",
+            principal="investigation:test",
+            event_id="evt-kb-mismatch",
+            trace_id="trace-kb-mismatch",
+            query_plan=plan,
+        )
+        chunks = [_make_chunk("chk-x", "case_kb", "content", score=0.9)]
+        pipeline = RetrievalPipeline(
+            rewriter=QueryRewriter(
+                MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+                agent_name="test",
+            ),
+            retriever=_ConstantRetriever([chunks, chunks]),  # type: ignore[arg-type]
+            reranker=MockReranker(),
+            settings=settings,
+        )
+        result = await pipeline.retrieve("accounts", ["case_kb"], top_k=1, context=context)
+        assert result.chunks == []
+        assert "knowledge_query_plan_rejected" in result.degraded_steps
+        assert "plan_kb_not_in_scope" in result.degraded_steps
+
 
 # ============================================================================
 # Full pipeline integration tests (requires PostgreSQL)

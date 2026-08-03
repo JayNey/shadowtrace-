@@ -67,3 +67,37 @@ def test_knowledge_store_compose_vector_search_sql_passes_prefilter_proof() -> N
     order_pos = sql.upper().index("ORDER BY")
     tenant_pos = sql.index("metadata->>'tenant_id'")
     assert tenant_pos < order_pos
+
+
+def test_knowledge_store_compose_keyword_search_sql_passes_prefilter_proof() -> None:
+    from app.services.knowledge_store import KnowledgeStore
+    from app.services.knowledge_store_prefilter import assert_knowledge_chunk_keyword_prefilter_in_sql
+
+    sql = KnowledgeStore.compose_keyword_search_sql(
+        tenant_id="tenant-a",
+        tenant_isolation_strict=True,
+        release_id="krel-test",
+        embedding_release_id="emb-v1",
+        typed_filters=[
+            KnowledgeTypedFilter(kind=KnowledgeFilterKind.SOURCE_ID, value="mitre_attack_stix"),
+        ],
+    )
+    assert_knowledge_chunk_keyword_prefilter_in_sql(sql)
+    order_pos = sql.upper().index("ORDER BY")
+    release_pos = sql.index("metadata->>'release_id'")
+    assert release_pos < order_pos
+
+
+def test_build_knowledge_chunk_keyword_sql_has_prefilter_before_order() -> None:
+    from app.services.knowledge_store_prefilter import (
+        assert_knowledge_chunk_keyword_prefilter_in_sql,
+        build_knowledge_chunk_keyword_sql,
+    )
+
+    sql = build_knowledge_chunk_keyword_sql(
+        include_tenant=True,
+        include_release=True,
+        include_embedding_release=True,
+        include_typed_filters=True,
+    )
+    assert_knowledge_chunk_keyword_prefilter_in_sql(sql)

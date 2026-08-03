@@ -77,7 +77,11 @@ DEFAULT_KNOWLEDGE_MAX_CANDIDATES = 50
 
 
 class KnowledgeFilterKind(StrEnum):
-    """Typed metadata filters applied before candidate fetch (#636)."""
+    """Typed metadata filters applied before candidate fetch (#636).
+
+    Phase A supports ``source_id`` and ``content_type`` only. ``time_*`` values are
+    schema-reserved and rejected by the server validator until a later phase.
+    """
 
     SOURCE_ID = "source_id"
     CONTENT_TYPE = "content_type"

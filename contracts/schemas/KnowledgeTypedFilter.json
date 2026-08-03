@@ -1,7 +1,7 @@
 {
   "$defs": {
     "KnowledgeFilterKind": {
-      "description": "Typed metadata filters applied before candidate fetch (#636).",
+      "description": "Typed metadata filters applied before candidate fetch (#636).\n\nPhase A supports ``source_id`` and ``content_type`` only. ``time_*`` values are\nschema-reserved and rejected by the server validator until a later phase.",
       "enum": [
         "source_id",
         "content_type",

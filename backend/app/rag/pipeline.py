@@ -30,6 +30,11 @@ class RetrievalPipeline:
     Each non-retrieval step that fails is recorded in ``degraded_steps`` and the
     pipeline continues with the best available intermediate results.  Plan validation
     and all-retrieval-empty outcomes fail closed without widening scope.
+
+    #636 Phase A: release-pinned pre-filters apply only through this pipeline path
+    with a validated ``KnowledgeQueryPlan``. Direct ``KnowledgeStore.hybrid_search`` /
+    ``vector_search_query`` callers bypass plan validation until #644 production wiring.
+    Graph retrieval is out of scope for Phase A (vector + keyword only).
     """
 
     def __init__(
@@ -101,7 +106,19 @@ class RetrievalPipeline:
         active_context = context
         effective_top_k = top_k
 
-        if context.query_plan is not None and context.query_plan.kb_name in kb_names:
+        if context.query_plan is not None:
+            if context.query_plan.kb_name not in kb_names:
+                return RetrievalResult(
+                    query=query,
+                    rewritten_queries=[query],
+                    chunks=[],
+                    citations=[],
+                    degraded_steps=degraded + [_PLAN_REJECTED, "plan_kb_not_in_scope"],
+                    knowledge_query_plan={
+                        "rejected_reasons": ["plan_kb_not_in_scope"],
+                        "sanitized_plan_hash": "",
+                    },
+                )
             cfg = self._settings or get_settings()
             active_embedding_release_id = build_embedding_release(cfg).release_id
             outcome = validate_knowledge_query_plan(

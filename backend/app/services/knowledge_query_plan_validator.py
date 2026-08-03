@@ -42,9 +42,8 @@ def compute_plan_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _sanitize_hint_list(values: list[str]) -> tuple[list[str], list[str]]:
+def _sanitize_hint_list(values: list[str]) -> list[str]:
     clean: list[str] = []
-    rejected: list[str] = []
     seen: set[str] = set()
     for raw in values:
         item = raw.strip()
@@ -54,7 +53,7 @@ def _sanitize_hint_list(values: list[str]) -> tuple[list[str], list[str]]:
             continue
         seen.add(item)
         clean.append(item)
-    return clean, rejected
+    return clean
 
 
 def resolve_allowed_corpora_for_kbs(kb_names: list[str]) -> frozenset[str]:
@@ -104,7 +103,7 @@ def validate_knowledge_query_plan(
     if base_plan.corpus_id not in allowed_corpora:
         rejected.append("corpus_not_allowed_for_kb")
 
-    hint_corpora, _ = _sanitize_hint_list(agent_hints.corpus_ids)
+    hint_corpora = _sanitize_hint_list(agent_hints.corpus_ids)
     if hint_corpora:
         if len(hint_corpora) > 1:
             rejected.append("agent_corpus_hint_expands_scope")
@@ -141,8 +140,8 @@ def validate_knowledge_query_plan(
             break
         _append_filter(filt)
 
-    source_ids, _ = _sanitize_hint_list(agent_hints.source_ids)
-    content_types, _ = _sanitize_hint_list(agent_hints.content_types)
+    source_ids = _sanitize_hint_list(agent_hints.source_ids)
+    content_types = _sanitize_hint_list(agent_hints.content_types)
     for source_id in source_ids:
         _append_filter(KnowledgeTypedFilter(kind=KnowledgeFilterKind.SOURCE_ID, value=source_id))
     for content_type in content_types:
