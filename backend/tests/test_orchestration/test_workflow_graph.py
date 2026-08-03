@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from app.agents.planner_agent import PlannerAgent
-from app.core.errors import InvalidStateTransitionError
+from app.core.errors import InvalidStateTransitionError, ValidationError
 from app.models.agent_io import (
     CollectionStatus,
     EffectStatus,
@@ -1330,3 +1330,25 @@ async def test_response_node_invokes_response_plan_ledger(
     assert captured["idempotency_key"] == "response-plan:evt-graph-001:1"
     assert captured["plan_revision"] == 1
     assert captured["worker_principal"] == "investigation:workflow_graph"
+
+
+@pytest.mark.asyncio
+async def test_response_node_fail_closed_when_ledger_wired_without_tenant() -> None:
+    response_plan = ResponsePlan(
+        plan_id="plan-evt-graph-001-0",
+        actions=[],
+        strategy_summary="stub",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    agents = _agents()
+    agents["response_agent"] = StubAgent(response_plan)
+    services = _services()
+    services["agent_task_service"] = object()
+    services["agent_artifact_service"] = object()
+    services["content_projection_service"] = None
+
+    with pytest.raises(ValidationError, match="requires tenant_id"):
+        await build_investigation_graph(agents, services).ainvoke(
+            _base_state(source_snapshot={}),
+            {"configurable": {"thread_id": "evt-response-no-tenant"}},
+        )

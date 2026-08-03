@@ -526,6 +526,19 @@ async def run_response_plan_with_ledger(
         )
         raise
 
+    # Ledger enqueue without artifact persistence would COMPLETE without an
+    # immutable plan anchor, allowing content drift on later redelivery.
+    if artifact_service is None:
+        await _fail_claim_manual(
+            agent_task_service,
+            claim,
+            error_summary="artifact_service_unavailable",
+        )
+        raise AgentTaskDeniedError(
+            "response_plan requires artifact service when ledger is enabled",
+            details={"task_id": task.task_id, "reason": "artifact_service_unavailable"},
+        )
+
     _build_response_projection(content_projection_service, projection_fields)
     try:
         result = await execute()
@@ -536,10 +549,6 @@ async def run_response_plan_with_ledger(
             error_summary=f"execute_failed: {exc.__class__.__name__}",
         )
         raise
-
-    if artifact_service is None:
-        await agent_task_service.complete(claim)
-        return result
 
     payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
     if not isinstance(payload, dict):
@@ -575,12 +584,36 @@ async def run_response_plan_with_ledger(
         )
         raise
 
-    await agent_task_service.record_staged_artifact_hash(
-        claim,
-        tenant_id=tenant_id,
-        logical_artifact_key="response_plan",
-        content_hash=content_hash,
-    )
+    try:
+        await agent_task_service.record_staged_artifact_hash(
+            claim,
+            tenant_id=tenant_id,
+            logical_artifact_key="response_plan",
+            content_hash=content_hash,
+        )
+    except ValidationError:
+        await _fail_claim_manual(
+            agent_task_service,
+            claim,
+            error_summary="artifact_stage_validation_failed",
+        )
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Staged artifact hash record failed for response_plan event=%s task=%s",
+            event_id,
+            task.task_id,
+            exc_info=True,
+        )
+        await _fail_claim_manual(
+            agent_task_service,
+            claim,
+            error_summary=f"artifact_stage_failed: {exc.__class__.__name__}",
+        )
+        raise AgentTaskDeniedError(
+            "staged artifact hash record failed",
+            details={"task_id": task.task_id, "reason": exc.__class__.__name__},
+        ) from exc
 
     try:
         await artifact_service.persist(

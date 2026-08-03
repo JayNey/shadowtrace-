@@ -355,6 +355,122 @@ async def test_run_response_plan_claim_denied_does_not_execute() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_response_plan_artifact_service_missing_marks_manual_without_execute() -> None:
+    now = datetime.now(tz=UTC)
+    queued_task = AgentTask(
+        task_id="atk-response",
+        event_id="evt-001",
+        tenant_id="tenant-a",
+        task_type=AgentTaskType.RESPONSE_PLAN,
+        goal=AgentTaskGoal(
+            task_type=AgentTaskType.RESPONSE_PLAN,
+            context_refs=list(RESPONSE_PLAN_CONTEXT_REFS),
+            parameters={"plan_revision": 1},
+        ),
+        status=AgentTaskStatus.QUEUED,
+        revision=1,
+        attempt=0,
+        idempotency_key="response-plan:evt-001:1",
+        created_at=now,
+        updated_at=now,
+    )
+    claim = AgentTaskClaim(
+        task_id="atk-response",
+        fencing_token="fencing-token-001",
+        lease_expires_at=now + timedelta(minutes=5),
+        attempt=1,
+        worker_principal="test-worker",
+        revision=1,
+    )
+
+    task_service = AsyncMock(spec=AgentTaskService)
+    task_service.enqueue = AsyncMock(return_value=queued_task)
+    task_service.claim = AsyncMock(return_value=claim)
+    task_service.start = AsyncMock()
+    task_service.fail = AsyncMock()
+
+    execute = AsyncMock()
+
+    with pytest.raises(AgentTaskDeniedError, match="artifact service"):
+        await run_response_plan_with_ledger(
+            task_service,
+            None,
+            event_id="evt-001",
+            tenant_id="tenant-a",
+            worker_principal="test-worker",
+            idempotency_key="response-plan:evt-001:1",
+            plan_revision=1,
+            execute=execute,
+        )
+
+    execute.assert_not_called()
+    task_service.fail.assert_awaited_once()
+    assert task_service.fail.await_args.kwargs.get("side_effect_unknown") is True
+    task_service.complete.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_response_plan_stage_hash_fail_marks_manual() -> None:
+    plan = _sample_plan()
+    now = datetime.now(tz=UTC)
+    queued_task = AgentTask(
+        task_id="atk-response",
+        event_id="evt-001",
+        tenant_id="tenant-a",
+        task_type=AgentTaskType.RESPONSE_PLAN,
+        goal=AgentTaskGoal(
+            task_type=AgentTaskType.RESPONSE_PLAN,
+            context_refs=list(RESPONSE_PLAN_CONTEXT_REFS),
+            parameters={"plan_revision": 1},
+        ),
+        status=AgentTaskStatus.QUEUED,
+        revision=1,
+        attempt=0,
+        idempotency_key="response-plan:evt-001:1",
+        created_at=now,
+        updated_at=now,
+    )
+    claim = AgentTaskClaim(
+        task_id="atk-response",
+        fencing_token="fencing-token-001",
+        lease_expires_at=now + timedelta(minutes=5),
+        attempt=1,
+        worker_principal="test-worker",
+        revision=1,
+    )
+
+    task_service = AsyncMock(spec=AgentTaskService)
+    task_service.enqueue = AsyncMock(return_value=queued_task)
+    task_service.claim = AsyncMock(return_value=claim)
+    task_service.start = AsyncMock()
+    task_service.record_staged_artifact_hash = AsyncMock(side_effect=RuntimeError("db stage failed"))
+    task_service.fail = AsyncMock()
+
+    artifact_service = AsyncMock(spec=AgentArtifactService)
+    artifact_service.load_latest = AsyncMock(return_value=None)
+
+    async def _execute() -> ResponsePlan:
+        return plan
+
+    with pytest.raises(AgentTaskDeniedError, match="staged artifact hash"):
+        await run_response_plan_with_ledger(
+            task_service,
+            artifact_service,
+            event_id="evt-001",
+            tenant_id="tenant-a",
+            worker_principal="test-worker",
+            idempotency_key="response-plan:evt-001:1",
+            plan_revision=1,
+            execute=_execute,
+        )
+
+    task_service.fail.assert_awaited_once()
+    assert task_service.fail.await_args.kwargs.get("side_effect_unknown") is True
+    artifact_service.persist.assert_not_called()
+    task_service.complete.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_run_response_plan_persist_fail_marks_manual() -> None:
     plan = _sample_plan()
     now = datetime.now(tz=UTC)

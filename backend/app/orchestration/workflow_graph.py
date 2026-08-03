@@ -13,7 +13,7 @@ from langgraph.graph.state import CompiledStateGraph
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
-from app.core.errors import InvalidStateTransitionError
+from app.core.errors import InvalidStateTransitionError, ValidationError
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceAgentInput,
@@ -1069,6 +1069,16 @@ def build_investigation_graph(
                     content_projection_service=services.get("content_projection_service"),
                     projection_fields=projection_fields,
                     execute=_execute_response,
+                )
+            elif services.get("agent_task_service") is not None:
+                # Ledger is wired: refuse unscoped execute that would skip immutable refs.
+                raise ValidationError(
+                    "response_plan ledger requires tenant_id",
+                    error_code="validation_error",
+                    details={
+                        "event_id": state["event_id"],
+                        "reason": "tenant_missing",
+                    },
                 )
             else:
                 result = await _execute_response()
