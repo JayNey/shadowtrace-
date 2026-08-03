@@ -1,0 +1,64 @@
+{
+  "case_id": "threat_cold_start_insufficient_history",
+  "case_version": 1,
+  "source_tenant_id": "tenant-det-cold",
+  "source_product": "mock_xdr",
+  "connector_id": "conn-cold-001",
+  "slice_expectation": {
+    "slice_type": "threat",
+    "schema_version": "1.1",
+    "expected_case_label": "true_positive",
+    "expected_final_verdict": "confirmed_threat"
+  },
+  "label_provenance": {
+    "adjudicator": "detection-eval-curator",
+    "adjudicated_at": "2026-08-01T08:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "Statistical anomaly with insufficient baseline history must fail closed."
+  },
+  "detection_replay": {
+    "source_tenant_id": "tenant-det-cold",
+    "cutoff_at": "2026-08-01T15:30:00+00:00",
+    "scope_seed": {
+      "integration_instance_id": "inst-cold-001",
+      "connector_id": "conn-cold-001"
+    },
+    "package_id": "drpkg-det-cold-v1",
+    "package_version": 1,
+    "rules": [
+      {
+        "rule_id": "rule-cold-anomaly",
+        "rule_version": 1,
+        "operator": "statistical_anomaly",
+        "feature_contract_version": "1.0",
+        "detection_scope_id": "scope-placeholder",
+        "window_kind": "1h",
+        "group_key_fields": ["entity_type", "entity_id"],
+        "threshold": 3.5,
+        "severity": "medium",
+        "match_criteria": {
+          "entity_type": "account",
+          "entity_id": "acct-cold-001",
+          "model_release_id": "mock-account-mad-v1",
+          "model_release_hash": "923939d28bfaf57522062ab98194eb020e55efb36cec11f5c33e1d0b3f892d66"
+        }
+      }
+    ],
+    "feature_snapshots": [
+      {
+        "snapshot_id": "snap-cold-001",
+        "entity_type": "account",
+        "entity_id": "acct-cold-001",
+        "window_kind": "1h",
+        "cutoff_at": "2026-08-01T15:30:00+00:00",
+        "status": "ready",
+        "features": {
+          "observation_count": 5,
+          "avg_detection_score": 70.0,
+          "unique_action_count": 3
+        }
+      }
+    ]
+  },
+  "retention_policy": "evaluation_standard"
+}

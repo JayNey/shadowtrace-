@@ -177,12 +177,12 @@ class DetectionShadowReplayer:
         *,
         probe_tenant_id: str,
     ) -> TenantIsolationProbeOutcome:
-        await self.seed_case(replay)
+        seeded = await self.seed_case(replay)
         try:
             result = await self._runtime.execute_shadow(
                 source_tenant_id=probe_tenant_id,
                 cutoff_at=replay.cutoff_at,
-                package_id=None,
+                package_id=seeded.package_id,
             )
         except ValidationError as exc:
             if _is_probe_misconfiguration_error(exc):

@@ -4,6 +4,9 @@ Specialized runner for shadow detection replay (#626–#628). Reuses #608 shared
 components (``EvaluationTruthService``, ``evaluate_gate``, threshold manifests)
 but does not delegate to ``EvaluationRunner`` — detection cases require shadow
 runtime seeding and slice-specific scorers.
+
+Post-promotion production drift comparison is Phase B (#629); this runner emits
+pre-promotion ``DetectionEvaluationArtifact`` only.
 """
 
 from __future__ import annotations

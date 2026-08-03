@@ -133,9 +133,11 @@
       "type": "string"
     },
     "candidate_refs": {
-      "$ref": "#/$defs/DetectionCandidateRefs"
+      "$ref": "#/$defs/DetectionCandidateRefs",
+      "description": "Primary (first) candidate package refs for backward compatibility. Prefer candidate_refs_entries for full multi-package provenance."
     },
     "candidate_refs_entries": {
+      "description": "Complete pinned candidate package/model refs across all replay fixtures.",
       "items": {
         "$ref": "#/$defs/DetectionCandidateRefs"
       },
@@ -144,6 +146,7 @@
     },
     "candidate_set_hash": {
       "default": "",
+      "description": "Deterministic hash over sorted candidate_refs_entries.",
       "maxLength": 64,
       "minLength": 0,
       "title": "Candidate Set Hash",

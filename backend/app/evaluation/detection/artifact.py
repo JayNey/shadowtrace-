@@ -40,6 +40,9 @@ def _canonical_payload(artifact: DetectionEvaluationArtifact) -> dict[str, Any]:
             for candidate in observation.get("candidates", []):
                 if isinstance(candidate, dict):
                     candidate.pop("created_at", None)
+            for error in observation.get("runtime_errors", []):
+                if isinstance(error, dict):
+                    error.pop("created_at", None)
     resource_summary = canonical.get("resource_summary")
     if isinstance(resource_summary, dict):
         resource_summary.pop("total_replay_duration_ms", None)

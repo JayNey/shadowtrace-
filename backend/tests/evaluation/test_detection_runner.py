@@ -105,12 +105,10 @@ async def test_detection_fixture_dataset_loads(
     loaded_detection_dataset: tuple[object, object],
 ) -> None:
     manifest, fixture_index = loaded_detection_dataset
-    assert manifest.case_count == 5
-    assert len(fixture_index.by_case_id) == 5
+    assert manifest.case_count == 7
+    assert len(fixture_index.by_case_id) == 7
 
 
-@pytest.mark.evaluation
-@pytest.mark.asyncio
 async def _run_loaded_dataset(
     session_factory: async_sessionmaker[AsyncSession],
     truth_service: EvaluationTruthService,
@@ -145,7 +143,7 @@ async def _run_loaded_dataset(
 
 @pytest.mark.evaluation
 @pytest.mark.asyncio
-async def test_detection_evaluation_completes(
+async def test_detection_shadow_v1_full_dataset(
     session_factory: async_sessionmaker[AsyncSession],
     truth_service: EvaluationTruthService,
     loaded_detection_dataset: tuple[object, object],
@@ -156,22 +154,36 @@ async def test_detection_evaluation_completes(
         loaded_detection_dataset,
     )
 
-    assert artifact.status == EvaluationRunStatus.COMPLETED
-    assert artifact.aggregates.case_count == 5
-    assert artifact.aggregates.fail_count == 0
-    assert artifact.aggregates.error_count == 0
+    assert artifact.status == EvaluationRunStatus.FAILED
+    assert artifact.aggregates.case_count == 7
+    assert artifact.aggregates.pass_count == 4
+    assert artifact.aggregates.error_count == 2
+    assert artifact.aggregates.unevaluable_count == 1
     assert artifact.artifact_hash
     assert artifact.approval_note.startswith("Not a governance approval")
     assert artifact.tenant_safety.probe_count >= 1
     assert artifact.tenant_safety.fail_count == 0
     assert artifact.quality_report is not None
-    threat_recall = next(
-        metric for metric in artifact.quality_report.metrics if metric.metric_id == "threat_recall"
-    )
-    assert threat_recall.value == 1.0
     assert artifact.resource_summary.total_replay_duration_ms >= 0
     assert artifact.config.candidate_set_hash
-    assert len(artifact.config.candidate_refs_entries) >= 2
+    assert len(artifact.config.candidate_refs_entries) >= 5
+
+    cold_start = next(
+        case
+        for case in artifact.case_results
+        if case.case_id == "threat_cold_start_insufficient_history"
+    )
+    assert cold_start.case_status == EvaluationRunStatus.FAILED
+    assert cold_start.observation.runtime_errors
+
+    resource_case = next(
+        case
+        for case in artifact.case_results
+        if case.case_id == "threat_resource_budget_exceeded"
+    )
+    assert resource_case.case_status == EvaluationRunStatus.FAILED
+    budget = next(r for r in resource_case.scorer_results if r.scorer_id == "resource_budget")
+    assert budget.outcome == ScorerOutcome.FAIL
 
 
 @pytest.mark.evaluation
@@ -277,104 +289,61 @@ async def test_late_observation_does_not_fire(
 
 @pytest.mark.evaluation
 @pytest.mark.asyncio
+async def test_foreign_tenant_cannot_execute_victim_package(
+    session_factory: async_sessionmaker[AsyncSession],
+    loaded_detection_dataset: tuple[object, object],
+) -> None:
+    from app.evaluation.detection.replayer import DetectionShadowReplayer
+
+    _, fixture_index = loaded_detection_dataset
+    replay = fixture_index.by_case_id["threat_event_match"]
+    replayer = DetectionShadowReplayer(session_factory)
+    outcome = await replayer.probe_tenant_isolation(
+        replay,
+        probe_tenant_id="tenant-det-foreign",
+    )
+    assert outcome.execution_error is None
+    assert outcome.foreign_candidates == []
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_diff_detects_candidate_set_hash_drift(
+    session_factory: async_sessionmaker[AsyncSession],
+    truth_service: EvaluationTruthService,
+    loaded_detection_dataset: tuple[object, object],
+) -> None:
+    baseline = await _run_loaded_dataset(
+        session_factory,
+        truth_service,
+        loaded_detection_dataset,
+        seed=42,
+        code_sha="baseline0001",
+    )
+    mutated_config = baseline.config.model_copy(update={"candidate_set_hash": "0" * 64})
+    candidate = baseline.model_copy(update={"config": mutated_config})
+    candidate = finalize_detection_artifact(candidate)
+    diffs = diff_detection_artifacts(baseline, candidate)
+    assert any(diff.field == "config.candidate_set_hash" for diff in diffs)
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
 async def test_resource_failure_fail_closed(
     session_factory: async_sessionmaker[AsyncSession],
     truth_service: EvaluationTruthService,
+    loaded_detection_dataset: tuple[object, object],
 ) -> None:
-    from app.evaluation.detection.fixture_loader import parse_detection_replay_fixture
-    from app.evaluation.fixture_loader import build_truth_from_fixture_case, load_fixture_cases
-    from app.models.detection_rule import DetectionRuleDefinition
-
-    case_payload = {
-        "case_id": "resource_failure_case",
-        "slice_expectation": {
-            "slice_type": "threat",
-            "expected_case_label": "true_positive",
-            "expected_final_verdict": "confirmed_threat",
-        },
-        "label_provenance": {
-            "adjudicator": "test",
-            "adjudicated_at": "2026-08-01T08:00:00+00:00",
-            "source_kind": "test",
-        },
-        "detection_replay": {
-            "source_tenant_id": "tenant-det-resource-test",
-            "cutoff_at": "2026-08-01T15:30:00+00:00",
-            "scope_seed": {
-                "integration_instance_id": "inst-resource-test",
-                "connector_id": "conn-resource-test",
-            },
-            "package_id": "drpkg-det-resource-test",
-            "package_version": 1,
-            "max_observations_scanned": 1,
-            "rules": [
-                {
-                    "rule_id": "rule-count",
-                    "rule_version": 1,
-                    "operator": "event_count",
-                    "feature_contract_version": FEATURE_CONTRACT_VERSION,
-                    "detection_scope_id": "scope-placeholder",
-                    "window_kind": FeatureWindowKind.ONE_HOUR.value,
-                    "group_key_fields": ["entity_type", "entity_id"],
-                    "threshold": 1.0,
-                    "severity": "medium",
-                    "match_criteria": {},
-                    "max_observation_scan": 2,
-                }
-            ],
-            "observations": [
-                {
-                    "observation_id": f"obs-resource-{index}",
-                    "observed_at": (
-                        datetime(2026, 8, 1, 14, 30, 0, tzinfo=UTC) + timedelta(minutes=index * 5)
-                    ).isoformat(),
-                    "action": "create_process",
-                    "category": "process_create",
-                    "entity": {"entity_type": "ip", "entity_id": "10.0.0.99"},
-                    "connector_id": "conn-resource-test",
-                    "source_object_id": f"log-resource-{index}",
-                }
-                for index in range(4)
-            ],
-        },
-    }
-
-    truth_service = EvaluationTruthService(session_factory)
-    truth = await truth_service.persist(
-        build_truth_from_fixture_case(
-            case_payload,
-            tenant_id="tenant-detection-eval",
-            dataset_id="detection_resource_test",
-            dataset_version="2026.08.02",
-        )
-    )
-    manifest = await truth_service.get_dataset_manifest(
-        tenant_id="tenant-detection-eval",
-        dataset_id="detection_resource_test",
-        dataset_version="2026.08.02",
-    )
-    replay = parse_detection_replay_fixture(case_payload)
-    assert replay is not None
-    candidate_refs = await derive_candidate_refs(session_factory, replay)
-    fixture_index = load_detection_fixture_index(DATASET_DIR)
-    fixture_index.by_case_id["resource_failure_case"] = replay
-    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
-
-    artifact = await run_fixture_detection_evaluation(
-        truth_service,
+    artifact = await _run_loaded_dataset(
         session_factory,
-        manifest,
-        fixture_index,
-        seed=42,
-        code_sha="abc1234",
-        cutoff_at=cutoff,
-        effective_cutoff_at=cutoff,
-        candidate_refs=candidate_refs,
-        candidate_refs_entries=[candidate_refs],
-        candidate_set_hash="",
+        truth_service,
+        loaded_detection_dataset,
     )
-
-    case = next(item for item in artifact.case_results if item.case_id == "resource_failure_case")
+    case = next(
+        item
+        for item in artifact.case_results
+        if item.case_id == "threat_resource_budget_exceeded"
+    )
     assert case.case_status == EvaluationRunStatus.FAILED
     assert case.observation.runtime_errors
     threat = next(result for result in case.scorer_results if result.scorer_id == "threat_detection")
@@ -514,104 +483,19 @@ async def test_duplicate_observation_idempotent_replay(
 @pytest.mark.asyncio
 async def test_cold_start_insufficient_history_fail_closed(
     session_factory: async_sessionmaker[AsyncSession],
+    truth_service: EvaluationTruthService,
+    loaded_detection_dataset: tuple[object, object],
 ) -> None:
-    from app.detection.scoring.release import MOCK_ACCOUNT_MAD_RELEASE
-    from app.evaluation.detection.fixture_loader import parse_detection_replay_fixture
-    from app.evaluation.fixture_loader import build_truth_from_fixture_case
-
-    case_payload = {
-        "case_id": "cold_start_case",
-        "slice_expectation": {
-            "slice_type": "threat",
-            "expected_case_label": "true_positive",
-            "expected_final_verdict": "confirmed_threat",
-        },
-        "label_provenance": {
-            "adjudicator": "test",
-            "adjudicated_at": "2026-08-01T08:00:00+00:00",
-            "source_kind": "test",
-        },
-        "detection_replay": {
-            "source_tenant_id": "tenant-det-cold",
-            "cutoff_at": "2026-08-01T15:30:00+00:00",
-            "scope_seed": {
-                "integration_instance_id": "inst-cold-001",
-                "connector_id": "conn-cold-001",
-            },
-            "package_id": "drpkg-det-cold-v1",
-            "package_version": 1,
-            "rules": [
-                {
-                    "rule_id": "rule-cold-anomaly",
-                    "rule_version": 1,
-                    "operator": "statistical_anomaly",
-                    "feature_contract_version": FEATURE_CONTRACT_VERSION,
-                    "detection_scope_id": "scope-placeholder",
-                    "window_kind": FeatureWindowKind.ONE_HOUR.value,
-                    "group_key_fields": ["entity_type", "entity_id"],
-                    "threshold": 3.5,
-                    "severity": "medium",
-                    "match_criteria": {
-                        "entity_type": "account",
-                        "entity_id": "acct-cold-001",
-                        "model_release_id": MOCK_ACCOUNT_MAD_RELEASE.release_id,
-                        "model_release_hash": MOCK_ACCOUNT_MAD_RELEASE.release_hash,
-                    },
-                }
-            ],
-            "feature_snapshots": [
-                {
-                    "snapshot_id": "snap-cold-001",
-                    "entity_type": "account",
-                    "entity_id": "acct-cold-001",
-                    "window_kind": "1h",
-                    "cutoff_at": "2026-08-01T15:30:00+00:00",
-                    "status": "ready",
-                    "features": {
-                        "observation_count": 5,
-                        "avg_detection_score": 70.0,
-                        "unique_action_count": 3,
-                    },
-                }
-            ],
-        },
-    }
-
-    truth_service = EvaluationTruthService(session_factory)
-    await truth_service.persist(
-        build_truth_from_fixture_case(
-            case_payload,
-            tenant_id="tenant-detection-eval",
-            dataset_id="detection_cold_start_test",
-            dataset_version="2026.08.02",
-        )
-    )
-    manifest = await truth_service.get_dataset_manifest(
-        tenant_id="tenant-detection-eval",
-        dataset_id="detection_cold_start_test",
-        dataset_version="2026.08.02",
-    )
-    replay = parse_detection_replay_fixture(case_payload)
-    assert replay is not None
-    candidate_refs = await derive_candidate_refs(session_factory, replay)
-    fixture_index = load_detection_fixture_index(DATASET_DIR)
-    fixture_index.by_case_id["cold_start_case"] = replay
-    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
-
-    artifact = await run_fixture_detection_evaluation(
-        truth_service,
+    artifact = await _run_loaded_dataset(
         session_factory,
-        manifest,
-        fixture_index,
-        seed=42,
-        code_sha="abc1234",
-        cutoff_at=cutoff,
-        effective_cutoff_at=cutoff,
-        candidate_refs=candidate_refs,
-        candidate_refs_entries=[candidate_refs],
-        candidate_set_hash="",
+        truth_service,
+        loaded_detection_dataset,
     )
-    case = next(item for item in artifact.case_results if item.case_id == "cold_start_case")
+    case = next(
+        item
+        for item in artifact.case_results
+        if item.case_id == "threat_cold_start_insufficient_history"
+    )
     assert case.case_status == EvaluationRunStatus.FAILED
     assert case.observation.runtime_errors
     threat = next(result for result in case.scorer_results if result.scorer_id == "threat_detection")
@@ -637,7 +521,7 @@ async def test_artifact_candidate_refs_cover_all_packages(
         if case.candidate_refs is not None
     }
     assert case_package_ids.issubset(package_ids)
-    assert len(package_ids) >= 3
+    assert len(package_ids) >= 5
 
 
 @pytest.mark.evaluation

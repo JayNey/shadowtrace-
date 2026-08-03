@@ -132,10 +132,6 @@ async def _insert_feature_snapshot_row(
     content_hash = hashlib.sha256(
         orjson.dumps(features, option=orjson.OPT_SORT_KEYS),
     ).hexdigest()
-    cache_key = (
-        f"{source_tenant_id}:{detection_scope_id}:{fixture.entity_type}:"
-        f"{fixture.entity_id}:{fixture.window_kind.value}:{fixture.cutoff_at.isoformat()}"
-    )
     session.add(
         orm.FeatureSnapshot(
             snapshot_id=fixture.snapshot_id,
@@ -159,7 +155,7 @@ async def _insert_feature_snapshot_row(
             revision=1,
             supersedes_snapshot_id=None,
             content_hash=content_hash,
-            cache_key=cache_key,
+            cache_key=content_hash,
             idempotency_key=f"idem-{fixture.snapshot_id}",
             schema_version="1.0",
         )

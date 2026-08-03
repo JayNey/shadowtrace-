@@ -145,9 +145,23 @@ class DetectionEvaluationConfig(BaseModel):
             "Does not use post-promotion Event severity or agent conclusions."
         ),
     )
-    candidate_refs: DetectionCandidateRefs
-    candidate_refs_entries: list[DetectionCandidateRefs] = Field(default_factory=list)
-    candidate_set_hash: str = Field(default="", min_length=0, max_length=64)
+    candidate_refs: DetectionCandidateRefs = Field(
+        ...,
+        description=(
+            "Primary (first) candidate package refs for backward compatibility. "
+            "Prefer candidate_refs_entries for full multi-package provenance."
+        ),
+    )
+    candidate_refs_entries: list[DetectionCandidateRefs] = Field(
+        default_factory=list,
+        description="Complete pinned candidate package/model refs across all replay fixtures.",
+    )
+    candidate_set_hash: str = Field(
+        default="",
+        min_length=0,
+        max_length=64,
+        description="Deterministic hash over sorted candidate_refs_entries.",
+    )
     scorer_ids: list[str] = Field(default_factory=list)
     extra: dict[str, Any] = Field(default_factory=dict)
 

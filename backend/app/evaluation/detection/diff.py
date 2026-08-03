@@ -77,6 +77,28 @@ def diff_detection_artifacts(
             )
         )
 
+    if baseline.config.candidate_set_hash != candidate.config.candidate_set_hash:
+        diffs.append(
+            EvaluationGateDiff(
+                field="config.candidate_set_hash",
+                expected=baseline.config.candidate_set_hash,
+                actual=candidate.config.candidate_set_hash,
+                reason="candidate set hash changed",
+            )
+        )
+
+    baseline_entries = [entry.model_dump() for entry in baseline.config.candidate_refs_entries]
+    candidate_entries = [entry.model_dump() for entry in candidate.config.candidate_refs_entries]
+    if baseline_entries != candidate_entries:
+        diffs.append(
+            EvaluationGateDiff(
+                field="config.candidate_refs_entries",
+                expected=baseline_entries,
+                actual=candidate_entries,
+                reason="candidate refs entries changed",
+            )
+        )
+
     if baseline.artifact_hash != candidate.artifact_hash:
         diffs.append(
             EvaluationGateDiff(
