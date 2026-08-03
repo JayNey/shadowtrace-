@@ -20,7 +20,7 @@ from app.models.detection_governance import (
 )
 from app.services.detection_governance_policy import DETECTION_GOVERNANCE_POLICY_VERSION
 
-_HASH_EXCLUDE = frozenset({"decision_id", "decided_at", "decision_hash", "expires_at"})
+_HASH_EXCLUDE = frozenset({"decision_id", "decided_at", "decision_hash"})
 
 
 def build_candidate_binding(

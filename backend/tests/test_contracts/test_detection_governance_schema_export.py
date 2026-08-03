@@ -49,6 +49,12 @@ def test_detection_governance_decision_schema_exports_core_fields() -> None:
         assert field in props
 
 
+def test_detection_governance_eligibility_schema_exports_validated_flag() -> None:
+    schema = DetectionGovernanceEligibilityAssessment.model_json_schema(mode="serialization")
+    props = schema.get("properties", {})
+    assert "threshold_manifest_validated" in props
+
+
 def test_detection_governance_golden_json_roundtrip() -> None:
     from datetime import UTC, datetime
 

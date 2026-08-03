@@ -155,6 +155,7 @@ def test_record_decision_endpoint(governance_client: tuple[TestClient, _FakeGove
         json={
             "artifact": _minimal_artifact_payload(),
             "decision": "approve",
+            "threshold_manifest_path": "data/evaluation/detection_shadow_v1/threshold_manifest.json",
             "expires_at": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
         },
     )
@@ -174,4 +175,15 @@ def test_list_decisions_requires_tenant_id(governance_client: tuple[TestClient, 
 def test_get_decision_requires_tenant_id(governance_client: tuple[TestClient, _FakeGovernance]) -> None:
     client, _ = governance_client
     response = client.get("/api/v1/detection/governance/decisions/dgov-test")
+    assert response.status_code == 422
+
+
+def test_record_approve_requires_threshold_manifest_path(
+    governance_client: tuple[TestClient, _FakeGovernance],
+) -> None:
+    client, _ = governance_client
+    response = client.post(
+        "/api/v1/detection/governance/decisions",
+        json={"artifact": _minimal_artifact_payload(), "decision": "approve"},
+    )
     assert response.status_code == 422

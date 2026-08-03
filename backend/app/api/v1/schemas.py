@@ -13,7 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.models.action import Action
 from app.models.agent_io import CollectionStatus
@@ -188,6 +188,7 @@ class InvestigationHealthConfig(BaseModel):
     auto_investigate_enabled: bool
     auto_response_enabled: bool
     approval_policy_version: str
+    detection_governance_policy_version: str
 
 
 class InvestigationIntentDispatchResponse(BaseModel):
@@ -522,6 +523,7 @@ class DetectionGovernanceEligibilityRequest(_StrictRequest):
 
 class DetectionGovernanceEligibilityResponse(BaseModel):
     eligible: bool
+    threshold_manifest_validated: bool = False
     reason_codes: list[str] = Field(default_factory=list)
     messages: list[str] = Field(default_factory=list)
 
@@ -532,6 +534,14 @@ class DetectionGovernanceDecisionCreateRequest(_StrictRequest):
     reason_note: str = Field(default="", max_length=1024)
     expires_at: datetime | None = None
     threshold_manifest_path: str | None = None
+
+    @model_validator(mode="after")
+    def approve_requires_threshold_manifest(self) -> DetectionGovernanceDecisionCreateRequest:
+        if self.decision == "approve":
+            path = (self.threshold_manifest_path or "").strip()
+            if not path:
+                raise ValueError("threshold_manifest_path is required when decision is approve")
+        return self
 
 
 class DetectionGovernanceDecisionResponse(BaseModel):

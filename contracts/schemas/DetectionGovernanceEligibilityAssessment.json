@@ -14,7 +14,9 @@
         "required_scorer_errors",
         "runtime_error_budget_exceeded",
         "threshold_manifest_mismatch",
+        "threshold_manifest_missing",
         "candidate_binding_mismatch",
+        "no_active_approval",
         "reviewer_required",
         "policy_version_mismatch",
         "decision_revoked",
@@ -32,6 +34,11 @@
   "properties": {
     "eligible": {
       "title": "Eligible",
+      "type": "boolean"
+    },
+    "threshold_manifest_validated": {
+      "default": false,
+      "title": "Threshold Manifest Validated",
       "type": "boolean"
     },
     "reason_codes": {

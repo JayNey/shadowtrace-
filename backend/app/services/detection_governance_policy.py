@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 DETECTION_GOVERNANCE_POLICY_VERSION = "issue125_v1"
 DETECTION_GOVERNANCE_POLICY_SOURCE = "detection_governance_policy_v1"
 DEFAULT_POLICY_PATH = (
-    Path(__file__).resolve().parents[3] / "data" / "governance" / "detection_governance_policy_v1.json"
+    Path(__file__).resolve().parents[3]
+    / "data"
+    / "governance"
+    / "detection_governance_policy_v1.json"
 )
 REQUIRED_GOVERNANCE_METRIC_IDS = frozenset({"threat_recall", "benign_specificity"})
 
@@ -158,7 +161,11 @@ def assess_governance_eligibility(
         reason_codes.append(DetectionGovernanceReasonCode.QUALITY_METRIC_INSUFFICIENT_SAMPLE)
         messages.append("unevaluable case count exceeds policy limit")
 
-    if threshold_manifest_path is not None:
+    threshold_manifest_validated = False
+    if threshold_manifest_path is None:
+        reason_codes.append(DetectionGovernanceReasonCode.THRESHOLD_MANIFEST_MISSING)
+        messages.append("threshold_manifest_path required for governance eligibility")
+    else:
         try:
             manifest = load_threshold_manifest(threshold_manifest_path)
             validate_threshold_manifest_for_run(
@@ -172,6 +179,8 @@ def assess_governance_eligibility(
                 messages.append(
                     "artifact gate manifest_version does not match supplied threshold manifest"
                 )
+            else:
+                threshold_manifest_validated = True
         except Exception as exc:  # noqa: BLE001 — surface as fail-closed eligibility
             reason_codes.append(DetectionGovernanceReasonCode.THRESHOLD_MANIFEST_MISMATCH)
             messages.append(f"threshold manifest validation failed: {exc}")
@@ -179,6 +188,7 @@ def assess_governance_eligibility(
     eligible = not reason_codes
     return DetectionGovernanceEligibilityAssessment(
         eligible=eligible,
+        threshold_manifest_validated=threshold_manifest_validated,
         reason_codes=reason_codes,
         messages=messages,
     )

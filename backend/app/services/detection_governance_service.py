@@ -94,7 +94,10 @@ class DetectionGovernanceService:
                 details={"decision": request.decision.value},
             )
         self._require_human_reviewer(principal)
-        if request.decision == DetectionGovernanceDecisionKind.APPROVE and threshold_manifest_path is None:
+        if (
+            request.decision == DetectionGovernanceDecisionKind.APPROVE
+            and threshold_manifest_path is None
+        ):
             raise ValidationError(
                 "approval blocked: threshold_manifest_path required",
                 details={"reason": "threshold_manifest_path_missing"},
@@ -178,34 +181,68 @@ class DetectionGovernanceService:
                 "only approve decisions can be revoked",
                 details={"decision_id": decision_id, "decision": target.decision.value},
             )
-        active = await self._find_active_approval(target.binding_hash)
-        if active is None or active.decision_id != decision_id:
-            raise ValidationError(
-                "decision is not the active approval for binding",
-                details={"decision_id": decision_id},
-            )
 
         decided_at = self._now()
-        revoke_id = await self._new_decision_id()
-        revoke = finalize_decision(
-            DetectionGovernanceDecision(
-                decision_id=revoke_id,
-                tenant_id=target.tenant_id,
-                decision=DetectionGovernanceDecisionKind.REVOKE,
-                candidate_binding=target.candidate_binding,
-                evaluation_binding=target.evaluation_binding,
-                threshold_binding=target.threshold_binding,
-                binding_hash=target.binding_hash,
-                policy_version=DETECTION_GOVERNANCE_POLICY_VERSION,
-                reviewer_subject=principal.subject,
-                reviewer_roles=list(principal.roles),
-                reason_codes=[DetectionGovernanceReasonCode.MANUAL_REVOKE],
-                reason_note=reason_note.strip(),
-                decided_at=decided_at,
-                supersedes_decision_id=decision_id,
-            )
-        )
-        await self._insert_decision(revoke, require_no_active_approval=False)
+        async with self._session_factory() as session:
+            async with session.begin():
+                rows = list(
+                    await session.scalars(
+                        select(DetectionGovernanceDecisionORM)
+                        .where(
+                            DetectionGovernanceDecisionORM.binding_hash == target.binding_hash
+                        )
+                        .order_by(DetectionGovernanceDecisionORM.decided_at.asc())
+                        .with_for_update()
+                    )
+                )
+                chain = [_row_to_decision(row) for row in rows]
+                if _is_superseded(target, chain):
+                    raise ValidationError(
+                        "approval already revoked or expired",
+                        details={
+                            "decision_id": decision_id,
+                            "reason": DetectionGovernanceReasonCode.DECISION_SUPERSEDED.value,
+                        },
+                    )
+                active = _resolve_active_approval(chain, now=decided_at)
+                if active is None or active.decision_id != decision_id:
+                    raise ValidationError(
+                        "decision is not the active approval for binding",
+                        details={"decision_id": decision_id},
+                    )
+                revoke_id = await self._new_decision_id_in_session(session)
+                revoke = finalize_decision(
+                    DetectionGovernanceDecision(
+                        decision_id=revoke_id,
+                        tenant_id=target.tenant_id,
+                        decision=DetectionGovernanceDecisionKind.REVOKE,
+                        candidate_binding=target.candidate_binding,
+                        evaluation_binding=target.evaluation_binding,
+                        threshold_binding=target.threshold_binding,
+                        binding_hash=target.binding_hash,
+                        policy_version=DETECTION_GOVERNANCE_POLICY_VERSION,
+                        reviewer_subject=principal.subject,
+                        reviewer_roles=list(principal.roles),
+                        reason_codes=[DetectionGovernanceReasonCode.MANUAL_REVOKE],
+                        reason_note=reason_note.strip(),
+                        decided_at=decided_at,
+                        supersedes_decision_id=decision_id,
+                    )
+                )
+                session.add(
+                    DetectionGovernanceDecisionORM(
+                        decision_id=revoke.decision_id,
+                        tenant_id=revoke.tenant_id,
+                        decision=revoke.decision.value,
+                        binding_hash=revoke.binding_hash,
+                        decision_hash=revoke.decision_hash,
+                        payload=revoke.model_dump(mode="json"),
+                        reviewer_subject=revoke.reviewer_subject,
+                        supersedes_decision_id=revoke.supersedes_decision_id,
+                        expires_at=revoke.expires_at,
+                        decided_at=revoke.decided_at,
+                    )
+                )
         return revoke
 
     async def expire_active_approvals(self, *, binding_hash: str | None = None) -> list[str]:
@@ -214,21 +251,33 @@ class DetectionGovernanceService:
         expired_ids: list[str] = []
         async with self._session_factory() as session:
             async with session.begin():
-                rows = list(
-                    await session.scalars(
-                        select(DetectionGovernanceDecisionORM)
-                        .order_by(DetectionGovernanceDecisionORM.decided_at.asc())
-                        .with_for_update()
-                    )
+                candidate_stmt = select(DetectionGovernanceDecisionORM.binding_hash).where(
+                    DetectionGovernanceDecisionORM.decision
+                    == DetectionGovernanceDecisionKind.APPROVE.value,
+                    DetectionGovernanceDecisionORM.expires_at.isnot(None),
+                    DetectionGovernanceDecisionORM.expires_at <= now,
                 )
-                decisions = [_row_to_decision(row) for row in rows]
-                by_binding: dict[str, list[DetectionGovernanceDecision]] = {}
-                for decision in decisions:
-                    by_binding.setdefault(decision.binding_hash, []).append(decision)
+                if binding_hash is not None:
+                    candidate_stmt = candidate_stmt.where(
+                        DetectionGovernanceDecisionORM.binding_hash == binding_hash
+                    )
+                binding_hashes = {
+                    row for row in await session.scalars(candidate_stmt.distinct()) if row
+                }
 
-                for current_binding_hash, chain in by_binding.items():
-                    if binding_hash is not None and current_binding_hash != binding_hash:
-                        continue
+                for current_binding_hash in sorted(binding_hashes):
+                    rows = list(
+                        await session.scalars(
+                            select(DetectionGovernanceDecisionORM)
+                            .where(
+                                DetectionGovernanceDecisionORM.binding_hash
+                                == current_binding_hash
+                            )
+                            .order_by(DetectionGovernanceDecisionORM.decided_at.asc())
+                            .with_for_update()
+                        )
+                    )
+                    chain = [_row_to_decision(row) for row in rows]
                     for record in sorted(chain, key=lambda item: item.decided_at):
                         if record.decision != DetectionGovernanceDecisionKind.APPROVE:
                             continue
@@ -361,7 +410,7 @@ class DetectionGovernanceService:
         if active is None:
             return DetectionGovernancePromotionGateResult(
                 allowed=False,
-                reason_codes=[DetectionGovernanceReasonCode.GATE_NOT_PASS],
+                reason_codes=[DetectionGovernanceReasonCode.NO_ACTIVE_APPROVAL],
                 messages=["no active governance approval for candidate binding"],
             )
         try:
@@ -451,12 +500,15 @@ class DetectionGovernanceService:
     def _require_human_reviewer(principal: Principal) -> None:
         from app.core.auth import ROLE_APPROVER
 
+        policy = get_detection_governance_policy()
         if not principal.has_any_role([ROLE_APPROVER]):
             raise ValidationError(
                 "governance decision requires approver role",
                 details={"reason": DetectionGovernanceReasonCode.REVIEWER_REQUIRED.value},
             )
-        if principal.subject.startswith("system:") or principal.subject.startswith("agent:"):
+        if policy.require_human_reviewer_for_approve and (
+            principal.subject.startswith("system:") or principal.subject.startswith("agent:")
+        ):
             raise ValidationError(
                 "governance approval requires human reviewer principal",
                 details={"reason": DetectionGovernanceReasonCode.REVIEWER_REQUIRED.value},

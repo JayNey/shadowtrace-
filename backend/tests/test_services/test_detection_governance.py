@@ -207,6 +207,26 @@ def _approver(*, tenant_id: str = "tenant-detection-eval") -> Principal:
     return Principal(subject="detection-approver-1", roles=["approver"], tenant_id=tenant_id)
 
 
+def test_assert_governance_tenant_access_denies_missing_tenant_id() -> None:
+    from app.core.errors import ResourceNotFoundError
+    from app.services.detection_governance_service import assert_governance_tenant_access
+
+    with pytest.raises(ResourceNotFoundError):
+        assert_governance_tenant_access(
+            Principal(subject="approver-no-tenant", roles=["approver"]),
+            "tenant-detection-eval",
+        )
+
+
+def test_assert_governance_tenant_access_allows_admin_without_tenant_id() -> None:
+    from app.services.detection_governance_service import assert_governance_tenant_access
+
+    assert_governance_tenant_access(
+        Principal(subject="admin-user", roles=["admin"]),
+        "tenant-detection-eval",
+    )
+
+
 @pytest.mark.asyncio
 async def test_eligibility_passes_for_clean_artifact() -> None:
     assessment = assess_governance_eligibility(
@@ -215,6 +235,7 @@ async def test_eligibility_passes_for_clean_artifact() -> None:
     )
     assert assessment.eligible is True
     assert assessment.reason_codes == []
+    assert assessment.threshold_manifest_validated is True
 
 
 @pytest.mark.asyncio
@@ -310,7 +331,7 @@ async def test_revoke_supersedes_active_approval(
     assert revoked.decision == DetectionGovernanceDecisionKind.REVOKE
     gate = await service.evaluate_promotion_gate(_artifact(eligible=True))
     assert gate.allowed is False
-    assert DetectionGovernanceReasonCode.GATE_NOT_PASS in gate.reason_codes
+    assert DetectionGovernanceReasonCode.NO_ACTIVE_APPROVAL in gate.reason_codes
 
 
 @pytest.mark.asyncio
@@ -608,3 +629,114 @@ async def test_expire_active_approvals_is_idempotent(
         item for item in chain if item.decision == DetectionGovernanceDecisionKind.EXPIRE
     ]
     assert len(expire_records) == 1
+
+
+@pytest.mark.asyncio
+async def test_eligibility_fail_closed_without_threshold_path() -> None:
+    assessment = assess_governance_eligibility(_artifact(eligible=True))
+    assert assessment.eligible is False
+    assert assessment.threshold_manifest_validated is False
+    assert DetectionGovernanceReasonCode.THRESHOLD_MANIFEST_MISSING in assessment.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_baseline_artifact_never_eligible_for_approve() -> None:
+    import json
+
+    baseline_path = REPO_ROOT / "data" / "evaluation" / "detection_shadow_v1" / "baseline_artifact.json"
+    artifact = DetectionEvaluationArtifact.model_validate(
+        json.loads(baseline_path.read_text(encoding="utf-8"))
+    )
+    assessment = assess_governance_eligibility(artifact, threshold_manifest_path=THRESHOLD_PATH)
+    assert assessment.eligible is False
+    assert assessment.threshold_manifest_validated is True
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_governance_approve_revoke_gate_chain(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    service = DetectionGovernanceService(session_factory)
+    artifact = _artifact(eligible=True)
+    approved = await service.record_decision(
+        _approver(),
+        artifact,
+        DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.APPROVE),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    gate = await service.evaluate_promotion_gate(artifact)
+    assert gate.allowed is True
+    assert gate.decision_id == approved.decision_id
+
+    await service.revoke_decision(
+        _approver(),
+        approved.decision_id,
+        reason_note="regression found",
+        tenant_id=approved.tenant_id,
+    )
+    gate_after = await service.evaluate_promotion_gate(artifact)
+    assert gate_after.allowed is False
+    assert DetectionGovernanceReasonCode.NO_ACTIVE_APPROVAL in gate_after.reason_codes
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_revoke_is_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    service = DetectionGovernanceService(session_factory)
+    approved = await service.record_decision(
+        _approver(),
+        _artifact(eligible=True),
+        DetectionGovernanceDecisionRequest(decision=DetectionGovernanceDecisionKind.APPROVE),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    await service.revoke_decision(
+        _approver(),
+        approved.decision_id,
+        reason_note="first revoke",
+        tenant_id=approved.tenant_id,
+    )
+    with pytest.raises(ValidationError, match="already revoked or expired"):
+        await service.revoke_decision(
+            _approver(),
+            approved.decision_id,
+            reason_note="duplicate revoke",
+            tenant_id=approved.tenant_id,
+        )
+    chain, _ = await service.list_decisions(binding_hash=approved.binding_hash, limit=20)
+    revoke_records = [
+        item for item in chain if item.decision == DetectionGovernanceDecisionKind.REVOKE
+    ]
+    assert len(revoke_records) == 1
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_decision_hash_includes_expires_at(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_governance_rows: None,
+) -> None:
+    from app.services.detection_governance_binding import compute_decision_hash
+
+    now = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
+    service = DetectionGovernanceService(session_factory, now=lambda: now)
+    approved = await service.record_decision(
+        _approver(),
+        _artifact(eligible=True),
+        DetectionGovernanceDecisionRequest(
+            decision=DetectionGovernanceDecisionKind.APPROVE,
+            expires_at=now + timedelta(days=1),
+        ),
+        threshold_manifest_path=THRESHOLD_PATH,
+    )
+    variant = approved.model_copy(
+        update={
+            "expires_at": now + timedelta(days=2),
+            "decision_hash": "",
+        }
+    )
+    assert compute_decision_hash(approved) != compute_decision_hash(variant)

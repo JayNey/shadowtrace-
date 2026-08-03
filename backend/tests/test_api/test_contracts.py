@@ -645,8 +645,10 @@ def test_investigation_health_config_contract_fields() -> None:
         auto_investigate_enabled=False,
         auto_response_enabled=False,
         approval_policy_version="issue109_v1",
+        detection_governance_policy_version="issue125_v1",
     )
     assert cfg.approval_policy_version == "issue109_v1"
+    assert cfg.detection_governance_policy_version == "issue125_v1"
     assert cfg.auto_response_enabled is False
 
 

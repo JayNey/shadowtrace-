@@ -40,7 +40,9 @@ class DetectionGovernanceReasonCode(StrEnum):
     REQUIRED_SCORER_ERRORS = "required_scorer_errors"
     RUNTIME_ERROR_BUDGET_EXCEEDED = "runtime_error_budget_exceeded"
     THRESHOLD_MANIFEST_MISMATCH = "threshold_manifest_mismatch"
+    THRESHOLD_MANIFEST_MISSING = "threshold_manifest_missing"
     CANDIDATE_BINDING_MISMATCH = "candidate_binding_mismatch"
+    NO_ACTIVE_APPROVAL = "no_active_approval"
     REVIEWER_REQUIRED = "reviewer_required"
     POLICY_VERSION_MISMATCH = "policy_version_mismatch"
     DECISION_REVOKED = "decision_revoked"
@@ -92,6 +94,7 @@ class DetectionGovernanceEligibilityAssessment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     eligible: bool
+    threshold_manifest_validated: bool = False
     reason_codes: list[DetectionGovernanceReasonCode] = Field(default_factory=list)
     messages: list[str] = Field(default_factory=list)
 

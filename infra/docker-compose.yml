@@ -117,7 +117,7 @@ services:
       ALLOW_XDR_WRITEBACK: "false"
 
       # --- Dev auth (ISSUE-088 bootstrap + ISSUE-077 e2e compatibility) ---
-      DEV_AUTH_TOKENS: '{"bootstrap-token":{"subject":"bootstrap","roles":["analyst","admin","approver","disposition_operator"]},"e2e-token":{"subject":"e2e-operator","display_name":"E2E Operator","roles":["analyst","approver"]}}'
+      DEV_AUTH_TOKENS: '{"bootstrap-token":{"subject":"bootstrap","roles":["analyst","admin","approver","disposition_operator"],"tenant_id":"tenant-a"},"e2e-token":{"subject":"e2e-operator","display_name":"E2E Operator","roles":["analyst","approver"],"tenant_id":"tenant-a"}}'
 
       # --- Optional graph mirror (override host default when neo4j profile is on) ---
       NEO4J_URI: bolt://neo4j:7687
