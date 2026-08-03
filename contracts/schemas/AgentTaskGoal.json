@@ -38,6 +38,7 @@
       "enum": [
         "evidence_collect",
         "risk_score",
+        "response_plan",
         "report_generate"
       ],
       "title": "AgentTaskType",

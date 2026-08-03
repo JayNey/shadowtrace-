@@ -6,8 +6,11 @@ import hashlib
 from collections.abc import Sequence
 from typing import Any
 
+import orjson
+
 from app.core.errors import ValidationError
 from app.models.action import Action
+from app.models.agent_io import ResponsePlan
 from app.models.enums import CapabilityState
 from app.models.playbook_release import (
     PlaybookActionTemplateSnapshot,
@@ -168,9 +171,68 @@ def validate_approval_binding(action: Action, detail: dict[str, Any] | None) -> 
         )
 
 
+def _canonical_plan_payload(plan: ResponsePlan | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(plan, ResponsePlan):
+        return plan.model_dump(mode="json")
+    return dict(plan)
+
+
+def compute_response_plan_content_hash(plan: ResponsePlan | dict[str, Any]) -> str:
+    """Canonical content hash for immutable response_plan artifacts."""
+    payload = _canonical_plan_payload(plan)
+    return hashlib.sha256(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+STAGED_ARTIFACT_HASHES_KEY = "_staged_artifact_hashes"
+
+
+def staged_artifact_hash_from_parameters(
+    parameters: dict[str, Any],
+    logical_artifact_key: str,
+) -> str | None:
+    """Return a previously staged artifact hash recorded before persist."""
+    raw = parameters.get(STAGED_ARTIFACT_HASHES_KEY)
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get(logical_artifact_key)
+    if isinstance(value, str) and len(value) == 64:
+        return value
+    return None
+
+
+def validate_task_retry_preserves_plan_artifact(
+    *,
+    prior_content_hash: str | None,
+    staged_content_hash: str | None = None,
+    new_payload: dict[str, Any],
+    task_revision: int,
+) -> None:
+    """Reject task retries that would mutate an already-materialized plan revision."""
+    anchor_hash = prior_content_hash or staged_content_hash
+    if anchor_hash is None or task_revision <= 1:
+        return
+    new_hash = compute_response_plan_content_hash(new_payload)
+    if new_hash == anchor_hash:
+        return
+    raise ValidationError(
+        "task retry would change immutable response plan content; bump plan_revision for replan",
+        error_code="validation_error",
+        details={
+            "reason": "response_plan_content_drift",
+            "task_revision": task_revision,
+            "stored_hash": anchor_hash,
+            "new_hash": new_hash,
+        },
+    )
+
+
 __all__ = [
     "build_approval_binding_detail",
     "compute_playbook_binding_hash",
+    "compute_response_plan_content_hash",
     "manifest_supports_template_capabilities",
+    "STAGED_ARTIFACT_HASHES_KEY",
+    "staged_artifact_hash_from_parameters",
     "validate_approval_binding",
+    "validate_task_retry_preserves_plan_artifact",
 ]

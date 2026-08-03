@@ -24,6 +24,8 @@ from app.models.agent_io import (
     PlanStep,
     ReportAgentInput,
     RiskAssessment,
+    ResponsePlan,
+    ResponsePlanGeneratedBy,
     ScoringMode,
     TriageResult,
     VerificationActionResult,
@@ -1288,3 +1290,43 @@ async def test_approval_gate_is_reentrant() -> None:
     assert NODE_CLOSE in final2["node_trace"], (
         f"Expected CLOSE after re-entrant approval, trace={final2['node_trace']}"
     )
+
+
+@pytest.mark.asyncio
+async def test_response_node_invokes_response_plan_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _capture_run_response_plan_with_ledger(*args: Any, **kwargs: Any) -> ResponsePlan:
+        captured.update(kwargs)
+        return await kwargs["execute"]()
+
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph.run_response_plan_with_ledger",
+        _capture_run_response_plan_with_ledger,
+    )
+
+    response_plan = ResponsePlan(
+        plan_id="plan-evt-graph-001-0",
+        actions=[],
+        strategy_summary="stub",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    agents = _agents()
+    agents["response_agent"] = StubAgent(response_plan)
+    services = _services()
+    services["agent_task_service"] = None
+    services["agent_artifact_service"] = None
+    services["content_projection_service"] = None
+
+    final = await build_investigation_graph(agents, services).ainvoke(
+        _base_state(source_snapshot={"tenant_id": "tenant-graph-a"}),
+        {"configurable": {"thread_id": "evt-response-ledger"}},
+    )
+
+    assert NODE_RESPONSE in final["node_trace"]
+    assert captured["tenant_id"] == "tenant-graph-a"
+    assert captured["idempotency_key"] == "response-plan:evt-graph-001:1"
+    assert captured["plan_revision"] == 1
+    assert captured["worker_principal"] == "investigation:workflow_graph"

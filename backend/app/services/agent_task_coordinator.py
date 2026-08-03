@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from app.core.errors import AgentTaskDeniedError, AgentTaskUnavailableError, ValidationError
-from app.models.agent_io import RiskAssessment
+from app.models.agent_io import ResponsePlan, RiskAssessment
 from app.models.agent_task import (
     TERMINAL_AGENT_TASK_STATUSES,
     AgentArtifactPersistRequest,
@@ -23,6 +23,11 @@ from app.models.agent_task import (
 from app.services.agent_artifact_service import AgentArtifactService
 from app.services.agent_task_service import AgentTaskService
 from app.services.content_projection_service import ContentProjectionService
+from app.services.playbook_approval_binding import (
+    compute_response_plan_content_hash,
+    staged_artifact_hash_from_parameters,
+    validate_task_retry_preserves_plan_artifact,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,12 @@ RISK_SCORE_CONTEXT_REFS: list[AgentTaskContextRef] = [
     AgentTaskContextRef(ref_kind="event_context_field", ref_id="evidence_output"),
     AgentTaskContextRef(ref_kind="event_context_field", ref_id="rag_output"),
     AgentTaskContextRef(ref_kind="event_context_field", ref_id="graph_output"),
+]
+
+RESPONSE_PLAN_CONTEXT_REFS: list[AgentTaskContextRef] = [
+    AgentTaskContextRef(ref_kind="event_context_field", ref_id="risk_assessment"),
+    AgentTaskContextRef(ref_kind="event_context_field", ref_id="evidence_output"),
+    AgentTaskContextRef(ref_kind="artifact", ref_id="risk_assessment"),
 ]
 
 _NON_RECOVERABLE_TERMINAL: frozenset[AgentTaskStatus] = frozenset(
@@ -195,6 +206,27 @@ async def _fail_claim_quietly(
         )
 
 
+async def _fail_claim_manual(
+    agent_task_service: AgentTaskService,
+    claim: AgentTaskClaim,
+    *,
+    error_summary: str,
+) -> None:
+    """Mark task MANUAL after execute succeeded but ledger persistence failed."""
+    try:
+        await agent_task_service.fail(
+            claim,
+            error_summary=error_summary[:1024],
+            side_effect_unknown=True,
+        )
+    except Exception:
+        logger.warning(
+            "AgentTask manual transition failed for task=%s",
+            claim.task_id,
+            exc_info=True,
+        )
+
+
 async def run_risk_score_with_ledger(
     agent_task_service: AgentTaskService | None,
     artifact_service: AgentArtifactService | None,
@@ -314,8 +346,286 @@ async def run_risk_score_with_ledger(
     return result
 
 
+async def enqueue_response_plan_task(
+    agent_task_service: AgentTaskService | None,
+    *,
+    event_id: str,
+    tenant_id: str,
+    idempotency_key: str,
+    plan_revision: int,
+    parameters: dict[str, Any] | None = None,
+) -> AgentTask | None:
+    """Best-effort ledger enqueue before ResponseAgent execution (ISSUE-139 Phase B)."""
+    if agent_task_service is None:
+        return None
+    merged_parameters = {"plan_revision": plan_revision, **(parameters or {})}
+    try:
+        return await agent_task_service.enqueue(
+            AgentTaskEnqueueRequest(
+                event_id=event_id,
+                tenant_id=tenant_id,
+                goal=AgentTaskGoal(
+                    task_type=AgentTaskType.RESPONSE_PLAN,
+                    context_refs=list(RESPONSE_PLAN_CONTEXT_REFS),
+                    parameters=merged_parameters,
+                ),
+                idempotency_key=idempotency_key,
+            )
+        )
+    except AgentTaskUnavailableError:
+        logger.warning(
+            "AgentTask ledger unavailable; skipping response_plan enqueue for event=%s",
+            event_id,
+        )
+        return None
+
+
+def _build_response_projection(
+    content_projection_service: ContentProjectionService | None,
+    projection_fields: dict[str, Any] | None,
+) -> None:
+    if content_projection_service is None or not projection_fields:
+        return
+    content_projection_service.build(
+        projection_kind="response_plan_context",
+        raw_fields=projection_fields,
+        source_refs=list(RESPONSE_PLAN_CONTEXT_REFS),
+    )
+
+
+async def _prepare_response_plan_task_for_claim(
+    task: AgentTask,
+    agent_task_service: AgentTaskService,
+    artifact_service: AgentArtifactService | None,
+    *,
+    tenant_id: str,
+) -> AgentTask | ResponsePlan:
+    if task.status in _NON_RECOVERABLE_TERMINAL:
+        raise AgentTaskDeniedError(
+            "terminal task cannot re-execute",
+            details={"task_id": task.task_id, "status": task.status.value},
+        )
+
+    if task.status is AgentTaskStatus.COMPLETED:
+        cached = await _load_completed_response_plan(
+            artifact_service,
+            task=task,
+            tenant_id=tenant_id,
+        )
+        if cached is not None:
+            return cached
+        logger.warning(
+            "COMPLETED AgentTask missing response_plan artifact; reconciling task=%s",
+            task.task_id,
+        )
+        await agent_task_service.reconcile_completed_without_artifact(task.task_id, tenant_id=tenant_id)
+        return await agent_task_service.retry_to_queue(task.task_id, tenant_id=tenant_id)
+
+    if task.status is AgentTaskStatus.RUNNING:
+        try:
+            task = await agent_task_service.reconcile_stale_running(task.task_id, tenant_id=tenant_id)
+        except AgentTaskDeniedError:
+            pass
+        if task.status is AgentTaskStatus.RUNNING:
+            raise AgentTaskDeniedError(
+                "task already running",
+                details={"task_id": task.task_id},
+            )
+
+    if task.status in TERMINAL_AGENT_TASK_STATUSES:
+        task = await _maybe_requeue_recoverable(task, agent_task_service, tenant_id=tenant_id)
+        if task.status in TERMINAL_AGENT_TASK_STATUSES:
+            raise AgentTaskDeniedError(
+                "terminal task cannot re-execute",
+                details={"task_id": task.task_id, "status": task.status.value},
+            )
+
+    return task
+
+
+async def _load_completed_response_plan(
+    artifact_service: AgentArtifactService | None,
+    *,
+    task: AgentTask,
+    tenant_id: str,
+) -> ResponsePlan | None:
+    if artifact_service is None:
+        return None
+    try:
+        artifact = await artifact_service.load_latest(
+            task_id=task.task_id,
+            logical_artifact_key="response_plan",
+            tenant_id=tenant_id,
+        )
+    except AgentTaskUnavailableError:
+        return None
+    if artifact is None:
+        return None
+    try:
+        return ResponsePlan.model_validate(artifact.payload)
+    except Exception:
+        logger.warning(
+            "Stored response_plan artifact invalid for task=%s",
+            task.task_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def run_response_plan_with_ledger(
+    agent_task_service: AgentTaskService | None,
+    artifact_service: AgentArtifactService | None,
+    *,
+    event_id: str,
+    tenant_id: str,
+    worker_principal: str,
+    idempotency_key: str,
+    plan_revision: int,
+    execute: Callable[[], Awaitable[_T]],
+    parameters: dict[str, Any] | None = None,
+    content_projection_service: ContentProjectionService | None = None,
+    projection_fields: dict[str, Any] | None = None,
+) -> _T:
+    """Run ResponseAgent under claim→start→artifact→complete with immutable plan refs."""
+    task = await enqueue_response_plan_task(
+        agent_task_service,
+        event_id=event_id,
+        tenant_id=tenant_id,
+        idempotency_key=idempotency_key,
+        plan_revision=plan_revision,
+        parameters=parameters,
+    )
+    if agent_task_service is None or task is None:
+        _build_response_projection(content_projection_service, projection_fields)
+        return await execute()
+
+    prepared = await _prepare_response_plan_task_for_claim(
+        task,
+        agent_task_service,
+        artifact_service,
+        tenant_id=tenant_id,
+    )
+    if isinstance(prepared, ResponsePlan):
+        return prepared  # type: ignore[return-value]
+    task = prepared
+
+    try:
+        claim = await agent_task_service.claim(
+            AgentTaskClaimRequest(
+                task_id=task.task_id,
+                worker_principal=worker_principal,
+                tenant_id=tenant_id,
+            )
+        )
+        await agent_task_service.start(claim, tenant_id=tenant_id)
+    except (AgentTaskDeniedError, AgentTaskUnavailableError) as exc:
+        logger.warning(
+            "AgentTask claim/start denied for response_plan event=%s: %s",
+            event_id,
+            exc,
+        )
+        raise
+
+    _build_response_projection(content_projection_service, projection_fields)
+    try:
+        result = await execute()
+    except Exception as exc:
+        await _fail_claim_quietly(
+            agent_task_service,
+            claim,
+            error_summary=f"execute_failed: {exc.__class__.__name__}",
+        )
+        raise
+
+    if artifact_service is None:
+        await agent_task_service.complete(claim)
+        return result
+
+    payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+    if not isinstance(payload, dict):
+        await _fail_claim_manual(
+            agent_task_service,
+            claim,
+            error_summary="artifact_persist_skipped: non-dict payload",
+        )
+        raise AgentTaskDeniedError(
+            "artifact persist requires dict payload",
+            details={"task_id": task.task_id},
+        )
+
+    content_hash = compute_response_plan_content_hash(payload)
+    prior_artifact = await artifact_service.load_latest(
+        task_id=task.task_id,
+        logical_artifact_key="response_plan",
+        tenant_id=tenant_id,
+    )
+    staged_hash = staged_artifact_hash_from_parameters(task.goal.parameters, "response_plan")
+    try:
+        validate_task_retry_preserves_plan_artifact(
+            prior_content_hash=prior_artifact.content_hash if prior_artifact is not None else None,
+            staged_content_hash=staged_hash,
+            new_payload=payload,
+            task_revision=claim.revision,
+        )
+    except ValidationError:
+        await _fail_claim_manual(
+            agent_task_service,
+            claim,
+            error_summary="artifact_persist_validation_failed: plan_content_drift",
+        )
+        raise
+
+    await agent_task_service.record_staged_artifact_hash(
+        claim,
+        tenant_id=tenant_id,
+        logical_artifact_key="response_plan",
+        content_hash=content_hash,
+    )
+
+    try:
+        await artifact_service.persist(
+            claim,
+            AgentArtifactPersistRequest(
+                logical_artifact_key="response_plan",
+                payload=payload,
+                source_refs=list(RESPONSE_PLAN_CONTEXT_REFS),
+            ),
+            tenant_id=tenant_id,
+            event_id=event_id,
+        )
+    except ValidationError:
+        await _fail_claim_manual(
+            agent_task_service,
+            claim,
+            error_summary="artifact_persist_validation_failed",
+        )
+        raise
+    except Exception as exc:
+        logger.warning(
+            "AgentArtifact persist failed for response_plan event=%s task=%s",
+            event_id,
+            task.task_id,
+            exc_info=True,
+        )
+        await _fail_claim_manual(
+            agent_task_service,
+            claim,
+            error_summary=f"artifact_persist_failed: {exc.__class__.__name__}",
+        )
+        raise AgentTaskDeniedError(
+            "artifact persist failed",
+            details={"task_id": task.task_id, "reason": exc.__class__.__name__},
+        ) from exc
+
+    await agent_task_service.complete(claim)
+    return result
+
+
 __all__ = [
+    "RESPONSE_PLAN_CONTEXT_REFS",
     "RISK_SCORE_CONTEXT_REFS",
+    "enqueue_response_plan_task",
     "enqueue_risk_score_task",
+    "run_response_plan_with_ledger",
     "run_risk_score_with_ledger",
 ]

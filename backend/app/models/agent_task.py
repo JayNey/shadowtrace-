@@ -13,6 +13,15 @@ AGENT_ARTIFACT_SCHEMA_VERSION = "1.0"
 CONTENT_PROJECTION_SCHEMA_VERSION = "1.0"
 DEFAULT_TASK_LEASE_SECONDS = 300
 
+# Allowlisted immutable artifact logical keys for typed goal context_refs.
+ALLOWLISTED_ARTIFACT_LOGICAL_KEYS: frozenset[str] = frozenset(
+    {
+        "evidence_output",
+        "response_plan",
+        "risk_assessment",
+    }
+)
+
 # Allowlisted EventContext fields agents may reference in typed goals/projections.
 ALLOWLISTED_EVENT_CONTEXT_FIELDS: frozenset[str] = frozenset(
     {
@@ -65,6 +74,7 @@ class AgentTaskType(StrEnum):
 
     EVIDENCE_COLLECT = "evidence_collect"
     RISK_SCORE = "risk_score"
+    RESPONSE_PLAN = "response_plan"
     REPORT_GENERATE = "report_generate"
 
 
@@ -86,6 +96,8 @@ class AgentTaskContextRef(BaseModel):
     def _validate_ref(self) -> AgentTaskContextRef:
         if self.ref_kind == "event_context_field" and self.ref_id not in ALLOWLISTED_EVENT_CONTEXT_FIELDS:
             raise ValueError(f"event_context_field ref not allowlisted: {self.ref_id}")
+        if self.ref_kind == "artifact" and self.ref_id not in ALLOWLISTED_ARTIFACT_LOGICAL_KEYS:
+            raise ValueError(f"artifact ref not allowlisted: {self.ref_id}")
         return self
 
 
@@ -266,6 +278,7 @@ def validate_agent_task_transition(
 __all__ = [
     "AGENT_ARTIFACT_SCHEMA_VERSION",
     "AGENT_TASK_SCHEMA_VERSION",
+    "ALLOWLISTED_ARTIFACT_LOGICAL_KEYS",
     "ALLOWLISTED_EVENT_CONTEXT_FIELDS",
     "CONTENT_PROJECTION_SCHEMA_VERSION",
     "DEFAULT_TASK_LEASE_SECONDS",

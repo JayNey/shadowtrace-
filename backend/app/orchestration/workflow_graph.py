@@ -58,7 +58,7 @@ from app.orchestration.writeback_recovery_handler import (
     writeback_recovery_graph_node,
 )
 from app.services.analysis_only_pipeline import run_rag_stage
-from app.services.agent_task_coordinator import run_risk_score_with_ledger
+from app.services.agent_task_coordinator import run_response_plan_with_ledger, run_risk_score_with_ledger
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService, apply_flag_to_list
 from app.services.evidence_query_plan_service import extract_evidence_plan_inputs
@@ -1025,13 +1025,53 @@ def build_investigation_graph(
                 if state.get("evidence_output") is not None
                 else None
             )
-            result = await response_agent.execute(
-                ResponseAgentInput(
-                    event_id=state["event_id"],
-                    risk_assessment=risk,
-                    evidence_output=evidence,
+
+            async def _execute_response() -> ResponsePlan:
+                result = await response_agent.execute(
+                    ResponseAgentInput(
+                        event_id=state["event_id"],
+                        risk_assessment=risk,
+                        evidence_output=evidence,
+                    )
                 )
-            )
+                if not isinstance(result, ResponsePlan):
+                    raise TypeError("response_agent must return ResponsePlan")
+                return result
+
+            tenant_id = resolve_tenant_id(state.get("source_snapshot"))
+            if tenant_id is None:
+                context_store = services.get("context_store")
+                if context_store is not None:
+                    try:
+                        source_snapshot = await context_store.get(state["event_id"], "source_snapshot")
+                        tenant_id = resolve_tenant_id(source_snapshot)
+                    except Exception:
+                        logger.debug(
+                            "response_node tenant resolution failed for event=%s",
+                            state["event_id"],
+                            exc_info=True,
+                        )
+
+            if tenant_id:
+                projection_fields: dict[str, Any] = {
+                    "risk_assessment": state["risk_assessment"],
+                }
+                if state.get("evidence_output") is not None:
+                    projection_fields["evidence_output"] = state["evidence_output"]
+                result = await run_response_plan_with_ledger(
+                    services.get("agent_task_service"),
+                    services.get("agent_artifact_service"),
+                    event_id=state["event_id"],
+                    tenant_id=tenant_id,
+                    worker_principal="investigation:workflow_graph",
+                    idempotency_key=f"response-plan:{state['event_id']}:{plan_revision}",
+                    plan_revision=plan_revision,
+                    content_projection_service=services.get("content_projection_service"),
+                    projection_fields=projection_fields,
+                    execute=_execute_response,
+                )
+            else:
+                result = await _execute_response()
             response_update["response_plan"] = result.model_dump(mode="json")
         verdict_raw = state.get("final_verdict")
         status = await _transition_status(

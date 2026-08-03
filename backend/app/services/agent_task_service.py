@@ -278,6 +278,52 @@ class AgentTaskService:
             terminal=True,
         )
 
+    async def record_staged_artifact_hash(
+        self,
+        claim: AgentTaskClaim,
+        *,
+        tenant_id: str,
+        logical_artifact_key: str,
+        content_hash: str,
+    ) -> None:
+        """Persist execute-time content hash before artifact write (retry immutability)."""
+        self._require_available()
+        if len(content_hash) != 64:
+            raise ValidationError(
+                "staged artifact hash must be 64 hex chars",
+                error_code="validation_error",
+            )
+        from app.services.playbook_approval_binding import STAGED_ARTIFACT_HASHES_KEY
+
+        async with self._session_factory() as session:  # type: ignore[union-attr]
+            async with session.begin():
+                row = await session.get(orm.AgentTaskORM, claim.task_id, with_for_update=True)
+                if row is None:
+                    raise AgentTaskDeniedError("unknown task_id", details={"task_id": claim.task_id})
+                if row.tenant_id != tenant_id:
+                    raise AgentTaskDeniedError(
+                        "cross-tenant staged hash denied",
+                        details={"task_id": claim.task_id},
+                    )
+                if AgentTaskStatus(row.status) is not AgentTaskStatus.RUNNING:
+                    raise AgentTaskDeniedError(
+                        "only running tasks may record staged artifact hash",
+                        details={"task_id": claim.task_id},
+                    )
+                if row.attempt != claim.attempt:
+                    raise AgentTaskDeniedError(
+                        "stale worker: attempt mismatch",
+                        details={"task_id": claim.task_id},
+                    )
+                goal = dict(row.goal)
+                parameters = dict(goal.get("parameters") or {})
+                staged = dict(parameters.get(STAGED_ARTIFACT_HASHES_KEY) or {})
+                staged[logical_artifact_key] = content_hash
+                parameters[STAGED_ARTIFACT_HASHES_KEY] = staged
+                goal["parameters"] = parameters
+                row.goal = goal
+                row.updated_at = datetime.now(tz=UTC)
+
     async def fail(
         self,
         claim: AgentTaskClaim,
