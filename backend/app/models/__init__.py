@@ -96,6 +96,18 @@ from app.models.detection_evaluation import (
     DetectionTenantSafetyProbe,
     DetectionTenantSafetySummary,
 )
+from app.models.detection_governance import (
+    DetectionGovernanceCandidateBinding,
+    DetectionGovernanceDecision,
+    DetectionGovernanceDecisionKind,
+    DetectionGovernanceDecisionRequest,
+    DetectionGovernanceEligibilityAssessment,
+    DetectionGovernanceEvaluationBinding,
+    DetectionGovernancePromotionGateResult,
+    DetectionGovernanceReasonCode,
+    DetectionGovernanceRevokeRequest,
+    DetectionGovernanceThresholdBinding,
+)
 from app.models.detection_rule import (
     CandidateDetection,
     CandidateDetectionListResult,
@@ -372,6 +384,15 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "DetectionResourceSummary": DetectionResourceSummary,
     "DetectionTenantSafetyProbe": DetectionTenantSafetyProbe,
     "DetectionTenantSafetySummary": DetectionTenantSafetySummary,
+    # detection governance (ISSUE-125 / #630 Phase A)
+    "DetectionGovernanceCandidateBinding": DetectionGovernanceCandidateBinding,
+    "DetectionGovernanceDecision": DetectionGovernanceDecision,
+    "DetectionGovernanceDecisionRequest": DetectionGovernanceDecisionRequest,
+    "DetectionGovernanceEligibilityAssessment": DetectionGovernanceEligibilityAssessment,
+    "DetectionGovernanceEvaluationBinding": DetectionGovernanceEvaluationBinding,
+    "DetectionGovernancePromotionGateResult": DetectionGovernancePromotionGateResult,
+    "DetectionGovernanceRevokeRequest": DetectionGovernanceRevokeRequest,
+    "DetectionGovernanceThresholdBinding": DetectionGovernanceThresholdBinding,
     # evaluation truth (ISSUE-113)
     "EvaluationCaseTruth": EvaluationCaseTruth,
     "EvaluationDatasetManifest": EvaluationDatasetManifest,

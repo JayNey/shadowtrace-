@@ -1,0 +1,46 @@
+{
+  "$defs": {
+    "DetectionGovernanceDecisionKind": {
+      "description": "Governance outcome — not package runtime state or promotion status.",
+      "enum": [
+        "approve",
+        "reject",
+        "expire",
+        "revoke"
+      ],
+      "title": "DetectionGovernanceDecisionKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Service/API input to record a governance decision (approve/reject only).",
+  "properties": {
+    "decision": {
+      "$ref": "#/$defs/DetectionGovernanceDecisionKind"
+    },
+    "reason_note": {
+      "default": "",
+      "maxLength": 1024,
+      "title": "Reason Note",
+      "type": "string"
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expires At"
+    }
+  },
+  "required": [
+    "decision"
+  ],
+  "title": "DetectionGovernanceDecisionRequest",
+  "type": "object"
+}

@@ -1,0 +1,57 @@
+{
+  "$defs": {
+    "DetectionGovernanceReasonCode": {
+      "description": "Machine-readable eligibility and audit reason codes.",
+      "enum": [
+        "artifact_hash_mismatch",
+        "artifact_incomplete",
+        "artifact_status_failed",
+        "gate_fail_closed",
+        "gate_not_pass",
+        "quality_metric_fail_closed",
+        "quality_metric_insufficient_sample",
+        "tenant_isolation_failed",
+        "required_scorer_errors",
+        "runtime_error_budget_exceeded",
+        "threshold_manifest_mismatch",
+        "candidate_binding_mismatch",
+        "reviewer_required",
+        "policy_version_mismatch",
+        "decision_revoked",
+        "decision_expired",
+        "decision_superseded",
+        "manual_reject",
+        "manual_revoke"
+      ],
+      "title": "DetectionGovernanceReasonCode",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Fail-closed eligibility outcome for pre-promotion approval.",
+  "properties": {
+    "eligible": {
+      "title": "Eligible",
+      "type": "boolean"
+    },
+    "reason_codes": {
+      "items": {
+        "$ref": "#/$defs/DetectionGovernanceReasonCode"
+      },
+      "title": "Reason Codes",
+      "type": "array"
+    },
+    "messages": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Messages",
+      "type": "array"
+    }
+  },
+  "required": [
+    "eligible"
+  ],
+  "title": "DetectionGovernanceEligibilityAssessment",
+  "type": "object"
+}

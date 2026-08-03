@@ -515,6 +515,64 @@ class MemoryReviewOperationResponse(BaseModel):
     message: str
 
 
+class DetectionGovernanceEligibilityRequest(_StrictRequest):
+    artifact: dict[str, Any]
+    threshold_manifest_path: str | None = None
+
+
+class DetectionGovernanceEligibilityResponse(BaseModel):
+    eligible: bool
+    reason_codes: list[str] = Field(default_factory=list)
+    messages: list[str] = Field(default_factory=list)
+
+
+class DetectionGovernanceDecisionCreateRequest(_StrictRequest):
+    artifact: dict[str, Any]
+    decision: Literal["approve", "reject"]
+    reason_note: str = Field(default="", max_length=1024)
+    expires_at: datetime | None = None
+    threshold_manifest_path: str | None = None
+
+
+class DetectionGovernanceDecisionResponse(BaseModel):
+    decision_id: str
+    schema_version: str
+    tenant_id: str
+    decision: str
+    candidate_binding: dict[str, Any]
+    evaluation_binding: dict[str, Any]
+    threshold_binding: dict[str, Any]
+    binding_hash: str
+    decision_hash: str
+    policy_version: str
+    reviewer_subject: str
+    reviewer_roles: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+    reason_note: str = ""
+    decided_at: datetime
+    expires_at: datetime | None = None
+    supersedes_decision_id: str | None = None
+
+
+class DetectionGovernanceDecisionListResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    items: list[DetectionGovernanceDecisionResponse] = Field(default_factory=list)
+
+
+class DetectionGovernancePromotionGateRequest(_StrictRequest):
+    artifact: dict[str, Any]
+    binding_hash: str | None = None
+
+
+class DetectionGovernancePromotionGateResponse(BaseModel):
+    allowed: bool
+    decision_id: str | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    messages: list[str] = Field(default_factory=list)
+
+
 class StatsResponse(BaseModel):
     """Platform statistics (ISSUE-085 SOC dashboard).
 

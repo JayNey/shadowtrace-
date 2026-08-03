@@ -168,6 +168,17 @@ class Settings(BaseSettings):
         le=200,
     )
 
+    detection_governance_expire_enabled: bool = Field(
+        default=True,
+        alias="DETECTION_GOVERNANCE_EXPIRE_ENABLED",
+    )
+    detection_governance_expire_interval_s: int = Field(
+        default=3600,
+        alias="DETECTION_GOVERNANCE_EXPIRE_INTERVAL_S",
+        ge=300,
+        le=86400,
+    )
+
     auto_investigate_enabled: bool = Field(default=False, alias="AUTO_INVESTIGATE_ENABLED")
     auto_investigate_min_severity: str = Field(
         default="medium",

@@ -1553,6 +1553,326 @@
         }
       }
     },
+    "/api/v1/detection/governance/eligibility": {
+      "post": {
+        "tags": [
+          "detection-governance"
+        ],
+        "summary": "Assess Detection Governance Eligibility",
+        "operationId": "assess_detection_governance_eligibility_api_v1_detection_governance_eligibility_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetectionGovernanceEligibilityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionGovernanceEligibilityResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/detection/governance/decisions": {
+      "post": {
+        "tags": [
+          "detection-governance"
+        ],
+        "summary": "Record Detection Governance Decision",
+        "operationId": "record_detection_governance_decision_api_v1_detection_governance_decisions_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetectionGovernanceDecisionCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionGovernanceDecisionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "detection-governance"
+        ],
+        "summary": "List Detection Governance Decisions",
+        "operationId": "list_detection_governance_decisions_api_v1_detection_governance_decisions_get",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Tenant Id"
+            }
+          },
+          {
+            "name": "binding_hash",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Binding Hash"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 20,
+              "title": "Page Size"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionGovernanceDecisionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/detection/governance/decisions/{decision_id}": {
+      "get": {
+        "tags": [
+          "detection-governance"
+        ],
+        "summary": "Get Detection Governance Decision",
+        "operationId": "get_detection_governance_decision_api_v1_detection_governance_decisions__decision_id__get",
+        "parameters": [
+          {
+            "name": "decision_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Decision Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Tenant Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionGovernanceDecisionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/detection/governance/decisions/{decision_id}/revoke": {
+      "post": {
+        "tags": [
+          "detection-governance"
+        ],
+        "summary": "Revoke Detection Governance Decision",
+        "operationId": "revoke_detection_governance_decision_api_v1_detection_governance_decisions__decision_id__revoke_post",
+        "parameters": [
+          {
+            "name": "decision_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Decision Id"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "title": "Tenant Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetectionGovernanceRevokeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionGovernanceDecisionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/detection/governance/promotion-gate": {
+      "post": {
+        "tags": [
+          "detection-governance"
+        ],
+        "summary": "Evaluate Detection Promotion Gate",
+        "operationId": "evaluate_detection_promotion_gate_api_v1_detection_governance_promotion_gate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetectionGovernancePromotionGateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetectionGovernancePromotionGateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/connectors": {
       "get": {
         "tags": [
@@ -3860,6 +4180,337 @@
           "event_id"
         ],
         "title": "DecisionTraceResponse"
+      },
+      "DetectionGovernanceDecisionCreateRequest": {
+        "properties": {
+          "artifact": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Artifact"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "approve",
+              "reject"
+            ],
+            "title": "Decision"
+          },
+          "reason_note": {
+            "type": "string",
+            "maxLength": 1024,
+            "title": "Reason Note",
+            "default": ""
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "threshold_manifest_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold Manifest Path"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "artifact",
+          "decision"
+        ],
+        "title": "DetectionGovernanceDecisionCreateRequest"
+      },
+      "DetectionGovernanceDecisionListResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/DetectionGovernanceDecisionResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "page",
+          "page_size"
+        ],
+        "title": "DetectionGovernanceDecisionListResponse"
+      },
+      "DetectionGovernanceDecisionResponse": {
+        "properties": {
+          "decision_id": {
+            "type": "string",
+            "title": "Decision Id"
+          },
+          "schema_version": {
+            "type": "string",
+            "title": "Schema Version"
+          },
+          "tenant_id": {
+            "type": "string",
+            "title": "Tenant Id"
+          },
+          "decision": {
+            "type": "string",
+            "title": "Decision"
+          },
+          "candidate_binding": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Candidate Binding"
+          },
+          "evaluation_binding": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Evaluation Binding"
+          },
+          "threshold_binding": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Threshold Binding"
+          },
+          "binding_hash": {
+            "type": "string",
+            "title": "Binding Hash"
+          },
+          "decision_hash": {
+            "type": "string",
+            "title": "Decision Hash"
+          },
+          "policy_version": {
+            "type": "string",
+            "title": "Policy Version"
+          },
+          "reviewer_subject": {
+            "type": "string",
+            "title": "Reviewer Subject"
+          },
+          "reviewer_roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reviewer Roles"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reason Codes"
+          },
+          "reason_note": {
+            "type": "string",
+            "title": "Reason Note",
+            "default": ""
+          },
+          "decided_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Decided At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "supersedes_decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Decision Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "decision_id",
+          "schema_version",
+          "tenant_id",
+          "decision",
+          "candidate_binding",
+          "evaluation_binding",
+          "threshold_binding",
+          "binding_hash",
+          "decision_hash",
+          "policy_version",
+          "reviewer_subject",
+          "decided_at"
+        ],
+        "title": "DetectionGovernanceDecisionResponse"
+      },
+      "DetectionGovernanceEligibilityRequest": {
+        "properties": {
+          "artifact": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Artifact"
+          },
+          "threshold_manifest_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Threshold Manifest Path"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "artifact"
+        ],
+        "title": "DetectionGovernanceEligibilityRequest"
+      },
+      "DetectionGovernanceEligibilityResponse": {
+        "properties": {
+          "eligible": {
+            "type": "boolean",
+            "title": "Eligible"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reason Codes"
+          },
+          "messages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Messages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "eligible"
+        ],
+        "title": "DetectionGovernanceEligibilityResponse"
+      },
+      "DetectionGovernancePromotionGateRequest": {
+        "properties": {
+          "artifact": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Artifact"
+          },
+          "binding_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Binding Hash"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "artifact"
+        ],
+        "title": "DetectionGovernancePromotionGateRequest"
+      },
+      "DetectionGovernancePromotionGateResponse": {
+        "properties": {
+          "allowed": {
+            "type": "boolean",
+            "title": "Allowed"
+          },
+          "decision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision Id"
+          },
+          "reason_codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reason Codes"
+          },
+          "messages": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Messages"
+          }
+        },
+        "type": "object",
+        "required": [
+          "allowed"
+        ],
+        "title": "DetectionGovernancePromotionGateResponse"
+      },
+      "DetectionGovernanceRevokeRequest": {
+        "properties": {
+          "reason_note": {
+            "type": "string",
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Reason Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reason_note"
+        ],
+        "title": "DetectionGovernanceRevokeRequest",
+        "description": "Input to revoke a prior approval."
       },
       "DispositionCommand": {
         "properties": {

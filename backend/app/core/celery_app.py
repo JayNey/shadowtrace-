@@ -86,6 +86,12 @@ def _build_beat_schedule() -> dict[str, dict[str, object]]:
             "schedule": float(settings.behavior_observation_retry_interval_s),
             "options": {"queue": "ingestion"},
         }
+    if settings.detection_governance_expire_enabled:
+        schedule["shadowtrace-detection-governance-expire"] = {
+            "task": "shadowtrace.detection_governance.expire_active_approvals",
+            "schedule": float(settings.detection_governance_expire_interval_s),
+            "options": {"queue": "investigation"},
+        }
     return schedule
 
 
@@ -100,6 +106,9 @@ celery_app.conf.update(
         "shadowtrace.dispatch_investigation_intents": {"queue": "investigation"},
         "shadowtrace.reconcile_investigation_intents": {"queue": "investigation"},
         "shadowtrace.behavior_observation.retry_pending": {"queue": "ingestion"},
+        "shadowtrace.detection_governance.expire_active_approvals": {
+            "queue": "investigation"
+        },
     },
     task_acks_late=True,
     task_reject_on_worker_lost=True,
@@ -115,6 +124,7 @@ celery_app.conf.update(
         "app.tasks.worker_tasks",
         "app.tasks.ingestion_tasks",
         "app.tasks.behavior_observation_tasks",
+        "app.tasks.detection_governance_tasks",
     ),
 )
 

@@ -52,6 +52,7 @@ _tool_call_log: Any = None  # ToolCallLogService
 _graph_sync_service: Any = None  # GraphSyncService (ISSUE-082)
 _neo4j_client: Any = None  # Neo4jClient (ISSUE-082)
 _memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
+_detection_governance: Any = None  # DetectionGovernanceService (ISSUE-125)
 _decision_record_service: Any = None  # DecisionRecordService (ISSUE-131)
 _tool_call_grant_service: Any = None  # ToolCallGrantService (ISSUE-134)
 
@@ -250,6 +251,19 @@ def get_memory_governance() -> Any:
 
 
 MemoryGovernanceDep = Annotated[Any, Depends(get_memory_governance)]
+
+
+def get_detection_governance_service() -> Any:
+    """Return the shared detection governance decision service."""
+    global _detection_governance
+    if _detection_governance is None:
+        from app.services.detection_governance_service import DetectionGovernanceService
+
+        _detection_governance = DetectionGovernanceService(_get_session_factory())
+    return _detection_governance
+
+
+DetectionGovernanceDep = Annotated[Any, Depends(get_detection_governance_service)]
 
 
 def _get_adapter_registry() -> Any:
@@ -883,7 +897,7 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
-    global _memory_governance, _decision_record_service, _tool_call_grant_service
+    global _memory_governance, _detection_governance, _decision_record_service, _tool_call_grant_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
     from app.playbook.resources import reset_playbook_resources_cache
@@ -921,5 +935,6 @@ def reset_deps() -> None:
     _graph_sync_service = None
     _neo4j_client = None
     _memory_governance = None
+    _detection_governance = None
     _decision_record_service = None
     _tool_call_grant_service = None

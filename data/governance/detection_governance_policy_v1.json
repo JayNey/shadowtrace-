@@ -1,0 +1,8 @@
+{
+  "policy_version": "issue125_v1",
+  "max_runtime_errors": 0,
+  "max_unevaluable_count": 0,
+  "require_gate_pass": true,
+  "require_human_reviewer_for_approve": true,
+  "default_approval_ttl_hours": 168
+}

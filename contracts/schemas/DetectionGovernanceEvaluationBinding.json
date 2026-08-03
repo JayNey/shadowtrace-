@@ -1,0 +1,52 @@
+{
+  "additionalProperties": false,
+  "description": "Evaluation artifact identity frozen at decision time.",
+  "properties": {
+    "evaluation_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Evaluation Id",
+      "type": "string"
+    },
+    "dataset_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Dataset Id",
+      "type": "string"
+    },
+    "dataset_version": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Dataset Version",
+      "type": "string"
+    },
+    "dataset_content_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Dataset Content Hash",
+      "type": "string"
+    },
+    "artifact_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Artifact Hash",
+      "type": "string"
+    },
+    "code_sha": {
+      "maxLength": 64,
+      "minLength": 7,
+      "title": "Code Sha",
+      "type": "string"
+    }
+  },
+  "required": [
+    "evaluation_id",
+    "dataset_id",
+    "dataset_version",
+    "dataset_content_hash",
+    "artifact_hash",
+    "code_sha"
+  ],
+  "title": "DetectionGovernanceEvaluationBinding",
+  "type": "object"
+}

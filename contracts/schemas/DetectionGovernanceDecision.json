@@ -1,0 +1,412 @@
+{
+  "$defs": {
+    "DetectionCandidateRefs": {
+      "additionalProperties": false,
+      "description": "Pinned candidate package/model/rule identity bound into the artifact.",
+      "properties": {
+        "package_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Package Id",
+          "type": "string"
+        },
+        "package_version": {
+          "minimum": 1,
+          "title": "Package Version",
+          "type": "integer"
+        },
+        "package_content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Package Content Hash",
+          "type": "string"
+        },
+        "rule_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Rule Ids",
+          "type": "array"
+        },
+        "feature_contract_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Feature Contract Version",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "scope_revision_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope Revision Id"
+        },
+        "model_release_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Id"
+        },
+        "model_release_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Hash"
+        }
+      },
+      "required": [
+        "package_id",
+        "package_version",
+        "package_content_hash",
+        "feature_contract_version",
+        "detection_scope_id"
+      ],
+      "title": "DetectionCandidateRefs",
+      "type": "object"
+    },
+    "DetectionGovernanceCandidateBinding": {
+      "additionalProperties": false,
+      "description": "Pinned candidate identity bound into a governance decision.",
+      "properties": {
+        "candidate_set_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Candidate Set Hash",
+          "type": "string"
+        },
+        "candidate_refs": {
+          "$ref": "#/$defs/DetectionCandidateRefs"
+        },
+        "feature_contract_version": {
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Feature Contract Version",
+          "type": "string"
+        },
+        "detection_scope_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Detection Scope Id",
+          "type": "string"
+        },
+        "scope_revision_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Scope Revision Id"
+        },
+        "model_release_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Id"
+        },
+        "model_release_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Release Hash"
+        }
+      },
+      "required": [
+        "candidate_set_hash",
+        "candidate_refs",
+        "feature_contract_version",
+        "detection_scope_id"
+      ],
+      "title": "DetectionGovernanceCandidateBinding",
+      "type": "object"
+    },
+    "DetectionGovernanceDecisionKind": {
+      "description": "Governance outcome — not package runtime state or promotion status.",
+      "enum": [
+        "approve",
+        "reject",
+        "expire",
+        "revoke"
+      ],
+      "title": "DetectionGovernanceDecisionKind",
+      "type": "string"
+    },
+    "DetectionGovernanceEvaluationBinding": {
+      "additionalProperties": false,
+      "description": "Evaluation artifact identity frozen at decision time.",
+      "properties": {
+        "evaluation_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Evaluation Id",
+          "type": "string"
+        },
+        "dataset_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "dataset_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Dataset Version",
+          "type": "string"
+        },
+        "dataset_content_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Dataset Content Hash",
+          "type": "string"
+        },
+        "artifact_hash": {
+          "maxLength": 64,
+          "minLength": 64,
+          "title": "Artifact Hash",
+          "type": "string"
+        },
+        "code_sha": {
+          "maxLength": 64,
+          "minLength": 7,
+          "title": "Code Sha",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evaluation_id",
+        "dataset_id",
+        "dataset_version",
+        "dataset_content_hash",
+        "artifact_hash",
+        "code_sha"
+      ],
+      "title": "DetectionGovernanceEvaluationBinding",
+      "type": "object"
+    },
+    "DetectionGovernanceReasonCode": {
+      "description": "Machine-readable eligibility and audit reason codes.",
+      "enum": [
+        "artifact_hash_mismatch",
+        "artifact_incomplete",
+        "artifact_status_failed",
+        "gate_fail_closed",
+        "gate_not_pass",
+        "quality_metric_fail_closed",
+        "quality_metric_insufficient_sample",
+        "tenant_isolation_failed",
+        "required_scorer_errors",
+        "runtime_error_budget_exceeded",
+        "threshold_manifest_mismatch",
+        "candidate_binding_mismatch",
+        "reviewer_required",
+        "policy_version_mismatch",
+        "decision_revoked",
+        "decision_expired",
+        "decision_superseded",
+        "manual_reject",
+        "manual_revoke"
+      ],
+      "title": "DetectionGovernanceReasonCode",
+      "type": "string"
+    },
+    "DetectionGovernanceThresholdBinding": {
+      "additionalProperties": false,
+      "description": "Threshold manifest identity frozen at decision time.",
+      "properties": {
+        "manifest_version": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Manifest Version",
+          "type": "string"
+        },
+        "manifest_path": {
+          "anyOf": [
+            {
+              "maxLength": 512,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Manifest Path"
+        }
+      },
+      "required": [
+        "manifest_version"
+      ],
+      "title": "DetectionGovernanceThresholdBinding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Immutable governance record consumable by #629 promotion gate (Phase B+).",
+  "properties": {
+    "decision_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "tenant_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Tenant Id",
+      "type": "string"
+    },
+    "decision": {
+      "$ref": "#/$defs/DetectionGovernanceDecisionKind"
+    },
+    "candidate_binding": {
+      "$ref": "#/$defs/DetectionGovernanceCandidateBinding"
+    },
+    "evaluation_binding": {
+      "$ref": "#/$defs/DetectionGovernanceEvaluationBinding"
+    },
+    "threshold_binding": {
+      "$ref": "#/$defs/DetectionGovernanceThresholdBinding"
+    },
+    "binding_hash": {
+      "maxLength": 64,
+      "minLength": 64,
+      "title": "Binding Hash",
+      "type": "string"
+    },
+    "decision_hash": {
+      "default": "",
+      "maxLength": 64,
+      "minLength": 0,
+      "title": "Decision Hash",
+      "type": "string"
+    },
+    "policy_version": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Policy Version",
+      "type": "string"
+    },
+    "reviewer_subject": {
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Reviewer Subject",
+      "type": "string"
+    },
+    "reviewer_roles": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Reviewer Roles",
+      "type": "array"
+    },
+    "reason_codes": {
+      "items": {
+        "$ref": "#/$defs/DetectionGovernanceReasonCode"
+      },
+      "title": "Reason Codes",
+      "type": "array"
+    },
+    "reason_note": {
+      "default": "",
+      "maxLength": 1024,
+      "title": "Reason Note",
+      "type": "string"
+    },
+    "decided_at": {
+      "format": "date-time",
+      "title": "Decided At",
+      "type": "string"
+    },
+    "expires_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expires At"
+    },
+    "supersedes_decision_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Supersedes Decision Id"
+    }
+  },
+  "required": [
+    "decision_id",
+    "tenant_id",
+    "decision",
+    "candidate_binding",
+    "evaluation_binding",
+    "threshold_binding",
+    "binding_hash",
+    "policy_version",
+    "reviewer_subject",
+    "decided_at"
+  ],
+  "title": "DetectionGovernanceDecision",
+  "type": "object"
+}

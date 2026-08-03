@@ -1,0 +1,17 @@
+{
+  "additionalProperties": false,
+  "description": "Input to revoke a prior approval.",
+  "properties": {
+    "reason_note": {
+      "maxLength": 1024,
+      "minLength": 1,
+      "title": "Reason Note",
+      "type": "string"
+    }
+  },
+  "required": [
+    "reason_note"
+  ],
+  "title": "DetectionGovernanceRevokeRequest",
+  "type": "object"
+}
