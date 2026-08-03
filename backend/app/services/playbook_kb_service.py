@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.models.knowledge import KnowledgeChunk
+from app.models.knowledge import GLOBAL_KB_TENANT_ID, KnowledgeChunk
 from app.models.knowledge_release import KnowledgeRelease
 from app.models.playbook import Playbook, PlaybookStep
 from app.models.playbook_release import PLAYBOOK_KB_NAME, PlaybookRef
@@ -70,6 +70,7 @@ def _chunk_metadata(
 ) -> dict[str, Any]:
     object_hash = compute_playbook_object_hash(pb)
     return {
+        "tenant_id": GLOBAL_KB_TENANT_ID,
         "playbook_id": pb.playbook_id,
         "playbook_name": pb.playbook_name,
         "event_type": pb.event_type.value,
@@ -129,6 +130,8 @@ class PlaybookKBService:
     """Manage the SOAR playbook knowledge base.
 
     Production paths require release-pinned chunks with immutable refs (#645).
+    Playbook corpus is organization-global: materialized chunks use
+    ``GLOBAL_KB_TENANT_ID`` so strict tenant isolation still retrieves them.
     Legacy file loads remain for tests and offline bootstrap only.
     """
 

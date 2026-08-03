@@ -40,7 +40,7 @@ _DISPOSITION_BLOCKING_STAGES = frozenset(
     }
 )
 _REF_ID_PATTERN = re.compile(
-    r"^(evt|evd|act|trc|dec|wbk|disp|case|plan|report)-[0-9a-f]{4,32}$",
+    r"^(evt|evd|act|trc|dec|wbk|disp|case|plan|report|pb|krel)-[0-9a-fA-F]{4,32}$",
     re.IGNORECASE,
 )
 
@@ -126,6 +126,36 @@ def _collect_input_refs(input_data: Any) -> tuple[list[dict[str, str]], list[str
                 refs.append({"ref_type": "evidence_id", "ref_id": ref_id})
             else:
                 unresolved.append(ref_id)
+    return refs, unresolved
+
+
+def _collect_enriched_input_refs(output_data: dict[str, Any]) -> tuple[list[dict[str, str]], list[str]]:
+    """Merge agent-enriched refs (e.g. playbook pins) into durable input_refs."""
+    refs: list[dict[str, str]] = []
+    unresolved: list[str] = []
+    raw = output_data.get("input_refs")
+    if not isinstance(raw, list):
+        return refs, unresolved
+    seen: set[tuple[str, str]] = set()
+    for item in raw[:50]:
+        if not isinstance(item, dict):
+            continue
+        ref_type = item.get("ref_type")
+        ref_id = item.get("ref_id")
+        if not isinstance(ref_type, str) or not isinstance(ref_id, str):
+            continue
+        ref_type = ref_type.strip()
+        ref_id = ref_id.strip()
+        if not ref_type or not ref_id:
+            continue
+        key = (ref_type, ref_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        if _validate_ref_id(ref_id):
+            refs.append({"ref_type": ref_type, "ref_id": ref_id})
+        else:
+            unresolved.append(ref_id)
     return refs, unresolved
 
 
@@ -237,11 +267,13 @@ def _enrich_agent_output(
                     continue
                 ref = action.get("playbook_ref")
                 if isinstance(ref, dict) and ref.get("release_id") and ref.get("playbook_id"):
+                    release_id = str(ref["release_id"]).strip()
+                    playbook_id = str(ref["playbook_id"]).strip()
                     playbook_refs.append(
-                        {
-                            "ref_type": "playbook_ref",
-                            "ref_id": f"{ref['release_id']}:{ref['playbook_id']}",
-                        }
+                        {"ref_type": "playbook_release_id", "ref_id": release_id},
+                    )
+                    playbook_refs.append(
+                        {"ref_type": "playbook_id", "ref_id": playbook_id},
                     )
             if playbook_refs:
                 enriched.setdefault("input_refs", [])
@@ -366,6 +398,9 @@ def _build_record_payload(
     confidence_value = float(confidence) if isinstance(confidence, (int, float)) else None
 
     input_refs, unresolved_from_input = _collect_input_refs(input_data)
+    enriched_refs, enriched_unresolved = _collect_enriched_input_refs(output_data)
+    input_refs.extend(enriched_refs)
+    unresolved_from_input.extend(enriched_unresolved)
     candidates = _coerce_candidates(output_data.get("candidate_actions"))
 
     evidence_refs = output_data.get("evidence_refs")

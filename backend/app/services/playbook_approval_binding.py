@@ -3,15 +3,39 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from typing import Any
 
 from app.core.errors import ValidationError
 from app.models.action import Action
+from app.models.enums import CapabilityState
 from app.models.playbook_release import (
     PlaybookActionTemplateSnapshot,
     PlaybookRef,
 )
+from app.models.tool_meta import CapabilityManifest
 from app.services.action_approval_policy import APPROVAL_POLICY_SOURCE, APPROVAL_POLICY_VERSION
+
+_MANIFEST_CAPABILITY_FIELDS: dict[str, str] = {
+    "entity_response": "entity_response",
+    "event_disposition": "event_disposition",
+    "source_read": "source_read",
+}
+
+
+def manifest_supports_template_capabilities(
+    manifest: CapabilityManifest,
+    required: Sequence[str],
+) -> tuple[bool, str | None]:
+    """Return whether provider manifest supports pinned template capabilities."""
+    for capability in required:
+        field = _MANIFEST_CAPABILITY_FIELDS.get(capability)
+        if field is None:
+            return False, f"unknown playbook capability {capability!r}"
+        state = getattr(manifest, field)
+        if state is not CapabilityState.SUPPORTED:
+            return False, f"playbook capability {capability!r} is {state.value}"
+    return True, None
 
 
 def compute_playbook_binding_hash(
@@ -131,5 +155,6 @@ def validate_approval_binding(action: Action, detail: dict[str, Any] | None) -> 
 __all__ = [
     "build_approval_binding_detail",
     "compute_playbook_binding_hash",
+    "manifest_supports_template_capabilities",
     "validate_approval_binding",
 ]

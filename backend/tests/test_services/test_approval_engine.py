@@ -290,6 +290,16 @@ async def _insert_action(
                     writeback_applicable=action.writeback_applicable,
                     writeback_readiness=action.writeback_readiness.value,
                     reason=action.reason,
+                    playbook_ref=(
+                        action.playbook_ref.model_dump(mode="json")
+                        if action.playbook_ref is not None
+                        else None
+                    ),
+                    action_template_snapshot=(
+                        action.action_template_snapshot.model_dump(mode="json")
+                        if action.action_template_snapshot is not None
+                        else None
+                    ),
                 )
             )
     return action.model_copy(update={"event_id": event_id})
@@ -366,6 +376,50 @@ def test_evaluate_hard_gates_rejects_unknown_tool() -> None:
     gate = evaluate_hard_gates(action, manifest=manifest)
     assert gate is not None
     assert gate.decision is ApprovalDecisionKind.AUTO_REJECT
+
+
+def test_evaluate_hard_gates_rejects_unsupported_playbook_capability() -> None:
+    from app.models.enums import CapabilityState
+    from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
+    from app.models.tool_meta import CapabilityManifest
+
+    manifest = build_mock_capability_manifest()
+    unsupported = manifest.model_copy(update={"entity_response": CapabilityState.UNSUPPORTED})
+    ref = PlaybookRef(
+        playbook_id="pb-a1b2c3d4",
+        release_id="krel-abcdef012345678",
+        release_version="v1",
+        content_hash="a" * 64,
+        bundle_content_hash="b" * 64,
+    )
+    snapshot = PlaybookActionTemplateSnapshot(
+        step_order=1,
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        action_name="Block IP",
+        required_capabilities=("entity_response",),
+        template_hash="c" * 64,
+    )
+    action = _action_model(
+        action_level=ActionLevel.L2,
+        playbook_ref=ref,
+        action_template_snapshot=snapshot,
+    )
+    gate = evaluate_hard_gates(action, manifest=unsupported)
+    assert gate is not None
+    assert gate.decision is ApprovalDecisionKind.AUTO_REJECT
+    assert gate.rule_applied == "playbook_capability_unsupported"
+
+
+def test_manifest_supports_template_capabilities_accepts_mock_manifest() -> None:
+    from app.services.playbook_approval_binding import manifest_supports_template_capabilities
+
+    ok, reason = manifest_supports_template_capabilities(
+        build_mock_capability_manifest(),
+        ("entity_response",),
+    )
+    assert ok is True
+    assert reason is None
 
 
 # --------------------------------------------------------------------------- #
@@ -1186,3 +1240,49 @@ async def test_impact_assessment_degraded_when_no_provider(
         assert row is not None
         # No impact_assessment persisted (service not injected).
         assert row.impact_assessment is None
+
+
+@pytest.mark.asyncio
+async def test_approve_rejects_stale_playbook_binding(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    engine: ApprovalEngine,
+) -> None:
+    from app.core.errors import ValidationError as ShadowValidationError
+    from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
+
+    event_id = await _create_event(session_factory, store)
+    ref = PlaybookRef(
+        playbook_id="pb-a1b2c3d4",
+        release_id="krel-abcdef012345678",
+        release_version="v1",
+        content_hash="a" * 64,
+        bundle_content_hash="b" * 64,
+    )
+    snapshot = PlaybookActionTemplateSnapshot(
+        step_order=1,
+        tool_name="block_ip",
+        action_level=ActionLevel.L4,
+        action_name="Block IP",
+        required_capabilities=("entity_response",),
+        template_hash="c" * 64,
+    )
+    action = _action_model(
+        event_id=event_id,
+        action_level=ActionLevel.L4,
+        playbook_ref=ref,
+        action_template_snapshot=snapshot,
+    )
+    await _insert_action(session_factory, event_id, action)
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action.action_id)
+            assert row is not None
+            row.action_fingerprint = "fp-stale-after-approval-eval"
+            await session.flush()
+
+    principal = Principal(subject="approver-1", roles=["approver"])
+    with pytest.raises(ShadowValidationError, match="fingerprint changed"):
+        await engine.approve(action.action_id, principal, "ok", "dec-playbook-stale")

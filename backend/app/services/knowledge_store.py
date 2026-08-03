@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.embedding.service import EmbeddingService
 from app.db.orm.knowledge import KnowledgeChunkORM
-from app.models.knowledge import KnowledgeChunk, RetrievedChunk
+from app.models.knowledge import GLOBAL_KB_TENANT_ID, KnowledgeChunk, RetrievedChunk
 from app.models.knowledge_release import KnowledgeTypedFilter
 from app.services.knowledge_store_prefilter import (
     assert_knowledge_chunk_keyword_prefilter_in_sql,
@@ -79,9 +79,15 @@ class KnowledgeStore:
         if tenant_id is None:
             return "", {}
         if tenant_isolation_strict:
-            clause = " AND metadata->>'tenant_id' = :tenant_id"
-        else:
-            clause = " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
+            clause = (
+                " AND (metadata->>'tenant_id' = :tenant_id"
+                " OR metadata->>'tenant_id' = :global_tenant_id)"
+            )
+            return clause, {
+                "tenant_id": tenant_id,
+                "global_tenant_id": GLOBAL_KB_TENANT_ID,
+            }
+        clause = " AND (metadata->>'tenant_id' IS NULL OR metadata->>'tenant_id' = :tenant_id)"
         return clause, {"tenant_id": tenant_id}
 
     @staticmethod

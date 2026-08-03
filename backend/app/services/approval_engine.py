@@ -44,6 +44,7 @@ from app.services.action_approval_policy import (
 )
 from app.services.playbook_approval_binding import (
     build_approval_binding_detail,
+    manifest_supports_template_capabilities,
     validate_approval_binding,
 )
 from app.services.action_mapper import action_from_orm as _action_from_orm
@@ -84,6 +85,17 @@ def evaluate_hard_gates(
                 rule_applied="capability_not_allowed",
                 reason=f"tool {action.tool_name} not in provider manifest",
             )
+        if action.action_template_snapshot is not None:
+            supported, reason = manifest_supports_template_capabilities(
+                manifest,
+                action.action_template_snapshot.required_capabilities,
+            )
+            if not supported:
+                return ApprovalDecision(
+                    decision=ApprovalDecisionKind.AUTO_REJECT,
+                    rule_applied="playbook_capability_unsupported",
+                    reason=reason or "playbook template capability unsupported",
+                )
 
     readiness = action.writeback_readiness
     if readiness is WritebackReadiness.PERMISSION_DENIED:

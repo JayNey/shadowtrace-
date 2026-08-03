@@ -669,6 +669,7 @@ async def test_playbook_ref_validation_error_skips_legacy_fallback() -> None:
     )
     plan = await agent.execute(_agent_input(event_id))
     assert not any(a.playbook_ref is not None for a in plan.actions)
+    assert "playbook resolution failed" in plan.strategy_summary
 
 
 def test_action_fingerprint_and_id_are_stable() -> None:

@@ -40,6 +40,26 @@ DATABASE_URL = os.environ.get(
 )
 
 
+def _postgres_reachable() -> bool:
+    import asyncio
+
+    from app.db.session_provider import SessionProvider
+
+    provider = SessionProvider(DATABASE_URL, pool="nullpool")
+    try:
+        return asyncio.run(provider.ping_postgres())
+    except Exception:
+        return False
+    finally:
+        asyncio.run(provider.dispose())
+
+
+requires_postgres = pytest.mark.skipif(
+    not _postgres_reachable(),
+    reason="PostgreSQL not reachable",
+)
+
+
 def _alembic_config() -> Config:
     cfg = Config(str(BACKEND_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(BACKEND_DIR / "migrations"))
@@ -105,6 +125,7 @@ async def _clean(session_factory: async_sessionmaker[AsyncSession]) -> None:
 
 
 @pytest.mark.asyncio
+@requires_postgres
 async def test_stage_and_activate_playbook_release(
     session_factory: async_sessionmaker[AsyncSession],
     release_service: PlaybookReleaseService,
@@ -136,6 +157,7 @@ async def test_stage_and_activate_playbook_release(
 
 
 @pytest.mark.asyncio
+@requires_postgres
 async def test_resolve_playbook_ref_rejects_hash_mismatch(
     session_factory: async_sessionmaker[AsyncSession],
     release_service: PlaybookReleaseService,
@@ -166,6 +188,7 @@ async def test_resolve_playbook_ref_rejects_hash_mismatch(
 
 
 @pytest.mark.asyncio
+@requires_postgres
 async def test_retired_release_still_resolves_historically(
     session_factory: async_sessionmaker[AsyncSession],
     release_service: PlaybookReleaseService,
@@ -388,6 +411,7 @@ def test_approval_binding_invalidates_on_policy_version_change() -> None:
 
 
 @pytest.mark.asyncio
+@requires_postgres
 async def test_resolve_playbook_ref_rejects_retired_when_not_allowed(
     session_factory: async_sessionmaker[AsyncSession],
     release_service: PlaybookReleaseService,
@@ -468,3 +492,16 @@ def test_compute_playbook_binding_hash_stable() -> None:
     h2 = compute_playbook_binding_hash(playbook_ref=ref, template_snapshot=snapshot)
     assert h1 == h2
     assert h1 != compute_playbook_binding_hash(playbook_ref=ref, template_snapshot=None)
+
+
+def test_manifest_supports_template_capabilities_rejects_unknown() -> None:
+    from app.models.tool_meta import CapabilityManifest
+    from app.services.playbook_approval_binding import manifest_supports_template_capabilities
+
+    ok, reason = manifest_supports_template_capabilities(
+        CapabilityManifest(provider_name="mock_xdr"),
+        ("fast_path",),
+    )
+    assert ok is False
+    assert reason is not None
+    assert "unknown playbook capability" in reason

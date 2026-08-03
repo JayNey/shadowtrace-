@@ -16,7 +16,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import Settings
 from app.core.embedding.service import EmbeddingService
-from app.models.knowledge import KnowledgeChunk
+from app.models.knowledge import GLOBAL_KB_TENANT_ID, KnowledgeChunk
 from app.services.knowledge_store import KnowledgeStore
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -92,8 +92,8 @@ def test_tenant_filter_strict_requires_metadata_match() -> None:
         tenant_isolation_strict=True,
     )
     assert "IS NULL" not in clause
-    assert "= :tenant_id" in clause
-    assert params == {"tenant_id": "tenant-a"}
+    assert "global_tenant_id" in clause
+    assert params == {"tenant_id": "tenant-a", "global_tenant_id": GLOBAL_KB_TENANT_ID}
 
 
 def test_tenant_filter_absent_when_tenant_id_none() -> None:
@@ -143,6 +143,59 @@ class TestKnowledgeStoreTenantIsolation:
             tenant_id="tenant-b",
         )
         assert hits_b == [] or hits_b[0].chunk_id == "chk-tenant-b"
+
+    @pytest.mark.asyncio
+    async def test_vector_search_strict_includes_global_corpus_chunks(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        embed_service: EmbeddingService,
+        clean_knowledge: None,
+    ) -> None:
+        store = KnowledgeStore(
+            session_factory,
+            embed_service,
+            tenant_isolation_strict=True,
+        )
+        await store.upsert_chunks(
+            "playbook_kb",
+            [
+                _chunk(
+                    "chk-playbook-global",
+                    "playbook_kb",
+                    "shared playbook guidance",
+                    tenant_id=GLOBAL_KB_TENANT_ID,
+                    release_id="krel-global00001",
+                ),
+                _chunk(
+                    "chk-tenant-private",
+                    "playbook_kb",
+                    "tenant private playbook",
+                    tenant_id="tenant-a",
+                    release_id="krel-tenant00001",
+                ),
+            ],
+        )
+
+        query_vec = await embed_service.embed_query("shared playbook guidance")
+        hits_a = await store.vector_search(
+            "playbook_kb",
+            query_vec,
+            top_k=5,
+            tenant_id="tenant-a",
+        )
+        chunk_ids = {hit.chunk_id for hit in hits_a}
+        assert "chk-playbook-global" in chunk_ids
+        assert "chk-tenant-private" in chunk_ids
+
+        hits_b = await store.vector_search(
+            "playbook_kb",
+            query_vec,
+            top_k=5,
+            tenant_id="tenant-b",
+        )
+        chunk_ids_b = {hit.chunk_id for hit in hits_b}
+        assert "chk-playbook-global" in chunk_ids_b
+        assert "chk-tenant-private" not in chunk_ids_b
 
     @pytest.mark.asyncio
     async def test_vector_search_permissive_includes_global_chunks(

@@ -46,7 +46,10 @@ from app.models.enums import (
 )
 from app.models.playbook import Playbook
 from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
-from app.services.playbook_approval_binding import compute_playbook_binding_hash
+from app.services.playbook_approval_binding import (
+    compute_playbook_binding_hash,
+    manifest_supports_template_capabilities,
+)
 from app.services.playbook_release_resolver import build_action_template_snapshot
 from app.models.tool_meta import (
     TERMINAL_DISPOSITION_TOOL as VIRTUAL_DISPOSITION_TOOL,
@@ -290,6 +293,18 @@ class ResponsePolicyFilter:
 
         if not self._validate_parameters(tool_name, candidate):
             return None
+
+        if candidate.action_template_snapshot is not None:
+            supported, _ = manifest_supports_template_capabilities(
+                self.manifest,
+                candidate.action_template_snapshot.required_capabilities,
+            )
+            if not supported:
+                logger.debug(
+                    "PolicyFilter: playbook template capability unsupported for %s",
+                    tool_name,
+                )
+                return None
 
         if tool_name in _NON_TARGET_TOOLS:
             return candidate
@@ -811,11 +826,30 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     input.event_id,
                     exc.error_message,
                 )
+                return (
+                    expand_rule_candidates(
+                        get_rule_actions(event_type, severity),
+                        entities,
+                    ),
+                    ResponsePlanGeneratedBy.TEMPLATE,
+                    (
+                        f"playbook resolution failed ({exc.error_code}); "
+                        "DEFAULT_RESPONSE_RULES fallback"
+                    ),
+                )
             except ValidationError as exc:
                 logger.warning(
                     "ResponseAgent playbook ref invalid event=%s err=%s",
                     input.event_id,
                     exc,
+                )
+                return (
+                    expand_rule_candidates(
+                        get_rule_actions(event_type, severity),
+                        entities,
+                    ),
+                    ResponsePlanGeneratedBy.TEMPLATE,
+                    "playbook ref invalid; DEFAULT_RESPONSE_RULES fallback",
                 )
         elif playbook_refs and self.playbook_kb_service is not None:
             # Legacy/test bootstrap only — production wires playbook_release_service.

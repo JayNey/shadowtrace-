@@ -6,6 +6,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+# Shared corpus chunks (e.g. playbook_soar) are visible to all tenants in strict mode.
+GLOBAL_KB_TENANT_ID = "__global__"
+
 
 class KnowledgeChunk(BaseModel):
     """A chunk of knowledge to be stored and embedded."""
