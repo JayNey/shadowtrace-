@@ -901,6 +901,7 @@ async def get_pipeline() -> Any:
             working_memory=stack["wm"],
             degraded_flags=stack["degraded_flags"],
             settings=stack["settings"],
+            agent_task_service=_get_agent_task_service(),
         )
     return _pipeline
 

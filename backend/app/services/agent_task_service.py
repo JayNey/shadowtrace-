@@ -50,6 +50,10 @@ def _canonical_bytes(value: Any) -> bytes:
     return orjson.dumps(value, option=orjson.OPT_SORT_KEYS)
 
 
+def _goal_hash(goal: dict[str, Any]) -> str:
+    return hashlib.sha256(_canonical_bytes(goal)).hexdigest()
+
+
 def _task_from_row(row: orm.AgentTaskORM) -> AgentTask:
     return AgentTask.model_validate(
         {
@@ -90,6 +94,16 @@ def _replay_or_deny(existing: orm.AgentTaskORM, request: AgentTaskEnqueueRequest
                 "event_id": request.event_id,
                 "existing_event_id": existing.event_id,
                 "idempotency_key": request.idempotency_key,
+            },
+        )
+    existing_goal = existing.goal if isinstance(existing.goal, dict) else {}
+    request_goal = request.goal.model_dump(mode="json")
+    if _goal_hash(existing_goal) != _goal_hash(request_goal):
+        raise AgentTaskDeniedError(
+            "idempotency key replay goal mismatch",
+            details={
+                "idempotency_key": request.idempotency_key,
+                "event_id": request.event_id,
             },
         )
     return _task_from_row(existing)
@@ -203,11 +217,6 @@ class AgentTaskService:
                         raise AgentTaskDeniedError(
                             "task already claimed by this worker",
                             details={"task_id": request.task_id},
-                        )
-                    if lease_valid:
-                        raise AgentTaskDeniedError(
-                            "task not claimable",
-                            details={"task_id": request.task_id, "status": status.value},
                         )
 
                 if status is not AgentTaskStatus.QUEUED and status is not AgentTaskStatus.CLAIMED:

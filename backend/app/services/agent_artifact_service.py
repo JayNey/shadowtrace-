@@ -37,6 +37,20 @@ def _content_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
 
 
+def _validate_artifact_replay(existing: AgentArtifact, payload: dict[str, Any]) -> None:
+    expected = _content_hash(payload)
+    if existing.content_hash != expected:
+        raise ValidationError(
+            "artifact idempotent replay content_hash mismatch",
+            error_code="validation_error",
+            details={
+                "logical_artifact_key": existing.logical_artifact_key,
+                "expected_hash": expected,
+                "stored_hash": existing.content_hash,
+            },
+        )
+
+
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
@@ -178,6 +192,7 @@ class AgentArtifactService:
                         producer_revision=claim.revision,
                     )
                     if existing is not None:
+                        _validate_artifact_replay(existing, request.payload)
                         return existing
 
                     session.add(row)
@@ -190,6 +205,7 @@ class AgentArtifactService:
                     producer_revision=claim.revision,
                 )
                 if existing is not None:
+                    _validate_artifact_replay(existing, request.payload)
                     return existing
             raise
 

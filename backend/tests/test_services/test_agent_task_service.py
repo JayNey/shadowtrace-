@@ -16,7 +16,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.core.errors import AgentTaskDeniedError
+from app.core.errors import AgentTaskDeniedError, ValidationError
 from app.db import models as orm
 from app.models.agent_task import (
     AgentArtifactPersistRequest,
@@ -139,6 +139,27 @@ async def test_enqueue_idempotent(task_service: AgentTaskService) -> None:
 
 
 @pytest.mark.asyncio
+async def test_enqueue_idempotency_rejects_goal_mismatch(task_service: AgentTaskService) -> None:
+    event_id = f"evt-at-{ _sfx() }"
+    key = f"idem-{ _sfx() }"
+    await task_service.enqueue(_enqueue_request(event_id=event_id, idempotency_key=key))
+    mismatched = AgentTaskEnqueueRequest(
+        event_id=event_id,
+        tenant_id="tenant-a",
+        goal=AgentTaskGoal(
+            task_type=AgentTaskType.RISK_SCORE,
+            context_refs=[
+                AgentTaskContextRef(ref_kind="event_context_field", ref_id="evidence_output"),
+            ],
+            parameters={"mode": "llm_assisted"},
+        ),
+        idempotency_key=key,
+    )
+    with pytest.raises(AgentTaskDeniedError, match="goal mismatch"):
+        await task_service.enqueue(mismatched)
+
+
+@pytest.mark.asyncio
 async def test_claim_start_complete_happy_path(task_service: AgentTaskService) -> None:
     event_id = f"evt-at-{ _sfx() }"
     task = await task_service.enqueue(
@@ -253,6 +274,86 @@ async def test_artifact_idempotent_logical_key(
         event_id=event_id,
     )
     assert first.artifact_id == second.artifact_id
+
+
+@pytest.mark.asyncio
+async def test_artifact_idempotent_replay_rejects_content_hash_mismatch(
+    task_service: AgentTaskService,
+    artifact_service: AgentArtifactService,
+) -> None:
+    event_id = f"evt-at-{ _sfx() }"
+    task = await task_service.enqueue(
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+    )
+    claim = await task_service.claim(
+        AgentTaskClaimRequest(
+            task_id=task.task_id,
+            worker_principal="worker-a",
+            tenant_id="tenant-a",
+        )
+    )
+    await task_service.start(claim, tenant_id="tenant-a")
+    request = AgentArtifactPersistRequest(
+        logical_artifact_key="risk_assessment",
+        payload={"risk_score": 82, "severity": "high"},
+        source_refs=[
+            AgentTaskContextRef(ref_kind="event_context_field", ref_id="evidence_output"),
+        ],
+    )
+    await artifact_service.persist(
+        claim,
+        request,
+        tenant_id="tenant-a",
+        event_id=event_id,
+    )
+    mismatched = AgentArtifactPersistRequest(
+        logical_artifact_key="risk_assessment",
+        payload={"risk_score": 99, "severity": "critical"},
+        source_refs=[
+            AgentTaskContextRef(ref_kind="event_context_field", ref_id="evidence_output"),
+        ],
+    )
+    with pytest.raises(ValidationError, match="content_hash mismatch"):
+        await artifact_service.persist(
+            claim,
+            mismatched,
+            tenant_id="tenant-a",
+            event_id=event_id,
+        )
+
+
+@pytest.mark.asyncio
+async def test_claim_reclaims_after_lease_expiry(
+    task_service: AgentTaskService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = f"evt-at-{ _sfx() }"
+    task = await task_service.enqueue(
+        _enqueue_request(event_id=event_id, idempotency_key=f"idem-{ _sfx() }")
+    )
+    first_claim = await task_service.claim(
+        AgentTaskClaimRequest(
+            task_id=task.task_id,
+            worker_principal="worker-a",
+            tenant_id="tenant-a",
+            lease_seconds=60,
+        )
+    )
+    assert first_claim.worker_principal == "worker-a"
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.AgentTaskORM, task.task_id)
+            assert row is not None
+            row.lease_expires_at = datetime.now(tz=UTC) - timedelta(seconds=30)
+    second_claim = await task_service.claim(
+        AgentTaskClaimRequest(
+            task_id=task.task_id,
+            worker_principal="worker-b",
+            tenant_id="tenant-a",
+        )
+    )
+    assert second_claim.worker_principal == "worker-b"
+    assert second_claim.attempt == first_claim.attempt + 1
 
 
 @pytest.mark.asyncio
