@@ -24,18 +24,20 @@ from app.models.knowledge_release import (
 from app.models.playbook import Playbook
 from app.models.playbook_release import (
     PLAYBOOK_CORPUS_ID,
-    PLAYBOOK_SOURCE_ID,
     PLAYBOOK_RELEASE_SCHEMA_VERSION,
+    PLAYBOOK_SOURCE_ID,
     PlaybookRef,
     ResolvedPlaybook,
 )
 from app.services.knowledge_release_resolver import (
-    build_idempotency_key,
     build_knowledge_release,
+    corpus_advisory_lock_key,
 )
-from app.services.knowledge_release_service import KnowledgeReleaseService, _corpus_advisory_lock_key
+from app.services.knowledge_release_service import KnowledgeReleaseService
 from app.services.playbook_kb_service import PlaybookKBService
 from app.services.playbook_release_resolver import (
+    build_playbook_idempotency_key,
+    build_playbook_release_id,
     compute_playbook_object_hash,
     validate_playbook_bundle,
 )
@@ -113,9 +115,9 @@ class PlaybookReleaseService:
                 details={"errors": list(validation.errors)},
             )
 
-        idempotency_key = build_idempotency_key(
-            corpus_id=PLAYBOOK_CORPUS_ID,
+        idempotency_key = build_playbook_idempotency_key(
             content_hash=validation.content_hash,
+            release_version=release_version,
         )
         async with self._session_factory() as session:
             async with session.begin():
@@ -141,6 +143,11 @@ class PlaybookReleaseService:
                     lifecycle_state=KnowledgeReleaseLifecycleState.STAGED,
                     import_status=KnowledgeImportStatus.VALIDATED,
                     vector_ready=False,
+                    release_id=build_playbook_release_id(
+                        validation.content_hash,
+                        release_version,
+                    ),
+                    idempotency_key=idempotency_key,
                 )
                 row = orm.KnowledgeReleaseORM(
                     release_id=release.release_id,
@@ -228,7 +235,7 @@ class PlaybookReleaseService:
 
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                    {"lock_key": _corpus_advisory_lock_key(row.corpus_id)},
+                    {"lock_key": corpus_advisory_lock_key(row.corpus_id)},
                 )
                 active_rows = await session.scalars(
                     select(orm.KnowledgeReleaseORM)

@@ -209,7 +209,7 @@ async def test_retired_release_still_resolves_historically(
 
 def test_approval_binding_invalidates_on_fingerprint_change() -> None:
     from app.models.action import Action
-    from app.models.enums import ActionCategory, ActionLevel, ActionStatus, ExecutionOwner
+    from app.models.enums import ActionCategory, ActionLevel, ExecutionOwner
     from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
 
     ref = PlaybookRef(
@@ -347,6 +347,103 @@ def test_approval_binding_requires_detail_for_playbook_pinned_action() -> None:
     )
     with pytest.raises(ValidationError, match="binding missing"):
         validate_approval_binding(action, None)
+
+
+def test_approval_binding_invalidates_on_policy_version_change() -> None:
+    from app.models.action import Action
+    from app.models.enums import ActionCategory, ActionLevel, ExecutionOwner
+    from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
+
+    ref = PlaybookRef(
+        playbook_id="pb-a1b2c3d4",
+        release_id="krel-abc",
+        release_version="v1",
+        content_hash="a" * 64,
+        bundle_content_hash="b" * 64,
+    )
+    snapshot = PlaybookActionTemplateSnapshot(
+        step_order=1,
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        action_name="Block IP",
+        template_hash="c" * 64,
+    )
+    action = Action(
+        action_id="act-001",
+        event_id="evt-001",
+        plan_revision=1,
+        action_fingerprint="fp-original",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        playbook_ref=ref,
+        action_template_snapshot=snapshot,
+    )
+    detail = build_approval_binding_detail(action)
+    detail["policy_version"] = "stale-policy-v0"
+    with pytest.raises(ValidationError, match="policy version changed"):
+        validate_approval_binding(action, detail)
+
+
+@pytest.mark.asyncio
+async def test_resolve_playbook_ref_rejects_retired_when_not_allowed(
+    session_factory: async_sessionmaker[AsyncSession],
+    release_service: PlaybookReleaseService,
+) -> None:
+    await _clean(session_factory)
+    bundle = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    provenance = KnowledgeReleaseProvenance(
+        source_path=str(DATA_FILE),
+        imported_by="test",
+        import_kind="playbook_bundle",
+    )
+    v1 = await release_service.stage_playbook_bundle(
+        bundle,
+        release_version="v1",
+        provenance=provenance,
+    )
+    await release_service.activate_release(v1.release_id)
+    playbook = bundle["playbooks"][0]
+    ref = PlaybookRef(
+        playbook_id=playbook["playbook_id"],
+        release_id=v1.release_id,
+        release_version=v1.release_version,
+        content_hash=compute_playbook_object_hash(playbook),
+        bundle_content_hash=v1.content_hash,
+        revision=v1.revision,
+    )
+
+    v2 = await release_service.stage_playbook_bundle(
+        bundle,
+        release_version="v2",
+        provenance=provenance,
+        revision=2,
+        supersedes_release_id=v1.release_id,
+    )
+    await release_service.activate_release(v2.release_id)
+
+    with pytest.raises(ValidationError, match="release retired"):
+        await release_service.resolve_playbook_ref(ref, allow_retired=False)
+
+
+def test_build_action_template_snapshot_enforces_byte_budget() -> None:
+    from app.models.enums import ActionLevel
+    from app.models.playbook import PlaybookStep
+    from app.services.playbook_release_resolver import build_action_template_snapshot
+
+    step = PlaybookStep(
+        step_order=1,
+        action_name="x" * 3000,
+        tool_name="block_ip",
+        action_level=ActionLevel.L2,
+        precondition="",
+        expected_outcome="",
+        required_capabilities=["entity_response"],
+    )
+    with pytest.raises(ValueError, match="byte budget"):
+        build_action_template_snapshot(step)
 
 
 def test_compute_playbook_binding_hash_stable() -> None:

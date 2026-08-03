@@ -10,7 +10,6 @@ from typing import Any
 from app.models.knowledge_release import (
     ATTACK_CORPUS_ID,
     ATTACK_KB_NAME,
-    ATTACK_SOURCE_ID,
     KNOWLEDGE_RELEASE_SCHEMA_VERSION,
     KnowledgeImportStatus,
     KnowledgeRelease,
@@ -45,6 +44,11 @@ def build_idempotency_key(*, corpus_id: str, content_hash: str) -> str:
     return f"{corpus_id}:{content_hash}"
 
 
+def corpus_advisory_lock_key(corpus_id: str) -> int:
+    material = f"knowledge_release|{corpus_id}".encode()
+    return int.from_bytes(hashlib.sha256(material).digest()[:8], byteorder="big", signed=True)
+
+
 def build_stix_object_id(technique_id: str) -> str:
     """Deterministic STIX id for an ATT&CK technique external id."""
     namespace = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
@@ -66,10 +70,16 @@ def build_knowledge_release(
     import_status: KnowledgeImportStatus = KnowledgeImportStatus.VALIDATED,
     vector_ready: bool = False,
     embedding_release_id: str | None = None,
+    release_id: str | None = None,
+    idempotency_key: str | None = None,
 ) -> KnowledgeRelease:
-    release_id = build_release_id(content_hash)
+    resolved_release_id = release_id or build_release_id(content_hash)
+    resolved_idempotency = idempotency_key or build_idempotency_key(
+        corpus_id=corpus_id,
+        content_hash=content_hash,
+    )
     return KnowledgeRelease(
-        release_id=release_id,
+        release_id=resolved_release_id,
         corpus_id=corpus_id,
         source_id=source_id,
         release_version=release_version,
@@ -84,7 +94,7 @@ def build_knowledge_release(
         relationship_count=relationship_count,
         vector_ready=vector_ready,
         embedding_release_id=embedding_release_id,
-        idempotency_key=build_idempotency_key(corpus_id=corpus_id, content_hash=content_hash),
+        idempotency_key=resolved_idempotency,
     )
 
 
@@ -120,6 +130,7 @@ __all__ = [
     "canonical_json_bytes",
     "compute_bundle_content_hash",
     "compute_object_hash",
+    "corpus_advisory_lock_key",
     "corpus_to_kb_name",
     "default_attack_provenance",
     "kb_name_to_corpus",

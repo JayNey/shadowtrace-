@@ -31,6 +31,7 @@ from app.services.knowledge_release_resolver import (
     build_idempotency_key,
     build_knowledge_release,
     compute_object_hash,
+    corpus_advisory_lock_key,
 )
 from app.services.knowledge_store import KnowledgeStore
 from app.services.stix_bundle_validator import StixBundleValidationResult, validate_stix_bundle
@@ -61,11 +62,6 @@ def _row_to_release(row: orm.KnowledgeReleaseORM) -> KnowledgeRelease:
         created_at=row.created_at,
         failure_reason=row.failure_reason,
     )
-
-
-def _corpus_advisory_lock_key(corpus_id: str) -> int:
-    material = f"knowledge_release|{corpus_id}".encode()
-    return int.from_bytes(hashlib.sha256(material).digest()[:8], byteorder="big", signed=True)
 
 
 def _extract_external_id(obj: dict[str, Any]) -> str | None:
@@ -412,7 +408,7 @@ class KnowledgeReleaseService:
 
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:lock_key)"),
-                    {"lock_key": _corpus_advisory_lock_key(row.corpus_id)},
+                    {"lock_key": corpus_advisory_lock_key(row.corpus_id)},
                 )
 
                 active_rows = await session.scalars(

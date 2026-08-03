@@ -9,11 +9,16 @@ from typing import Any
 from app.models.enums import ActionLevel, EventType
 from app.models.playbook import Playbook, PlaybookStep
 from app.models.playbook_release import (
+    MAX_ACTION_TEMPLATE_SNAPSHOT_BYTES,
+    PLAYBOOK_CORPUS_ID,
     PLAYBOOK_RELEASE_SCHEMA_VERSION,
     PlaybookActionTemplateSnapshot,
 )
 from app.models.tool_meta import ToolMeta
-from app.services.knowledge_release_resolver import canonical_json_bytes, compute_bundle_content_hash
+from app.services.knowledge_release_resolver import (
+    canonical_json_bytes,
+    compute_bundle_content_hash,
+)
 from app.tools.specs import baseline_tool_index
 
 _OTHER_ALLOWED_LEVELS = frozenset({ActionLevel.L0, ActionLevel.L1})
@@ -59,6 +64,19 @@ def compute_playbook_object_hash(playbook: Playbook | dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
+def build_playbook_idempotency_key(*, content_hash: str, release_version: str) -> str:
+    """Playbook releases are versioned independently of bundle content hash."""
+    return f"{PLAYBOOK_CORPUS_ID}:{content_hash}:{release_version}"
+
+
+def build_playbook_release_id(content_hash: str, release_version: str) -> str:
+    from app.services.knowledge_release_resolver import build_release_id
+
+    material = f"{content_hash}:{release_version}"
+    digest = hashlib.sha256(material.encode()).hexdigest()
+    return build_release_id(digest)
+
+
 def build_action_template_snapshot(step: PlaybookStep) -> PlaybookActionTemplateSnapshot:
     canonical = {
         "step_order": step.step_order,
@@ -67,7 +85,13 @@ def build_action_template_snapshot(step: PlaybookStep) -> PlaybookActionTemplate
         "action_name": step.action_name,
         "required_capabilities": sorted(step.required_capabilities),
     }
-    template_hash = hashlib.sha256(canonical_json_bytes(canonical)).hexdigest()
+    encoded = canonical_json_bytes(canonical)
+    if len(encoded) > MAX_ACTION_TEMPLATE_SNAPSHOT_BYTES:
+        raise ValueError(
+            "playbook action template snapshot exceeds byte budget "
+            f"({len(encoded)} > {MAX_ACTION_TEMPLATE_SNAPSHOT_BYTES})"
+        )
+    template_hash = hashlib.sha256(encoded).hexdigest()
     return PlaybookActionTemplateSnapshot(
         step_order=step.step_order,
         tool_name=step.tool_name,
@@ -144,6 +168,8 @@ __all__ = [
     "PLAYBOOK_RELEASE_SCHEMA_VERSION",
     "_validate_steps",
     "build_action_template_snapshot",
+    "build_playbook_idempotency_key",
+    "build_playbook_release_id",
     "compute_playbook_object_hash",
     "default_playbook_provenance",
     "validate_playbook_bundle",

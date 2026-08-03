@@ -86,6 +86,25 @@ def validate_approval_binding(action: Action, detail: dict[str, Any] | None) -> 
                 "reason": "action_fingerprint_mismatch",
             },
         )
+    bound_policy_version = detail.get("policy_version")
+    if not isinstance(bound_policy_version, str) or not bound_policy_version:
+        raise ValidationError(
+            "approval binding missing policy version for playbook-pinned action",
+            details={
+                "action_id": action.action_id,
+                "reason": "policy_version_missing",
+            },
+        )
+    if bound_policy_version != APPROVAL_POLICY_VERSION:
+        raise ValidationError(
+            "approval binding stale: policy version changed",
+            details={
+                "action_id": action.action_id,
+                "bound_policy_version": bound_policy_version,
+                "current_policy_version": APPROVAL_POLICY_VERSION,
+                "reason": "policy_version_mismatch",
+            },
+        )
     bound_hash = detail.get("playbook_binding_hash")
     if not isinstance(bound_hash, str) or not bound_hash:
         raise ValidationError(
