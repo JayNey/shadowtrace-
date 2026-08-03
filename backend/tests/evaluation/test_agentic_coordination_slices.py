@@ -23,7 +23,7 @@ from app.evaluation.runner import run_fixture_evaluation
 from app.evaluation.scorers.agentic_scorers import AgenticSliceScorer
 from app.evaluation.scorers.base import ScorerContext
 from app.evaluation.scorers.coordination_scorers import CoordinationSliceScorer
-from app.evaluation.scorers.registry import default_scorer_registry
+from app.evaluation.scorers.registry import ScorerRegistration, ScorerRegistry, default_scorer_registry
 from app.evaluation.threshold import evaluate_gate
 from app.models.evaluation_run import (
     AgenticCaseObservation,
@@ -543,6 +543,291 @@ def test_gate_fail_closed_on_unexpected_coordination_dependency_degraded() -> No
 
 
 @pytest.mark.evaluation
+def test_gate_min_case_count_exceeded_for_agentic_coordination() -> None:
+    threshold = EvaluationThresholdManifest(
+        manifest_version="test",
+        dataset_id="agentic_coordination_v1",
+        min_case_count=16,
+    )
+    gate = evaluate_gate(
+        threshold,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=15,
+            pass_count=15,
+            fail_count=0,
+            unevaluable_count=0,
+            error_count=0,
+            pass_rate=1.0,
+        ),
+        case_results=[],
+        registry=default_scorer_registry(),
+    )
+    assert gate.verdict == GateVerdict.FAIL
+    assert any(diff.field == "case_count" for diff in gate.diffs)
+
+
+@pytest.mark.evaluation
+def test_gate_max_unevaluable_exceeded_for_agentic_coordination() -> None:
+    threshold = EvaluationThresholdManifest(
+        manifest_version="test",
+        dataset_id="agentic_coordination_v1",
+        max_unevaluable_count=0,
+    )
+    gate = evaluate_gate(
+        threshold,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=2,
+            pass_count=1,
+            fail_count=0,
+            unevaluable_count=1,
+            error_count=0,
+            pass_rate=1.0,
+        ),
+        case_results=[],
+        registry=default_scorer_registry(),
+    )
+    assert gate.verdict == GateVerdict.FAIL
+    assert any(diff.field == "unevaluable_count" for diff in gate.diffs)
+
+
+@pytest.mark.evaluation
+def test_required_agentic_scorer_error_fail_closed() -> None:
+    threshold = EvaluationThresholdManifest(
+        manifest_version="test",
+        dataset_id="agentic_coordination_v1",
+        required_scorers=["agentic_shadow"],
+        required_gate=True,
+    )
+    gate = evaluate_gate(
+        threshold,
+        aggregates=EvaluationAggregateMetrics(
+            case_count=1,
+            pass_count=0,
+            fail_count=0,
+            unevaluable_count=0,
+            error_count=1,
+            pass_rate=0.0,
+        ),
+        case_results=[
+            EvaluationCaseResult(
+                case_id="agentic-error",
+                truth_id="truth-1",
+                truth_revision=1,
+                truth_content_hash="a" * 64,
+                slice_type=SliceType.AGENTIC,
+                observation=CaseObservation(
+                    case_id="agentic-error",
+                    slice_type=SliceType.AGENTIC,
+                    observation_available=False,
+                ),
+                scorer_results=[
+                    EvaluationScorerResult(
+                        scorer_id="agentic_shadow",
+                        outcome=ScorerOutcome.ERROR,
+                        reason_code="scorer_exception",
+                    )
+                ],
+                case_status=EvaluationRunStatus.FAILED,
+                critical=True,
+            )
+        ],
+        registry=default_scorer_registry(),
+    )
+    assert gate.verdict == GateVerdict.FAIL_CLOSED
+    assert any(diff.field == "scorer:agentic_shadow" for diff in gate.diffs)
+
+
+@pytest.mark.evaluation
+def test_agentic_scorer_expectation_kind_mismatch() -> None:
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="agentic-kind-mismatch",
+        slice_expectation=AgenticSliceExpectation(
+            expectation_kind=AgenticExpectationKind.SHADOW_ISOLATION,
+            expected_shadow_namespace_used=True,
+            expected_production_store_mutated=False,
+        ),
+        label_provenance=_provenance(),
+    )
+    observation = CaseObservation(
+        case_id=truth.case_id,
+        slice_type=SliceType.AGENTIC,
+        observation_available=True,
+        agentic=AgenticCaseObservation(
+            expectation_kind="no_raw_cot",
+            shadow_namespace_used=True,
+            production_store_mutated=False,
+        ),
+    )
+    result = AgenticSliceScorer().score(
+        truth,
+        observation,
+        ctx=ScorerContext(seed=1, dataset_id="dataset-test", dataset_version="v1"),
+    )
+    assert result.outcome == ScorerOutcome.FAIL
+    assert result.reason_code == "expectation_kind_mismatch"
+
+
+@pytest.mark.evaluation
+def test_coordination_scorer_expectation_kind_mismatch() -> None:
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="coordination-kind-mismatch",
+        slice_expectation=CoordinationSliceExpectation(
+            expectation_kind=CoordinationExpectationKind.STALE_FENCING_DENIED,
+            expected_stale_fencing_denied=True,
+        ),
+        label_provenance=_provenance(),
+    )
+    observation = CaseObservation(
+        case_id=truth.case_id,
+        slice_type=SliceType.COORDINATION,
+        observation_available=True,
+        coordination=CoordinationCaseObservation(
+            expectation_kind="forged_grant_denied",
+            stale_fencing_denied=True,
+        ),
+    )
+    result = CoordinationSliceScorer().score(
+        truth,
+        observation,
+        ctx=ScorerContext(seed=1, dataset_id="dataset-test", dataset_version="v1"),
+    )
+    assert result.outcome == ScorerOutcome.FAIL
+    assert result.reason_code == "expectation_kind_mismatch"
+
+
+@pytest.mark.evaluation
+def test_agentic_scorer_rejects_raw_cot_persisted_true() -> None:
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="agentic-invalid-cot",
+        slice_expectation=AgenticSliceExpectation(
+            expectation_kind=AgenticExpectationKind.NO_RAW_COT,
+            expected_raw_cot_persisted=True,
+            expected_production_store_mutated=False,
+        ),
+        label_provenance=_provenance(),
+    )
+    observation = MockDeterministicReplayer().replay(truth, seed=1)
+    result = AgenticSliceScorer().score(
+        truth,
+        observation,
+        ctx=ScorerContext(seed=1, dataset_id="dataset-test", dataset_version="v1"),
+    )
+    assert result.outcome == ScorerOutcome.FAIL
+    assert result.reason_code == "invalid_expectation_config"
+
+
+@pytest.mark.evaluation
+def test_coordination_scorer_rejects_duplicate_logical_artifact_true() -> None:
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="coordination-invalid-artifact",
+        slice_expectation=CoordinationSliceExpectation(
+            expectation_kind=CoordinationExpectationKind.ARTIFACT_IDEMPOTENT_REPLAY,
+            expected_duplicate_logical_artifact=True,
+            expected_content_hash_match=True,
+        ),
+        label_provenance=_provenance(),
+    )
+    observation = MockDeterministicReplayer().replay(truth, seed=1)
+    result = CoordinationSliceScorer().score(
+        truth,
+        observation,
+        ctx=ScorerContext(seed=1, dataset_id="dataset-test", dataset_version="v1"),
+    )
+    assert result.outcome == ScorerOutcome.FAIL
+    assert result.reason_code == "invalid_expectation_config"
+
+
+@pytest.mark.evaluation
+def test_coordination_scorer_fails_on_dependency_degraded() -> None:
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="coordination-degraded",
+        slice_expectation=CoordinationSliceExpectation(
+            expectation_kind=CoordinationExpectationKind.STALE_FENCING_DENIED,
+            expected_stale_fencing_denied=True,
+        ),
+        label_provenance=_provenance(),
+    )
+    observation = CaseObservation(
+        case_id=truth.case_id,
+        slice_type=SliceType.COORDINATION,
+        observation_available=True,
+        coordination=CoordinationCaseObservation(
+            expectation_kind="stale_fencing_denied",
+            stale_fencing_denied=True,
+            dependency_degraded=True,
+        ),
+    )
+    result = CoordinationSliceScorer().score(
+        truth,
+        observation,
+        ctx=ScorerContext(seed=1, dataset_id="dataset-test", dataset_version="v1"),
+    )
+    assert result.outcome == ScorerOutcome.FAIL
+    assert result.reason_code == "required_dependency_degraded"
+
+
+@pytest.mark.evaluation
+def test_agentic_replayer_simulates_shadow_degraded_fail_closed() -> None:
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-a",
+        dataset_id="dataset-test",
+        dataset_version="v1",
+        case_id="agentic-degraded-pass",
+        slice_expectation=AgenticSliceExpectation(
+            expectation_kind=AgenticExpectationKind.SHADOW_DEGRADED_FAIL_CLOSED,
+            expected_degraded_fail_closed=True,
+            expected_production_store_mutated=False,
+        ),
+        label_provenance=_provenance(),
+    )
+    observation = MockDeterministicReplayer().replay(truth, seed=42)
+    assert observation.agentic is not None
+    assert observation.agentic.degraded_fail_closed is True
+    assert observation.agentic.dependency_degraded is True
+    result = AgenticSliceScorer().score(
+        truth,
+        observation,
+        ctx=ScorerContext(seed=42, dataset_id="dataset-test", dataset_version="v1"),
+    )
+    assert result.outcome == ScorerOutcome.PASS
+
+
+@pytest.mark.evaluation
+def test_run_evaluation_report_only_gate_does_not_force_exit() -> None:
+    from types import SimpleNamespace
+
+    from scripts.run_evaluation import should_exit_nonzero_for_gate
+
+    artifact = SimpleNamespace(gate=SimpleNamespace(verdict=SimpleNamespace(value="fail")))
+    assert should_exit_nonzero_for_gate(artifact, DATASET_DIR / "threshold_manifest.json") is False
+
+
+@pytest.mark.evaluation
+def test_run_evaluation_required_gate_forces_exit_on_fail() -> None:
+    from types import SimpleNamespace
+
+    from scripts.run_evaluation import should_exit_nonzero_for_gate
+
+    artifact = SimpleNamespace(gate=SimpleNamespace(verdict=SimpleNamespace(value="fail_closed")))
+    assert should_exit_nonzero_for_gate(artifact, None) is True
+
+
+@pytest.mark.evaluation
 def test_manifest_documents_slice_adapter_stub_replay_fidelity() -> None:
     manifest = json.loads((DATASET_DIR / "manifest.json").read_text(encoding="utf-8"))
     notes = manifest["evaluation_notes"]
@@ -705,6 +990,71 @@ async def test_critical_coordination_failure_fail_closed_gate(
     assert artifact.gate is not None
     assert artifact.gate.verdict in {GateVerdict.FAIL, GateVerdict.FAIL_CLOSED}
     assert any(diff.field.startswith("critical:") for diff in artifact.gate.diffs)
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+@requires_postgres
+async def test_runner_agentic_scorer_exception_surfaces_as_error(
+    truth_service: EvaluationTruthService,
+    clean_evaluation_truth: None,
+) -> None:
+    truth = build_evaluation_case_truth(
+        tenant_id="tenant-evaluation-agentic-coordination",
+        dataset_id="agentic_coordination_v1",
+        dataset_version="2026.08.03",
+        case_id="agentic-scorer-exception",
+        slice_expectation=AgenticSliceExpectation(
+            expectation_kind=AgenticExpectationKind.SHADOW_ISOLATION,
+            expected_shadow_namespace_used=True,
+            expected_production_store_mutated=False,
+        ),
+        label_provenance=_provenance(),
+    )
+    await truth_service.persist(truth)
+    manifest = await truth_service.get_dataset_manifest(
+        tenant_id=truth.tenant_id,
+        dataset_id=truth.dataset_id,
+        dataset_version=truth.dataset_version,
+    )
+
+    class _ExplodingScorer:
+        scorer_id = "agentic_shadow"
+        supported_slices = frozenset({SliceType.AGENTIC})
+
+        def score(self, _truth, _observation, ctx) -> EvaluationScorerResult:
+            del ctx
+            raise RuntimeError("scorer exploded")
+
+    registry = ScorerRegistry()
+    registry.register(
+        ScorerRegistration(
+            scorer_id="agentic_shadow",
+            scorer=_ExplodingScorer(),
+            required=True,
+        )
+    )
+    for reg in default_scorer_registry().list_for_slice(SliceType.COORDINATION):
+        registry.register(reg)
+
+    artifact = await run_fixture_evaluation(
+        truth_service,
+        manifest,
+        seed=42,
+        code_sha="deadbeef",
+        threshold_manifest_path=DATASET_DIR / "threshold_manifest.json",
+        registry=registry,
+        dataset_dir=DATASET_DIR,
+    )
+
+    agentic_case = next(c for c in artifact.case_results if c.case_id == truth.case_id)
+    assert any(
+        r.scorer_id == "agentic_shadow" and r.outcome == ScorerOutcome.ERROR
+        for r in agentic_case.scorer_results
+    )
+    assert artifact.aggregates.error_count >= 1
+    assert artifact.gate is not None
+    assert artifact.gate.verdict in {GateVerdict.FAIL, GateVerdict.FAIL_CLOSED}
 
 
 @pytest.mark.evaluation

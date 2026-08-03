@@ -150,10 +150,9 @@ class AgenticSliceScorer:
                     "shadow_degraded_fail_closed requires dependency_degraded=True",
                 )
 
-        for expected_field, observed_field in _OBSERVED_FIELD_BY_EXPECTATION.items():
-            expected = getattr(expectation, expected_field)
-            if expected is None:
-                continue
+        for field_name in _KIND_REQUIRED_FIELDS.get(expectation.expectation_kind, ()):
+            observed_field = _OBSERVED_FIELD_BY_EXPECTATION[field_name]
+            expected = getattr(expectation, field_name)
             actual = getattr(observed, observed_field)
             if actual is None:
                 return _fail(

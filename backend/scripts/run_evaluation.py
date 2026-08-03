@@ -14,6 +14,21 @@ REPO_ROOT = BACKEND_DIR.parent
 DEFAULT_DATASET = REPO_ROOT / "data" / "evaluation" / "shadowtrace_demo_v1"
 
 
+def should_exit_nonzero_for_gate(artifact, threshold_path: Path | None) -> bool:
+    """Return True when CLI should exit 1 for gate failure (respects required_gate)."""
+    if artifact.gate is None:
+        return False
+    verdict = artifact.gate.verdict.value
+    if verdict == "fail_closed":
+        return True
+    if verdict == "fail":
+        if threshold_path is not None and threshold_path.is_file():
+            from app.evaluation.threshold import load_threshold_manifest
+
+            return load_threshold_manifest(threshold_path).required_gate
+    return False
+
+
 def resolve_code_sha(explicit: str | None) -> str:
     if explicit and explicit.strip():
         return explicit.strip()
@@ -180,7 +195,7 @@ async def _run(args: argparse.Namespace) -> int:
     await engine.dispose()
     if artifact.status.value != "completed":
         return 1
-    if artifact.gate and artifact.gate.verdict.value in {"fail", "fail_closed"}:
+    if should_exit_nonzero_for_gate(artifact, threshold_path):
         return 1
     return 0
 
