@@ -540,16 +540,17 @@ class RiskScoringEngine:
                     if feature.evidence_ids:
                         stages.append(feature.score_hint)
                         labels.append(f"{feature.feature_kind}:{feature.feature_id}")
-            else:
-                for edge in graph_output.edges:
-                    if edge.evidence_id:
-                        stages.append(55.0)
-                        labels.append(edge.relation_type.value)
 
         if not stages:
-            if graph_output is not None and graph_output.degraded:
-                reason = graph_output.degraded_reason or "graph_degraded"
-                return 30.0, f"graph degraded ({reason}); early-stage baseline"
+            if graph_output is not None:
+                if graph_output.degraded:
+                    reason = graph_output.degraded_reason or "graph_degraded"
+                    return 30.0, f"graph degraded ({reason}); early-stage baseline"
+                if graph_output.summary is None and graph_output.edges:
+                    return (
+                        30.0,
+                        "graph summary missing; early-stage baseline (edges not scored)",
+                    )
             return 30.0, "缺少 ATT&CK/阶段线索，按早期阶段基线"
         best = max(stages)
         return best, "攻击阶段依据: " + ", ".join(dict.fromkeys(labels))[:120]

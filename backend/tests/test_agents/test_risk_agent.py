@@ -421,6 +421,59 @@ def test_rule_engine_uses_graph_summary_for_attack_stage() -> None:
     assert "relation_connected_to" in scores["attack_stage"][1]
 
 
+def test_rule_engine_attack_stage_ignores_edges_when_summary_missing() -> None:
+    """ISSUE-116: rule path must not score raw graph edges without GraphSummary."""
+    from app.models.agent_io import GraphEdge, GraphNode, GraphRelationType
+
+    engine = RiskScoringEngine()
+    empty = EvidenceOutput(
+        evidence_list=[],
+        overall_confidence=0.0,
+        collection_status=CollectionStatus.COMPLETED,
+    )
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=False,
+    )
+    graph_output = GraphOutput(
+        nodes=[
+            GraphNode(
+                node_id="node-a",
+                event_id="evt-001",
+                entity_type="account",
+                entity_value="svc",
+            ),
+            GraphNode(
+                node_id="node-b",
+                event_id="evt-001",
+                entity_type="ip",
+                entity_value="203.0.113.9",
+            ),
+        ],
+        edges=[
+            GraphEdge(
+                edge_id="edge-1",
+                event_id="evt-001",
+                source_node_id="node-a",
+                target_node_id="node-b",
+                relation_type=GraphRelationType.CONNECTED_TO,
+                evidence_id="evd-would-score-90",
+                occurred_at=datetime.now(UTC),
+            )
+        ],
+        summary=None,
+    )
+    scores = engine.score(
+        triage_result=triage,
+        evidence_output=empty,
+        graph_output=graph_output,
+    )
+    assert scores["attack_stage"][0] == 30.0
+    assert "summary missing" in scores["attack_stage"][1]
+    assert "CONNECTED_TO" not in scores["attack_stage"][1]
+
+
 def test_rule_engine_boundary_all_zero_and_all_hundred() -> None:
     engine = RiskScoringEngine()
     empty = EvidenceOutput(

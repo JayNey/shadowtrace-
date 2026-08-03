@@ -2,14 +2,24 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+import pytest
+
 from app.models import MODEL_REGISTRY
 from app.models.agent_io import (
     AttackStoryline,
+    GraphOutput,
     GraphSummary,
     GraphSummaryFeature,
+    RiskAgentInput,
     StorylineClaimRef,
     StorylineGroundingStatus,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SCHEMA_DIR = REPO_ROOT / "contracts" / "schemas"
 
 
 def test_issue116_contract_models_are_registered() -> None:
@@ -52,6 +62,28 @@ def test_attack_storyline_schema_exports_grounding_status_enum() -> None:
     assert StorylineGroundingStatus.EVIDENCE_GROUNDED.value in enum_values
     assert StorylineGroundingStatus.LEGACY_EVIDENCE_GROUNDED.value in enum_values
     assert StorylineGroundingStatus.CLAIM_REFS_UNAVAILABLE.value in enum_values
+
+
+@pytest.mark.parametrize(
+    ("model_cls", "schema_file"),
+    [
+        (GraphSummary, "GraphSummary.json"),
+        (GraphSummaryFeature, "GraphSummaryFeature.json"),
+        (GraphOutput, "GraphOutput.json"),
+        (RiskAgentInput, "RiskAgentInput.json"),
+        (StorylineClaimRef, "StorylineClaimRef.json"),
+        (AttackStoryline, "AttackStoryline.json"),
+    ],
+)
+def test_committed_issue116_schemas_match_models(
+    model_cls: type,
+    schema_file: str,
+) -> None:
+    path = SCHEMA_DIR / schema_file
+    assert path.is_file(), f"missing committed schema: {path}"
+    committed = json.loads(path.read_text(encoding="utf-8"))
+    current = model_cls.model_json_schema(mode="serialization")
+    assert committed == current
 
 
 def test_graph_summary_schema_roundtrip() -> None:

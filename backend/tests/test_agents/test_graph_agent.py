@@ -705,6 +705,67 @@ class TestGraphAgentIntegration:
         assert build_calls == 1
         assert len(second.nodes) == len(first.nodes)
 
+    async def test_execute_rebuilds_graph_when_evidence_changes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """ISSUE-116: read-before-generate invalidates cache when evidence changes."""
+        from app.models.agent_io import EvidenceOutput
+
+        wm = _FakeWorkingMemory()
+        build_calls = 0
+        original_build = GraphBuilder.build
+
+        @staticmethod
+        def _counting_build(evidence_list: list[Evidence]) -> tuple[list[Any], list[Any]]:
+            nonlocal build_calls
+            build_calls += 1
+            return original_build(evidence_list)
+
+        monkeypatch.setattr(GraphBuilder, "build", _counting_build)
+
+        agent = _build_agent(wm=wm)
+        event_id = f"evt-cache-bust-{_new_sfx()}"
+        first_evidence = _main_scenario_evidence(event_id)
+        first_input = GraphAgentInput(
+            event_id=event_id,
+            evidence_output=EvidenceOutput(
+                evidence_list=first_evidence,
+                conflicts=[],
+                gaps=[],
+                success_sources=[EvidenceSource.IDENTITY.value],
+                failed_sources=[],
+                overall_confidence=0.85,
+                collection_status=CollectionStatus.COMPLETED,
+            ),
+        )
+        await agent.execute(first_input)
+        assert build_calls == 1
+
+        changed_evidence = first_evidence + [
+            _make_evidence(
+                source=EvidenceSource.NETWORK_FLOW,
+                evidence_type="upload",
+                description="extra upload after replan",
+                event_id=event_id,
+            )
+        ]
+        second_input = GraphAgentInput(
+            event_id=event_id,
+            evidence_output=EvidenceOutput(
+                evidence_list=changed_evidence,
+                conflicts=[],
+                gaps=[],
+                success_sources=[EvidenceSource.IDENTITY.value],
+                failed_sources=[],
+                overall_confidence=0.85,
+                collection_status=CollectionStatus.COMPLETED,
+            ),
+        )
+        second = await agent.execute(second_input)
+        assert second.summary is not None
+        assert build_calls == 2
+
     async def test_neo4j_disabled_sets_typed_reason_without_blocking_graph(
         self,
         monkeypatch: pytest.MonkeyPatch,
