@@ -261,7 +261,9 @@ def build_resource_summary(case_results: list[DetectionCaseResult]) -> Detection
     )
 
 
-def build_tenant_safety_summary(probes: list[DetectionTenantSafetyProbe]) -> DetectionTenantSafetySummary:
+def build_tenant_safety_summary(
+    probes: list[DetectionTenantSafetyProbe],
+) -> DetectionTenantSafetySummary:
     pass_count = sum(1 for probe in probes if probe.passed)
     return DetectionTenantSafetySummary(
         probe_count=len(probes),

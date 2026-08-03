@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import orjson
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -23,15 +23,18 @@ from app.models.behavior_observation import (
     BehaviorObservationProvenance,
     BehaviorObservationSourceRef,
 )
-from app.models.detection_rule import DetectionRuleRuntimeState, RuleOperatorKind
+from app.models.detection_evaluation import DetectionCandidateRefs
+from app.models.detection_rule import (
+    DetectionRulePackageProvenance,
+    DetectionRuleRuntimeState,
+    RuleOperatorKind,
+)
 from app.models.detection_scope import DetectionScopeIdentity, UpstreamConnectorMember
-from app.models.feature_snapshot import DEFAULT_ALLOWED_LATENESS, FeatureWindowKind
+from app.models.feature_snapshot import DEFAULT_ALLOWED_LATENESS
 from app.services.detection_rule_resolver import compile_rule_package
 from app.services.detection_rule_service import DetectionRuleService
 from app.services.detection_scope_service import DetectionScopeService
 from app.services.feature_snapshot_resolver import compute_window_bounds
-from app.models.detection_rule import DetectionRulePackageProvenance
-from app.models.detection_evaluation import DetectionCandidateRefs
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,11 +270,12 @@ async def seed_detection_replay_fixture(
             source_tenant_id=replay.source_tenant_id,
             package_id=package.package_id,
         )
-        package = await rule_service.get_package(
+        refreshed_package = await rule_service.get_package(
             source_tenant_id=replay.source_tenant_id,
             package_id=package.package_id,
         )
-        assert package is not None
+        assert refreshed_package is not None
+        package = refreshed_package
 
     feature_contract_version = rules[0].feature_contract_version if rules else "unknown"
     return SeededDetectionContext(

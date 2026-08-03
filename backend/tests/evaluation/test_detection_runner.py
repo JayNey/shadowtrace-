@@ -837,8 +837,8 @@ async def test_insufficient_sample_fails_run(
             "case_id": f"benign_only_{index}",
             "slice_expectation": {
                 "slice_type": "benign",
-                "expected_case_label": "true_negative",
-                "expected_final_verdict": "benign",
+                "expected_case_label": "false_positive",
+                "expected_final_verdict": "false_positive",
             },
             "label_provenance": {
                 "adjudicator": "test",

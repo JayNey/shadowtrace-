@@ -52,7 +52,9 @@ def compute_detection_artifact_hash(artifact: DetectionEvaluationArtifact) -> st
     return hashlib.sha256(_canonical_bytes(_canonical_payload(artifact))).hexdigest()
 
 
-def finalize_detection_artifact(artifact: DetectionEvaluationArtifact) -> DetectionEvaluationArtifact:
+def finalize_detection_artifact(
+    artifact: DetectionEvaluationArtifact,
+) -> DetectionEvaluationArtifact:
     """Attach ``artifact_hash`` derived from reproducible fields."""
     digest = compute_detection_artifact_hash(artifact)
     return artifact.model_copy(update={"artifact_hash": digest})

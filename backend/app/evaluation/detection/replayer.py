@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import time
-
 from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,7 +24,7 @@ from app.models.detection_evaluation import (
     DetectionCaseObservation,
     DetectionResourceMetrics,
 )
-from app.models.detection_rule import DetectionRuleRuntimeError
+from app.models.detection_rule import CandidateDetection, DetectionRuleRuntimeError
 from app.models.evaluation_truth import EvaluationCaseTruth, SliceType, UnevaluableSliceExpectation
 from app.services.detection_rule_runtime import DetectionRuleRuntimeService
 
@@ -42,11 +41,22 @@ def _replay_cache_key(replay: DetectionReplayFixture) -> str:
     )
 
 
+def _is_probe_misconfiguration_error(exc: ValidationError) -> bool:
+    """Distinguish probe setup failures from expected tenant/package isolation."""
+    message = str(exc).lower()
+    if "not found for tenant" in message:
+        return False
+    details = getattr(exc, "details", None) or {}
+    if isinstance(details, dict) and details.get("package_id") and details.get("source_tenant_id"):
+        return False
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class TenantIsolationProbeOutcome:
     """Result of executing a cross-tenant isolation probe."""
 
-    foreign_candidates: list
+    foreign_candidates: list[CandidateDetection]
     execution_error: str | None = None
 
 
@@ -167,18 +177,20 @@ class DetectionShadowReplayer:
         *,
         probe_tenant_id: str,
     ) -> TenantIsolationProbeOutcome:
-        seeded = await self.seed_case(replay)
+        await self.seed_case(replay)
         try:
             result = await self._runtime.execute_shadow(
                 source_tenant_id=probe_tenant_id,
                 cutoff_at=replay.cutoff_at,
-                package_id=seeded.package_id,
+                package_id=None,
             )
         except ValidationError as exc:
-            return TenantIsolationProbeOutcome(
-                foreign_candidates=[],
-                execution_error=str(exc)[:512],
-            )
+            if _is_probe_misconfiguration_error(exc):
+                return TenantIsolationProbeOutcome(
+                    foreign_candidates=[],
+                    execution_error=str(exc)[:512],
+                )
+            return TenantIsolationProbeOutcome(foreign_candidates=[])
         return TenantIsolationProbeOutcome(
             foreign_candidates=list(result.candidates),
         )

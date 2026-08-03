@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from app.models.detection_rule import DetectionRuleDefinition
@@ -77,7 +78,9 @@ class DetectionFixtureIndex:
     by_case_id: dict[str, DetectionReplayFixture] = field(default_factory=dict)
 
 
-def _parse_observation(raw: dict[str, Any], *, source_tenant_id: str, scope_id: str) -> DetectionObservationFixture:
+def _parse_observation(
+    raw: dict[str, Any], *, source_tenant_id: str, scope_id: str
+) -> DetectionObservationFixture:
     observed_at = datetime.fromisoformat(str(raw["observed_at"]))
     entity = raw.get("entity") or {}
     return DetectionObservationFixture(
@@ -136,7 +139,9 @@ def parse_detection_replay_fixture(case_payload: dict[str, Any]) -> DetectionRep
             entity_id=str(item.get("entity_id", "acct-cold-001")),
             window_kind=FeatureWindowKind(str(item.get("window_kind", "1h"))),
             cutoff_at=datetime.fromisoformat(str(item.get("cutoff_at", replay_raw["cutoff_at"]))),
-            status=FeatureSnapshotStatus(str(item.get("status", FeatureSnapshotStatus.READY.value))),
+            status=FeatureSnapshotStatus(
+                str(item.get("status", FeatureSnapshotStatus.READY.value))
+            ),
             features={
                 str(key): value
                 for key, value in (item.get("features") or {}).items()
@@ -163,7 +168,7 @@ def parse_detection_replay_fixture(case_payload: dict[str, Any]) -> DetectionRep
     )
 
 
-def load_detection_fixture_index(dataset_dir) -> DetectionFixtureIndex:
+def load_detection_fixture_index(dataset_dir: Path) -> DetectionFixtureIndex:
     from app.evaluation.fixture_loader import load_fixture_cases
 
     index = DetectionFixtureIndex()

@@ -12,6 +12,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -25,12 +26,16 @@ from app.evaluation.detection.metrics import (
     quality_report_has_blocking_metrics,
 )
 from app.evaluation.detection.replayer import DetectionShadowReplayer
-from app.evaluation.detection.scorers.base import DetectionScorerContext
+from app.evaluation.detection.scorers.base import (
+    DetectionScorerContext,
+    DetectionScorerRegistration,
+)
 from app.evaluation.detection.scorers.registry import (
     DetectionScorerRegistry,
     default_detection_scorer_registry,
 )
 from app.evaluation.paths import repo_relative_manifest_path
+from app.evaluation.scorers.registry import ScorerRegistry
 from app.evaluation.threshold import (
     evaluate_gate,
     load_threshold_manifest,
@@ -43,9 +48,10 @@ from app.models.detection_evaluation import (
     DetectionEvaluationConfig,
     DetectionTenantSafetyProbe,
 )
+from app.models.evaluation_quality import EvaluationQualityReport
 from app.models.evaluation_run import (
     EvaluationAggregateMetrics,
-    EvaluationGateResult,
+    EvaluationCaseResult as AgentEvaluationCaseResult,
     EvaluationReleaseRefs,
     EvaluationRunStatus,
     EvaluationScorerResult,
@@ -53,7 +59,6 @@ from app.models.evaluation_run import (
     GateVerdict,
     ScorerOutcome,
 )
-from app.models.evaluation_quality import EvaluationQualityReport
 from app.models.evaluation_truth import (
     EvaluationCaseTruth,
     EvaluationDatasetManifest,
@@ -229,7 +234,9 @@ class DetectionEvaluationRunner:
         self._replayer = replayer or DetectionShadowReplayer(session_factory)
         self._registry = registry or default_detection_scorer_registry()
 
-    async def _load_truths(self, request: DetectionEvaluationRunRequest) -> list[EvaluationCaseTruth]:
+    async def _load_truths(
+        self, request: DetectionEvaluationRunRequest
+    ) -> list[EvaluationCaseTruth]:
         truths: list[EvaluationCaseTruth] = []
         page = 1
         while True:
@@ -374,7 +381,8 @@ class DetectionEvaluationRunner:
                     )
                 else:
                     errors.append(
-                        f"no detection scorers registered for slice {slice_type.value}: {truth.case_id}"
+                        "no detection scorers registered for slice "
+                        f"{slice_type.value}: {truth.case_id}"
                     )
 
             scorer_results: list[EvaluationScorerResult] = []
@@ -433,7 +441,7 @@ class DetectionEvaluationRunner:
             request.threshold_manifest,
             aggregates=aggregates,
             case_results=_gate_case_adapter(case_results),
-            registry=gate_registry,
+            registry=cast(ScorerRegistry, gate_registry),
             manifest_path=request.threshold_manifest_path,
         )
 
@@ -496,7 +504,7 @@ class _GateRegistryAdapter:
     def __init__(self, registry: DetectionScorerRegistry) -> None:
         self._registry = registry
 
-    def get(self, scorer_id: str):
+    def get(self, scorer_id: str) -> DetectionScorerRegistration:
         return self._registry.get(scorer_id)
 
     def all_required_ids(self) -> list[str]:
@@ -507,14 +515,16 @@ class _GateRegistryAdapter:
         return self._registry.scorer_ids
 
 
-def _gate_case_adapter(case_results: list[DetectionCaseResult]) -> list:
+def _gate_case_adapter(
+    case_results: list[DetectionCaseResult],
+) -> list[AgentEvaluationCaseResult]:
     """Minimal adapter so evaluate_gate can inspect required scorer errors."""
-    from app.models.evaluation_run import CaseObservation, EvaluationCaseResult as AgentCaseResult
+    from app.models.evaluation_run import CaseObservation
 
-    adapted: list[AgentCaseResult] = []
+    adapted: list[AgentEvaluationCaseResult] = []
     for case in case_results:
         adapted.append(
-            AgentCaseResult(
+            AgentEvaluationCaseResult(
                 case_id=case.case_id,
                 truth_id=case.truth_id,
                 truth_revision=case.truth_revision,
