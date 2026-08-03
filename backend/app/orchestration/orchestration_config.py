@@ -29,6 +29,18 @@ def assert_shadow_pivot_config(settings: Settings | None = None) -> None:
             error_code="configuration_error",
             details={"react_shadow_pivot_enabled": True},
         )
+    if not cfg.knowledge_release_require_active:
+        raise ConfigurationError(
+            "REACT_SHADOW_PIVOT_ENABLED=true requires KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=true",
+            error_code="configuration_error",
+            details={"react_shadow_pivot_enabled": True},
+        )
+    if cfg.retrieval_fixture_fallback:
+        raise ConfigurationError(
+            "REACT_SHADOW_PIVOT_ENABLED=true forbids RETRIEVAL_FIXTURE_FALLBACK=true",
+            error_code="configuration_error",
+            details={"react_shadow_pivot_enabled": True},
+        )
 
 
 def assert_orchestration_mode(settings: Settings | None = None) -> None:

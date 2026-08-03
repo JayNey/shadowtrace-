@@ -38,6 +38,7 @@ from app.models.react import (
     ReActUncertaintyCode,
 )
 from app.models.shadow_run import ShadowQueryPivotRequest, ShadowRunStatus
+from app.models.tool_call_grant import ToolCallMode
 from app.services.safe_tool_projection import SafeToolProjectionService
 from app.services.shadow_query_pivot_service import ShadowQueryPivotService
 from app.services.shadow_run_service import ShadowRunService
@@ -169,12 +170,14 @@ async def test_shadow_pivot_produces_artifacts_without_production_mutation(
         EMBEDDING_MODE="mock",
         TOOL_CALL_GRANT_REQUIRED=True,
         REACT_SHADOW_PIVOT_ENABLED=True,
+        KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
         REACT_SHADOW_MAX_TOOL_CALLS=3,
         REACT_SHADOW_MAX_STEPS=3,
+        REACT_SHADOW_RETENTION_HOURS=72,
     )
 
     grant_service = ToolCallGrantService(session_factory)
-    shadow_service = ShadowRunService(session_factory, retention_hours=settings.react_shadow_retention_hours)
+    shadow_service = ShadowRunService.from_settings(session_factory, settings)
     registry = ToolRegistry()
     registry.auto_discover()
     inner = ToolExecutor(registry=registry)
@@ -306,7 +309,38 @@ async def test_shadow_pivot_produces_artifacts_without_production_mutation(
     assert prod_before == prod_after == 0
     assert prod_attempts_before == prod_attempts_after == 0
     assert shadow_runs == 1
-    assert shadow_records >= 1
+    assert shadow_records >= 2
+
+    finalized = await shadow_service.get_run(result.shadow_run_id)
+    assert finalized is not None
+    assert finalized.tool_call_count >= 1
+    assert finalized.retention_expires_at is not None
+
+    async with session_factory() as session:
+        shadow_grants = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.ToolCallGrantORM)
+                .where(
+                    orm.ToolCallGrantORM.event_id == event_id,
+                    orm.ToolCallGrantORM.mode == ToolCallMode.SHADOW.value,
+                )
+            )
+            or 0
+        )
+        shadow_attempts = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.ToolCallAttemptORM)
+                .where(
+                    orm.ToolCallAttemptORM.event_id == event_id,
+                    orm.ToolCallAttemptORM.mode == ToolCallMode.SHADOW.value,
+                )
+            )
+            or 0
+        )
+    assert shadow_grants >= 1
+    assert shadow_attempts == 0
 
 
 @pytest.mark.asyncio
@@ -323,12 +357,13 @@ async def test_shadow_pivot_respects_max_steps(
         EMBEDDING_MODE="mock",
         TOOL_CALL_GRANT_REQUIRED=True,
         REACT_SHADOW_PIVOT_ENABLED=True,
+        KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
         REACT_SHADOW_MAX_TOOL_CALLS=5,
         REACT_SHADOW_MAX_STEPS=1,
     )
 
     grant_service = ToolCallGrantService(session_factory)
-    shadow_service = ShadowRunService(session_factory)
+    shadow_service = ShadowRunService.from_settings(session_factory, settings)
     registry = ToolRegistry()
     registry.auto_discover()
     react_factory = ReactToolExecutorFactory(
@@ -403,3 +438,129 @@ async def test_shadow_pivot_respects_max_steps(
     finalized = await shadow_service.get_run(result.shadow_run_id)
     assert finalized is not None
     assert finalized.step_count == 1
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_shadow_pivot_marks_failed_on_engine_exception(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_tables: None,
+) -> None:
+    sfx = uuid.uuid4().hex[:8]
+    settings = Settings(
+        EMBEDDING_MODE="mock",
+        TOOL_CALL_GRANT_REQUIRED=True,
+        REACT_SHADOW_PIVOT_ENABLED=True,
+        KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+    )
+    shadow_service = ShadowRunService.from_settings(session_factory, settings)
+    pivot = ShadowQueryPivotService(shadow_service, settings=settings)
+
+    class _ExplodingLLM:
+        async def chat(self, *_args, **_kwargs) -> LLMResponse:
+            raise RuntimeError("llm unavailable")
+
+    react_factory = MagicMock()
+    react_factory.for_shadow_run = AsyncMock(
+        return_value=MagicMock(execute=AsyncMock(return_value={"status": "success"}))
+    )
+
+    result = await pivot.run_pivot(
+        ShadowQueryPivotRequest(
+            event_id=f"evt-pivot-fail-{sfx}",
+            tenant_id="tenant-a",
+            principal="investigation:test",
+            trace_id=f"trace-fail-{sfx}",
+            goal="fail closed",
+        ),
+        llm_client=_ExplodingLLM(),
+        react_factory=react_factory,
+        pipeline=MagicMock(),
+        knowledge_release_service=MagicMock(),
+    )
+
+    assert result.status is ShadowRunStatus.FAILED
+    assert "pivot_execution_error" in result.rejected_reasons
+    finalized = await shadow_service.get_run(result.shadow_run_id)
+    assert finalized is not None
+    assert finalized.status is ShadowRunStatus.FAILED
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_shadow_pivot_denies_unlisted_agent(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_tables: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sfx = uuid.uuid4().hex[:8]
+    event_id = f"evt-pivot-deny-{sfx}"
+    trace_id = f"trace-deny-{sfx}"
+    settings = Settings(
+        EMBEDDING_MODE="mock",
+        TOOL_CALL_GRANT_REQUIRED=True,
+        REACT_SHADOW_PIVOT_ENABLED=True,
+        KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+        REACT_SHADOW_MAX_STEPS=2,
+    )
+
+    grant_service = ToolCallGrantService(session_factory)
+    shadow_service = ShadowRunService.from_settings(session_factory, settings)
+    registry = ToolRegistry()
+    registry.auto_discover()
+    react_factory = ReactToolExecutorFactory(
+        inner_executor=ToolExecutor(registry=registry),
+        grant_service=grant_service,
+        settings=settings,
+        projection_service=SafeToolProjectionService(registry),
+    )
+
+    release_service = MagicMock()
+    release_service.get_active_release = AsyncMock(return_value=MagicMock(release_id="krel-deny"))
+    monkeypatch.setattr(
+        "app.services.react_mock_query_adapter.resolve_active_knowledge_query_plan",
+        AsyncMock(return_value=_active_attack_plan(settings, trace_id)),
+    )
+
+    pivot = ShadowQueryPivotService(shadow_service, settings=settings)
+    llm = _ScriptedLLM()
+    llm.add_round(
+        ReActThinkOutput(
+            decision_summary="attempt forbidden agent",
+            reason_code=ReActReasonCode.FILL_EVIDENCE_GAP,
+            action=ReActAction(
+                action_type=ReActActionType.CALL_AGENT,
+                target_name="ResponseAgent",
+                params={},
+            ),
+        ),
+        ReActReflectOutput(
+            decision_summary="agent denied",
+            confidence=0.2,
+            gap_code=ReActGapCode.EVIDENCE_MISSING,
+            uncertainty_code=ReActUncertaintyCode.INCOMPLETE_COVERAGE,
+        ),
+    )
+
+    result = await pivot.run_pivot(
+        ShadowQueryPivotRequest(
+            event_id=event_id,
+            tenant_id="tenant-a",
+            principal="investigation:test",
+            trace_id=trace_id,
+            goal="deny side-effect agent",
+        ),
+        llm_client=llm,
+        react_factory=react_factory,
+        pipeline=MagicMock(),
+        knowledge_release_service=release_service,
+    )
+
+    assert result.shadow_run_id
+    retrieval_artifacts = [
+        artifact for artifact in result.artifacts if artifact.kind.value == "retrieval_hit"
+    ]
+    assert not retrieval_artifacts
+    finalized = await shadow_service.get_run(result.shadow_run_id)
+    assert finalized is not None
+    assert finalized.status in {ShadowRunStatus.COMPLETED, ShadowRunStatus.FAILED}

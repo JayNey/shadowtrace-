@@ -162,3 +162,44 @@ async def test_shadow_decision_record_does_not_increment_production_count(
     loaded = await service.get_run(run.shadow_run_id)
     assert loaded is not None
     assert loaded.event_id == event_id
+
+
+@pytest.mark.asyncio
+@requires_postgres
+async def test_shadow_decision_record_idempotent_replay(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = ShadowRunService(session_factory)
+    sfx = uuid.uuid4().hex[:8]
+    run = await service.create_run(
+        event_id=f"evt-shadow-replay-{sfx}",
+        tenant_id="tenant-a",
+        principal="investigation:test",
+        trigger="unit_test",
+        max_steps=1,
+        max_tool_calls=1,
+    )
+    idempotency_key = f"shadow:{run.shadow_run_id}:reflect:round1"
+    record = DecisionRecord(
+        record_id=f"sdr-{sfx}-a",
+        event_id=run.event_id,
+        stage=DecisionStage.REACT_REFLECT,
+        actor="shadow_query_pivot",
+        decision_summary="first write",
+        idempotency_key=idempotency_key,
+        retention_policy="shadow_pivot_v1",
+        owner=run.namespace_key,
+        record_hash="hash-a",
+    )
+    first_id = await service.persist_decision_record(run, record)
+    replay = record.model_copy(
+        update={"record_id": f"sdr-{sfx}-b", "record_hash": "hash-a"}
+    )
+    second_id = await service.persist_decision_record(run, replay)
+    assert second_id == first_id
+
+    mismatch = record.model_copy(
+        update={"record_id": f"sdr-{sfx}-c", "record_hash": "hash-b"}
+    )
+    third_id = await service.persist_decision_record(run, mismatch)
+    assert third_id == first_id

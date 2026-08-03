@@ -27,6 +27,7 @@ from app.models.shadow_run import (
 )
 from app.orchestration.react_engine import ReActEngine
 from app.rag.pipeline import RetrievalPipeline
+from app.services.knowledge_release_service import KnowledgeReleaseService
 from app.services.react_mock_query_adapter import (
     MOCK_QUERY_AGENT_NAME,
     ReactMockQueryAdapter,
@@ -38,11 +39,24 @@ from app.tools.tool_call_runtime import ReactToolExecutorFactory
 
 logger = logging.getLogger(__name__)
 
+_QUERY_INVOCATION_TYPES = frozenset(
+    {ReActActionType.CALL_TOOL, ReActActionType.CALL_AGENT}
+)
+
 
 def _record_hash(record: DecisionRecord) -> str:
     payload = record.model_dump(mode="json", exclude={"record_hash", "created_at"})
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _count_query_invocations(rounds: list[ReActRound]) -> int:
+    return sum(
+        1
+        for round_ in rounds
+        if round_.action is not None
+        and round_.action.action_type in _QUERY_INVOCATION_TYPES
+    )
 
 
 class ShadowQueryPivotService:
@@ -57,6 +71,18 @@ class ShadowQueryPivotService:
         self._shadow_runs = shadow_run_service
         self._settings = settings
 
+    @classmethod
+    def from_settings(
+        cls,
+        session_factory: Any,
+        *,
+        settings: Settings,
+    ) -> ShadowQueryPivotService:
+        return cls(
+            ShadowRunService.from_settings(session_factory, settings),
+            settings=settings,
+        )
+
     async def run_pivot(
         self,
         request: ShadowQueryPivotRequest,
@@ -64,7 +90,7 @@ class ShadowQueryPivotService:
         llm_client: BaseLLMClient,
         react_factory: ReactToolExecutorFactory,
         pipeline: RetrievalPipeline,
-        knowledge_release_service: Any | None = None,
+        knowledge_release_service: KnowledgeReleaseService | None = None,
     ) -> ShadowQueryPivotResult:
         cfg = self._settings
         if not cfg.react_shadow_pivot_enabled:
@@ -146,50 +172,75 @@ class ShadowQueryPivotService:
             tool_call_budget=cfg.react_shadow_max_tool_calls,
             agent_name="shadow_query_pivot",
         )
-        react_result = await engine.run(
-            request.goal,
-            context,
-            react_exec,
-            max_rounds=cfg.react_shadow_max_steps,
-        )
 
-        artifacts = await self._persist_round_artifacts(run, react_result.rounds)
-        record_ids = await self._persist_shadow_decision_records(
-            run,
-            request,
-            react_result.rounds,
-        )
+        try:
+            react_result = await engine.run(
+                request.goal,
+                context,
+                react_exec,
+                max_rounds=cfg.react_shadow_max_steps,
+            )
 
-        tool_calls = sum(
-            1
-            for round_ in react_result.rounds
-            if round_.action.action_type is ReActActionType.CALL_TOOL
-        )
-        status = ShadowRunStatus.COMPLETED
-        if react_result.stop_reason is ReActStopReason.ERROR:
-            status = ShadowRunStatus.FAILED
+            artifacts = await self._persist_round_artifacts(run, react_result.rounds)
+            record_ids = await self._persist_shadow_decision_records(
+                run,
+                request,
+                react_result.rounds,
+            )
 
-        finalized = await self._shadow_runs.finalize_run(
-            run.shadow_run_id,
-            status=status,
-            step_count=len(react_result.rounds),
-            tool_call_count=tool_calls,
-            result_summary={
-                "stop_reason": react_result.stop_reason.value,
-                "confidence": react_result.final_confidence,
-                "artifact_count": len(artifacts),
-                "decision_record_count": len(record_ids),
-            },
-        )
-        assert finalized is not None
-        return ShadowQueryPivotResult(
-            shadow_run_id=run.shadow_run_id,
-            status=status,
-            react_stop_reason=react_result.stop_reason.value,
-            artifacts=artifacts,
-            decision_record_ids=record_ids,
-            degraded=status is not ShadowRunStatus.COMPLETED,
-        )
+            tool_calls = _count_query_invocations(react_result.rounds)
+            status = ShadowRunStatus.COMPLETED
+            if react_result.stop_reason is ReActStopReason.ERROR:
+                status = ShadowRunStatus.FAILED
+
+            finalized = await self._shadow_runs.finalize_run(
+                run.shadow_run_id,
+                status=status,
+                step_count=len(react_result.rounds),
+                tool_call_count=tool_calls,
+                result_summary={
+                    "stop_reason": react_result.stop_reason.value,
+                    "confidence": react_result.final_confidence,
+                    "artifact_count": len(artifacts),
+                    "decision_record_count": len(record_ids),
+                },
+            )
+            if finalized is None:
+                return ShadowQueryPivotResult(
+                    shadow_run_id=run.shadow_run_id,
+                    status=ShadowRunStatus.FAILED,
+                    rejected_reasons=["shadow_run_finalize_missing"],
+                    degraded=True,
+                )
+
+            return ShadowQueryPivotResult(
+                shadow_run_id=run.shadow_run_id,
+                status=status,
+                react_stop_reason=react_result.stop_reason.value,
+                artifacts=artifacts,
+                decision_record_ids=record_ids,
+                degraded=status is not ShadowRunStatus.COMPLETED,
+            )
+        except Exception as exc:
+            logger.exception(
+                "shadow query pivot failed event=%s shadow_run=%s",
+                request.event_id,
+                run.shadow_run_id,
+            )
+            await self._shadow_runs.finalize_run(
+                run.shadow_run_id,
+                status=ShadowRunStatus.FAILED,
+                step_count=0,
+                tool_call_count=0,
+                rejected_reasons=["pivot_execution_error"],
+                result_summary={"detail": str(exc)[:512]},
+            )
+            return ShadowQueryPivotResult(
+                shadow_run_id=run.shadow_run_id,
+                status=ShadowRunStatus.FAILED,
+                rejected_reasons=["pivot_execution_error"],
+                degraded=True,
+            )
 
     async def _persist_round_artifacts(
         self,
@@ -200,15 +251,18 @@ class ShadowQueryPivotService:
 
         artifacts: list[ShadowQueryArtifact] = []
         for round_ in rounds:
+            action = round_.action
+            if action is None:
+                continue
             action_result = round_.action_result or {}
-            if round_.action.action_type is ReActActionType.CALL_AGENT:
+            if action.action_type is ReActActionType.CALL_AGENT:
                 if action_result.get("status") == "success":
                     artifact = await self._shadow_runs.persist_artifact(
                         run,
                         kind=ShadowQueryArtifactKind.RETRIEVAL_HIT,
                         payload={
                             "round": round_.round_index,
-                            "agent": round_.action.target_name,
+                            "agent": action.target_name,
                             "chunk_count": action_result.get("data", {}).get("chunk_count", 0),
                             "plan_hash": action_result.get("data", {}).get("plan_hash", ""),
                             "chunks": action_result.get("data", {}).get("chunks", []),
@@ -216,14 +270,14 @@ class ShadowQueryPivotService:
                         provenance={"shadow_run_id": run.shadow_run_id},
                     )
                     artifacts.append(artifact)
-            elif round_.action.action_type is ReActActionType.CALL_TOOL:
+            elif action.action_type is ReActActionType.CALL_TOOL:
                 if action_result.get("status") in {"success", "ok"}:
                     artifact = await self._shadow_runs.persist_artifact(
                         run,
                         kind=ShadowQueryArtifactKind.TOOL_PROJECTION,
                         payload={
                             "round": round_.round_index,
-                            "tool_name": round_.action.target_name,
+                            "tool_name": action.target_name,
                             "projection_hash": action_result.get("projection_hash"),
                             "data": action_result.get("data", {}),
                         },
@@ -251,28 +305,61 @@ class ShadowQueryPivotService:
     ) -> list[str]:
         record_ids: list[str] = []
         for round_ in rounds:
-            record_id = f"sdr-{secrets.token_hex(4)}"
-            idempotency_key = f"shadow:{run.shadow_run_id}:reflect:round{round_.round_index}"
-            record = DecisionRecord(
-                record_id=record_id,
+            action = round_.action
+            think_summary = round_.decision_summary[:512]
+            if action is not None and action.target_name:
+                think_summary = (
+                    f"plan {action.action_type.value} {action.target_name}: "
+                    f"{round_.decision_summary[:400]}"
+                )[:512]
+
+            think_id = f"sdr-{secrets.token_hex(4)}"
+            think_key = f"shadow:{run.shadow_run_id}:think:round{round_.round_index}"
+            think_record = DecisionRecord(
+                record_id=think_id,
                 event_id=request.event_id,
-                stage=DecisionStage.REACT_REFLECT,
+                stage=DecisionStage.REACT_THINK,
                 actor="shadow_query_pivot",
                 reason_codes=[round_.reason_code.value],
-                decision_summary=round_.decision_summary[:512],
-                confidence=round_.confidence,
-                uncertainty_codes=[round_.uncertainty_code.value],
-                idempotency_key=idempotency_key,
+                decision_summary=think_summary,
+                idempotency_key=think_key,
                 retention_policy="shadow_pivot_v1",
                 owner=run.namespace_key,
                 selected={
-                    "action_type": round_.action.action_type.value if round_.action else "",
-                    "target_name": round_.action.target_name if round_.action else "",
+                    "action_type": action.action_type.value if action else "",
+                    "target_name": action.target_name if action else "",
                 },
             )
-            record = record.model_copy(update={"record_hash": _record_hash(record)})
-            persisted = await self._shadow_runs.persist_decision_record(run, record)
-            record_ids.append(persisted)
+            think_record = think_record.model_copy(
+                update={"record_hash": _record_hash(think_record)}
+            )
+            record_ids.append(await self._shadow_runs.persist_decision_record(run, think_record))
+
+            reflect_id = f"sdr-{secrets.token_hex(4)}"
+            reflect_key = f"shadow:{run.shadow_run_id}:reflect:round{round_.round_index}"
+            reflect_record = DecisionRecord(
+                record_id=reflect_id,
+                event_id=request.event_id,
+                stage=DecisionStage.REACT_REFLECT,
+                actor="shadow_query_pivot",
+                reason_codes=[round_.gap_code.value],
+                decision_summary=round_.decision_summary[:512],
+                confidence=round_.confidence,
+                uncertainty_codes=[round_.uncertainty_code.value],
+                idempotency_key=reflect_key,
+                retention_policy="shadow_pivot_v1",
+                owner=run.namespace_key,
+                selected={
+                    "action_type": action.action_type.value if action else "",
+                    "target_name": action.target_name if action else "",
+                },
+            )
+            reflect_record = reflect_record.model_copy(
+                update={"record_hash": _record_hash(reflect_record)}
+            )
+            record_ids.append(
+                await self._shadow_runs.persist_decision_record(run, reflect_record)
+            )
         return record_ids
 
 

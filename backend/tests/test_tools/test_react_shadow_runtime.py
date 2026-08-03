@@ -85,6 +85,34 @@ def test_assert_shadow_pivot_config_requires_grant() -> None:
             Settings(REACT_SHADOW_PIVOT_ENABLED=True, TOOL_CALL_GRANT_REQUIRED=False)
         )
 
+    with pytest.raises(ConfigurationError, match="KNOWLEDGE_RELEASE_REQUIRE_ACTIVE"):
+        assert_shadow_pivot_config(
+            Settings(
+                REACT_SHADOW_PIVOT_ENABLED=True,
+                TOOL_CALL_GRANT_REQUIRED=True,
+                KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=False,
+            )
+        )
+
+    with pytest.raises(ConfigurationError, match="RETRIEVAL_FIXTURE_FALLBACK"):
+        assert_shadow_pivot_config(
+            Settings(
+                REACT_SHADOW_PIVOT_ENABLED=True,
+                TOOL_CALL_GRANT_REQUIRED=True,
+                KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+                RETRIEVAL_FIXTURE_FALLBACK=True,
+            )
+        )
+
+    assert_shadow_pivot_config(
+        Settings(
+            REACT_SHADOW_PIVOT_ENABLED=True,
+            TOOL_CALL_GRANT_REQUIRED=True,
+            KNOWLEDGE_RELEASE_REQUIRE_ACTIVE=True,
+            RETRIEVAL_FIXTURE_FALLBACK=False,
+        )
+    )
+
     assert_shadow_pivot_config(
         Settings(REACT_SHADOW_PIVOT_ENABLED=False, TOOL_CALL_GRANT_REQUIRED=False)
     )

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.config import Settings
 from app.db.orm.shadow_run import (
     ShadowDecisionRecordORM,
     ShadowQueryArtifactORM,
@@ -23,8 +26,10 @@ from app.models.shadow_run import (
     ShadowRunProvenance,
     ShadowRunStatus,
 )
-from app.services.tool_call_grant_resolver import build_namespace_key
 from app.models.tool_call_grant import ToolCallMode
+from app.services.tool_call_grant_resolver import build_namespace_key
+
+logger = logging.getLogger(__name__)
 
 
 def _content_hash(payload: dict[str, object]) -> str:
@@ -43,6 +48,17 @@ class ShadowRunService:
     ) -> None:
         self._session_factory = session_factory
         self._retention_hours = max(1, retention_hours)
+
+    @classmethod
+    def from_settings(
+        cls,
+        session_factory: async_sessionmaker[AsyncSession],
+        settings: Settings,
+    ) -> ShadowRunService:
+        return cls(
+            session_factory,
+            retention_hours=settings.react_shadow_retention_hours,
+        )
 
     async def create_run(
         self,
@@ -103,19 +119,51 @@ class ShadowRunService:
     ) -> str:
         async with self._session_factory() as session:
             async with session.begin():
-                session.add(
-                    ShadowDecisionRecordORM(
-                        record_id=record.record_id,
-                        shadow_run_id=run.shadow_run_id,
-                        event_id=run.event_id,
-                        namespace_key=run.namespace_key,
-                        idempotency_key=record.idempotency_key,
-                        record_hash=record.record_hash,
-                        payload=record.model_dump(mode="json"),
-                        retention_expires_at=run.retention_expires_at,
+                existing = await session.scalar(
+                    select(ShadowDecisionRecordORM).where(
+                        ShadowDecisionRecordORM.idempotency_key == record.idempotency_key
                     )
                 )
+                if existing is not None:
+                    return self._finalize_existing_record(existing, record)
+
+                row = ShadowDecisionRecordORM(
+                    record_id=record.record_id,
+                    shadow_run_id=run.shadow_run_id,
+                    event_id=run.event_id,
+                    namespace_key=run.namespace_key,
+                    idempotency_key=record.idempotency_key,
+                    record_hash=record.record_hash,
+                    payload=record.model_dump(mode="json"),
+                    retention_expires_at=run.retention_expires_at,
+                )
+                try:
+                    session.add(row)
+                    await session.flush()
+                except IntegrityError:
+                    existing = await session.scalar(
+                        select(ShadowDecisionRecordORM).where(
+                            ShadowDecisionRecordORM.idempotency_key == record.idempotency_key
+                        )
+                    )
+                    if existing is None:
+                        raise
+                    return self._finalize_existing_record(existing, record)
         return record.record_id
+
+    @staticmethod
+    def _finalize_existing_record(
+        existing: ShadowDecisionRecordORM,
+        record: DecisionRecord,
+    ) -> str:
+        if existing.record_hash != record.record_hash:
+            logger.warning(
+                "ShadowDecisionRecord idempotency replay hash mismatch key=%s existing=%s new=%s",
+                record.idempotency_key,
+                existing.record_hash,
+                record.record_hash,
+            )
+        return existing.record_id
 
     async def persist_artifact(
         self,

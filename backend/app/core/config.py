@@ -339,6 +339,14 @@ class Settings(BaseSettings):
             violations.append(
                 "react_shadow_pivot_enabled=true requires tool_call_grant_required=true"
             )
+        if self.react_shadow_pivot_enabled and not self.knowledge_release_require_active:
+            violations.append(
+                "react_shadow_pivot_enabled=true requires knowledge_release_require_active=true"
+            )
+        if self.react_shadow_pivot_enabled and self.retrieval_fixture_fallback:
+            violations.append(
+                "react_shadow_pivot_enabled=true forbids retrieval_fixture_fallback=true"
+            )
         return violations
 
 
