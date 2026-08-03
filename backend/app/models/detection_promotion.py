@@ -65,6 +65,7 @@ class DetectionPromotionReasonCode(StrEnum):
     INGEST_FAILED = "ingest_failed"
     PACKAGE_TRANSITION_BLOCKED = "package_transition_blocked"
     PROMOTION_SUPERSEDED = "promotion_superseded"
+    CONTEXT_PROJECTION_FAILED = "context_projection_failed"
 
 
 class TypedIngestResult(BaseModel):

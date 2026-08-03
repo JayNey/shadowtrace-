@@ -15,7 +15,6 @@ from app.models.detection_context_snapshot import (
     DetectionContextSnapshot,
     DetectionContextSnapshotRef,
 )
-from app.models.detection_governance import DetectionGovernanceDecisionKind
 from app.models.detection_promotion import DetectionPromotionStatus
 from app.models.detection_rule import DetectionRuleDefinition
 from app.models.feature_snapshot import FeatureSnapshot
@@ -112,13 +111,18 @@ class DetectionContextProjector:
             promotion.decision_id,
             tenant_id=tenant_id,
         )
-        if decision.decision is not DetectionGovernanceDecisionKind.APPROVE:
+        active = await self._governance.resolve_active_approval(
+            tenant_id=tenant_id,
+            binding_hash=decision.binding_hash,
+        )
+        if active is None or active.decision_id != promotion.decision_id:
             raise ValidationError(
-                "detection context projection blocked: governance decision not approved",
-                details={"decision_id": promotion.decision_id},
+                "detection context projection blocked: governance approval not active",
+                details={
+                    "decision_id": promotion.decision_id,
+                    "reason": "governance_approval_not_active",
+                },
             )
-        if decision.binding_hash != decision.candidate_binding.candidate_set_hash:
-            pass  # binding_hash is decision-level; validated at promotion time
 
         candidate_row = await session.scalar(
             select(orm.CandidateDetection).where(
@@ -147,7 +151,11 @@ class DetectionContextProjector:
                 details={"promotion_id": promotion_id},
             )
 
-        event_row = await session.get(orm.SecurityEvent, promotion.event_id)
+        event_row = await session.get(
+            orm.SecurityEvent,
+            promotion.event_id,
+            with_for_update=True,
+        )
         if event_row is None:
             raise ValidationError(
                 "detection context projection blocked: event not found",
@@ -186,7 +194,7 @@ class DetectionContextProjector:
                     rule = item
                     break
 
-        feature_snapshots = await self._load_feature_snapshots(
+        feature_snapshots, projection_errors = await self._load_feature_snapshots(
             session,
             tenant_id=tenant_id,
             snapshot_ids=list(candidate.provenance.snapshot_ids or []),
@@ -206,6 +214,7 @@ class DetectionContextProjector:
             feature_snapshots=feature_snapshots,
             revision=revision,
             supersedes_snapshot_id=supersedes,
+            projection_errors=projection_errors,
         )
 
         existing = await session.scalar(
@@ -228,9 +237,9 @@ class DetectionContextProjector:
         *,
         tenant_id: str,
         snapshot_ids: list[str],
-    ) -> list[FeatureSnapshot]:
+    ) -> tuple[list[FeatureSnapshot], list[str]]:
         if not snapshot_ids:
-            return []
+            return [], []
         rows = list(
             await session.scalars(
                 select(orm.FeatureSnapshot).where(
@@ -240,7 +249,12 @@ class DetectionContextProjector:
             )
         )
         by_id = {row.snapshot_id: row_to_feature_snapshot(row) for row in rows}
-        return [by_id[sid] for sid in snapshot_ids if sid in by_id]
+        missing = [sid for sid in snapshot_ids if sid not in by_id]
+        errors = [
+            f"missing_feature_snapshot:{snapshot_id}" for snapshot_id in missing
+        ]
+        snapshots = [by_id[sid] for sid in snapshot_ids if sid in by_id]
+        return snapshots, errors
 
     async def _write_context_ref(
         self,

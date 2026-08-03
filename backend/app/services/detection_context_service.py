@@ -170,6 +170,7 @@ class DetectionContextService:
             )
             .order_by(DetectionContextSnapshotORM.revision.desc())
             .limit(1)
+            .with_for_update()
         )
         if row is None:
             return 1, None

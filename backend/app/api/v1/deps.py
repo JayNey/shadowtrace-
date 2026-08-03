@@ -54,6 +54,7 @@ _neo4j_client: Any = None  # Neo4jClient (ISSUE-082)
 _memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
 _detection_governance: Any = None  # DetectionGovernanceService (ISSUE-125)
 _detection_promotion: Any = None  # DetectionPromotionService (ISSUE-124)
+_detection_context_projector: Any = None  # DetectionContextProjector (ISSUE-127)
 _decision_record_service: Any = None  # DecisionRecordService (ISSUE-131)
 _tool_call_grant_service: Any = None  # ToolCallGrantService (ISSUE-134)
 
@@ -267,6 +268,19 @@ def get_detection_governance_service() -> Any:
 DetectionGovernanceDep = Annotated[Any, Depends(get_detection_governance_service)]
 
 
+def get_detection_context_projector() -> Any:
+    """Return the shared detection context projector (ISSUE-127)."""
+    global _detection_context_projector
+    if _detection_context_projector is None:
+        from app.services.detection_context_projector import DetectionContextProjector
+
+        _detection_context_projector = DetectionContextProjector(
+            _get_session_factory(),
+            governance=get_detection_governance_service(),
+        )
+    return _detection_context_projector
+
+
 async def get_detection_promotion_service() -> Any:
     """Return the shared detection promotion saga service (ISSUE-124)."""
     global _detection_promotion
@@ -287,6 +301,7 @@ async def get_detection_promotion_service() -> Any:
             governance=get_detection_governance_service(),
             event_service=event_service,
             source_ingester=ingester,
+            context_projector=get_detection_context_projector(),
         )
     return _detection_promotion
 
@@ -925,7 +940,7 @@ def reset_deps() -> None:
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
-    global _memory_governance, _detection_governance, _detection_promotion, _decision_record_service, _tool_call_grant_service
+    global _memory_governance, _detection_governance, _detection_promotion, _detection_context_projector, _decision_record_service, _tool_call_grant_service
     reset_session_provider()
     from app.core.embedding.factory import reset_embedding_client
     from app.playbook.resources import reset_playbook_resources_cache
@@ -965,5 +980,6 @@ def reset_deps() -> None:
     _memory_governance = None
     _detection_governance = None
     _detection_promotion = None
+    _detection_context_projector = None
     _decision_record_service = None
     _tool_call_grant_service = None

@@ -18,6 +18,12 @@ class DetectionContextSnapshotORM(Base):
     __tablename__ = "detection_context_snapshot"
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_detection_context_snapshot_idempotency"),
+        UniqueConstraint(
+            "tenant_id",
+            "event_id",
+            "revision",
+            name="uq_detection_context_snapshot_event_revision",
+        ),
         Index("ix_detection_context_snapshot_event_revision", "tenant_id", "event_id", "revision"),
         Index("ix_detection_context_snapshot_promotion", "promotion_id"),
     )

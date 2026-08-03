@@ -39,6 +39,14 @@ from app.models.agent_io import (
     ScoringMode,
     TriageResult,
 )
+from app.models.detection_context_snapshot import (
+    DetectionContextAttackRef,
+    DetectionContextEvaluationRefs,
+    DetectionContextGovernanceRefs,
+    DetectionContextReleaseRefs,
+    DetectionContextScoreSummary,
+    DetectionContextSnapshot,
+)
 from app.models.entities import (
     AccountEntity,
     DomainEntity,
@@ -1175,3 +1183,73 @@ def test_llm_failure_metadata_timeout_code() -> None:
 
     meta = llm_failure_metadata(TimeoutError())
     assert meta["error_code"] == "llm_timeout"
+
+
+def _sample_detection_context_snapshot(*, event_id: str) -> DetectionContextSnapshot:
+    hash64 = "a" * 64
+    return DetectionContextSnapshot(
+        snapshot_id="dctx-report-test",
+        tenant_id="tenant-a",
+        event_id=event_id,
+        event_revision=1,
+        promotion_id="dprom-report",
+        promotion_link_revision=1,
+        promotion_key="promotion-key",
+        release_refs=DetectionContextReleaseRefs(
+            candidate_detection_id="dcand-1",
+            candidate_content_hash=hash64,
+            package_id="pkg-1",
+            package_version=1,
+            package_content_hash=hash64,
+            rule_id="rule-1",
+            rule_version=1,
+            feature_contract_version="1.0",
+            detection_scope_id="dscope-1",
+            scope_revision_id="dsrev-1",
+        ),
+        governance_refs=DetectionContextGovernanceRefs(
+            decision_id="dgov-1",
+            binding_hash=hash64,
+            decision_hash=hash64,
+            candidate_set_hash=hash64,
+        ),
+        evaluation_refs=DetectionContextEvaluationRefs(
+            evaluation_id="deval-1",
+            artifact_hash=hash64,
+            dataset_id="detection_shadow_v1",
+            dataset_version="2026.08.02",
+            dataset_content_hash=hash64,
+            code_sha="abc1234",
+        ),
+        attack_refs=[
+            DetectionContextAttackRef(technique_id="T1059", source="rule"),
+        ],
+        scores=DetectionContextScoreSummary(
+            matched_value=2.0,
+            detection_score=88.5,
+            severity="high",
+            operator="event_match",
+        ),
+        content_hash=hash64,
+        idempotency_key="idem-report",
+    )
+
+
+def test_report_section_builder_includes_detection_context_provenance() -> None:
+    builder = ReportSectionBuilder()
+    event_id = "evt-detection-context"
+    snapshot = _sample_detection_context_snapshot(event_id=event_id)
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=_main_evidence(event_id),
+        risk_assessment=_high_risk(),
+        triage_result=_main_triage(),
+        detection_context_snapshot=snapshot,
+    )
+    overview = next(section for section in sections if section.key == "overview")
+    appendix = next(section for section in sections if section.key == "appendix_index")
+    attack_mapping = next(section for section in sections if section.key == "attack_mapping")
+    assert snapshot.snapshot_id in overview.content
+    assert snapshot.content_hash in overview.content
+    assert appendix.data["detection_context_snapshot_id"] == snapshot.snapshot_id
+    assert "T1059" in attack_mapping.content

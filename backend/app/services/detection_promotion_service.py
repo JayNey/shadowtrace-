@@ -50,6 +50,7 @@ from app.services.event_service import EventService, ingest_result_to_typed
 
 MAX_PROMOTION_INGEST_RETRIES = 5
 PAYLOAD_RETRY_COUNT_KEY = "ingest_retry_count"
+PAYLOAD_PROJECTION_ERROR_KEY = "context_projection_error"
 
 if TYPE_CHECKING:
     from app.services.detection_context_projector import DetectionContextProjector
@@ -104,12 +105,61 @@ class DetectionPromotionService:
                 record.promotion_id,
                 tenant_id=record.tenant_id,
             )
+        except ValidationError as exc:
+            await self._record_projection_failure(
+                record.promotion_id,
+                message=str(exc),
+                reason=(
+                    exc.details.get("reason", DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value)
+                    if isinstance(exc.details, dict)
+                    else DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value
+                ),
+            )
+            logger.error(
+                "detection context projection blocked promotion_id=%s reason=%s",
+                record.promotion_id,
+                exc.details if isinstance(exc.details, dict) else exc,
+            )
         except Exception as exc:
+            await self._record_projection_failure(
+                record.promotion_id,
+                message=f"{type(exc).__name__}: {exc}",
+                reason=DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value,
+            )
             logger.warning(
                 "detection context projection failed promotion_id=%s: %s",
                 record.promotion_id,
                 exc,
             )
+
+    async def _record_projection_failure(
+        self,
+        promotion_id: str,
+        *,
+        message: str,
+        reason: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    DetectionPromotionORM,
+                    promotion_id,
+                    with_for_update=True,
+                )
+                if row is None:
+                    return
+                payload = dict(row.payload or {})
+                payload[PAYLOAD_PROJECTION_ERROR_KEY] = {
+                    "message": message[:512],
+                    "reason": reason,
+                    "at": self._now().isoformat(),
+                }
+                row.payload = payload
+                codes = list(row.reason_codes or [])
+                failed = DetectionPromotionReasonCode.CONTEXT_PROJECTION_FAILED.value
+                if failed not in codes:
+                    codes.append(failed)
+                row.reason_codes = codes
 
     async def _finalize_promotion(
         self,

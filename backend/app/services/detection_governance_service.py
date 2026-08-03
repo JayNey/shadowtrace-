@@ -432,6 +432,20 @@ class DetectionGovernanceService:
             decision_id=active.decision_id,
         )
 
+    async def resolve_active_approval(
+        self,
+        *,
+        tenant_id: str,
+        binding_hash: str,
+    ) -> DetectionGovernanceDecision | None:
+        """Return the currently active APPROVE decision for a binding hash, if any."""
+        chain, _ = await self.list_decisions(
+            tenant_id=tenant_id,
+            binding_hash=binding_hash,
+            limit=200,
+        )
+        return _resolve_active_approval(chain, now=self._now())
+
     async def _find_active_approval(
         self,
         binding_hash: str,
