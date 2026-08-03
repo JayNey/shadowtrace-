@@ -65,6 +65,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
+from app.models.playbook_release import PlaybookRef
 
 # Mapping of the 12 Agents (intro §4.4) to their locked output model names.
 AGENT_OUTPUT_MODELS = {
@@ -267,7 +268,15 @@ def test_rag_output_ok() -> None:
                 score=0.6,
             )
         ],
-        playbook_refs=["pb-1"],
+        playbook_refs=[
+            PlaybookRef(
+                playbook_id="pb-a1b2c3d4",
+                release_id="krel-test00000001",
+                release_version="v1",
+                content_hash="a" * 64,
+                bundle_content_hash="b" * 64,
+            )
+        ],
         citations=[
             Citation(
                 citation_id="cit-aaaa1111",

@@ -39,10 +39,12 @@ from app.models.workflow import (
     validate_action_status_transition,
 )
 from app.services.action_approval_policy import (
-    APPROVAL_POLICY_SOURCE,
-    APPROVAL_POLICY_VERSION,
     action_level_rank,
     resolve_runtime_max_auto_level,
+)
+from app.services.playbook_approval_binding import (
+    build_approval_binding_detail,
+    validate_approval_binding,
 )
 from app.services.action_mapper import action_from_orm as _action_from_orm
 from app.services.state_machine_service import StateMachineService
@@ -461,6 +463,9 @@ class ApprovalEngine:
                                 "reason": gate.reason,
                             },
                         )
+                    pending = await self._load_pending_record_row(session, action_id)
+                    if pending is not None and isinstance(pending.detail, dict):
+                        validate_approval_binding(action, pending.detail)
 
                 if decision_id:
                     replay = await session.scalar(
@@ -613,8 +618,7 @@ class ApprovalEngine:
         detail = {
             "rule_applied": decision.rule_applied,
             "reason": decision.reason,
-            "policy_version": APPROVAL_POLICY_VERSION,
-            "policy_source": APPROVAL_POLICY_SOURCE,
+            **build_approval_binding_detail(action),
             "impact_assessment": (
                 action.impact_assessment.model_dump(mode="json")
                 if action.impact_assessment is not None

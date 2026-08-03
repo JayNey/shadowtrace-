@@ -102,6 +102,12 @@ class Settings(BaseSettings):
 
     retrieval_default_tenant_id: str = Field(default="local", alias="RETRIEVAL_DEFAULT_TENANT_ID")
     retrieval_fixture_fallback: bool = Field(default=False, alias="RETRIEVAL_FIXTURE_FALLBACK")
+    playbook_fixture_fallback: bool = Field(default=False, alias="PLAYBOOK_FIXTURE_FALLBACK")
+    playbook_release_require_active: bool = Field(
+        default=False,
+        alias="PLAYBOOK_RELEASE_REQUIRE_ACTIVE",
+        description="When true, playbook_kb retrieval requires an active playbook release",
+    )
     knowledge_release_require_active: bool = Field(
         default=False,
         alias="KNOWLEDGE_RELEASE_REQUIRE_ACTIVE",
@@ -291,6 +297,8 @@ class Settings(BaseSettings):
             violations.append(f"embedding_mode={self.embedding_mode}")
         if self.retrieval_fixture_fallback:
             violations.append("retrieval_fixture_fallback=true")
+        if self.playbook_fixture_fallback:
+            violations.append("playbook_fixture_fallback=true")
         if self.react_enabled and not self.tool_call_grant_required:
             violations.append("react_enabled=true requires tool_call_grant_required=true")
         return violations

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.models.knowledge_release import (
     ATTACK_CORPUS_ID,
+    ATTACK_KB_NAME,
     ATTACK_SOURCE_ID,
     KNOWLEDGE_RELEASE_SCHEMA_VERSION,
     KnowledgeImportStatus,
@@ -16,6 +17,7 @@ from app.models.knowledge_release import (
     KnowledgeReleaseLifecycleState,
     KnowledgeReleaseProvenance,
 )
+from app.models.playbook_release import PLAYBOOK_CORPUS_ID, PLAYBOOK_KB_NAME
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -96,13 +98,17 @@ def default_attack_provenance(source_path: str) -> KnowledgeReleaseProvenance:
 
 def corpus_to_kb_name(corpus_id: str) -> str | None:
     if corpus_id == ATTACK_CORPUS_ID:
-        return "attack_kb"
+        return ATTACK_KB_NAME
+    if corpus_id == PLAYBOOK_CORPUS_ID:
+        return PLAYBOOK_KB_NAME
     return None
 
 
 def kb_name_to_corpus(kb_name: str) -> str | None:
-    if kb_name == "attack_kb":
+    if kb_name == ATTACK_KB_NAME:
         return ATTACK_CORPUS_ID
+    if kb_name == PLAYBOOK_KB_NAME:
+        return PLAYBOOK_CORPUS_ID
     return None
 
 

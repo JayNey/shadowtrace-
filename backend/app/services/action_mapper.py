@@ -36,6 +36,8 @@ def action_from_orm(row: orm.Action) -> Action:
         "reason": row.reason,
         "impact_assessment": row.impact_assessment,
         "playbook_id": row.playbook_id,
+        "playbook_ref": row.playbook_ref,
+        "action_template_snapshot": row.action_template_snapshot,
         "provider_name": row.provider_name,
         "execution_owner": row.execution_owner,
         "execution_job_id": row.execution_job_id,

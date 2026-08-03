@@ -364,6 +364,8 @@ async def _build_production_investigation_graph(
         event_bus=event_bus,
         event_service=stack["event_service"],
         session_factory=stack["session_factory"],
+        playbook_kb_service=stack.get("playbook_kb_service"),
+        playbook_release_service=stack.get("playbook_release_service"),
         scenario_id="insider_data_exfiltration",
     )
     verify_agent = VerifyAgent(
@@ -654,6 +656,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         event_service=event_service,
         session_factory=session_factory,
     )
+    from app.playbook.resources import get_loaded_playbook_resources, probe_playbook_resources
     from app.rag.resources import get_loaded_retrieval_resources
     from app.services.knowledge_release_service import KnowledgeReleaseService
 
@@ -672,6 +675,22 @@ async def _build_investigation_agents() -> dict[str, Any]:
                 "mode": retrieval_resources.mode,
             },
         )
+    playbook_resources = get_loaded_playbook_resources(
+        settings=settings,
+        session_factory=session_factory,
+        embed_service=embed_service,
+    )
+    playbook_resources = await probe_playbook_resources(playbook_resources, settings=settings)
+    if playbook_resources.status != "ready":
+        logger.warning(
+            "Playbook resources not ready during investigation stack build",
+            extra={
+                "status": playbook_resources.status,
+                "reasons": list(playbook_resources.reasons),
+                "mode": playbook_resources.mode,
+                "active_release_id": playbook_resources.active_release_id,
+            },
+        )
     knowledge_release_service = KnowledgeReleaseService(
         session_factory,
         store=knowledge_store,
@@ -685,6 +704,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         trace_service=trace_service,
         event_bus=event_bus,
         knowledge_release_service=knowledge_release_service,
+        playbook_release_service=playbook_resources.playbook_release_service,
         settings=settings,
     )
     risk = RiskAgent(
@@ -732,6 +752,8 @@ async def _build_investigation_agents() -> dict[str, Any]:
         "triage": triage,
         "evidence": evidence,
         "rag": rag,
+        "playbook_kb_service": playbook_resources.playbook_kb_service,
+        "playbook_release_service": playbook_resources.playbook_release_service,
         "risk": risk,
         "report": report,
         "graph_agent": graph_agent,

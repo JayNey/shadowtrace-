@@ -30,6 +30,7 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
+from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
 
 TERMINAL_DISPOSITION_TOOL = "update_source_event_disposition"
 
@@ -85,6 +86,8 @@ class Action(BaseModel):
     reason: str | None = None
     impact_assessment: ImpactAssessment | None = None
     playbook_id: str | None = None
+    playbook_ref: PlaybookRef | None = None
+    action_template_snapshot: PlaybookActionTemplateSnapshot | None = None
     provider_name: str | None = None
     execution_owner: ExecutionOwner | None = None
     execution_job_id: str | None = None

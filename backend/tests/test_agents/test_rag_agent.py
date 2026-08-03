@@ -364,6 +364,14 @@ _HISTORY_CITATIONS = [
     ),
 ]
 
+_PLAYBOOK_RELEASE_META = {
+    "release_id": "krel-test00000001",
+    "release_version": "v1-test",
+    "playbook_object_hash": "a" * 64,
+    "bundle_content_hash": "b" * 64,
+    "revision": 1,
+}
+
 _PLAYBOOK_CHUNKS = [
     _make_chunk(
         "pbk-001",
@@ -372,12 +380,13 @@ _PLAYBOOK_CHUNKS = [
         "Event Type: data_exfiltration\nMin Severity: high\n...",
         score=0.91,
         metadata={
-            "playbook_id": "pb-exfil-001",
+            "playbook_id": "pb-a1b2c3d4",
             "playbook_name": "Data Exfiltration Response",
             "event_type": "data_exfiltration",
             "min_severity": "high",
             "description": "Isolate affected hosts, block external IPs, initiate DLP scan.",
             "steps": [],
+            **_PLAYBOOK_RELEASE_META,
         },
     ),
     _make_chunk(
@@ -387,12 +396,13 @@ _PLAYBOOK_CHUNKS = [
         "Event Type: data_exfiltration\nMin Severity: medium\n...",
         score=0.73,
         metadata={
-            "playbook_id": "pb-data-prot-001",
+            "playbook_id": "pb-b2c3d4e5",
             "playbook_name": "Generic Data Protection",
             "event_type": "data_exfiltration",
             "min_severity": "medium",
             "description": "Audit data access, review DLP policies.",
             "steps": [],
+            **_PLAYBOOK_RELEASE_META,
         },
     ),
 ]
@@ -659,17 +669,27 @@ class TestBuildPlaybookRefs:
         )
         refs = _build_playbook_refs(result)
         assert len(refs) == 2
-        assert "pb-exfil-001" in refs
-        assert "pb-data-prot-001" in refs
+        ids = {ref.playbook_id for ref in refs}
+        assert "pb-a1b2c3d4" in ids
+        assert "pb-b2c3d4e5" in ids
 
     def test_deduplicates_playbook_ids(self):
+        meta = {
+            "playbook_id": "pb-a1b2c3d4",
+            "release_id": "krel-test00000001",
+            "release_version": "v1",
+            "playbook_object_hash": "a" * 64,
+            "bundle_content_hash": "b" * 64,
+            "revision": 1,
+        }
         chunks = [
-            _make_chunk("p1", "playbook_kb", "v1", score=0.9, metadata={"playbook_id": "pb-001"}),
-            _make_chunk("p2", "playbook_kb", "v2", score=0.7, metadata={"playbook_id": "pb-001"}),
+            _make_chunk("p1", "playbook_kb", "v1", score=0.9, metadata=meta),
+            _make_chunk("p2", "playbook_kb", "v2", score=0.7, metadata=dict(meta)),
         ]
         result = RetrievalResult(query="", chunks=chunks, citations=[])
         refs = _build_playbook_refs(result)
-        assert refs == ["pb-001"]
+        assert len(refs) == 1
+        assert refs[0].playbook_id == "pb-a1b2c3d4"
 
     def test_empty_result_returns_empty(self):
         assert _build_playbook_refs(None) == []

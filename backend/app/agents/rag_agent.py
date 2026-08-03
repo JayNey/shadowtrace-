@@ -30,15 +30,20 @@ from app.models.agent_io import (
 from app.models.enums import EventType, FinalVerdict
 from app.models.knowledge import RetrievalResult
 from app.models.knowledge_release import KnowledgeQueryPlan
+from app.models.playbook_release import PlaybookRef
 from app.rag.context import RetrievalContext
 from app.services.knowledge_query_plan_service import resolve_active_knowledge_query_plan
 from app.services.knowledge_release_service import KnowledgeReleaseService
+from app.services.playbook_kb_service import playbook_ref_from_metadata
+from app.services.playbook_query_plan_service import resolve_active_playbook_query_plan
+from app.services.playbook_release_service import PlaybookReleaseService
 
 logger = logging.getLogger(__name__)
 
 _KB_NAMES = ["attack_kb", "fp_case_kb", "history_case_kb", "playbook_kb"]
 _TOP_K = 5
 _NO_ACTIVE_RELEASE = "no_active_knowledge_release"
+_NO_ACTIVE_PLAYBOOK_RELEASE = "no_active_playbook_release"
 
 
 class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
@@ -64,6 +69,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         event_bus: Any | None = None,
         pipeline: Any | None = None,
         knowledge_release_service: KnowledgeReleaseService | None = None,
+        playbook_release_service: PlaybookReleaseService | None = None,
         settings: Settings | None = None,
     ) -> None:
         super().__init__(
@@ -78,6 +84,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         )
         self._pipeline = pipeline
         self._knowledge_release_service = knowledge_release_service
+        self._playbook_release_service = playbook_release_service
         self._settings = settings
 
     # ------------------------------------------------------------------ #
@@ -94,22 +101,26 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             return output
 
         cfg = self._settings or get_settings()
-        context = RetrievalContext.from_rag_input(
-            input,
-            settings=cfg,
-            query_plan=await self._resolve_query_plan(input),
-        )
+        attack_plan = await self._resolve_attack_query_plan(input)
+        playbook_plan = await self._resolve_playbook_query_plan(input)
+        base_context = RetrievalContext.from_rag_input(input, settings=cfg, query_plan=attack_plan)
         attack_kb_blocked = (
-            self._knowledge_release_service is not None and context.query_plan is None
+            self._knowledge_release_service is not None and attack_plan is None
         )
+        playbook_kb_blocked = self._playbook_kb_blocked(cfg, playbook_plan)
         retrieve_outcomes = await asyncio.gather(
             *(
                 self._retrieve_for_kb(
                     kb_name,
                     queries.get(kb_name, ""),
                     top_k=_TOP_K,
-                    context=context,
-                    blocked=kb_name == "attack_kb" and attack_kb_blocked,
+                    base_context=base_context,
+                    attack_plan=attack_plan,
+                    playbook_plan=playbook_plan,
+                    blocked=(
+                        (kb_name == "attack_kb" and attack_kb_blocked)
+                        or (kb_name == "playbook_kb" and playbook_kb_blocked)
+                    ),
                 )
                 for kb_name in _KB_NAMES
             ),
@@ -125,9 +136,11 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
         citations = _aggregate_citations(results)
 
         all_failed = all(r is None for r in results.values())
-        plan_payload = (
-            context.query_plan.model_dump(mode="json") if context.query_plan is not None else None
-        )
+        plan_payload = None
+        if attack_plan is not None:
+            plan_payload = attack_plan.model_dump(mode="json")
+        elif playbook_plan is not None:
+            plan_payload = playbook_plan.model_dump(mode="json")
         output = RAGOutput(
             attack_techniques=attack_techniques,
             fp_similarity=fp_similarity,
@@ -147,7 +160,7 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
     # Helpers
     # ------------------------------------------------------------------ #
 
-    async def _resolve_query_plan(self, input: RAGAgentInput) -> KnowledgeQueryPlan | None:
+    async def _resolve_attack_query_plan(self, input: RAGAgentInput) -> KnowledgeQueryPlan | None:
         if self._knowledge_release_service is None:
             return None
         cfg = self._settings or get_settings()
@@ -158,25 +171,62 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
             trace_id=trace_id,
         )
 
+    async def _resolve_playbook_query_plan(self, input: RAGAgentInput) -> KnowledgeQueryPlan | None:
+        if self._playbook_release_service is None:
+            return None
+        cfg = self._settings or get_settings()
+        trace_id = (input.trace_id or f"evt:{input.event_id}").strip()
+        return await resolve_active_playbook_query_plan(
+            self._playbook_release_service,
+            cfg,
+            trace_id=trace_id,
+        )
+
+    def _playbook_kb_blocked(
+        self,
+        cfg: Settings,
+        playbook_plan: KnowledgeQueryPlan | None,
+    ) -> bool:
+        if self._playbook_release_service is None:
+            return False
+        require_active = (
+            cfg.app_env.strip().lower() == "production" or cfg.playbook_release_require_active
+        )
+        return require_active and playbook_plan is None
+
     async def _retrieve_for_kb(
         self,
         kb_name: str,
         query: str,
         top_k: int = 5,
         *,
-        context: RetrievalContext,
+        base_context: RetrievalContext,
+        attack_plan: KnowledgeQueryPlan | None,
+        playbook_plan: KnowledgeQueryPlan | None,
         blocked: bool = False,
     ) -> RetrievalResult | None:
         if blocked:
+            degraded = [_NO_ACTIVE_RELEASE if kb_name == "attack_kb" else _NO_ACTIVE_PLAYBOOK_RELEASE]
+            plan = attack_plan if kb_name == "attack_kb" else playbook_plan
             return RetrievalResult(
                 query=query,
-                degraded_steps=[_NO_ACTIVE_RELEASE],
+                degraded_steps=degraded,
                 knowledge_query_plan=(
-                    context.query_plan.model_dump(mode="json")
-                    if context.query_plan is not None
-                    else None
+                    plan.model_dump(mode="json") if plan is not None else None
                 ),
             )
+        query_plan = None
+        if kb_name == "attack_kb":
+            query_plan = attack_plan
+        elif kb_name == "playbook_kb":
+            query_plan = playbook_plan
+        context = RetrievalContext(
+            tenant_id=base_context.tenant_id,
+            principal=base_context.principal,
+            event_id=base_context.event_id,
+            trace_id=base_context.trace_id,
+            query_plan=query_plan,
+        )
         return await self._retrieve_safe(kb_name, query, top_k=top_k, context=context)
 
     async def _retrieve_safe(
@@ -360,18 +410,22 @@ def _build_similar_cases(
     return cases
 
 
-def _build_playbook_refs(result: RetrievalResult | None) -> list[str]:
-    """Extract playbook IDs from playbook_kb retrieval result."""
+def _build_playbook_refs(result: RetrievalResult | None) -> list[PlaybookRef]:
+    """Extract immutable playbook refs from playbook_kb retrieval result."""
     if result is None or not result.chunks:
         return []
 
     seen: set[str] = set()
-    refs: list[str] = []
+    refs: list[PlaybookRef] = []
     for chunk in result.chunks:
-        pb_id = chunk.metadata.get("playbook_id", "")
-        if pb_id and pb_id not in seen:
-            seen.add(pb_id)
-            refs.append(pb_id)
+        ref = playbook_ref_from_metadata(chunk.metadata)
+        if ref is None:
+            continue
+        key = f"{ref.release_id}:{ref.playbook_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(ref)
     return refs
 
 

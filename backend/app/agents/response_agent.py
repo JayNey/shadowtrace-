@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.base import BaseAgent
 from app.agents.prompts.response_prompt import build_response_plan_messages
 from app.agents.rules.default_response_rules import ResponseRuleAction, get_rule_actions
-from app.core.errors import LLMError
+from app.core.errors import LLMError, ValidationError as ShadowValidationError
 from app.db import models as orm
 from app.models.action import Action
 from app.models.agent_io import (
@@ -45,6 +45,9 @@ from app.models.enums import (
     WritebackReadiness,
 )
 from app.models.playbook import Playbook
+from app.models.playbook_release import PlaybookActionTemplateSnapshot, PlaybookRef
+from app.services.playbook_approval_binding import compute_playbook_binding_hash
+from app.services.playbook_release_resolver import build_action_template_snapshot
 from app.models.tool_meta import (
     TERMINAL_DISPOSITION_TOOL as VIRTUAL_DISPOSITION_TOOL,
 )
@@ -109,6 +112,7 @@ def compute_action_fingerprint(
     source_locator_hash: str,
     execution_phase: ActionExecutionPhase,
     approved_template_hash: str,
+    playbook_binding_hash: str = "",
 ) -> str:
     material = "|".join(
         (
@@ -122,6 +126,7 @@ def compute_action_fingerprint(
             source_locator_hash,
             execution_phase.value,
             approved_template_hash,
+            playbook_binding_hash,
         )
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -214,6 +219,27 @@ class ActionCandidate:
     reason: str
     step_order: int = 0
     playbook_id: str | None = None
+    playbook_ref: PlaybookRef | None = None
+    action_template_snapshot: PlaybookActionTemplateSnapshot | None = None
+
+
+def _parse_playbook_refs(rag_output: Any) -> list[PlaybookRef]:
+    if not isinstance(rag_output, dict):
+        return []
+    raw_refs = rag_output.get("playbook_refs") or []
+    if not isinstance(raw_refs, list):
+        return []
+    refs: list[PlaybookRef] = []
+    for item in raw_refs:
+        if isinstance(item, PlaybookRef):
+            refs.append(item)
+            continue
+        if isinstance(item, dict):
+            try:
+                refs.append(PlaybookRef.model_validate(item))
+            except ValidationError:
+                continue
+    return refs
 
 
 class ResponsePolicyFilter:
@@ -485,9 +511,15 @@ def expand_rule_candidates(
     return candidates
 
 
-def candidates_from_playbook(playbook: Playbook, entities: EntitySet) -> list[ActionCandidate]:
+def candidates_from_playbook(
+    playbook: Playbook,
+    entities: EntitySet,
+    *,
+    playbook_ref: PlaybookRef | None = None,
+) -> list[ActionCandidate]:
     candidates: list[ActionCandidate] = []
     for step in playbook.steps:
+        template_snapshot = build_action_template_snapshot(step)
         if step.tool_name.startswith(_QUERY_TOOL_PREFIX):
             continue
         if step.tool_name not in baseline_tool_index():
@@ -509,6 +541,8 @@ def candidates_from_playbook(playbook: Playbook, entities: EntitySet) -> list[Ac
                     reason=step.action_name,
                     step_order=step.step_order,
                     playbook_id=playbook.playbook_id,
+                    playbook_ref=playbook_ref,
+                    action_template_snapshot=template_snapshot,
                 )
             )
             continue
@@ -525,6 +559,8 @@ def candidates_from_playbook(playbook: Playbook, entities: EntitySet) -> list[Ac
                     reason=step.action_name,
                     step_order=step.step_order,
                     playbook_id=playbook.playbook_id,
+                    playbook_ref=playbook_ref,
+                    action_template_snapshot=template_snapshot,
                 )
             )
     return candidates
@@ -604,6 +640,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         event_bus: Any | None = None,
         event_service: Any | None = None,
         playbook_kb_service: Any | None = None,
+        playbook_release_service: Any | None = None,
         capability_manifest: CapabilityManifest | None = None,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         scenario_id: str | None = None,
@@ -620,6 +657,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         )
         self.event_service = event_service
         self.playbook_kb_service = playbook_kb_service
+        self.playbook_release_service = playbook_release_service
         self.capability_manifest = capability_manifest or build_mock_capability_manifest()
         self.session_factory = session_factory
         self.scenario_id = scenario_id
@@ -747,15 +785,44 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         ctx: dict[str, Any],
     ) -> tuple[list[ActionCandidate], ResponsePlanGeneratedBy, str]:
         rag_output = ctx.get("rag_output")
-        playbook_refs = []
-        if isinstance(rag_output, dict):
-            playbook_refs = list(rag_output.get("playbook_refs") or [])
+        playbook_refs = _parse_playbook_refs(rag_output)
+
+        if playbook_refs and self.playbook_release_service is not None:
+            try:
+                playbook, release = await self.playbook_release_service.resolve_playbook_ref(
+                    playbook_refs[0],
+                    allow_retired=True,
+                )
+                pinned_ref = playbook_refs[0].model_copy(
+                    update={"lifecycle_state": release.lifecycle_state},
+                )
+                return (
+                    candidates_from_playbook(
+                        playbook,
+                        entities,
+                        playbook_ref=pinned_ref,
+                    ),
+                    ResponsePlanGeneratedBy.TEMPLATE,
+                    f"playbook {playbook.playbook_id}@{release.release_version}",
+                )
+            except ShadowValidationError as exc:
+                logger.warning(
+                    "ResponseAgent playbook resolution failed event=%s err=%s",
+                    input.event_id,
+                    exc.error_message,
+                )
+            except ValidationError as exc:
+                logger.warning(
+                    "ResponseAgent playbook ref invalid event=%s err=%s",
+                    input.event_id,
+                    exc,
+                )
 
         if playbook_refs and self.playbook_kb_service is not None:
-            playbook = await self._load_playbook(playbook_refs[0])
+            playbook = await self._load_playbook_legacy(playbook_refs[0].playbook_id)
             if playbook is not None:
                 return (
-                    candidates_from_playbook(playbook, entities),
+                    candidates_from_playbook(playbook, entities, playbook_ref=playbook_refs[0]),
                     ResponsePlanGeneratedBy.TEMPLATE,
                     f"playbook {playbook.playbook_id}",
                 )
@@ -908,6 +975,10 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 if candidate.tool_name == VIRTUAL_DISPOSITION_TOOL
                 else ActionExecutionPhase.IMMEDIATE
             )
+            binding_hash = compute_playbook_binding_hash(
+                playbook_ref=candidate.playbook_ref,
+                template_snapshot=candidate.action_template_snapshot,
+            )
             fingerprint = compute_action_fingerprint(
                 event_id=event_id,
                 plan_revision=plan_revision,
@@ -919,6 +990,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 source_locator_hash=locator_hash,
                 execution_phase=phase,
                 approved_template_hash=template_hash,
+                playbook_binding_hash=binding_hash,
             )
             action_id = derive_stable_action_id(fingerprint)
             wb_required, wb_applicable, wb_readiness, wb_block = policy_filter.writeback_fields(
@@ -956,6 +1028,8 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                 status=ActionStatus.PENDING,
                 reason=candidate.reason,
                 playbook_id=candidate.playbook_id,
+                playbook_ref=candidate.playbook_ref,
+                action_template_snapshot=candidate.action_template_snapshot,
                 provider_name=self.capability_manifest.provider_name,
                 execution_owner=owner,
                 idempotency_key=idempotency_key,
@@ -995,7 +1069,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     response_plan.model_dump(mode="json"),
                 )
 
-    async def _load_playbook(self, playbook_id: str) -> Playbook | None:
+    async def _load_playbook_legacy(self, playbook_id: str) -> Playbook | None:
         if self.playbook_kb_service is None:
             return None
         getter = getattr(self.playbook_kb_service, "get_playbook", None)
@@ -1206,6 +1280,8 @@ async def _upsert_action_row(session: AsyncSession, action: Action) -> str:
         reason=payload.get("reason"),
         impact_assessment=payload.get("impact_assessment"),
         playbook_id=payload.get("playbook_id"),
+        playbook_ref=payload.get("playbook_ref"),
+        action_template_snapshot=payload.get("action_template_snapshot"),
         provider_name=payload.get("provider_name"),
         execution_owner=payload.get("execution_owner"),
         execution_job_id=payload.get("execution_job_id"),

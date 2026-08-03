@@ -57,6 +57,7 @@ from app.models.enums import (
     SourceObjectKind,
 )
 from app.models.playbook import Playbook, PlaybookStep
+from app.models.playbook_release import PlaybookRef
 from app.models.source import SourceReference
 from app.models.workflow import FP_HIGH_THRESHOLD
 
@@ -159,6 +160,17 @@ class _FakeEventService:
 class _FailingLLM:
     async def chat(self, *args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("llm unavailable")
+
+
+def _playbook_ref(playbook_id: str) -> dict[str, str | int]:
+    return {
+        "playbook_id": playbook_id,
+        "release_id": "krel-test00000001",
+        "release_version": "v1-test",
+        "content_hash": "a" * 64,
+        "bundle_content_hash": "b" * 64,
+        "revision": 1,
+    }
 
 
 class _FakePlaybookKB:
@@ -529,7 +541,7 @@ async def test_playbook_path_used_when_available() -> None:
     event_id = f"evt-{uuid4().hex[:8]}"
     wm = _FakeWorkingMemory()
     _seed_wm(wm, event_id, triage=_triage(event_type=EventType.ACCOUNT_ANOMALY))
-    wm.values[(event_id, "rag_output")] = {"playbook_refs": ["pb-a1b2c3d4"]}
+    wm.values[(event_id, "rag_output")] = {"playbook_refs": [_playbook_ref("pb-a1b2c3d4")]}
     playbook = Playbook(
         playbook_id="pb-a1b2c3d4",
         playbook_name="Account playbook",
@@ -759,7 +771,7 @@ async def test_playbook_expands_all_entity_targets() -> None:
     event_id = f"evt-{uuid4().hex[:8]}"
     wm = _FakeWorkingMemory()
     _seed_wm(wm, event_id, triage=_triage(event_type=EventType.DATA_EXFILTRATION))
-    wm.values[(event_id, "rag_output")] = {"playbook_refs": ["pb-a1b2c3d5"]}
+    wm.values[(event_id, "rag_output")] = {"playbook_refs": [_playbook_ref("pb-a1b2c3d5")]}
     playbook = Playbook(
         playbook_id="pb-a1b2c3d5",
         playbook_name="Multi IP block",

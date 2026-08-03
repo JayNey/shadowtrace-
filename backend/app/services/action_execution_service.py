@@ -14,6 +14,7 @@ from app.core.config import get_settings
 from app.core.errors import EventNotFoundError, InvalidStateTransitionError, ValidationError
 from app.core.event_bus import EventBus
 from app.db import models as orm
+from app.db.orm.approval import ApprovalRecordORM
 from app.models.action import TERMINAL_DISPOSITION_TOOL, Action
 from app.models.disposition import SourceObjectLocator
 from app.models.enums import (
@@ -28,6 +29,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.execution import ActionExecutionJob, ExecutionActionView, ExecutionSummary
+from app.services.playbook_approval_binding import validate_approval_binding
 from app.models.ids import new_disposition_id, new_job_id
 from app.models.workflow import validate_action_status_transition
 from app.services.context_service import EventContextStore
@@ -67,6 +69,8 @@ def _action_from_row(row: orm.Action) -> Action:
             "reason": row.reason,
             "impact_assessment": row.impact_assessment,
             "playbook_id": row.playbook_id,
+            "playbook_ref": row.playbook_ref,
+            "action_template_snapshot": row.action_template_snapshot,
             "provider_name": row.provider_name,
             "execution_owner": row.execution_owner,
             "execution_job_id": row.execution_job_id,
@@ -428,6 +432,8 @@ class ActionExecutionService:
                         details={"action_id": action_id},
                     )
                 action = _action_from_row(row)
+                approval_detail = await self._latest_approval_detail(session, action.action_id)
+                validate_approval_binding(action, approval_detail)
                 if action.status is not ActionStatus.APPROVED:
                     raise InvalidStateTransitionError(
                         "action is not claimable",
@@ -513,6 +519,22 @@ class ActionExecutionService:
                 select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
             )
         return int(value or 1)
+
+    async def _latest_approval_detail(
+        self,
+        session: AsyncSession,
+        action_id: str,
+    ) -> dict[str, Any] | None:
+        row = await session.scalar(
+            select(ApprovalRecordORM.detail)
+            .where(
+                ApprovalRecordORM.action_id == action_id,
+                ApprovalRecordORM.decided_at.is_not(None),
+            )
+            .order_by(ApprovalRecordORM.decided_at.desc())
+            .limit(1)
+        )
+        return row if isinstance(row, dict) else None
 
     async def _validate_claim_preconditions(
         self,

@@ -265,6 +265,8 @@ class Action(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     impact_assessment: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     playbook_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    playbook_ref: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    action_template_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     provider_name: Mapped[str | None] = mapped_column(String, nullable=True)
     execution_owner: Mapped[str | None] = mapped_column(String, nullable=True)
     execution_job_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -1109,6 +1111,31 @@ class KnowledgeStixObjectORM(Base):
     stix_id: Mapped[str] = mapped_column(String, nullable=False)
     stix_type: Mapped[str] = mapped_column(String, nullable=False)
     external_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    object_hash: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+
+
+class PlaybookReleaseObjectORM(Base):
+    """Immutable playbook object rows bound to one playbook release (ISSUE-139 / #645)."""
+
+    __tablename__ = "playbook_release_object"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "playbook_id",
+            name="uq_playbook_release_object_release_playbook_id",
+        ),
+    )
+
+    object_row_id: Mapped[str] = mapped_column(String, primary_key=True)
+    release_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("knowledge_release.release_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    playbook_id: Mapped[str] = mapped_column(String, nullable=False)
     object_hash: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)

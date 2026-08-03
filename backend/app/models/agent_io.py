@@ -26,6 +26,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
+from app.models.playbook_release import PlaybookRef
 
 # --------------------------------------------------------------------------- #
 # Agent-IO-local enumerations (not part of intro §4.6 DECLARED_ENUMS)
@@ -321,7 +322,7 @@ class RAGOutput(BaseModel):
     attack_techniques: list[AttackTechniqueMatch] = Field(default_factory=list)
     fp_similarity: FpSimilarity = Field(default_factory=FpSimilarity)
     similar_cases: list[SimilarCaseSummary] = Field(default_factory=list)
-    playbook_refs: list[str] = Field(default_factory=list)
+    playbook_refs: list[PlaybookRef] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
     knowledge_query_plan: dict[str, Any] | None = Field(
         default=None,

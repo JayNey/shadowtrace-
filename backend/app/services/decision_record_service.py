@@ -231,6 +231,27 @@ def _enrich_agent_output(
                 if isinstance(action, dict)
                 and (action.get("action_name") or action.get("tool_name"))
             ]
+            playbook_refs = []
+            for action in actions[:50]:
+                if not isinstance(action, dict):
+                    continue
+                ref = action.get("playbook_ref")
+                if isinstance(ref, dict) and ref.get("release_id") and ref.get("playbook_id"):
+                    playbook_refs.append(
+                        {
+                            "ref_type": "playbook_ref",
+                            "ref_id": f"{ref['release_id']}:{ref['playbook_id']}",
+                        }
+                    )
+            if playbook_refs:
+                enriched.setdefault("input_refs", [])
+                if isinstance(enriched["input_refs"], list):
+                    enriched["input_refs"].extend(playbook_refs[:20])
+                first_ref = actions[0].get("playbook_ref") if actions else None
+                if isinstance(first_ref, dict):
+                    enriched["kb_version"] = str(
+                        first_ref.get("release_version") or first_ref.get("release_id") or ""
+                    )[:128]
         plan_id = output_data.get("plan_id")
         if isinstance(plan_id, str) and plan_id.strip():
             enriched.setdefault("selected_action", f"response_plan:{plan_id.strip()}")
