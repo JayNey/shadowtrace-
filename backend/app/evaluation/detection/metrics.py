@@ -226,6 +226,18 @@ def build_detection_quality_report(
     )
 
 
+def quality_report_has_blocking_metrics(
+    quality_report: EvaluationQualityReport | None,
+) -> bool:
+    """Return True when any metric is fail-closed or under-sampled."""
+    if quality_report is None:
+        return False
+    return any(
+        metric.status in {QualityMetricStatus.FAIL_CLOSED, QualityMetricStatus.INSUFFICIENT_SAMPLE}
+        for metric in quality_report.metrics
+    )
+
+
 def build_resource_summary(case_results: list[DetectionCaseResult]) -> DetectionResourceSummary:
     total_rules = total_scanned = total_errors = total_candidates = max_scanned = 0
     total_duration = max_duration = 0
@@ -263,4 +275,5 @@ __all__ = [
     "build_detection_quality_report",
     "build_resource_summary",
     "build_tenant_safety_summary",
+    "quality_report_has_blocking_metrics",
 ]

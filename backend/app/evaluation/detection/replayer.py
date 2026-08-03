@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import time
 
+from dataclasses import dataclass
+
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import ValidationError
@@ -38,6 +40,14 @@ def _replay_cache_key(replay: DetectionReplayFixture) -> str:
         f"{replay.source_tenant_id}:{replay.scope_seed.integration_instance_id}:"
         f"{replay.package_id}"
     )
+
+
+@dataclass(frozen=True, slots=True)
+class TenantIsolationProbeOutcome:
+    """Result of executing a cross-tenant isolation probe."""
+
+    foreign_candidates: list
+    execution_error: str | None = None
 
 
 class DetectionShadowReplayer:
@@ -156,7 +166,7 @@ class DetectionShadowReplayer:
         replay: DetectionReplayFixture,
         *,
         probe_tenant_id: str,
-    ) -> list:
+    ) -> TenantIsolationProbeOutcome:
         seeded = await self.seed_case(replay)
         try:
             result = await self._runtime.execute_shadow(
@@ -164,9 +174,14 @@ class DetectionShadowReplayer:
                 cutoff_at=replay.cutoff_at,
                 package_id=seeded.package_id,
             )
-        except ValidationError:
-            return []
-        return list(result.candidates)
+        except ValidationError as exc:
+            return TenantIsolationProbeOutcome(
+                foreign_candidates=[],
+                execution_error=str(exc)[:512],
+            )
+        return TenantIsolationProbeOutcome(
+            foreign_candidates=list(result.candidates),
+        )
 
 
-__all__ = ["DetectionShadowReplayer"]
+__all__ = ["DetectionShadowReplayer", "TenantIsolationProbeOutcome"]

@@ -10,5 +10,5 @@
   ],
   "min_pass_rate": 1.0,
   "max_error_count": 0,
-  "required_gate": false
+  "required_gate": true
 }

@@ -750,3 +750,203 @@ async def test_force_runtime_error_path(
     case = next(item for item in artifact.case_results if item.case_id == "forced_error_case")
     assert case.observation.runtime_errors
     assert case.observation.runtime_errors[0].error_category == "fixture_forced_error"
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_gate_fail_closed_with_shipped_threshold_manifest(
+    session_factory: async_sessionmaker[AsyncSession],
+    truth_service: EvaluationTruthService,
+    loaded_detection_dataset: tuple[object, object],
+) -> None:
+    from app.evaluation.detection.runner import DetectionEvaluationRunRequest
+    from app.evaluation.threshold import load_threshold_manifest
+
+    manifest, fixture_index = loaded_detection_dataset
+    candidate_refs_entries, candidate_set_hash = await derive_all_candidate_refs(
+        session_factory,
+        fixture_index,
+    )
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    shipped = load_threshold_manifest(DATASET_DIR / "threshold_manifest.json")
+    threshold = shipped.model_copy(
+        update={"required_scorers": [*shipped.required_scorers, "missing_scorer"]}
+    )
+    runner = DetectionEvaluationRunner(truth_service, session_factory)
+    artifact = await runner.run(
+        DetectionEvaluationRunRequest(
+            tenant_id=manifest.tenant_id,
+            dataset_id=manifest.dataset_id,
+            dataset_version=manifest.dataset_version,
+            dataset_content_hash=manifest.content_hash,
+            seed=42,
+            code_sha="abc1234",
+            cutoff_at=cutoff,
+            effective_cutoff_at=cutoff,
+            candidate_refs=candidate_refs_entries[0],
+            candidate_refs_entries=candidate_refs_entries,
+            candidate_set_hash=candidate_set_hash,
+            fixture_index=fixture_index,
+            threshold_manifest=threshold,
+        )
+    )
+    assert artifact.gate is not None
+    assert artifact.gate.verdict == GateVerdict.FAIL_CLOSED
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_insufficient_sample_fails_run(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from app.evaluation.detection.fixture_loader import parse_detection_replay_fixture
+    from app.evaluation.fixture_loader import build_truth_from_fixture_case
+    from app.models.evaluation_quality import QualityMetricStatus
+
+    benign_replay = {
+        "source_tenant_id": "tenant-det-benign-only",
+        "cutoff_at": "2026-08-01T15:30:00+00:00",
+        "scope_seed": {
+            "integration_instance_id": "inst-benign-only",
+            "connector_id": "conn-benign-only",
+        },
+        "package_id": "drpkg-det-benign-only",
+        "package_version": 1,
+        "rules": [
+            {
+                "rule_id": "rule-benign-silent",
+                "rule_version": 1,
+                "operator": "event_match",
+                "feature_contract_version": FEATURE_CONTRACT_VERSION,
+                "detection_scope_id": "scope-placeholder",
+                "window_kind": FeatureWindowKind.ONE_HOUR.value,
+                "group_key_fields": ["entity_type", "entity_id"],
+                "threshold": 99.0,
+                "severity": "medium",
+                "match_criteria": {"action": "never_matches"},
+            }
+        ],
+        "observations": [],
+    }
+    truth_service = EvaluationTruthService(session_factory)
+    fixture_index = load_detection_fixture_index(DATASET_DIR)
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+
+    for index in (1, 2):
+        case_payload = {
+            "case_id": f"benign_only_{index}",
+            "slice_expectation": {
+                "slice_type": "benign",
+                "expected_case_label": "true_negative",
+                "expected_final_verdict": "benign",
+            },
+            "label_provenance": {
+                "adjudicator": "test",
+                "adjudicated_at": "2026-08-01T08:00:00+00:00",
+                "source_kind": "test",
+            },
+            "detection_replay": benign_replay,
+        }
+        await truth_service.persist(
+            build_truth_from_fixture_case(
+                case_payload,
+                tenant_id="tenant-detection-eval",
+                dataset_id="detection_benign_only_test",
+                dataset_version="2026.08.02",
+            )
+        )
+        replay = parse_detection_replay_fixture(case_payload)
+        assert replay is not None
+        fixture_index.by_case_id[f"benign_only_{index}"] = replay
+
+    manifest = await truth_service.get_dataset_manifest(
+        tenant_id="tenant-detection-eval",
+        dataset_id="detection_benign_only_test",
+        dataset_version="2026.08.02",
+    )
+    candidate_refs = await derive_candidate_refs(
+        session_factory,
+        fixture_index.by_case_id["benign_only_1"],
+    )
+    artifact = await run_fixture_detection_evaluation(
+        truth_service,
+        session_factory,
+        manifest,
+        fixture_index,
+        seed=42,
+        code_sha="abc1234",
+        cutoff_at=cutoff,
+        effective_cutoff_at=cutoff,
+        candidate_refs=candidate_refs,
+        candidate_refs_entries=[candidate_refs],
+        candidate_set_hash="",
+    )
+    assert artifact.status == EvaluationRunStatus.FAILED
+    assert artifact.quality_report is not None
+    threat_recall = next(
+        metric for metric in artifact.quality_report.metrics if metric.metric_id == "threat_recall"
+    )
+    assert threat_recall.status == QualityMetricStatus.INSUFFICIENT_SAMPLE
+
+
+@pytest.mark.evaluation
+@pytest.mark.asyncio
+async def test_tenant_probe_validation_error_not_silent_pass(
+    session_factory: async_sessionmaker[AsyncSession],
+    truth_service: EvaluationTruthService,
+    loaded_detection_dataset: tuple[object, object],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.errors import ValidationError
+    from app.services.detection_rule_runtime import DetectionRuleRuntimeService
+
+    manifest, fixture_index = loaded_detection_dataset
+    candidate_refs_entries, candidate_set_hash = await derive_all_candidate_refs(
+        session_factory,
+        fixture_index,
+    )
+    cutoff = datetime(2026, 8, 1, 15, 30, 0, tzinfo=UTC)
+    original_execute = DetectionRuleRuntimeService.execute_shadow
+
+    async def _execute_with_probe_failure(
+        self: DetectionRuleRuntimeService,
+        *,
+        source_tenant_id: str,
+        cutoff_at: datetime,
+        package_id: str,
+    ) -> object:
+        if source_tenant_id == "tenant-det-foreign":
+            raise ValidationError("probe tenant package scope misconfigured")
+        return await original_execute(
+            self,
+            source_tenant_id=source_tenant_id,
+            cutoff_at=cutoff_at,
+            package_id=package_id,
+        )
+
+    monkeypatch.setattr(
+        DetectionRuleRuntimeService,
+        "execute_shadow",
+        _execute_with_probe_failure,
+    )
+    artifact = await run_fixture_detection_evaluation(
+        truth_service,
+        session_factory,
+        manifest,
+        fixture_index,
+        seed=42,
+        code_sha="abc1234",
+        cutoff_at=cutoff,
+        effective_cutoff_at=cutoff,
+        candidate_refs=candidate_refs_entries[0],
+        candidate_refs_entries=candidate_refs_entries,
+        candidate_set_hash=candidate_set_hash,
+    )
+    failed_probe = next(
+        probe
+        for probe in artifact.tenant_safety.probes
+        if probe.probe_id == "probe-threat-cross-tenant"
+    )
+    assert failed_probe.passed is False
+    assert failed_probe.reason_code == "probe_execution_error"
+    assert artifact.status == EvaluationRunStatus.FAILED

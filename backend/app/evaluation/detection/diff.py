@@ -1,4 +1,8 @@
-"""Detection evaluation artifact comparison (ISSUE-126 / #631 Phase A)."""
+"""Detection evaluation artifact comparison (ISSUE-126 / #631 Phase A).
+
+Phase A baseline regression only — compares pinned fixture artifacts for CI.
+Post-promotion production drift (Phase B / #629) is out of scope here.
+"""
 
 from __future__ import annotations
 

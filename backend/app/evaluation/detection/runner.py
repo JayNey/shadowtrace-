@@ -1,4 +1,10 @@
-"""Detection evaluation runner orchestration (ISSUE-126 / #631 Phase A)."""
+"""Detection evaluation runner orchestration (ISSUE-126 / #631 Phase A).
+
+Specialized runner for shadow detection replay (#626–#628). Reuses #608 shared
+components (``EvaluationTruthService``, ``evaluate_gate``, threshold manifests)
+but does not delegate to ``EvaluationRunner`` — detection cases require shadow
+runtime seeding and slice-specific scorers.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +22,7 @@ from app.evaluation.detection.metrics import (
     build_detection_quality_report,
     build_resource_summary,
     build_tenant_safety_summary,
+    quality_report_has_blocking_metrics,
 )
 from app.evaluation.detection.replayer import DetectionShadowReplayer
 from app.evaluation.detection.scorers.base import DetectionScorerContext
@@ -46,6 +53,7 @@ from app.models.evaluation_run import (
     GateVerdict,
     ScorerOutcome,
 )
+from app.models.evaluation_quality import EvaluationQualityReport
 from app.models.evaluation_truth import (
     EvaluationCaseTruth,
     EvaluationDatasetManifest,
@@ -169,8 +177,12 @@ def _run_status(
     gate_verdict: GateVerdict | None,
     errors: list[str],
     tenant_safety_failures: int,
+    *,
+    quality_report: EvaluationQualityReport | None = None,
 ) -> EvaluationRunStatus:
     if errors or tenant_safety_failures > 0:
+        return EvaluationRunStatus.FAILED
+    if quality_report_has_blocking_metrics(quality_report):
         return EvaluationRunStatus.FAILED
     if gate_verdict in {GateVerdict.FAIL, GateVerdict.FAIL_CLOSED}:
         return EvaluationRunStatus.FAILED
@@ -290,22 +302,29 @@ class DetectionEvaluationRunner:
         probe_cfg = replay.tenant_isolation_probe
         if probe_cfg is None:
             return None
-        foreign_candidates = await self._replayer.probe_tenant_isolation(
+        probe_outcome = await self._replayer.probe_tenant_isolation(
             replay,
             probe_tenant_id=probe_cfg.probe_tenant_id,
         )
-        passed = len(foreign_candidates) == 0
+        if probe_outcome.execution_error:
+            passed = False
+            reason_code = "probe_execution_error"
+            message = probe_outcome.execution_error
+        else:
+            passed = len(probe_outcome.foreign_candidates) == 0
+            reason_code = "cross_tenant_leak" if not passed else ""
+            message = (
+                f"foreign tenant saw {len(probe_outcome.foreign_candidates)} candidate(s)"
+                if not passed
+                else "no cross-tenant candidates observed"
+            )
         return DetectionTenantSafetyProbe(
             probe_id=probe_cfg.probe_id,
             source_tenant_id=replay.source_tenant_id,
             probe_tenant_id=probe_cfg.probe_tenant_id,
             passed=passed,
-            reason_code="cross_tenant_leak" if not passed else "",
-            message=(
-                f"foreign tenant saw {len(foreign_candidates)} candidate(s)"
-                if not passed
-                else "no cross-tenant candidates observed"
-            ),
+            reason_code=reason_code,
+            message=message,
         )
 
     async def run(self, request: DetectionEvaluationRunRequest) -> DetectionEvaluationArtifact:
@@ -420,7 +439,21 @@ class DetectionEvaluationRunner:
 
         tenant_safety = build_tenant_safety_summary(tenant_probes)
         tenant_failures = tenant_safety.fail_count
-        status = _run_status(aggregates, gate.verdict if gate else None, errors, tenant_failures)
+        quality_report = build_detection_quality_report(
+            dataset_id=request.dataset_id,
+            dataset_version=request.dataset_version,
+            dataset_content_hash=request.dataset_content_hash,
+            code_sha=request.code_sha,
+            release_refs=request.release_refs,
+            case_results=case_results,
+        )
+        status = _run_status(
+            aggregates,
+            gate.verdict if gate else None,
+            errors,
+            tenant_failures,
+            quality_report=quality_report,
+        )
         completed_at = datetime.now(tz=UTC)
 
         config = DetectionEvaluationConfig(
@@ -433,15 +466,6 @@ class DetectionEvaluationRunner:
             candidate_refs_entries=request.candidate_refs_entries,
             candidate_set_hash=request.candidate_set_hash,
             scorer_ids=scorer_ids,
-        )
-
-        quality_report = build_detection_quality_report(
-            dataset_id=request.dataset_id,
-            dataset_version=request.dataset_version,
-            dataset_content_hash=request.dataset_content_hash,
-            code_sha=request.code_sha,
-            release_refs=request.release_refs,
-            case_results=case_results,
         )
 
         artifact = DetectionEvaluationArtifact(
