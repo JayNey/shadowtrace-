@@ -57,12 +57,16 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
 
 down:
+	@demo_running=$$($(COMPOSE_DEMO) ps -q 2>/dev/null | wc -l | tr -d ' '); \
+	if [ "$$demo_running" != "0" ]; then \
+	  echo "NOTE: demo/observability containers still running — use 'make down-demo' after 'make up-demo'." >&2; \
+	fi
 	$(COMPOSE) down
 
 # Remove containers AND volumes (ISSUE-088 — full reset).
@@ -92,11 +96,16 @@ up-demo:
 down-demo:
 	$(COMPOSE_DEMO) down
 
-bootstrap-demo: bootstrap
+bootstrap-demo:
+	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
+	@$(MAKE) bootstrap
 
 smoke-demo:
 	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
 	@bash "$(CURDIR)/scripts/smoke_demo.sh"
+
+demo-guard-test:
+	@bash "$(CURDIR)/scripts/test_demo_mock_guard.sh"
 
 up-observability:
 	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \

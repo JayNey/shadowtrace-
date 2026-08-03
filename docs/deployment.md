@@ -49,9 +49,12 @@ make smoke-demo        # exit 0 并打印 URL/端口表
 | `make up` | core only | 关（默认） |
 | `make up WORKER=1` | core + worker | 可选，需手工启 observability |
 | `make up SCHEDULER=1` | core + scheduler | 可选 |
+| `make up-observability` | otel-collector + prometheus + grafana only | 开（无 app） |
 | `make up-demo` | core + worker + scheduler + otel-collector + prometheus + grafana | 默认开，in-network |
 
-**约束：** demo profile 为 Mock-only。存在 `.env.live` 或 `ALLOW_LIVE_SIDE_EFFECTS=true` / 非 mock `SOURCE_MODE` 时 `make up-demo` / `make smoke-demo` **fail closed**。
+**停止 demo 栈：** 使用 `make up-demo` 后必须用 **`make down-demo`** 停止 worker/scheduler/observability；仅 `make down` 只会停 core，demo 容器可能残留（Makefile 会提示）。
+
+**约束：** demo profile 为 Mock-only。存在 `.env.live` 或 `ALLOW_LIVE_SIDE_EFFECTS=true` / `AUTO_*=true` / `SIMULATION_ENABLED=false` / 非 mock `SOURCE_MODE` 时 `make up-demo` / `make bootstrap-demo` / `make smoke-demo` **fail closed**。
 
 ---
 
@@ -66,9 +69,9 @@ make smoke-demo        # exit 0 并打印 URL/端口表
 | `make bootstrap LOAD_KB=true` | 同上 + 加载知识库（约 30-60 秒） |
 | `make smoke-bootstrap` | bootstrap 后冒烟：health + ≥3 事件 + 前端反代 |
 | `make up-demo` | **Mock 全栈 demo**（core + worker + scheduler + observability，ISSUE-141） |
-| `make bootstrap-demo` | 同 `make bootstrap`（demo 栈迁移/种子） |
-| `make smoke-demo` | demo 全栈冒烟：bootstrap + worker + scheduler + Grafana/Prometheus |
-| `make down-demo` | 停止 demo 栈（含 observability） |
+| `make bootstrap-demo` | 同 `make bootstrap`（demo guard + 迁移/种子） |
+| `make smoke-demo` | demo 全栈冒烟：bootstrap + worker + scheduler + OTEL/Prometheus/Grafana |
+| `make down-demo` | 停止 demo 栈（含 worker/scheduler/observability）——**up-demo 后必用** |
 | `make up-observability` | 仅启动 OTEL/Prometheus/Grafana（不含 app） |
 | `make down-observability` | 停止 observability 栈 |
 | `make down` | 停止并移除容器（**数据卷保留**） |

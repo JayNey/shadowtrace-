@@ -21,6 +21,13 @@ _live_conflict() {
 
 _live_conflict "ALLOW_LIVE_SIDE_EFFECTS" "${ALLOW_LIVE_SIDE_EFFECTS:-false}"
 _live_conflict "ALLOW_XDR_WRITEBACK" "${ALLOW_XDR_WRITEBACK:-false}"
+_live_conflict "AUTO_INVESTIGATE_ENABLED" "${AUTO_INVESTIGATE_ENABLED:-false}"
+_live_conflict "AUTO_RESPONSE_ENABLED" "${AUTO_RESPONSE_ENABLED:-false}"
+
+if [[ -n "${SIMULATION_ENABLED:-}" && "${SIMULATION_ENABLED}" != "true" ]]; then
+  echo "[demo-guard] ERROR: SIMULATION_ENABLED=${SIMULATION_ENABLED}; demo requires true." >&2
+  exit 1
+fi
 
 if [[ -n "${SOURCE_MODE:-}" && "${SOURCE_MODE}" != "mock_xdr" ]]; then
   echo "[demo-guard] ERROR: SOURCE_MODE=${SOURCE_MODE}; demo requires mock_xdr." >&2

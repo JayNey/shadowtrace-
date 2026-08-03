@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Full mock demo stack smoke (ISSUE-141 / #647).
 #
-# Prerequisites: make up-demo && make bootstrap
-# Checks: core health/events, Celery worker, ingestion scheduler, observability URLs.
+# Prerequisites: make up-demo && make bootstrap-demo
+# Checks: core health/events, Celery worker, ingestion scheduler, observability URLs + OTEL path.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,12 +40,18 @@ print_demo_urls() {
 EOF
 }
 
-echo "[smoke-demo] core bootstrap smoke ..."
-BACKEND_PORT="${BACKEND_PORT}" FRONTEND_PORT="${FRONTEND_PORT}" MOCK_XDR_PORT="${MOCK_XDR_PORT}" \
-  bash "${ROOT}/scripts/smoke_bootstrap.sh"
+echo "[smoke-demo] core bootstrap smoke (requires make bootstrap-demo) ..."
+if ! BACKEND_PORT="${BACKEND_PORT}" FRONTEND_PORT="${FRONTEND_PORT}" MOCK_XDR_PORT="${MOCK_XDR_PORT}" \
+  bash "${ROOT}/scripts/smoke_bootstrap.sh"; then
+  echo "[smoke-demo] ERROR: bootstrap smoke failed — run: make bootstrap-demo" >&2
+  exit 1
+fi
 
 echo "[smoke-demo] celery investigation worker ..."
-COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" BACKEND_PORT="${BACKEND_PORT}" \
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" \
+  COMPOSE_PROFILE="demo" \
+  OBS_COMPOSE_FILE="${OBS_COMPOSE_FILE}" \
+  BACKEND_PORT="${BACKEND_PORT}" \
   bash "${ROOT}/scripts/celery_worker_smoke.sh"
 
 echo "[smoke-demo] ingestion scheduler worker ..."
@@ -74,7 +80,31 @@ echo "  ok: scheduler beat + ingestion worker healthy"
 echo "[smoke-demo] observability stack ..."
 curl -sf "http://127.0.0.1:${PROMETHEUS_PORT}/-/ready" >/dev/null
 curl -sf "http://127.0.0.1:${GRAFANA_PORT}/api/health" >/dev/null
-echo "  ok: prometheus + grafana reachable"
+curl -sf "http://127.0.0.1:${PROMETHEUS_PORT}/api/v1/query?query=up%7Bjob%3D%22otel-collector%22%7D" \
+  | python3 -c "
+import json, sys
+payload = json.load(sys.stdin)
+results = payload.get('data', {}).get('result', [])
+assert results, payload
+value = results[0].get('value', [None, None])[1]
+assert value == '1', payload
+print('  ok: prometheus scrapes otel-collector')
+"
+
+backend_id="$(compose_cmd ps -q backend 2>/dev/null | head -1 || true)"
+if [[ -z "${backend_id}" ]]; then
+  echo "[smoke-demo] ERROR: backend container not found" >&2
+  exit 1
+fi
+docker exec "${backend_id}" sh -c \
+  'test "${OTEL_ENABLED}" = "true" && test "${OTEL_EXPORTER_OTLP_ENDPOINT}" = "http://otel-collector:4318"'
+http_code="$(docker exec "${backend_id}" curl -sS --connect-timeout 5 -o /dev/null -w "%{http_code}" \
+  "http://otel-collector:4318/v1/traces" || true)"
+if [[ "${http_code}" != "405" && "${http_code}" != "404" && "${http_code}" != "200" ]]; then
+  echo "[smoke-demo] ERROR: backend cannot reach otel-collector in-network (HTTP ${http_code})" >&2
+  exit 1
+fi
+echo "  ok: backend OTEL in-network (${http_code} from collector)"
 
 print_demo_urls
 echo "[smoke-demo] full demo smoke passed"
