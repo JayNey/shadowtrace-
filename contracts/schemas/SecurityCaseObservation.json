@@ -1,0 +1,89 @@
+{
+  "additionalProperties": false,
+  "description": "Structured security replay observation for #642 security slice scorers.",
+  "properties": {
+    "expectation_kind": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Expectation Kind",
+      "type": "string"
+    },
+    "cross_tenant_denied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Cross Tenant Denied"
+    },
+    "grant_forgery_rejected": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Grant Forgery Rejected"
+    },
+    "grant_budget_race_rejected": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Grant Budget Race Rejected"
+    },
+    "side_effect_blocked": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Side Effect Blocked"
+    },
+    "prompt_injection_contained": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Prompt Injection Contained"
+    },
+    "production_store_mutated": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Production Store Mutated"
+    }
+  },
+  "required": [
+    "expectation_kind"
+  ],
+  "title": "SecurityCaseObservation",
+  "type": "object"
+}

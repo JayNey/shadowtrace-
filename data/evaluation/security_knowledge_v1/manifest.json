@@ -1,0 +1,7 @@
+{
+  "dataset_id": "security_knowledge_v1",
+  "dataset_version": "2026.08.01",
+  "tenant_id": "tenant-evaluation-security-knowledge",
+  "schema_version": "1.0",
+  "content_hash": "00301710c03c3e0864fc64bf79db859ed8527d2e2dcba5f3744e5276ab035a84"
+}

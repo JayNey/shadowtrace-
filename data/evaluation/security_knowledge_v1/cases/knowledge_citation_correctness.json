@@ -1,0 +1,36 @@
+{
+  "case_id": "knowledge_citation_correctness",
+  "case_version": 1,
+  "source_tenant_id": "tenant-alpha",
+  "source_product": "mock_xdr",
+  "connector_id": "mock-xdr-primary",
+  "observation_refs": [
+    {
+      "ref_type": "knowledge_fixture",
+      "ref_id": "citation_bundle",
+      "source_product": "mock_xdr",
+      "connector_id": "mock-xdr-primary"
+    }
+  ],
+  "slice_expectation": {
+    "slice_type": "knowledge",
+    "schema_version": "1.1",
+    "expectation_kind": "citation_correctness",
+    "critical": false,
+    "expected_citation_chunk_ids": ["chunk-playbook-001", "chunk-playbook-002"],
+    "expected_degraded": false,
+    "expected_empty_results": false,
+    "replay_variant": "pass"
+  },
+  "label_provenance": {
+    "adjudicator": "evaluation-curator",
+    "adjudicated_at": "2026-08-01T08:00:00+00:00",
+    "source_kind": "imported_fixture",
+    "revision_notes": "Deterministic citation correctness case."
+  },
+  "operational_mapping": {
+    "mapping_version": "1.0",
+    "notes": "Shadow replay anchor only; not ground truth."
+  },
+  "retention_policy": "evaluation_standard"
+}

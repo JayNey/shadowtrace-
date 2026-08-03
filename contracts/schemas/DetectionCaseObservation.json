@@ -536,11 +536,13 @@
       "type": "string"
     },
     "SliceType": {
-      "description": "First-round evaluation slices; extend via reviewed schema revision only.",
+      "description": "Evaluation slices; extend via reviewed schema revision only (#618 / #642).",
       "enum": [
         "threat",
         "benign",
-        "unevaluable"
+        "unevaluable",
+        "security",
+        "knowledge"
       ],
       "title": "SliceType",
       "type": "string"

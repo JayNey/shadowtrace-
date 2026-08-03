@@ -39,6 +39,8 @@ from app.models.evaluation_truth import (
     EvaluationCaseTruth,
     EvaluationDatasetManifest,
     EvaluationTruthQuery,
+    KnowledgeSliceExpectation,
+    SecuritySliceExpectation,
     SliceType,
     UnevaluableSliceExpectation,
 )
@@ -47,6 +49,15 @@ from app.services.evaluation_truth_service import EvaluationTruthService
 
 def _slice_type(truth: EvaluationCaseTruth) -> SliceType:
     return SliceType(truth.slice_expectation.slice_type)
+
+
+def _case_critical(truth: EvaluationCaseTruth) -> bool:
+    expectation = truth.slice_expectation
+    if isinstance(expectation, SecuritySliceExpectation):
+        return expectation.critical
+    if isinstance(expectation, KnowledgeSliceExpectation):
+        return expectation.critical
+    return False
 
 
 def _scorer_failure_status(
@@ -316,6 +327,7 @@ class EvaluationRunner:
                         scorer_results,
                         required_scorer_ids=required_for_case,
                     ),
+                    critical=_case_critical(truth),
                     unevaluable_reason=(
                         truth.slice_expectation.reason_code
                         if isinstance(truth.slice_expectation, UnevaluableSliceExpectation)

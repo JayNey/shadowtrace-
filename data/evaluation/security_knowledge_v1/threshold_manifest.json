@@ -1,0 +1,14 @@
+{
+  "manifest_version": "2026.08.01",
+  "dataset_id": "security_knowledge_v1",
+  "dataset_version": "2026.08.01",
+  "required_scorers": [
+    "security_gate",
+    "knowledge_retrieval"
+  ],
+  "min_pass_rate": 1.0,
+  "max_error_count": 0,
+  "max_unevaluable_count": 0,
+  "required_gate": false,
+  "require_critical_pass": true
+}

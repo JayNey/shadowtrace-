@@ -57,6 +57,8 @@ def default_scorer_registry() -> ScorerRegistry:
         IncidentGroupingConsistencyScorer,
         SeverityAlignmentScorer,
     )
+    from app.evaluation.scorers.knowledge_scorers import KnowledgeSliceScorer
+    from app.evaluation.scorers.security_scorers import SecuritySliceScorer
     from app.evaluation.scorers.slice_scorers import (
         BenignSliceScorer,
         ThreatSliceScorer,
@@ -68,6 +70,8 @@ def default_scorer_registry() -> ScorerRegistry:
         (ThreatSliceScorer(), True),
         (BenignSliceScorer(), True),
         (UnevaluableSliceScorer(), True),
+        (SecuritySliceScorer(), True),
+        (KnowledgeSliceScorer(), True),
         (SeverityAlignmentScorer(), False),
         (AttackTechniqueCoverageScorer(), False),
         (IncidentGroupingConsistencyScorer(), False),

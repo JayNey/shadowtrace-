@@ -1,0 +1,107 @@
+{
+  "$defs": {
+    "KnowledgeExpectationKind": {
+      "description": "Typed knowledge slice expectations (Phase A deterministic cases).",
+      "enum": [
+        "release_pinned_retrieval",
+        "citation_correctness",
+        "tenant_filter",
+        "degraded_no_release"
+      ],
+      "title": "KnowledgeExpectationKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Knowledge retrieval expectations \u2014 release pinning, citation, filters.",
+  "properties": {
+    "slice_type": {
+      "const": "knowledge",
+      "default": "knowledge",
+      "title": "Slice Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.1",
+      "minLength": 1,
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "expectation_kind": {
+      "$ref": "#/$defs/KnowledgeExpectationKind"
+    },
+    "critical": {
+      "default": false,
+      "title": "Critical",
+      "type": "boolean"
+    },
+    "expected_release_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Release Id"
+    },
+    "expected_plan_hash": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "minLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Plan Hash"
+    },
+    "expected_citation_chunk_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Expected Citation Chunk Ids",
+      "type": "array"
+    },
+    "expected_tenant_filter_applied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Tenant Filter Applied"
+    },
+    "expected_degraded": {
+      "default": false,
+      "title": "Expected Degraded",
+      "type": "boolean"
+    },
+    "expected_empty_results": {
+      "default": false,
+      "title": "Expected Empty Results",
+      "type": "boolean"
+    },
+    "replay_variant": {
+      "default": "pass",
+      "maxLength": 32,
+      "minLength": 1,
+      "title": "Replay Variant",
+      "type": "string"
+    }
+  },
+  "required": [
+    "expectation_kind"
+  ],
+  "title": "KnowledgeSliceExpectation",
+  "type": "object"
+}

@@ -127,8 +127,10 @@ from app.models.evaluation_truth import (
     EvaluationDatasetManifest,
     EvaluationTruthListResult,
     EvaluationTruthQuery,
+    KnowledgeSliceExpectation,
     LabelProvenance,
     OperationalTruthMapping,
+    SecuritySliceExpectation,
     ThreatSliceExpectation,
     TruthObservationRef,
     UnevaluableSliceExpectation,
@@ -141,6 +143,8 @@ from app.models.evaluation_run import (
     EvaluationRunArtifact,
     EvaluationRunConfig,
     EvaluationThresholdManifest,
+    KnowledgeCaseObservation,
+    SecurityCaseObservation,
 )
 from app.models.evaluation_quality import (
     ConfidenceInterval,
@@ -410,6 +414,8 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "ThreatSliceExpectation": ThreatSliceExpectation,
     "BenignSliceExpectation": BenignSliceExpectation,
     "UnevaluableSliceExpectation": UnevaluableSliceExpectation,
+    "SecuritySliceExpectation": SecuritySliceExpectation,
+    "KnowledgeSliceExpectation": KnowledgeSliceExpectation,
     "TruthObservationRef": TruthObservationRef,
     # evaluation quality report (ISSUE-113 Phase B)
     "EvaluationQualityReport": EvaluationQualityReport,
@@ -425,6 +431,8 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     "EvaluationGateResult": EvaluationGateResult,
     "EvaluationQuarantinePolicy": EvaluationQuarantinePolicy,
     "EvaluationThresholdManifest": EvaluationThresholdManifest,
+    "SecurityCaseObservation": SecurityCaseObservation,
+    "KnowledgeCaseObservation": KnowledgeCaseObservation,
     # embedding / vector contract (ISSUE-140)
     "EmbeddingRelease": EmbeddingRelease,
     "VectorRecordIdentity": VectorRecordIdentity,

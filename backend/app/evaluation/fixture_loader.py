@@ -14,8 +14,10 @@ from app.models.evaluation_truth import (
     BenignSliceExpectation,
     EvaluationCaseTruth,
     EvaluationDatasetManifest,
+    KnowledgeSliceExpectation,
     LabelProvenance,
     OperationalTruthMapping,
+    SecuritySliceExpectation,
     SliceType,
     ThreatSliceExpectation,
     TruthObservationRef,
@@ -29,11 +31,20 @@ from app.services.evaluation_truth_service import (
 
 _SLICE_BUILDERS: dict[
     str,
-    Callable[[Any], ThreatSliceExpectation | BenignSliceExpectation | UnevaluableSliceExpectation],
+    Callable[
+        [Any],
+        ThreatSliceExpectation
+        | BenignSliceExpectation
+        | UnevaluableSliceExpectation
+        | SecuritySliceExpectation
+        | KnowledgeSliceExpectation,
+    ],
 ] = {
     SliceType.THREAT.value: ThreatSliceExpectation.model_validate,
     SliceType.BENIGN.value: BenignSliceExpectation.model_validate,
     SliceType.UNEVALUABLE.value: UnevaluableSliceExpectation.model_validate,
+    SliceType.SECURITY.value: SecuritySliceExpectation.model_validate,
+    SliceType.KNOWLEDGE.value: KnowledgeSliceExpectation.model_validate,
 }
 
 

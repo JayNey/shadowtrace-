@@ -166,6 +166,8 @@
           "discriminator": {
             "mapping": {
               "benign": "#/$defs/BenignSliceExpectation",
+              "knowledge": "#/$defs/KnowledgeSliceExpectation",
+              "security": "#/$defs/SecuritySliceExpectation",
               "threat": "#/$defs/ThreatSliceExpectation",
               "unevaluable": "#/$defs/UnevaluableSliceExpectation"
             },
@@ -180,6 +182,12 @@
             },
             {
               "$ref": "#/$defs/UnevaluableSliceExpectation"
+            },
+            {
+              "$ref": "#/$defs/SecuritySliceExpectation"
+            },
+            {
+              "$ref": "#/$defs/KnowledgeSliceExpectation"
             }
           ],
           "title": "Slice Expectation"
@@ -293,6 +301,111 @@
       "title": "FinalVerdict",
       "type": "string"
     },
+    "KnowledgeExpectationKind": {
+      "description": "Typed knowledge slice expectations (Phase A deterministic cases).",
+      "enum": [
+        "release_pinned_retrieval",
+        "citation_correctness",
+        "tenant_filter",
+        "degraded_no_release"
+      ],
+      "title": "KnowledgeExpectationKind",
+      "type": "string"
+    },
+    "KnowledgeSliceExpectation": {
+      "additionalProperties": false,
+      "description": "Knowledge retrieval expectations — release pinning, citation, filters.",
+      "properties": {
+        "slice_type": {
+          "const": "knowledge",
+          "default": "knowledge",
+          "title": "Slice Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.1",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "expectation_kind": {
+          "$ref": "#/$defs/KnowledgeExpectationKind"
+        },
+        "critical": {
+          "default": false,
+          "title": "Critical",
+          "type": "boolean"
+        },
+        "expected_release_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Release Id"
+        },
+        "expected_plan_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Plan Hash"
+        },
+        "expected_citation_chunk_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Citation Chunk Ids",
+          "type": "array"
+        },
+        "expected_tenant_filter_applied": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Tenant Filter Applied"
+        },
+        "expected_degraded": {
+          "default": false,
+          "title": "Expected Degraded",
+          "type": "boolean"
+        },
+        "expected_empty_results": {
+          "default": false,
+          "title": "Expected Empty Results",
+          "type": "boolean"
+        },
+        "replay_variant": {
+          "default": "pass",
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Replay Variant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectation_kind"
+      ],
+      "title": "KnowledgeSliceExpectation",
+      "type": "object"
+    },
     "LabelProvenance": {
       "additionalProperties": false,
       "description": "Who adjudicated the label and when — append-only across revisions.",
@@ -386,6 +499,109 @@
         }
       },
       "title": "OperationalTruthMapping",
+      "type": "object"
+    },
+    "SecurityExpectationKind": {
+      "description": "Typed security slice expectations (Phase A deterministic cases).",
+      "enum": [
+        "cross_tenant_denied",
+        "grant_forgery_rejected",
+        "side_effect_blocked",
+        "prompt_injection_contained",
+        "production_isolation"
+      ],
+      "title": "SecurityExpectationKind",
+      "type": "string"
+    },
+    "SecuritySliceExpectation": {
+      "additionalProperties": false,
+      "description": "Security gate expectations — cross-tenant, grant, side-effect, isolation.",
+      "properties": {
+        "slice_type": {
+          "const": "security",
+          "default": "security",
+          "title": "Slice Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.1",
+          "minLength": 1,
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "expectation_kind": {
+          "$ref": "#/$defs/SecurityExpectationKind"
+        },
+        "critical": {
+          "default": true,
+          "title": "Critical",
+          "type": "boolean"
+        },
+        "expected_cross_tenant_denied": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Cross Tenant Denied"
+        },
+        "expected_grant_forgery_rejected": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Grant Forgery Rejected"
+        },
+        "expected_side_effect_blocked": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Side Effect Blocked"
+        },
+        "expected_prompt_injection_contained": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Prompt Injection Contained"
+        },
+        "expected_production_store_mutated": {
+          "default": false,
+          "title": "Expected Production Store Mutated",
+          "type": "boolean"
+        },
+        "replay_variant": {
+          "default": "pass",
+          "maxLength": 32,
+          "minLength": 1,
+          "title": "Replay Variant",
+          "type": "string"
+        }
+      },
+      "required": [
+        "expectation_kind"
+      ],
+      "title": "SecuritySliceExpectation",
       "type": "object"
     },
     "ThreatSliceExpectation": {

@@ -15,6 +15,7 @@ from app.models.evaluation_run import (
     EvaluationGateDiff,
     EvaluationGateResult,
     EvaluationQuarantinePolicy,
+    EvaluationRunStatus,
     EvaluationThresholdManifest,
     EvaluationThresholdRule,
     GateVerdict,
@@ -146,6 +147,32 @@ def _quarantine_diff(
     )
 
 
+def _collect_critical_failures(
+    case_results: list[EvaluationCaseResult],
+    *,
+    require_critical_pass: bool,
+) -> list[EvaluationGateDiff]:
+    if not require_critical_pass:
+        return []
+    diffs: list[EvaluationGateDiff] = []
+    for case in case_results:
+        if not case.critical:
+            continue
+        if case.case_status != EvaluationRunStatus.COMPLETED:
+            diffs.append(
+                EvaluationGateDiff(
+                    field=f"critical:{case.case_id}",
+                    expected=EvaluationRunStatus.COMPLETED.value,
+                    actual=case.case_status.value,
+                    reason=(
+                        f"critical case {case.case_id} did not complete successfully "
+                        f"(slice={case.slice_type.value})"
+                    ),
+                )
+            )
+    return diffs
+
+
 def _collect_threshold_diffs(
     manifest: EvaluationThresholdManifest,
     *,
@@ -222,10 +249,30 @@ def _collect_threshold_diffs(
             )
         )
 
+    if (
+        manifest.max_unevaluable_count is not None
+        and aggregates.unevaluable_count > manifest.max_unevaluable_count
+    ):
+        diffs.append(
+            EvaluationGateDiff(
+                field="unevaluable_count",
+                expected=manifest.max_unevaluable_count,
+                actual=aggregates.unevaluable_count,
+                reason="unevaluable_count above manifest maximum",
+            )
+        )
+
     for rule in manifest.thresholds:
         delta = _evaluate_rule(rule, aggregates)
         if delta is not None:
             diffs.append(delta)
+
+    diffs.extend(
+        _collect_critical_failures(
+            case_results,
+            require_critical_pass=manifest.require_critical_pass,
+        )
+    )
 
     return diffs
 

@@ -80,6 +80,28 @@
           "maxLength": 512,
           "title": "Replay Notes",
           "type": "string"
+        },
+        "security": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SecurityCaseObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "knowledge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/KnowledgeCaseObservation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -135,6 +157,106 @@
       "title": "EvaluationScorerResult",
       "type": "object"
     },
+    "KnowledgeCaseObservation": {
+      "additionalProperties": false,
+      "description": "Structured knowledge replay observation for #642 knowledge slice scorers.",
+      "properties": {
+        "expectation_kind": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Expectation Kind",
+          "type": "string"
+        },
+        "release_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Release Id"
+        },
+        "plan_hash": {
+          "anyOf": [
+            {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan Hash"
+        },
+        "tenant_filter_applied": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tenant Filter Applied"
+        },
+        "citation_chunk_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Citation Chunk Ids",
+          "type": "array"
+        },
+        "degraded": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Degraded"
+        },
+        "chunk_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Chunk Count"
+        },
+        "empty_results": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Empty Results"
+        }
+      },
+      "required": [
+        "expectation_kind"
+      ],
+      "title": "KnowledgeCaseObservation",
+      "type": "object"
+    },
     "ScorerOutcome": {
       "description": "Typed scorer result; unevaluable/error never count as pass.",
       "enum": [
@@ -147,12 +269,91 @@
       "title": "ScorerOutcome",
       "type": "string"
     },
+    "SecurityCaseObservation": {
+      "additionalProperties": false,
+      "description": "Structured security replay observation for #642 security slice scorers.",
+      "properties": {
+        "expectation_kind": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Expectation Kind",
+          "type": "string"
+        },
+        "cross_tenant_denied": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cross Tenant Denied"
+        },
+        "grant_forgery_rejected": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Grant Forgery Rejected"
+        },
+        "side_effect_blocked": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Side Effect Blocked"
+        },
+        "prompt_injection_contained": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Prompt Injection Contained"
+        },
+        "production_store_mutated": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Production Store Mutated"
+        }
+      },
+      "required": [
+        "expectation_kind"
+      ],
+      "title": "SecurityCaseObservation",
+      "type": "object"
+    },
     "SliceType": {
-      "description": "First-round evaluation slices; extend via reviewed schema revision only.",
+      "description": "Evaluation slices; extend via reviewed schema revision only (#618 / #642).",
       "enum": [
         "threat",
         "benign",
-        "unevaluable"
+        "unevaluable",
+        "security",
+        "knowledge"
       ],
       "title": "SliceType",
       "type": "string"
@@ -209,6 +410,12 @@
       ],
       "default": null,
       "title": "Unevaluable Reason"
+    },
+    "critical": {
+      "default": false,
+      "description": "When true, gate may fail closed regardless of aggregate pass_rate (#642).",
+      "title": "Critical",
+      "type": "boolean"
     }
   },
   "required": [

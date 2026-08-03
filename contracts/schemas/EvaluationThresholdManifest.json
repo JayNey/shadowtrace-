@@ -116,9 +116,29 @@
       "title": "Max Error Count",
       "type": "integer"
     },
+    "max_unevaluable_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "When set, fail closed when unevaluable_count exceeds this ceiling.",
+      "title": "Max Unevaluable Count"
+    },
     "required_gate": {
       "default": false,
       "title": "Required Gate",
+      "type": "boolean"
+    },
+    "require_critical_pass": {
+      "default": true,
+      "description": "Fail closed when any critical case does not complete successfully.",
+      "title": "Require Critical Pass",
       "type": "boolean"
     },
     "quarantine": {

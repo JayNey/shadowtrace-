@@ -1,0 +1,100 @@
+{
+  "additionalProperties": false,
+  "description": "Structured knowledge replay observation for #642 knowledge slice scorers.",
+  "properties": {
+    "expectation_kind": {
+      "maxLength": 64,
+      "minLength": 1,
+      "title": "Expectation Kind",
+      "type": "string"
+    },
+    "release_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Release Id"
+    },
+    "plan_hash": {
+      "anyOf": [
+        {
+          "maxLength": 64,
+          "minLength": 64,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Plan Hash"
+    },
+    "tenant_filter_applied": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tenant Filter Applied"
+    },
+    "citation_chunk_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Citation Chunk Ids",
+      "type": "array"
+    },
+    "degraded": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Degraded"
+    },
+    "chunk_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Chunk Count"
+    },
+    "empty_results": {
+      "anyOf": [
+        {
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Empty Results"
+    }
+  },
+  "required": [
+    "expectation_kind"
+  ],
+  "title": "KnowledgeCaseObservation",
+  "type": "object"
+}

@@ -75,6 +75,35 @@ class EvaluationRunConfig(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+class SecurityCaseObservation(BaseModel):
+    """Structured security replay observation for #642 security slice scorers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expectation_kind: str = Field(..., min_length=1, max_length=64)
+    cross_tenant_denied: bool | None = None
+    grant_forgery_rejected: bool | None = None
+    grant_budget_race_rejected: bool | None = None
+    side_effect_blocked: bool | None = None
+    prompt_injection_contained: bool | None = None
+    production_store_mutated: bool | None = None
+
+
+class KnowledgeCaseObservation(BaseModel):
+    """Structured knowledge replay observation for #642 knowledge slice scorers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expectation_kind: str = Field(..., min_length=1, max_length=64)
+    release_id: str | None = Field(default=None, max_length=128)
+    plan_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    tenant_filter_applied: bool | None = None
+    citation_chunk_ids: list[str] = Field(default_factory=list)
+    degraded: bool | None = None
+    chunk_count: int | None = Field(default=None, ge=0)
+    empty_results: bool | None = None
+
+
 class CaseObservation(BaseModel):
     """Deterministic mock-replay observation for one evaluation case."""
 
@@ -89,6 +118,8 @@ class CaseObservation(BaseModel):
     observed_incident_group_id: str | None = Field(default=None, max_length=128)
     observation_available: bool = True
     replay_notes: str = Field(default="", max_length=512)
+    security: SecurityCaseObservation | None = None
+    knowledge: KnowledgeCaseObservation | None = None
 
 
 class EvaluationScorerResult(BaseModel):
@@ -117,6 +148,10 @@ class EvaluationCaseResult(BaseModel):
     scorer_results: list[EvaluationScorerResult] = Field(default_factory=list)
     case_status: EvaluationRunStatus
     unevaluable_reason: str | None = None
+    critical: bool = Field(
+        default=False,
+        description="When true, gate may fail closed regardless of aggregate pass_rate (#642).",
+    )
 
 
 class EvaluationAggregateMetrics(BaseModel):
@@ -194,7 +229,16 @@ class EvaluationThresholdManifest(BaseModel):
     thresholds: list[EvaluationThresholdRule] = Field(default_factory=list)
     min_pass_rate: float = Field(default=1.0, ge=0.0, le=1.0)
     max_error_count: int = Field(default=0, ge=0)
+    max_unevaluable_count: int | None = Field(
+        default=None,
+        ge=0,
+        description="When set, fail closed when unevaluable_count exceeds this ceiling.",
+    )
     required_gate: bool = Field(default=False)
+    require_critical_pass: bool = Field(
+        default=True,
+        description="Fail closed when any critical case does not complete successfully.",
+    )
     quarantine: EvaluationQuarantinePolicy | None = None
 
 
@@ -238,7 +282,9 @@ __all__ = [
     "EvaluationThresholdManifest",
     "EvaluationThresholdRule",
     "GateVerdict",
+    "KnowledgeCaseObservation",
     "ScorerOutcome",
+    "SecurityCaseObservation",
 ]
 
 

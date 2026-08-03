@@ -27,8 +27,10 @@ from app.models.evaluation_truth import (
     EvaluationDatasetManifest,
     EvaluationTruthListResult,
     EvaluationTruthQuery,
+    KnowledgeSliceExpectation,
     LabelProvenance,
     OperationalTruthMapping,
+    SecuritySliceExpectation,
     SliceExpectation,
     SliceType,
     ThreatSliceExpectation,
@@ -108,7 +110,14 @@ def _to_mapping(value: Any) -> dict[str, Any]:
 
 def _parse_slice_expectation(raw: Any) -> SliceExpectation:
     if isinstance(
-        raw, (ThreatSliceExpectation, BenignSliceExpectation, UnevaluableSliceExpectation)
+        raw,
+        (
+            ThreatSliceExpectation,
+            BenignSliceExpectation,
+            UnevaluableSliceExpectation,
+            SecuritySliceExpectation,
+            KnowledgeSliceExpectation,
+        ),
     ):
         return raw
     if not isinstance(raw, dict):
@@ -120,6 +129,10 @@ def _parse_slice_expectation(raw: Any) -> SliceExpectation:
         return BenignSliceExpectation.model_validate(raw)
     if slice_type == SliceType.UNEVALUABLE.value:
         return UnevaluableSliceExpectation.model_validate(raw)
+    if slice_type == SliceType.SECURITY.value:
+        return SecuritySliceExpectation.model_validate(raw)
+    if slice_type == SliceType.KNOWLEDGE.value:
+        return KnowledgeSliceExpectation.model_validate(raw)
     raise ValidationError(f"unsupported slice_type: {slice_type!r}")
 
 

@@ -113,7 +113,7 @@ def _threat_truth(*, tenant_id: str, case_id: str):
 
 def test_slice_expectation_discriminated_union_rejects_unknown_type() -> None:
     with pytest.raises(ValidationError):
-        _parse_slice_expectation({"slice_type": "security", "schema_version": "1.0"})
+        _parse_slice_expectation({"slice_type": "agentic", "schema_version": "1.0"})
 
 
 def test_unevaluable_slice_does_not_default_to_benign() -> None:

@@ -24,11 +24,33 @@ SLICE_EXPECTATION_SCHEMA_VERSION_1_1 = "1.1"
 
 
 class SliceType(StrEnum):
-    """First-round evaluation slices; extend via reviewed schema revision only."""
+    """Evaluation slices; extend via reviewed schema revision only (#618 / #642)."""
 
     THREAT = "threat"
     BENIGN = "benign"
     UNEVALUABLE = "unevaluable"
+    SECURITY = "security"
+    KNOWLEDGE = "knowledge"
+
+
+class SecurityExpectationKind(StrEnum):
+    """Typed security slice expectations (Phase A deterministic cases)."""
+
+    CROSS_TENANT_DENIED = "cross_tenant_denied"
+    GRANT_FORGERY_REJECTED = "grant_forgery_rejected"
+    GRANT_BUDGET_RACE = "grant_budget_race"
+    SIDE_EFFECT_BLOCKED = "side_effect_blocked"
+    PROMPT_INJECTION_CONTAINED = "prompt_injection_contained"
+    PRODUCTION_ISOLATION = "production_isolation"
+
+
+class KnowledgeExpectationKind(StrEnum):
+    """Typed knowledge slice expectations (Phase A deterministic cases)."""
+
+    RELEASE_PINNED_RETRIEVAL = "release_pinned_retrieval"
+    CITATION_CORRECTNESS = "citation_correctness"
+    TENANT_FILTER = "tenant_filter"
+    DEGRADED_NO_RELEASE = "degraded_no_release"
 
 
 class TruthObservationRef(BaseModel):
@@ -124,8 +146,48 @@ class UnevaluableSliceExpectation(BaseModel):
         return value[:512]
 
 
+class SecuritySliceExpectation(BaseModel):
+    """Security gate expectations — cross-tenant, grant, side-effect, isolation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slice_type: Literal["security"] = "security"
+    schema_version: str = Field(default=SLICE_EXPECTATION_SCHEMA_VERSION_1_1, min_length=1)
+    expectation_kind: SecurityExpectationKind
+    critical: bool = Field(default=True)
+    expected_cross_tenant_denied: bool | None = None
+    expected_grant_forgery_rejected: bool | None = None
+    expected_grant_budget_race_rejected: bool | None = None
+    expected_side_effect_blocked: bool | None = None
+    expected_prompt_injection_contained: bool | None = None
+    expected_production_store_mutated: bool = False
+    replay_variant: str = Field(default="pass", min_length=1, max_length=32)
+
+
+class KnowledgeSliceExpectation(BaseModel):
+    """Knowledge retrieval expectations — release pinning, citation, filters."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slice_type: Literal["knowledge"] = "knowledge"
+    schema_version: str = Field(default=SLICE_EXPECTATION_SCHEMA_VERSION_1_1, min_length=1)
+    expectation_kind: KnowledgeExpectationKind
+    critical: bool = Field(default=False)
+    expected_release_id: str | None = Field(default=None, max_length=128)
+    expected_plan_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_citation_chunk_ids: list[str] = Field(default_factory=list)
+    expected_tenant_filter_applied: bool | None = None
+    expected_degraded: bool = False
+    expected_empty_results: bool = False
+    replay_variant: str = Field(default="pass", min_length=1, max_length=32)
+
+
 SliceExpectation = Annotated[
-    ThreatSliceExpectation | BenignSliceExpectation | UnevaluableSliceExpectation,
+    ThreatSliceExpectation
+    | BenignSliceExpectation
+    | UnevaluableSliceExpectation
+    | SecuritySliceExpectation
+    | KnowledgeSliceExpectation,
     Field(discriminator="slice_type"),
 ]
 
@@ -218,9 +280,14 @@ __all__ = [
     "EvaluationDatasetManifest",
     "EvaluationTruthListResult",
     "EvaluationTruthQuery",
+    "KnowledgeExpectationKind",
+    "KnowledgeSliceExpectation",
     "LabelProvenance",
     "OperationalTruthMapping",
     "SLICE_EXPECTATION_SCHEMA_VERSION",
+    "SLICE_EXPECTATION_SCHEMA_VERSION_1_1",
+    "SecurityExpectationKind",
+    "SecuritySliceExpectation",
     "SliceExpectation",
     "SliceType",
     "ThreatSliceExpectation",
