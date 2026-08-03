@@ -495,9 +495,14 @@ async def run_response_plan_with_ledger(
         plan_revision=plan_revision,
         parameters=parameters,
     )
-    if agent_task_service is None or task is None:
+    if agent_task_service is None:
         _build_response_projection(content_projection_service, projection_fields)
         return await execute()
+    if task is None:
+        raise AgentTaskUnavailableError(
+            "response_plan ledger enqueue unavailable",
+            details={"event_id": event_id, "reason": "enqueue_failed"},
+        )
 
     prepared = await _prepare_response_plan_task_for_claim(
         task,
@@ -539,50 +544,76 @@ async def run_response_plan_with_ledger(
             details={"task_id": task.task_id, "reason": "artifact_service_unavailable"},
         )
 
-    _build_response_projection(content_projection_service, projection_fields)
-    try:
-        result = await execute()
-    except Exception as exc:
-        await _fail_claim_quietly(
-            agent_task_service,
-            claim,
-            error_summary=f"execute_failed: {exc.__class__.__name__}",
-        )
-        raise
-
-    payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
-    if not isinstance(payload, dict):
-        await _fail_claim_manual(
-            agent_task_service,
-            claim,
-            error_summary="artifact_persist_skipped: non-dict payload",
-        )
-        raise AgentTaskDeniedError(
-            "artifact persist requires dict payload",
-            details={"task_id": task.task_id},
-        )
-
-    content_hash = compute_response_plan_content_hash(payload)
     prior_artifact = await artifact_service.load_latest(
         task_id=task.task_id,
         logical_artifact_key="response_plan",
         tenant_id=tenant_id,
     )
     staged_hash = staged_artifact_hash_from_parameters(task.goal.parameters, "response_plan")
-    try:
-        validate_task_retry_preserves_plan_artifact(
-            prior_content_hash=prior_artifact.content_hash if prior_artifact is not None else None,
-            staged_content_hash=staged_hash,
-            new_payload=payload,
-            task_revision=claim.revision,
-        )
-    except ValidationError:
+    prior_hash = prior_artifact.content_hash if prior_artifact is not None else None
+    anchor_hash = prior_hash or staged_hash
+    replay_from_artifact = claim.revision > 1 and prior_artifact is not None
+
+    if claim.revision > 1 and anchor_hash is not None and not replay_from_artifact:
         await _fail_claim_manual(
             agent_task_service,
             claim,
-            error_summary="artifact_persist_validation_failed: plan_content_drift",
+            error_summary="retry_staged_without_artifact",
         )
-        raise
+        raise ValidationError(
+            "response plan retry requires persisted artifact anchor",
+            error_code="validation_error",
+            details={
+                "reason": "staged_hash_without_artifact",
+                "task_id": task.task_id,
+                "task_revision": claim.revision,
+            },
+        )
+
+    if replay_from_artifact:
+        assert prior_artifact is not None
+        result = ResponsePlan.model_validate(prior_artifact.payload)
+        payload = prior_artifact.payload
+        content_hash = prior_artifact.content_hash
+    else:
+        _build_response_projection(content_projection_service, projection_fields)
+        try:
+            result = await execute()
+        except Exception as exc:
+            await _fail_claim_quietly(
+                agent_task_service,
+                claim,
+                error_summary=f"execute_failed: {exc.__class__.__name__}",
+            )
+            raise
+
+        payload = result.model_dump(mode="json") if hasattr(result, "model_dump") else result
+        if not isinstance(payload, dict):
+            await _fail_claim_manual(
+                agent_task_service,
+                claim,
+                error_summary="artifact_persist_skipped: non-dict payload",
+            )
+            raise AgentTaskDeniedError(
+                "artifact persist requires dict payload",
+                details={"task_id": task.task_id},
+            )
+
+        content_hash = compute_response_plan_content_hash(payload)
+        try:
+            validate_task_retry_preserves_plan_artifact(
+                prior_content_hash=prior_hash,
+                staged_content_hash=staged_hash,
+                new_payload=payload,
+                task_revision=claim.revision,
+            )
+        except ValidationError:
+            await _fail_claim_manual(
+                agent_task_service,
+                claim,
+                error_summary="artifact_persist_validation_failed: plan_content_drift",
+            )
+            raise
 
     try:
         await agent_task_service.record_staged_artifact_hash(

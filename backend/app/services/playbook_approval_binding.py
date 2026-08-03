@@ -6,8 +6,6 @@ import hashlib
 from collections.abc import Sequence
 from typing import Any
 
-import orjson
-
 from app.core.errors import ValidationError
 from app.models.action import Action
 from app.models.agent_io import ResponsePlan
@@ -18,6 +16,7 @@ from app.models.playbook_release import (
 )
 from app.models.tool_meta import CapabilityManifest
 from app.services.action_approval_policy import APPROVAL_POLICY_SOURCE, APPROVAL_POLICY_VERSION
+from app.services.agent_artifact_service import artifact_payload_content_hash
 
 _MANIFEST_CAPABILITY_FIELDS: dict[str, str] = {
     "entity_response": "entity_response",
@@ -179,10 +178,10 @@ def _canonical_plan_payload(plan: ResponsePlan | dict[str, Any]) -> dict[str, An
 
 def compute_response_plan_content_hash(plan: ResponsePlan | dict[str, Any]) -> str:
     """Canonical content hash for immutable response_plan artifacts."""
-    payload = _canonical_plan_payload(plan)
-    return hashlib.sha256(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)).hexdigest()
+    return artifact_payload_content_hash(_canonical_plan_payload(plan))
 
 
+# Coordinator-internal key stored in AgentTaskGoal.parameters (not for external callers).
 STAGED_ARTIFACT_HASHES_KEY = "_staged_artifact_hashes"
 
 

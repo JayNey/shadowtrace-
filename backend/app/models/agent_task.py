@@ -16,7 +16,6 @@ DEFAULT_TASK_LEASE_SECONDS = 300
 # Allowlisted immutable artifact logical keys for typed goal context_refs.
 ALLOWLISTED_ARTIFACT_LOGICAL_KEYS: frozenset[str] = frozenset(
     {
-        "evidence_output",
         "response_plan",
         "risk_assessment",
     }

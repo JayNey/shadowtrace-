@@ -342,3 +342,56 @@ async def test_coordinator_skips_when_service_unavailable() -> None:
     )
     assert result is None
 
+
+@pytest.mark.asyncio
+async def test_record_staged_artifact_hash_persists_in_goal_parameters() -> None:
+    from app.services.playbook_approval_binding import STAGED_ARTIFACT_HASHES_KEY
+
+    session = AsyncMock()
+    session.begin = MagicMock(return_value=AsyncMock())
+    session.begin.return_value.__aenter__ = AsyncMock(return_value=None)
+    session.begin.return_value.__aexit__ = AsyncMock(return_value=None)
+    row = orm.AgentTaskORM(
+        task_id="atk-stage",
+        event_id="evt-stage",
+        tenant_id="tenant-a",
+        task_type=AgentTaskType.RESPONSE_PLAN.value,
+        goal=AgentTaskGoal(
+            task_type=AgentTaskType.RESPONSE_PLAN,
+            parameters={"plan_revision": 1},
+        ).model_dump(mode="json"),
+        status=AgentTaskStatus.RUNNING.value,
+        revision=1,
+        attempt=1,
+        claim_owner="worker-a",
+        fencing_token_hash="abc",
+        side_effect_status="none",
+        idempotency_key="response-plan:evt-stage:1",
+        schema_version="1.0",
+        created_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
+    )
+    session.get = AsyncMock(return_value=row)
+    factory = MagicMock(return_value=session)
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=None)
+
+    service = AgentTaskService(session_factory=factory)
+    claim = AgentTaskClaim(
+        task_id="atk-stage",
+        fencing_token="valid-fencing-token-001",
+        lease_expires_at=datetime.now(tz=UTC) + timedelta(minutes=5),
+        attempt=1,
+        worker_principal="worker-a",
+        revision=1,
+    )
+    content_hash = "a" * 64
+    await service.record_staged_artifact_hash(
+        claim,
+        tenant_id="tenant-a",
+        logical_artifact_key="response_plan",
+        content_hash=content_hash,
+    )
+    staged = row.goal["parameters"][STAGED_ARTIFACT_HASHES_KEY]
+    assert staged["response_plan"] == content_hash
+

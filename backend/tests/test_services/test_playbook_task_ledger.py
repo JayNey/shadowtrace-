@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.core.errors import AgentTaskDeniedError, ValidationError
+from app.core.errors import AgentTaskDeniedError, AgentTaskUnavailableError, ValidationError
 from app.models.action import Action
 from app.models.agent_io import ResponsePlan, ResponsePlanGeneratedBy
 from app.models.agent_task import (
@@ -239,7 +239,7 @@ async def test_run_response_plan_with_ledger_returns_cached_completed_plan() -> 
 
 
 @pytest.mark.asyncio
-async def test_run_response_plan_with_ledger_rejects_retry_content_drift() -> None:
+async def test_run_response_plan_retry_replays_prior_artifact_without_execute() -> None:
     plan = _sample_plan()
     mutated = plan.model_copy(update={"strategy_summary": "changed on retry"})
     now = datetime.now(tz=UTC)
@@ -287,15 +287,80 @@ async def test_run_response_plan_with_ledger_rejects_retry_content_drift() -> No
     task_service.claim = AsyncMock(return_value=claim)
     task_service.start = AsyncMock()
     task_service.record_staged_artifact_hash = AsyncMock()
+    task_service.complete = AsyncMock()
     task_service.fail = AsyncMock()
 
     artifact_service = AsyncMock(spec=AgentArtifactService)
     artifact_service.load_latest = AsyncMock(return_value=prior_artifact)
+    artifact_service.persist = AsyncMock(return_value=prior_artifact)
 
-    async def _execute() -> ResponsePlan:
-        return mutated
+    execute = AsyncMock(return_value=mutated)
 
-    with pytest.raises(ValidationError, match="immutable response plan content"):
+    result = await run_response_plan_with_ledger(
+        task_service,
+        artifact_service,
+        event_id="evt-001",
+        tenant_id="tenant-a",
+        worker_principal="test-worker",
+        idempotency_key="response-plan:evt-001:1",
+        plan_revision=1,
+        execute=execute,
+    )
+
+    assert result.strategy_summary == plan.strategy_summary
+    execute.assert_not_called()
+    task_service.fail.assert_not_called()
+    artifact_service.persist.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_run_response_plan_execute_drift_rejected_before_side_effects() -> None:
+    plan = _sample_plan()
+    mutated = plan.model_copy(update={"strategy_summary": "changed on retry"})
+    prior_hash = compute_response_plan_content_hash(plan)
+    now = datetime.now(tz=UTC)
+    queued_task = AgentTask(
+        task_id="atk-response",
+        event_id="evt-001",
+        tenant_id="tenant-a",
+        task_type=AgentTaskType.RESPONSE_PLAN,
+        goal=AgentTaskGoal(
+            task_type=AgentTaskType.RESPONSE_PLAN,
+            context_refs=list(RESPONSE_PLAN_CONTEXT_REFS),
+            parameters={
+                "plan_revision": 1,
+                STAGED_ARTIFACT_HASHES_KEY: {"response_plan": prior_hash},
+            },
+        ),
+        status=AgentTaskStatus.QUEUED,
+        revision=2,
+        attempt=1,
+        idempotency_key="response-plan:evt-001:1",
+        created_at=now,
+        updated_at=now,
+    )
+    claim = AgentTaskClaim(
+        task_id="atk-response",
+        fencing_token="fencing-token-001",
+        lease_expires_at=now + timedelta(minutes=5),
+        attempt=2,
+        worker_principal="test-worker",
+        revision=2,
+    )
+
+    task_service = AsyncMock(spec=AgentTaskService)
+    task_service.enqueue = AsyncMock(return_value=queued_task)
+    task_service.claim = AsyncMock(return_value=claim)
+    task_service.start = AsyncMock()
+    task_service.record_staged_artifact_hash = AsyncMock()
+    task_service.fail = AsyncMock()
+
+    artifact_service = AsyncMock(spec=AgentArtifactService)
+    artifact_service.load_latest = AsyncMock(return_value=None)
+
+    execute = AsyncMock(return_value=mutated)
+
+    with pytest.raises(ValidationError, match="persisted artifact anchor"):
         await run_response_plan_with_ledger(
             task_service,
             artifact_service,
@@ -304,11 +369,34 @@ async def test_run_response_plan_with_ledger_rejects_retry_content_drift() -> No
             worker_principal="test-worker",
             idempotency_key="response-plan:evt-001:1",
             plan_revision=1,
-            execute=_execute,
+            execute=execute,
         )
 
+    execute.assert_not_called()
     task_service.fail.assert_awaited_once()
     artifact_service.persist.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_response_plan_enqueue_unavailable_fail_closed_when_service_wired() -> None:
+    plan = _sample_plan()
+    task_service = AsyncMock(spec=AgentTaskService)
+    task_service.enqueue = AsyncMock(side_effect=AgentTaskUnavailableError("db down"))
+
+    async def _execute() -> ResponsePlan:
+        return plan
+
+    with pytest.raises(AgentTaskUnavailableError, match="enqueue unavailable"):
+        await run_response_plan_with_ledger(
+            task_service,
+            AsyncMock(spec=AgentArtifactService),
+            event_id="evt-001",
+            tenant_id="tenant-a",
+            worker_principal="test-worker",
+            idempotency_key="response-plan:evt-001:1",
+            plan_revision=1,
+            execute=_execute,
+        )
 
 
 @pytest.mark.asyncio
@@ -532,7 +620,7 @@ async def test_run_response_plan_persist_fail_marks_manual() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_response_plan_retry_rejects_drift_via_staged_hash_only() -> None:
+async def test_run_response_plan_retry_rejects_staged_hash_without_artifact() -> None:
     plan = _sample_plan()
     mutated = plan.model_copy(update={"strategy_summary": "changed after persist fail"})
     prior_hash = compute_response_plan_content_hash(plan)
@@ -576,10 +664,9 @@ async def test_run_response_plan_retry_rejects_drift_via_staged_hash_only() -> N
     artifact_service = AsyncMock(spec=AgentArtifactService)
     artifact_service.load_latest = AsyncMock(return_value=None)
 
-    async def _execute() -> ResponsePlan:
-        return mutated
+    execute = AsyncMock(return_value=mutated)
 
-    with pytest.raises(ValidationError, match="immutable response plan content"):
+    with pytest.raises(ValidationError, match="persisted artifact anchor"):
         await run_response_plan_with_ledger(
             task_service,
             artifact_service,
@@ -588,9 +675,10 @@ async def test_run_response_plan_retry_rejects_drift_via_staged_hash_only() -> N
             worker_principal="test-worker",
             idempotency_key="response-plan:evt-001:1",
             plan_revision=1,
-            execute=_execute,
+            execute=execute,
         )
 
+    execute.assert_not_called()
     task_service.fail.assert_awaited_once()
     artifact_service.persist.assert_not_called()
 

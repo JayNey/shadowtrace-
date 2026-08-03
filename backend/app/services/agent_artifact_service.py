@@ -33,8 +33,13 @@ def _canonical_bytes(value: Any) -> bytes:
     return orjson.dumps(value, option=orjson.OPT_SORT_KEYS)
 
 
-def _content_hash(payload: dict[str, Any]) -> str:
+def artifact_payload_content_hash(payload: dict[str, Any]) -> str:
+    """Canonical SHA-256 for immutable artifact payloads (shared with approval binding)."""
     return hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+
+
+def _content_hash(payload: dict[str, Any]) -> str:
+    return artifact_payload_content_hash(payload)
 
 
 def _validate_artifact_replay(existing: AgentArtifact, payload: dict[str, Any]) -> None:
@@ -240,4 +245,4 @@ class AgentArtifactService:
             raise AgentTaskUnavailableError("artifact ledger persistence unavailable")
 
 
-__all__ = ["AgentArtifactService", "new_artifact_id"]
+__all__ = ["AgentArtifactService", "artifact_payload_content_hash", "new_artifact_id"]
