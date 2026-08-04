@@ -14,7 +14,10 @@ import pytest
 
 from app.core.errors import ShadowTraceError
 from app.orchestration.convergence_guard import ConvergenceGuard
-from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
+from app.services.analysis_only_pipeline import (
+    AnalysisOnlyPipeline,
+    AnalysisOnlyPipelineResult,
+)
 
 
 @pytest.mark.asyncio
@@ -43,6 +46,37 @@ async def test_run_releases_guard_counters_on_failure() -> None:
     with pytest.raises(ShadowTraceError, match="not found"):
         await pipeline.run(event_id)
 
+    state = guard.get_state(event_id)
+    assert state.total_steps == 0
+    assert state.llm_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_run_releases_guard_counters_on_success() -> None:
+    """run() must reset the shared guard after _run completes successfully."""
+    guard = ConvergenceGuard()
+    event_id = "evt-iss168-pipeline-success"
+    await guard.record_step(event_id, "llm_call", signature="TriageAgent:triage_extract:m")
+    await guard.record_step(event_id, tool_name="block_ip")
+
+    pipeline = AnalysisOnlyPipeline(
+        triage_agent=MagicMock(),
+        evidence_agent=MagicMock(),
+        rag_agent=MagicMock(),
+        risk_agent=MagicMock(),
+        report_agent=MagicMock(),
+        convergence_guard=guard,
+    )
+    pipeline._run = AsyncMock(
+        return_value=AnalysisOnlyPipelineResult(
+            event_id=event_id,
+            triage_result=MagicMock(),
+        )
+    )
+
+    result = await pipeline.run(event_id)
+
+    assert result.event_id == event_id
     state = guard.get_state(event_id)
     assert state.total_steps == 0
     assert state.llm_calls == 0

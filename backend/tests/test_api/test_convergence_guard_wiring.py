@@ -106,6 +106,33 @@ def _patch_deps_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.agents.memory_agent.MemoryAgent", lambda **_k: MagicMock())
 
 
+def _patch_production_stack_assembly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stubs for a real stack build with in-memory LLM audit and async WM writes."""
+    _patch_deps_dependencies(monkeypatch)
+
+    wm_writer = MagicMock()
+    wm_writer.write = AsyncMock(return_value=None)
+    wm_writer.read = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        deps,
+        "_get_wm",
+        AsyncMock(return_value=MagicMock(for_writer=MagicMock(return_value=wm_writer))),
+    )
+
+    from app.core.llm.factory import get_llm_client as real_get_llm_client
+
+    def _llm_client_inmemory_audit(**kwargs: Any) -> Any:
+        kwargs["audit_recorder"] = InMemoryLLMCallAuditRecorder()
+        return real_get_llm_client(**kwargs)
+
+    monkeypatch.setattr("app.core.llm.factory.get_llm_client", _llm_client_inmemory_audit)
+
+    audit = MagicMock()
+    audit.log_start = AsyncMock(return_value=None)
+    audit.log_finish = AsyncMock(return_value=None)
+    monkeypatch.setattr(deps, "_get_tool_call_log_service", lambda: audit)
+
+
 @pytest.mark.asyncio
 async def test_build_investigation_agents_wires_single_real_convergence_guard(
     monkeypatch: pytest.MonkeyPatch,
@@ -416,3 +443,99 @@ async def test_tool_traffic_trips_llm_stop_on_shared_guard(
             agent_name="TriageAgent",
             prompt_key="triage_extract",
         )
+
+
+@pytest.mark.asyncio
+async def test_production_stack_guard_blocks_llm_after_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stack-assembled LLM client must share the real guard and stop at threshold."""
+    monkeypatch.setattr(guard_module, "MAX_TOTAL_LLM_CALLS", 1)
+    _patch_production_stack_assembly(monkeypatch)
+
+    deps.reset_deps()
+    try:
+        stack = await deps._build_investigation_agents()
+        guard = stack["convergence_guard"]
+        llm_client = stack["llm_client"]
+        executor = stack["tool_executor"]
+
+        assert isinstance(guard, ConvergenceGuard)
+        assert not isinstance(executor.convergence_guard, NoopConvergenceGuard)
+        assert llm_client.convergence_guard is guard
+        assert executor.convergence_guard is guard
+
+        event_id = "evt-iss168-prod-stack"
+        with pytest.raises(LLMProviderError, match="convergence guard"):
+            await llm_client.chat(
+                MESSAGES,
+                event_id=event_id,
+                agent_name="TriageAgent",
+                prompt_key="triage_extract",
+            )
+        assert guard.get_state(event_id).llm_calls == 1
+    finally:
+        deps.reset_deps()
+
+
+@pytest.mark.asyncio
+async def test_production_stack_guard_blocks_tool_after_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stack-assembled ToolExecutor must share the real guard and stop at threshold."""
+    monkeypatch.setattr(guard_module, "GLOBAL_MAX_STEPS", 1)
+    _patch_production_stack_assembly(monkeypatch)
+
+    deps.reset_deps()
+    try:
+        stack = await deps._build_investigation_agents()
+        guard = stack["convergence_guard"]
+        executor = stack["tool_executor"]
+        registry = executor.registry
+
+        async def ok_execute(params: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "call_id": "call-iss168-prod",
+                "tool_name": "fake_prod_ok",
+                "provider_name": "fake",
+                "status": "success",
+                "data": {"ok": True},
+            }
+
+        registry.register(
+            ToolMeta(
+                tool_name="fake_prod_ok",
+                tool_category=ToolCategory.QUERY,
+                routing_kind=RoutingKind.TOOL_PROVIDER_ONLY,
+                default_timeout_s=5.0,
+                input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                output_schema={
+                    "type": "object",
+                    "properties": {"status": {"type": "string"}},
+                    "additionalProperties": True,
+                },
+            ),
+            ok_execute,
+        )
+
+        assert executor.convergence_guard is guard
+
+        event_id = "evt-iss168-prod-tool"
+        first = await executor.call(
+            "fake_prod_ok",
+            {},
+            event_id,
+            retry_policy=RetryPolicy(max_retries=0),
+        )
+        assert first.status == ToolResultStatus.SUCCESS
+
+        second = await executor.call(
+            "fake_prod_ok",
+            {},
+            event_id,
+            retry_policy=RetryPolicy(max_retries=0),
+        )
+        assert second.status == ToolResultStatus.FAILED
+        assert second.error_detail == "convergence guard stopped execution"
+    finally:
+        deps.reset_deps()

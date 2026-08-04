@@ -277,7 +277,7 @@ class AnalysisOnlyPipeline:
         raw_event_summary: str = "",
         hint_entities: Any | None = None,
     ) -> AnalysisOnlyPipelineResult:
-        """Execute the analysis-only pipeline for *event_id*."""
+        """Internal pipeline stages (``run()`` owns guard reset in ``finally``)."""
         assert_analysis_only_mode(self._settings)
 
         event = None
