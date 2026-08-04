@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 from collections import Counter
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -286,11 +287,26 @@ class EventContextStore:
         self,
         redis: RedisClient,
         session_factory: async_sessionmaker[AsyncSession],
+        *,
+        on_redis_recovery: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._redis = redis
         self._session_factory = session_factory
         self._degraded_cache: dict[str, EventContext] = {}
         self._degraded_cache_ts: dict[str, float] = {}
+        self._on_redis_recovery = on_redis_recovery
+
+    def set_on_redis_recovery(
+        self,
+        callback: Callable[[str], Awaitable[None]],
+    ) -> None:
+        """Register a callback invoked when Redis writes succeed after rebuild.
+
+        The callback receives ``event_id`` and is called at most once per
+        successful ``rebuild_context`` Redis write. Exceptions are logged
+        and swallowed — the callback is a best-effort side effect.
+        """
+        self._on_redis_recovery = callback
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -525,7 +541,16 @@ class EventContextStore:
         if redis_ok:
             self._clear_degraded_cache(event_id)
             mapping = self._context_to_redis_mapping(ctx, versions)
-            await self._redis_set_fields(event_id, mapping, log_entry=None, expire=False)
+            write_ok = await self._redis_set_fields(event_id, mapping, log_entry=None, expire=False)
+            if write_ok and self._on_redis_recovery is not None:
+                try:
+                    await self._on_redis_recovery(event_id)
+                except Exception:  # noqa: BLE001 — best-effort side effect
+                    logger.debug(
+                        "on_redis_recovery callback failed event_id=%s",
+                        event_id,
+                        exc_info=True,
+                    )
         else:
             self._degraded_cache[event_id] = ctx
             self._degraded_cache_ts[event_id] = time.monotonic()

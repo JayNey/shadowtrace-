@@ -47,6 +47,8 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "AgentTraceService",
         "DecisionRecordService",
         "InvestigationIntentService",
+        # ISSUE-179 — EventContextStore clears redis_context_unavailable on recovery.
+        "EventContextStore",
     }
 )
 
@@ -126,12 +128,33 @@ class DegradedFlagService:
                         details={"event_id": event_id},
                     )
                 current = [str(f) for f in (se.degraded_flags or [])]
+                was_set = any(
+                    f == flag_name or str(f).startswith(f"{flag_name}=")
+                    for f in current
+                )
                 updated = apply_flag_to_list(current, flag_name, value)
+
+                # ISSUE-179: Skip write and EventContext mirror when flag is
+                # already in the desired state — prevents redundant journal
+                # entries and Redis writes during concurrent rebuild_context.
+                if updated == current:
+                    return updated
+
                 se.degraded_flags = updated
                 await session.flush()
 
         # Mirror into EventContext via the store (owner path; skip WM recursion).
         await self._store.set(event_id, "degraded_flags", updated)
+
+        # ISSUE-179: Rate-limited info log on true→false transition.
+        if was_set and not value:
+            logger.info(
+                "degraded flag cleared: event_id=%s flag=%s writer=%s",
+                event_id,
+                flag_name,
+                writer,
+            )
+
         return updated
 
     async def has_flag(self, event_id: str, flag_name: str) -> bool:
