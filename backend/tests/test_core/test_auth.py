@@ -19,3 +19,11 @@ def test_filter_known_roles_drops_unknown_entries() -> None:
 
 def test_filter_known_roles_empty_when_all_unknown() -> None:
     assert _filter_known_roles(["superuser", "root"]) == []
+
+
+def test_filter_known_roles_normalizes_case() -> None:
+    assert _filter_known_roles(["Analyst", "ADMIN", "Approver"]) == [
+        "analyst",
+        "admin",
+        "approver",
+    ]

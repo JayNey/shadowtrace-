@@ -200,6 +200,23 @@ def test_trusted_proxy_strips_unknown_roles(
     assert unknown_only.json()["error_code"] == "forbidden"
 
 
+def test_trusted_proxy_accepts_case_insensitive_roles(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_ALLOWLIST", "testclient")
+    get_settings.cache_clear()
+
+    resp = client.get(
+        "/api/v1/events",
+        headers={
+            "X-Auth-Subject": "proxied-user",
+            "X-Auth-Roles": "Analyst,ADMIN",
+        },
+    )
+    assert resp.status_code == 200
+
+
 def test_dev_token_rejected_in_production(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

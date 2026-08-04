@@ -83,8 +83,16 @@ def _dev_token_registry() -> dict[str, Principal]:
 
 
 def _filter_known_roles(roles: list[str]) -> list[str]:
-    """Drop unknown role names from trusted-proxy headers (ISSUE-180)."""
-    return [role for role in roles if role in ALL_ROLES]
+    """Drop unknown role names from trusted-proxy headers (ISSUE-180).
+
+    Role names are normalized to lowercase before matching ``ALL_ROLES``.
+    """
+    known: list[str] = []
+    for role in roles:
+        normalized = role.lower()
+        if normalized in ALL_ROLES:
+            known.append(normalized)
+    return known
 
 
 def _proxy_allowlist() -> set[str]:

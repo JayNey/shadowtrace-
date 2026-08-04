@@ -281,8 +281,9 @@ Mock 模式下的 `ALLOW_*` 始终为 `false`。
 
 1. **禁止**将 backend `:8000` 直接暴露到公网。必须由内网 ingress / 反向代理终止 TLS，并由该代理注入 `X-Auth-Subject` / `X-Auth-Roles`；backend 只信任 allowlist 中的代理直连地址。
 2. `APP_ENV=production` 且 `TRUSTED_AUTH_PROXY_ENABLED=true` 时，`TRUSTED_PROXY_ALLOWLIST` 必须为非空、**不含** `*` 的显式地址列表；否则进程 **拒绝启动**（fail-closed）。
-3. `X-Auth-Roles` 仅接受已知角色（`analyst` / `approver` / `disposition_operator` / `admin`）；未知角色会被丢弃，可能导致 403。
+3. `X-Auth-Roles` 仅接受已知角色（`analyst` / `approver` / `disposition_operator` / `admin`）；大小写不敏感（会归一化为小写），未知角色会被丢弃，可能导致 403。
 4. Mock P0 闭环默认使用 `DEV_AUTH_TOKENS`，**不依赖** trusted-proxy 路径。
+5. 生产环境应启用 trusted-proxy（`TRUSTED_AUTH_PROXY_ENABLED=true`）并配置显式 allowlist；若关闭 trusted-proxy 且 `APP_ENV=production`，除 proxy 外无可用认证路径（`DEV_AUTH_TOKENS` 一律拒绝）。
 
 示例（内网 ingress 位于 `10.0.0.5`，backend 仅接受来自该地址的身份头）：
 
