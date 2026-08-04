@@ -33,7 +33,7 @@ from app.db import models as orm
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
 from app.models.action import Action
-from app.models.disposition import SourceObjectLocator
+from app.models.disposition import SourceObjectLocator, TargetWritebackResult
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -49,6 +49,7 @@ from app.models.enums import (
     OutboxDeliveryStatus,
     Severity,
     SourceObjectKind,
+    TargetWritebackStatus,
     WritebackReadiness,
     WritebackStatus,
 )
@@ -58,6 +59,7 @@ from app.services.context_service import (
     EventContextStore,
     append_context_journal_in_session,
     event_summary_from_security_event,
+    unwrap_journal_value,
 )
 from app.services.disposition_command_factory import DispositionCommandFactory
 from app.services.disposition_sync_service import DispositionSyncService
@@ -1309,11 +1311,21 @@ async def test_append_receipt_sanitizes_sensitive_raw_result_before_persist(
         status=WritebackStatus.CONFIRMED,
         confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
         provider_message="Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig",
+        target_results=[
+            TargetWritebackResult(
+                canonical_target="host:workstation-1",
+                status=TargetWritebackStatus.CONFIRMED,
+                provider_code="token=secret-provider-code",
+                message_code="Bearer leaked-target-token",
+                artifact_ref="https://user:password@internal.example/artifact/1",
+            )
+        ],
         raw_result=dict(malicious_raw),
         simulated=True,
     )
     original_raw = dict(receipt.raw_result)
     original_message = receipt.provider_message
+    original_target_results = [item.model_copy() for item in receipt.target_results]
 
     async with session_factory() as session:
         async with session.begin():
@@ -1340,6 +1352,9 @@ async def test_append_receipt_sanitizes_sensitive_raw_result_before_persist(
 
     assert receipt.raw_result == original_raw
     assert receipt.provider_message == original_message
+    assert [item.model_dump() for item in receipt.target_results] == [
+        item.model_dump() for item in original_target_results
+    ]
     assert persisted.status is WritebackStatus.CONFIRMED
     assert persisted.confirmation_evidence is ConfirmationEvidence.READBACK_VERIFIED
     assert persisted.raw_result["provider_status"] == "accepted"
@@ -1347,6 +1362,11 @@ async def test_append_receipt_sanitizes_sensitive_raw_result_before_persist(
     assert persisted.raw_result["password"] == "***"
     assert persisted.raw_result["details"]["api_key"] == "***"
     assert "[REDACTED]" in (persisted.provider_message or "")
+    assert persisted.target_results[0].canonical_target == "host:workstation-1"
+    assert persisted.target_results[0].status is TargetWritebackStatus.CONFIRMED
+    assert "[REDACTED]" in (persisted.target_results[0].provider_code or "")
+    assert "[REDACTED]" in (persisted.target_results[0].message_code or "")
+    assert "[REDACTED]" in (persisted.target_results[0].artifact_ref or "")
 
     async with session_factory() as session:
         row = await session.scalar(
@@ -1362,6 +1382,31 @@ async def test_append_receipt_sanitizes_sensitive_raw_result_before_persist(
         assert row.raw_result["password"] == "***"
         assert "secret-token-value" not in str(row.raw_result)
         assert "hunter2" not in str(row.raw_result)
+        assert "[REDACTED]" in str(row.target_results)
+
+        journal_value = await session.scalar(
+            select(orm.EventContextJournal.value)
+            .where(
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == "disposition_receipts",
+            )
+            .order_by(orm.EventContextJournal.version.desc())
+            .limit(1)
+        )
+        assert journal_value is not None
+        journal_items = unwrap_journal_value(journal_value)
+        assert isinstance(journal_items, list)
+        assert journal_items
+        journal_receipt = journal_items[-1]
+        assert journal_receipt["status"] == WritebackStatus.CONFIRMED.value
+        assert journal_receipt["confirmation_evidence"] == (
+            ConfirmationEvidence.READBACK_VERIFIED.value
+        )
+        assert journal_receipt["raw_result"]["token"] == "***"
+        assert journal_receipt["raw_result"]["password"] == "***"
+        assert "secret-token-value" not in str(journal_receipt)
+        assert "hunter2" not in str(journal_receipt)
+        assert "[REDACTED]" in str(journal_receipt["target_results"])
 
 
 @pytest.mark.asyncio
