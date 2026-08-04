@@ -21,6 +21,7 @@ from app.core.errors import (
     DependencyUnavailableError,
     GuardrailViolationError,
     InvestigationInProgressError,
+    InvestigationLeaseLostError,
     ToolCallGrantUnavailableError,
 )
 from app.models.agent_io import (
@@ -109,6 +110,46 @@ class _InMemoryEventLease:
             pass
 
         return asyncio.create_task(_noop())
+
+
+class _RenewalFailLease(_InMemoryEventLease):
+    """Simulates lease steal so ``renew()`` returns False and signals failure."""
+
+    def __init__(self, *, steal_after_s: float = 0.05) -> None:
+        super().__init__()
+        self.steal_after_s = steal_after_s
+
+    async def start_renewal(
+        self,
+        event_id: str,
+        owner_id: str,
+        *,
+        on_renewal_failed: asyncio.Event | None = None,
+    ) -> asyncio.Task[None]:
+        async def _renew_loop() -> None:
+            await asyncio.sleep(self.steal_after_s)
+            self._store[event_id] = ("worker-thief", time.monotonic() + 600)
+            ok = await self.renew(event_id, owner_id)
+            if not ok and on_renewal_failed is not None:
+                on_renewal_failed.set()
+
+        return asyncio.create_task(_renew_loop())
+
+
+class _BlockingTriageAgent:
+    """Blocks until cancelled so renewal failure can interrupt orchestration."""
+
+    agent_name = "triage_agent"
+
+    def __init__(self, *, started: asyncio.Event | None = None) -> None:
+        self.started = started
+        self.result = _make_triage()
+
+    async def execute(self, input: Any) -> TriageResult:
+        if self.started is not None:
+            self.started.set()
+        await asyncio.Event().wait()
+        return self.result
 
 
 # --------------------------------------------------------------------------- #
@@ -578,6 +619,68 @@ class TestLeaseExpiryRecovery:
         # Different event_id — no conflict.
         await agent2.investigate(_EVENT_ID_2)
         assert events[_EVENT_ID_2]["status"] == EventStatus.REPORTING
+
+
+class TestRenewalFailure:
+    """ISSUE-182: lease renewal failure must stop orchestration without poisoning."""
+
+    async def test_renewal_failure_aborts_without_marking_failed(self) -> None:
+        lease = _RenewalFailLease(steal_after_s=0.02)
+        triage_started = asyncio.Event()
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        agent = _build_super_agent(
+            lease=lease,
+            event_service=_MockEventService(events),
+        )
+        agent.triage_agent = _BlockingTriageAgent(started=triage_started)  # type: ignore[assignment]
+
+        with pytest.raises(InvestigationLeaseLostError) as exc:
+            await agent.investigate(_EVENT_ID)
+
+        assert exc.value.error_code == "investigation_lease_lost"
+        assert triage_started.is_set()
+        assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
+        assert events[_EVENT_ID]["status"] is not EventStatus.REPORTING
+
+    async def test_renewal_failure_does_not_reach_report_node(self) -> None:
+        lease = _RenewalFailLease(steal_after_s=0.02)
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        agent = _build_super_agent(
+            lease=lease,
+            event_service=_MockEventService(events),
+        )
+        agent.triage_agent = _BlockingTriageAgent()  # type: ignore[assignment]
+        recorded_steps: list[str] = []
+        original_record = agent._record_agent_step
+
+        async def _track_step(event_id: str, step: str) -> None:
+            recorded_steps.append(step)
+            await original_record(event_id, step)
+
+        agent._record_agent_step = _track_step  # type: ignore[method-assign]
+
+        with pytest.raises(InvestigationLeaseLostError):
+            await agent.investigate(_EVENT_ID)
+
+        assert "report_agent" not in recorded_steps
+        assert "response_agent" not in recorded_steps
+        assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
+
+    async def test_normal_path_unaffected_with_stable_lease(self) -> None:
+        """Renewal wiring must not break the golden path when the lease stays held."""
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        agent = _build_super_agent(
+            lease=_InMemoryEventLease(),
+            event_service=_MockEventService(events),
+        )
+        await agent.investigate(_EVENT_ID)
+        assert events[_EVENT_ID]["status"] == EventStatus.REPORTING
 
 
 class TestReactEnabled:

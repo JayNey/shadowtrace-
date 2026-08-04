@@ -119,6 +119,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "disposition_permission_denied": ErrorCategory.USER_INPUT,
     # Product / API surface codes referenced in the plan
     "investigation_in_progress": ErrorCategory.PERMANENT,
+    "investigation_lease_lost": ErrorCategory.PERMANENT,
     "storyline_not_ready": ErrorCategory.USER_INPUT,
     "context_not_ready": ErrorCategory.USER_INPUT,
     "evidence_not_ready": ErrorCategory.USER_INPUT,
@@ -487,6 +488,15 @@ class InvestigationInProgressError(ShadowTraceError):
 
     status_code = 409
     default_error_code = "investigation_in_progress"
+    default_category = ErrorCategory.PERMANENT
+    default_retryable = False
+
+
+class InvestigationLeaseLostError(ShadowTraceError):
+    """Distributed lease renewal failed — another worker owns the event (ISSUE-182)."""
+
+    status_code = 409
+    default_error_code = "investigation_lease_lost"
     default_category = ErrorCategory.PERMANENT
     default_retryable = False
 

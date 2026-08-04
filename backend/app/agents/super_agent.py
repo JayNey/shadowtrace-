@@ -21,6 +21,7 @@ Uses a lightweight dict-based graph runner that mirrors the langgraph
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -29,7 +30,12 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 from app.agents.base import AgentOutput, BaseAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
-from app.core.errors import InvestigationInProgressError, ShadowTraceError, is_retryable
+from app.core.errors import (
+    InvestigationInProgressError,
+    InvestigationLeaseLostError,
+    ShadowTraceError,
+    is_retryable,
+)
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceAgentInput,
@@ -78,6 +84,47 @@ _AgentResult = TypeVar("_AgentResult")
 
 # Plan steps handled outside execute_plan_steps (ISSUE-054 / ISSUE-062 boundary).
 _DEFERRED_PLAN_AGENTS = frozenset({"report_agent", "response_agent"})
+
+
+async def _run_orchestration_with_renewal_watch(
+    orchestration: Awaitable[Any],
+    renewal_failed: asyncio.Event | None,
+    *,
+    event_id: str,
+) -> Any:
+    """Run graph work until completion or lease renewal failure (owner lost).
+
+    Transient Redis errors during ``renew()`` do not set *renewal_failed*; only
+    owner mismatch stops orchestration (ISSUE-182).
+    """
+    if renewal_failed is None:
+        return await orchestration
+
+    async def _runner() -> Any:
+        return await orchestration
+
+    run_task = asyncio.create_task(_runner())
+    renewal_wait = asyncio.create_task(renewal_failed.wait())
+    try:
+        done, _pending = await asyncio.wait(
+            {run_task, renewal_wait},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        del done
+        if renewal_failed.is_set():
+            run_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await run_task
+            raise InvestigationLeaseLostError(
+                message="investigation lease lost during orchestration",
+                error_code="investigation_lease_lost",
+                details={"event_id": event_id},
+            )
+        return await run_task
+    finally:
+        renewal_wait.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await renewal_wait
 
 # --------------------------------------------------------------------------- #
 # Agent protocol for type-safe dependency injection
@@ -302,6 +349,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         resolved_owner = owner_id or generate_owner_id()
         acquired = lease_acquired
         renewal_task: asyncio.Task[None] | None = None
+        renewal_failed: asyncio.Event | None = None
         event_context: EventContext | None = None
         guard_reset_needed = True  # cleared only when another worker owns the lease
         lifecycle_input = SuperAgentInput(event_id=event_id)
@@ -319,7 +367,12 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                             error_code="investigation_in_progress",
                             details={"event_id": event_id},
                         )
-                renewal_task = await self.lease.start_renewal(event_id, resolved_owner)
+                renewal_failed = asyncio.Event()
+                renewal_task = await self.lease.start_renewal(
+                    event_id,
+                    resolved_owner,
+                    on_renewal_failed=renewal_failed,
+                )
 
             # Emit progress only after we own the lease (ISSUE-075).
             if publish_lifecycle:
@@ -347,7 +400,11 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     defer_response_execution=not include_response_execution,
                 )
                 config = {"configurable": {"thread_id": event_id}}
-                await self._investigation_graph.ainvoke(initial, config)
+                await _run_orchestration_with_renewal_watch(
+                    self._investigation_graph.ainvoke(initial, config),
+                    renewal_failed,
+                    event_id=event_id,
+                )
             else:
                 graph = self._build_graph()
                 state: dict[str, Any] = {
@@ -355,7 +412,11 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     "super_agent_status": SuperAgentStatus.PLANNING,
                     "error": None,
                 }
-                final_state = await graph.ainvoke(state)
+                final_state = await _run_orchestration_with_renewal_watch(
+                    graph.ainvoke(state),
+                    renewal_failed,
+                    event_id=event_id,
+                )
 
             # 5. Fail closed when state-machine transitions did not persist.
             failures = self._transition_failures.pop(event_id, [])
@@ -389,6 +450,13 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             # processing.  Also skip guard reset — the owning worker will
             # handle its own counters.
             guard_reset_needed = False
+            raise
+        except InvestigationLeaseLostError as exc:
+            # Lease stolen mid-run — stop side effects without poisoning the
+            # new owner's investigation (ISSUE-182).
+            guard_reset_needed = False
+            if lifecycle_started:
+                await self._publish_agent_failed(lifecycle_input, str(exc))
             raise
         except Exception as exc:
             if lifecycle_started:

@@ -325,6 +325,19 @@ def run_investigation(
             _release_celery_task_loop_resources()
     except SoftTimeLimitExceeded:
         logger.warning("run_investigation soft time limit exceeded for event=%s", event_id)
+        try:
+            from app.api.v1.deps import get_event_lease
+
+            lease = get_event_lease()
+            asyncio.run(lease.release(event_id, owner_id))
+        except Exception:
+            logger.warning(
+                "run_investigation: best-effort lease release failed after soft limit "
+                "event=%s owner=%s",
+                event_id,
+                owner_id,
+                exc_info=True,
+            )
         if intent_id:
             from app.db.session import get_session_factory
             from app.services.investigation_intent_service import InvestigationIntentService
