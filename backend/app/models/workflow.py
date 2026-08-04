@@ -239,6 +239,7 @@ ACTION_STATUS_TRANSITIONS_BY_CATEGORY: dict[
             ActionStatus.SUCCESS,
             ActionStatus.FAILED,
             ActionStatus.UNKNOWN,
+            ActionStatus.APPROVED,  # lease-expired reclaim only (validate gate)
         },
         ActionStatus.UNKNOWN: {
             ActionStatus.PARTIAL_SUCCESS,
@@ -291,6 +292,7 @@ ACTION_STATUS_TRANSITIONS_BY_CATEGORY: dict[
             ActionStatus.SUCCESS,
             ActionStatus.FAILED,
             ActionStatus.UNKNOWN,
+            ActionStatus.APPROVED,  # lease-expired reclaim only (validate gate)
         },
         ActionStatus.UNKNOWN: {
             ActionStatus.PARTIAL_SUCCESS,
@@ -394,6 +396,7 @@ JOB_STATUS_TRANSITIONS: dict[ExecutionJobStatus, set[ExecutionJobStatus]] = {
         ExecutionJobStatus.TIMED_OUT,
         ExecutionJobStatus.CANCELLED,
         ExecutionJobStatus.UNKNOWN,
+        ExecutionJobStatus.QUEUED,  # lease-expired reclaim only (validate gate)
     },
     ExecutionJobStatus.UNKNOWN: {
         ExecutionJobStatus.PARTIAL_SUCCESS,
@@ -889,6 +892,7 @@ def validate_action_status_transition(
     action_level: ActionLevel = ActionLevel.L0,
     auto_execute: bool = False,
     has_approval_evidence: bool = False,
+    lease_expired_reclaim: bool = False,
 ) -> None:
     table = ACTION_STATUS_TRANSITIONS_BY_CATEGORY[category]
     if not _edge_allowed(table, current, target):
@@ -954,6 +958,17 @@ def validate_action_status_transition(
                 },
             )
 
+    if (
+        current is ActionStatus.EXECUTING
+        and target is ActionStatus.APPROVED
+        and not lease_expired_reclaim
+    ):
+        raise InvalidStateTransitionError(
+            "EXECUTING→APPROVED requires lease-expired reclaim",
+            current=current,
+            target=target,
+        )
+
     if target is ActionStatus.ROLLED_BACK and category is not ActionCategory.RESPONSE:
         raise InvalidStateTransitionError(
             "ROLLED_BACK is only valid on the original response Action",
@@ -1001,7 +1016,18 @@ def validate_job_status_transition(
     target: ExecutionJobStatus,
     *,
     provider_confirmed_terminal: bool = False,
+    lease_expired_reclaim: bool = False,
 ) -> None:
+    if (
+        current is ExecutionJobStatus.RUNNING
+        and target is ExecutionJobStatus.QUEUED
+        and not lease_expired_reclaim
+    ):
+        raise InvalidStateTransitionError(
+            "RUNNING→QUEUED requires lease-expired reclaim",
+            current=current,
+            target=target,
+        )
     if not _edge_allowed(JOB_STATUS_TRANSITIONS, current, target):
         raise InvalidStateTransitionError(
             f"illegal job status {current.value} → {target.value}",

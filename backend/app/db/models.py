@@ -294,6 +294,7 @@ class ActionExecutionJob(Base):
     __table_args__ = (
         Index("ix_action_execution_job_status", "status"),
         Index("ix_action_execution_job_idempotency_key", "idempotency_key"),
+        Index("ix_action_execution_job_lease_expires_at", "lease_expires_at"),
     )
 
     job_id: Mapped[str] = mapped_column(String, primary_key=True)

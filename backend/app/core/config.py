@@ -201,6 +201,28 @@ class Settings(BaseSettings):
         ge=0.0,
         le=600.0,
     )
+    action_execution_lease_seconds: float = Field(
+        default=300.0,
+        alias="ACTION_EXECUTION_LEASE_SECONDS",
+        ge=30.0,
+        le=3600.0,
+    )
+    action_execution_max_attempts: int = Field(
+        default=5,
+        alias="ACTION_EXECUTION_MAX_ATTEMPTS",
+        ge=1,
+        le=20,
+    )
+    action_execution_reconcile_enabled: bool = Field(
+        default=True,
+        alias="ACTION_EXECUTION_RECONCILE_ENABLED",
+    )
+    action_execution_reconcile_interval_s: float = Field(
+        default=60.0,
+        alias="ACTION_EXECUTION_RECONCILE_INTERVAL_S",
+        ge=10.0,
+        le=600.0,
+    )
     task_mode: str = Field(default="background", alias="TASK_MODE")
     celery_broker_url: str = Field(default="", alias="CELERY_BROKER_URL")
     approval_timeout_minutes: int = Field(default=30, alias="APPROVAL_TIMEOUT_MINUTES")

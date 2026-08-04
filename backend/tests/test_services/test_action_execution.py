@@ -11,7 +11,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -42,6 +42,7 @@ from app.models.enums import (
     DispositionPolicy,
     EventStatus,
     EventType,
+    ExecutionJobStatus,
     ExecutionOwner,
     FinalVerdict,
     Severity,
@@ -706,3 +707,201 @@ async def test_execute_plan_partial_failure_others_succeed(
         fail_row = await session.get(orm.Action, action_fail.action_id)
         assert ok_row is not None and ok_row.status == ActionStatus.SUCCESS.value
         assert fail_row is not None and fail_row.status == ActionStatus.FAILED.value
+
+
+async def _insert_stale_executing_with_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    event_id: str,
+    lease_expires_at: datetime,
+    attempt: int = 1,
+    job_status: ExecutionJobStatus = ExecutionJobStatus.RUNNING,
+) -> tuple[str, str]:
+    action_id = f"act-{_sfx()}"
+    job_id = f"job-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_tool_provider",
+                    idempotency_key=f"idem-{action_id}",
+                    status=job_status.value,
+                    claimed_by="worker-stale",
+                    lease_expires_at=lease_expires_at,
+                    attempt=attempt,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{action_id}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="block ip",
+                    tool_name="block_ip",
+                    action_level=ActionLevel.L2.value,
+                    execution_owner=ExecutionOwner.DIRECT_TOOL.value,
+                    execution_phase=ActionExecutionPhase.IMMEDIATE.value,
+                    status=ActionStatus.EXECUTING.value,
+                    target_type="ip",
+                    target="203.0.113.88",
+                    parameters={"target_type": "ip", "target": "203.0.113.88"},
+                    writeback_required=False,
+                    writeback_applicable=False,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    execution_job_id=job_id,
+                    idempotency_key=f"idem-{action_id}",
+                )
+            )
+    return action_id, job_id
+
+
+@pytest.mark.asyncio
+async def test_stale_running_job_reclaimed_and_action_returns_to_approved(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    event_id = await _create_event(session_factory, store, object_id=f"INC-{_sfx()}")
+    expired = datetime.now(UTC) - timedelta(seconds=30)
+    action_id, job_id = await _insert_stale_executing_with_job(
+        session_factory,
+        event_id=event_id,
+        lease_expires_at=expired,
+        attempt=1,
+    )
+
+    reconciled = await execution_service.reconcile_stale_executions(limit=10)
+    assert reconciled >= 1
+
+    async with session_factory() as session:
+        action_row = await session.get(orm.Action, action_id)
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert action_row is not None
+        assert job_row is not None
+        assert action_row.status == ActionStatus.APPROVED.value
+        assert job_row.status == ExecutionJobStatus.QUEUED.value
+        assert job_row.lease_expires_at is None
+        assert job_row.claimed_by is None
+        assert job_row.attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_active_execution_lease_not_reclaimed(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    event_id = await _create_event(session_factory, store, object_id=f"INC-{_sfx()}")
+    future = datetime.now(UTC) + timedelta(seconds=300)
+    action_id, job_id = await _insert_stale_executing_with_job(
+        session_factory,
+        event_id=event_id,
+        lease_expires_at=future,
+        attempt=1,
+    )
+
+    reconciled = await execution_service.reconcile_stale_executions(limit=10)
+    assert reconciled == 0
+
+    async with session_factory() as session:
+        action_row = await session.get(orm.Action, action_id)
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert action_row is not None
+        assert job_row is not None
+        assert action_row.status == ActionStatus.EXECUTING.value
+        assert job_row.status == ExecutionJobStatus.RUNNING.value
+        assert job_row.lease_expires_at == future
+
+
+@pytest.mark.asyncio
+async def test_max_attempts_fails_stale_job_and_executing_action(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import Settings, get_settings
+
+    monkeypatch.setattr(
+        get_settings,
+        "cache_clear",
+        lambda: None,
+    )
+    settings = Settings.model_validate(
+        {
+            **get_settings().model_dump(),
+            "ACTION_EXECUTION_MAX_ATTEMPTS": 3,
+        }
+    )
+    monkeypatch.setattr(
+        "app.services.action_execution_service.get_settings",
+        lambda: settings,
+    )
+
+    event_id = await _create_event(session_factory, store, object_id=f"INC-{_sfx()}")
+    expired = datetime.now(UTC) - timedelta(seconds=30)
+    action_id, job_id = await _insert_stale_executing_with_job(
+        session_factory,
+        event_id=event_id,
+        lease_expires_at=expired,
+        attempt=3,
+    )
+
+    reconciled = await execution_service.reconcile_stale_executions(limit=10)
+    assert reconciled >= 1
+
+    async with session_factory() as session:
+        action_row = await session.get(orm.Action, action_id)
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert action_row is not None
+        assert job_row is not None
+        assert action_row.status == ActionStatus.FAILED.value
+        assert job_row.status == ExecutionJobStatus.TIMED_OUT.value
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_action_can_be_executed_again(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    oid = f"INC-{_sfx()}"
+    await _seed_connector_and_source(
+        session_factory, object_id=oid, mock_xdr_client=mock_xdr_client
+    )
+    event_id = await _create_event(session_factory, store, object_id=oid)
+    expired = datetime.now(UTC) - timedelta(seconds=30)
+    action_id, _job_id = await _insert_stale_executing_with_job(
+        session_factory,
+        event_id=event_id,
+        lease_expires_at=expired,
+        attempt=1,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id)
+            assert row is not None
+            row.disposition_source_ref = _locator(object_id=oid).model_dump(mode="json")
+            row.writeback_applicable = True
+            row.writeback_required = True
+            row.execution_owner = ExecutionOwner.XDR_MANAGED.value
+
+    await execution_service.reconcile_stale_executions(limit=10)
+
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action_id)
+        assert row is not None
+        assert row.status == ActionStatus.APPROVED.value
+
+    result = await execution_service.execute_action(action_id)
+    assert result.status in {ActionStatus.SUCCESS, ActionStatus.EXECUTING}
