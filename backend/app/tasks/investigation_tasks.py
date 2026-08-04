@@ -16,7 +16,11 @@ from app.core.celery_delivery import (
     evaluate_redelivered_investigation_skip,
     normalize_public_task_state,
 )
-from app.core.errors import DependencyUnavailableError, InvestigationInProgressError
+from app.core.errors import (
+    DependencyUnavailableError,
+    InvestigationInProgressError,
+    InvestigationLeaseLostError,
+)
 from app.core.redis_client import RedisClient
 from app.models.investigation_intent import IntentDeliveryAdmission
 
@@ -138,6 +142,16 @@ async def execute_investigation(
             "status": "skipped",
             "event_id": event_id,
             "reason": "investigation_in_progress",
+        }
+    except InvestigationLeaseLostError:
+        logger.info(
+            "run_investigation stopped for event=%s — lease lost mid-run",
+            event_id,
+        )
+        return {
+            "status": "skipped",
+            "event_id": event_id,
+            "reason": "investigation_lease_lost",
         }
 
 

@@ -111,6 +111,11 @@ async def _run_orchestration_with_renewal_watch(
             return_when=asyncio.FIRST_COMPLETED,
         )
         del done
+        if run_task.done() and not run_task.cancelled():
+            exc = run_task.exception()
+            if exc is not None:
+                raise exc
+            return run_task.result()
         if renewal_failed.is_set():
             run_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

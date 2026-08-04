@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from app.agents.super_agent import SuperAgent
+from app.agents.super_agent import SuperAgent, _run_orchestration_with_renewal_watch
 from app.core.errors import (
     DependencyUnavailableError,
     GuardrailViolationError,
@@ -681,6 +681,21 @@ class TestRenewalFailure:
         )
         await agent.investigate(_EVENT_ID)
         assert events[_EVENT_ID]["status"] == EventStatus.REPORTING
+
+    async def test_orchestration_prefers_success_at_renewal_boundary(self) -> None:
+        """Graph completion wins when renew fails in the same window (ISSUE-182)."""
+        renewal_failed = asyncio.Event()
+
+        async def _finish_and_signal_loss() -> int:
+            renewal_failed.set()
+            return 42
+
+        result = await _run_orchestration_with_renewal_watch(
+            _finish_and_signal_loss(),
+            renewal_failed,
+            event_id=_EVENT_ID,
+        )
+        assert result == 42
 
 
 class TestReactEnabled:

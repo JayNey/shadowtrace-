@@ -11,7 +11,11 @@ from kombu.exceptions import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.celery_app import celery_app
-from app.core.errors import DependencyUnavailableError, InvestigationInProgressError
+from app.core.errors import (
+    DependencyUnavailableError,
+    InvestigationInProgressError,
+    InvestigationLeaseLostError,
+)
 from app.tasks import investigation_tasks as tasks
 
 
@@ -46,6 +50,40 @@ async def test_execute_investigation_skips_when_lease_already_held(
         "status": "skipped",
         "event_id": "evt-skip",
         "reason": "investigation_in_progress",
+    }
+
+
+@pytest.mark.asyncio
+async def test_execute_investigation_skips_when_lease_lost_mid_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _lost(_event_id: str, **_kwargs: Any) -> None:
+        raise InvestigationLeaseLostError(
+            message="investigation lease lost during orchestration",
+            error_code="investigation_lease_lost",
+            details={"event_id": "evt-lease-lost"},
+        )
+
+    async def _fake_super_agent() -> Any:
+        agent = MagicMock()
+        agent.investigate = _lost
+        return agent
+
+    monkeypatch.setattr("app.api.v1.deps.get_super_agent", _fake_super_agent)
+    monkeypatch.setattr(
+        "app.services.evidence_projection.bind_evidence_projection",
+        lambda _projection: _null_context(),
+    )
+    monkeypatch.setattr(
+        "app.services.evidence_projection.EvidenceProjection",
+        lambda _factory: MagicMock(),
+    )
+
+    result = await tasks.execute_investigation("evt-lease-lost")
+    assert result == {
+        "status": "skipped",
+        "event_id": "evt-lease-lost",
+        "reason": "investigation_lease_lost",
     }
 
 
