@@ -66,7 +66,7 @@ ShadowTrace 与深信服 XDR、安全 GPT 均保持解耦：
 
 整个闭环由 SuperAgent 驱动 LangGraph 状态机编排，全过程记录 decision_trace（Agent 执行轨迹）、事件状态审计日志和工具调用审计日志，保证每一步可解释、可回溯。
 
-在保底闭环之上，系统保留以下可演示亮点（P1）：多 Agent 自主调查闭环、可解释 decision_trace、工具调用审计、证据冲突处理、ReAct 重规划、攻击故事线生成、误报识别、一键演示脚本。
+在保底闭环之上，系统保留以下可演示亮点（P1）：多 Agent 自主调查闭环、可解释 decision_trace、工具调用审计、证据冲突处理、ReAct 重规划、攻击故事线生成、误报识别、一键演示流程（`make up-demo && make bootstrap-demo && make smoke-demo`）。
 
 ## 三、技术边界与优先级约定
 

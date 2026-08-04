@@ -57,7 +57,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo demo-reset demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -116,6 +116,15 @@ smoke-demo:
 
 demo-guard-test:
 	@bash "$(CURDIR)/scripts/test_demo_mock_guard.sh"
+
+# ISSUE-176: One-command demo runner (chains existing up-demo + bootstrap-demo + smoke-demo).
+# Full disposition chain requires include_response_execution=true (default false is unchanged).
+demo: up-demo bootstrap-demo smoke-demo
+
+# ISSUE-176: Demo reset — tear down demo stack so next ``make demo`` starts clean.
+demo-reset:
+	$(COMPOSE_DEMO) down --volumes
+	@echo "[demo-reset] Demo stack stopped and volumes removed"
 
 up-observability:
 	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \

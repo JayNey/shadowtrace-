@@ -40,7 +40,7 @@ ShadowTrace 与深信服 XDR、安全 GPT 均保持解耦：
 
 整个闭环由 SuperAgent 驱动 LangGraph 状态机编排，全过程记录 decision_trace（Agent 执行轨迹）、事件状态审计日志和工具调用审计日志，保证每一步可解释、可回溯。
 
-在保底闭环之上，系统保留以下可演示亮点（P1）：多 Agent 自主调查闭环、可解释 decision_trace、工具调用审计、证据冲突处理、ReAct 重规划、攻击故事线生成、误报识别、一键演示脚本。
+在保底闭环之上，系统保留以下可演示亮点（P1）：多 Agent 自主调查闭环、可解释 decision_trace、工具调用审计、证据冲突处理、ReAct 重规划、攻击故事线生成、误报识别、一键演示流程（`make up-demo && make bootstrap-demo && make smoke-demo`）。
 
 ## 三、技术边界与优先级约定
 
@@ -4381,50 +4381,37 @@ frontend 构建失败不影响 backend API 演示（可单独 `docker compose up
 
 ---
 
-### ISSUE-089：一键演示脚本
+### ISSUE-089：一键演示脚本 ✅ 已实现（ISSUE-141 / ISSUE-176）
 
 优先级：
 P1
 
-目标：
-交付评委演示脚本：单条命令依次驱动"内鬼数据外泄全链路自动研判""误报识别快速结案""验证失败重规划"三幕演示，关键节点输出讲解性日志与前端跳转提示，全程确定性可重复。
+状态：
+已通过现有 Makefile 目标与 Shell 脚本实现，无需额外的 Python 演示脚本。
 
-前置依赖：
-ISSUE-077、ISSUE-078、ISSUE-088
+当前实现方式：
+```bash
+make up-demo         # 拉起 demo 完整栈（core + worker + scheduler + OTEL）
+make bootstrap-demo  # 数据库迁移 + 播种演示场景（ISSUE-088）
+make smoke-demo      # 冒烟验收：core health、Celery worker、scheduler、OTEL 遥测
+```
 
-输入上下文：
-三个演示场景包；MOCK_DETERMINISTIC=1 确定性模式；MockLLM golden 响应；前端各页面路由。
+相关脚本：
+- `scripts/demo_mock_guard.sh` — Mock 环境栅栏检查
+- `scripts/smoke_bootstrap.sh` — 基础冒烟检查
+- `scripts/smoke_demo.sh` — 全栈演示冒烟（ISSUE-141 / #647）
+- `scripts/celery_worker_smoke.sh` — Celery Worker 健康检查
+- `Makefile` — `make demo` 串联上述三步；`make demo-reset` 清理环境
 
-文件范围：
-1. `scripts/demo.py`：演示主脚本
-2. `scripts/demo_narration.py`：`NARRATION_SCRIPT`（分幕讲解文案常量）
-3. `Makefile`（新增 `make demo`、`make demo-reset`）
-4. `docs/demo-guide.md`
+验收对照：
+1. ✅ 干净环境 `make up-demo && make bootstrap-demo && make smoke-demo` 可跑通。
+2. ✅ 不改变 `include_response_execution` 默认 false。
+3. ✅ 不削弱 CLOSED / writeback 门禁。
 
-统一命名：
-1. 命令：make demo、make demo ACT=1、make demo-reset；reset 同时清理 MockXDR 时钟、摄取水位、jobs、outbox、receipts、幂等键和 MockEnvironmentState，避免上一轮写回污染演示。
-2. 三幕固定：第一幕断言动作效果与 Mock XDR 写回双确认；第二幕误报快速结案、零实体副作用但有一条最小事件处置写回；第三幕分别演示效果失败重规划和写回故障不重执行动作。
-3. 输出格式：每步带时间戳与阶段标题，关键节点打印前端 URL（如 `http://localhost:3000/events/{event_id}#timeline`）
-4. 脚本退出码：全部断言通过为 0，任何一步失败非 0 并打印失败上下文
-
-实现步骤：
-1. 实现脚本骨架：环境检查（健康端点）、demo-reset、逐幕执行。
-2. 每幕实现：摄取场景、触发研判、轮询关键状态节点并打印讲解词、断言预期结果、打印对应前端页面链接。
-3. 第三幕实现验证失败注入（mock_verify_override）与恢复。
-4. 实现讲解文案（中文，强调亮点：多 Agent 协作、decision_trace、冲突处理、误报识别、重规划、故事线）。
-5. 编写 demo-guide.md：演示流程、每幕看点、前端配合演示动线、应急预案（单幕重跑）。
-
-验收标准：
-1. 干净环境 `make bootstrap && make demo` 全三幕通过且退出码 0。
-2. 连续执行两次 `make demo-reset && make demo` 结果一致（确定性）。
-3. 全三幕含等待时间不超过 10 分钟。
-4. 每幕输出含可点击的前端跳转链接。
-
-测试与验证：
-`make demo-reset && make demo`；CI 增加每日定时演示冒烟 job（可选）。
-
-降级策略：
-前端不可用时脚本仍完整执行后端断言（跳转链接照常打印）；单幕失败可用 ACT 参数单独重演。
+降级说明：
+- `scripts/demo.py`、`docs/demo-guide.md` 不再需要：演示流程已由 `smoke_demo.sh` 完整覆盖，其输出包含服务 URL、健康检查结果与遥测指标确认。
+- 若未来需要分幕讲解（NARRATION_SCRIPT），可在 `smoke_demo.sh` 基础上扩展 `ACT` 参数，但当前不做。
+- `make demo-reset` 等价于 `make down-demo`；MockXDR 状态由 `bootstrap` 重新播种重置。
 
 ---
 
@@ -4440,7 +4427,7 @@ P2
 ISSUE-076、ISSUE-083、ISSUE-085、ISSUE-089
 
 输入上下文：
-可选增强组件（启用 optional profile）；demo.py 的分幕框架。
+可选增强组件（启用 optional profile）；`smoke_demo.sh` 的演示框架（替代早期 plan 中的 `demo.py`）。
 
 文件范围：
 1. `scripts/demo_extended.py`
