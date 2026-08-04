@@ -117,9 +117,19 @@ smoke-demo:
 demo-guard-test:
 	@bash "$(CURDIR)/scripts/test_demo_mock_guard.sh"
 
-# ISSUE-176: One-command demo runner (chains existing up-demo + bootstrap-demo + smoke-demo).
+# ISSUE-176: One-command demo smoke runner (infrastructure health check, NOT a narrated agent demo).
+# Chains existing up-demo + bootstrap-demo + smoke-demo.
 # Full disposition chain requires include_response_execution=true (default false is unchanged).
 demo: up-demo bootstrap-demo smoke-demo
+	@echo ""
+	@echo "[demo] ============================================================"
+	@echo "[demo]  Demo infrastructure smoke passed (health checks only)."
+	@echo "[demo]  This is NOT the full narrated agent demonstration."
+	@echo "[demo]  For autonomous agent E2E demo: make autonomous-mock-e2e"
+	@echo "[demo]  NOTE: Full disposition chain requires include_response_execution=true"
+	@echo "[demo]        (default false is unchanged by this target)."
+	@echo "[demo] ============================================================"
+	@echo ""
 
 # ISSUE-176: Demo reset — tear down demo stack so next ``make demo`` starts clean.
 demo-reset:

@@ -4381,19 +4381,21 @@ frontend 构建失败不影响 backend API 演示（可单独 `docker compose up
 
 ---
 
-### ISSUE-089：一键演示脚本 ✅ 已实现（ISSUE-141 / ISSUE-176）
+### ISSUE-089：一键演示脚本 ⚠️ 简化实现——冒烟检查替代原三幕演示（ISSUE-141 / ISSUE-176）
 
 优先级：
 P1
 
 状态：
-已通过现有 Makefile 目标与 Shell 脚本实现，无需额外的 Python 演示脚本。
+原 ISSUE-089 规格中的三幕 Agent 分幕演示（`scripts/demo.py` + `scripts/demo_narration.py` + `docs/demo-guide.md`）未按原始形式实施。当前通过 ISSUE-141 / ISSUE-176 提供 **基础设施冒烟检查**，作为演示环境就绪验证。完整 Agent 演示由 `make autonomous-mock-e2e`（ISSUE-110）覆盖。
 
 当前实现方式：
 ```bash
-make up-demo         # 拉起 demo 完整栈（core + worker + scheduler + OTEL）
-make bootstrap-demo  # 数据库迁移 + 播种演示场景（ISSUE-088）
-make smoke-demo      # 冒烟验收：core health、Celery worker、scheduler、OTEL 遥测
+make demo             # 一键：拉起 demo 栈 → 播种场景 → 冒烟验收
+# 等价于：
+make up-demo          # 拉起 demo 完整栈（core + worker + scheduler + OTEL）
+make bootstrap-demo   # 数据库迁移 + 播种演示场景（ISSUE-088）
+make smoke-demo       # 冒烟验收：core health、Celery worker、scheduler、OTEL 遥测
 ```
 
 相关脚本：
@@ -4403,15 +4405,16 @@ make smoke-demo      # 冒烟验收：core health、Celery worker、scheduler、
 - `scripts/celery_worker_smoke.sh` — Celery Worker 健康检查
 - `Makefile` — `make demo` 串联上述三步；`make demo-reset` 清理环境
 
-验收对照：
-1. ✅ 干净环境 `make up-demo && make bootstrap-demo && make smoke-demo` 可跑通。
-2. ✅ 不改变 `include_response_execution` 默认 false。
-3. ✅ 不削弱 CLOSED / writeback 门禁。
+验收对照（原始 ISSUE-089 四条标准 vs 当前实际）：
+1. ⚠️ 原标准：「干净环境 `make bootstrap && make demo` 全三幕通过且退出码 0」→ 当前 `make demo` 退出码 0，但执行的是冒烟检查而非三幕 Agent 演示。Agent 闭环演示见 `make autonomous-mock-e2e`（ISSUE-110）。
+2. ❌ 原标准：「连续执行两次 `make demo-reset && make demo` 结果一致（确定性）」→ 未作为冒烟脚本的验收标准验证。
+3. ❌ 原标准：「全三幕含等待时间不超过 10 分钟」→ 无分幕，不适用。
+4. ⚠️ 原标准：「每幕输出含可点击的前端跳转链接」→ `smoke_demo.sh` 输出服务 URL 列表，但不含分幕事件详情链接。
 
 降级说明：
-- `scripts/demo.py`、`docs/demo-guide.md` 不再需要：演示流程已由 `smoke_demo.sh` 完整覆盖，其输出包含服务 URL、健康检查结果与遥测指标确认。
+- `scripts/demo.py`、`docs/demo-guide.md` 不再需要：基础设施冒烟已由 `smoke_demo.sh` 覆盖，Agent 闭环演示由 `make autonomous-mock-e2e`（ISSUE-110）覆盖。
 - 若未来需要分幕讲解（NARRATION_SCRIPT），可在 `smoke_demo.sh` 基础上扩展 `ACT` 参数，但当前不做。
-- `make demo-reset` 等价于 `make down-demo`；MockXDR 状态由 `bootstrap` 重新播种重置。
+- `make demo-reset` 通过 `docker compose down --volumes` 清理所有 demo 数据卷（包括 MockXDR 水位/outbox/jobs/receipts/幂等键），`make bootstrap-demo` 重新播种可恢复干净状态。
 
 ---
 
