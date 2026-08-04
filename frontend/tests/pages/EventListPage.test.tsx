@@ -389,6 +389,7 @@ describe("EventListPage", () => {
     await waitFor(() => {
       expect(screen.getByText(/analysis_only 模式/)).toBeInTheDocument();
     });
+    expect(screen.queryByText("analysis_only mode")).not.toBeInTheDocument();
   });
 
   it("shows error toast with backend message on 503 task_unavailable", async () => {

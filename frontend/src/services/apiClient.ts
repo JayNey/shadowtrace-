@@ -3,6 +3,13 @@
 import axios, { AxiosError } from "axios";
 import { message } from "antd";
 
+declare module "axios" {
+  export interface AxiosRequestConfig {
+    /** When true, the response interceptor skips the global error toast (ISSUE-187). */
+    skipGlobalErrorToast?: boolean;
+  }
+}
+
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1";
 const DEV_AUTH_TOKEN = import.meta.env.VITE_DEV_AUTH_TOKEN ?? "";
 
@@ -72,7 +79,9 @@ apiClient.interceptors.response.use(
         error_message: error.message,
       });
     }
-    showApiErrorToast(apiError.message);
+    if (!error.config?.skipGlobalErrorToast) {
+      showApiErrorToast(apiError.message);
+    }
     throw apiError;
   },
 );

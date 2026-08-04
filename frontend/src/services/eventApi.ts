@@ -58,9 +58,13 @@ export function triggerInvestigation(
     status: string;
     include_response_execution?: boolean;
     full_loop_available?: boolean;
-  }>(`/events/${eventId}/investigate`, {
-    include_response_execution: options?.includeResponseExecution ?? false,
-  });
+  }>(
+    `/events/${eventId}/investigate`,
+    {
+      include_response_execution: options?.includeResponseExecution ?? false,
+    },
+    { skipGlobalErrorToast: true },
+  );
 }
 
 export function getHealth() {

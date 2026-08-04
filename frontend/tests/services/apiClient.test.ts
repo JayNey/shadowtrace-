@@ -105,4 +105,13 @@ describe("eventApi", () => {
     await eventApi.rejectAction("act-1", body);
     expect(mockPost).toHaveBeenCalledWith("/actions/act-1/reject", body);
   });
+
+  it("triggerInvestigation skips global error toast for page-local handling", async () => {
+    await eventApi.triggerInvestigation("evt-1", { includeResponseExecution: true });
+    expect(mockPost).toHaveBeenCalledWith(
+      "/events/evt-1/investigate",
+      { include_response_execution: true },
+      { skipGlobalErrorToast: true },
+    );
+  });
 });
