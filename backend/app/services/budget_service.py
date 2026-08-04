@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -11,6 +12,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import Settings, get_settings
 from app.core.errors import BudgetExceededError
+from app.core.metrics import (
+    record_budget_redis_fallback,
+    record_budget_redis_recovery,
+    set_budget_redis_degraded,
+)
 from app.core.redis_client import RedisClient
 from app.models.budget import BudgetScope, BudgetSnapshot
 from app.models.enums import Severity
@@ -27,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_BUDGET_KEY = "shadowtrace:budget:system"
 EVENT_BUDGET_KEY_PREFIX = "shadowtrace:budget:event:"
+BUDGET_RECOVERY_PROBE_KEY = "shadowtrace:budget:recovery_probe"
+DEFAULT_BUDGET_REDIS_RECOVERY_INTERVAL_SECONDS = 5.0
 
 _FIELD_TOKENS = "tokens"
 _FIELD_COST_USD = "cost_usd"
@@ -125,6 +133,8 @@ class BudgetService:
         usage_writer: BudgetUsageWriter | None = None,
         settings: Settings | None = None,
         enabled: bool | None = None,
+        attempt_redis_recovery: bool = True,
+        recovery_interval_seconds: float = DEFAULT_BUDGET_REDIS_RECOVERY_INTERVAL_SECONDS,
     ) -> None:
         self._redis = redis
         self._usage_writer = usage_writer
@@ -132,6 +142,10 @@ class BudgetService:
         self._enabled = self._settings.budget_enabled if enabled is None else enabled
         self._memory = _MemoryStore()
         self._redis_degraded = False
+        self._memory_pinned_events: set[str] = set()
+        self._last_recovery_probe_at = 0.0
+        self._attempt_redis_recovery = attempt_redis_recovery
+        self._recovery_interval_seconds = recovery_interval_seconds
 
     @property
     def enabled(self) -> bool:
@@ -192,13 +206,17 @@ class BudgetService:
         self._raise_if_exceeded(event_id, agent_name, usage)
 
     async def get_usage(self, event_id: str) -> BudgetUsage:
-        redis_usage = await self._read_redis_usage(event_id)
-        if redis_usage is not None:
-            return redis_usage
+        if self._uses_redis_for_event(event_id):
+            redis_usage = await self._read_redis_usage(event_id)
+            if redis_usage is not None:
+                return redis_usage
         return self._read_memory_usage(event_id)
 
     async def reset_event(self, event_id: str) -> None:
         self._memory.events.pop(event_id, None)
+        self._memory_pinned_events.discard(event_id)
+        if not self._uses_redis_for_event(event_id):
+            return
         client = await self._redis_client()
         if client is None:
             return
@@ -302,7 +320,7 @@ class BudgetService:
         cost_usd: float,
     ) -> None:
         client = await self._redis_client()
-        if client is None:
+        if client is None or not self._uses_redis_for_event(event_id):
             self._apply_memory_llm_charge(event_id, agent_name, tokens, cost_usd)
             return
         try:
@@ -320,7 +338,7 @@ class BudgetService:
 
     async def _apply_tool_charge(self, *, event_id: str, agent_name: str) -> None:
         client = await self._redis_client()
-        if client is None:
+        if client is None or not self._uses_redis_for_event(event_id):
             self._apply_memory_tool_charge(event_id, agent_name)
             return
         try:
@@ -373,6 +391,8 @@ class BudgetService:
         )
 
     async def _read_redis_usage(self, event_id: str) -> BudgetUsage | None:
+        if not self._uses_redis_for_event(event_id):
+            return None
         client = await self._redis_client()
         if client is None:
             return None
@@ -423,6 +443,41 @@ class BudgetService:
                 exc_info=True,
             )
 
+    def _uses_redis_for_event(self, event_id: str) -> bool:
+        return event_id not in self._memory_pinned_events
+
+    def _pin_event_to_memory(self, event_id: str | None) -> None:
+        if event_id:
+            self._memory_pinned_events.add(event_id)
+
+    async def _maybe_attempt_redis_recovery(self) -> None:
+        if not self._attempt_redis_recovery or not self._redis_degraded or self._redis is None:
+            return
+        now = time.monotonic()
+        if now - self._last_recovery_probe_at < self._recovery_interval_seconds:
+            return
+        self._last_recovery_probe_at = now
+        try:
+            if not await self._redis.ping():
+                return
+            client = self._redis.get_client()
+            await client.get(BUDGET_RECOVERY_PROBE_KEY)
+            self._clear_redis_degraded()
+        except Exception:
+            return
+
+    def _clear_redis_degraded(self) -> None:
+        if not self._redis_degraded:
+            return
+        self._redis_degraded = False
+        set_budget_redis_degraded(service="budget", active=False)
+        record_budget_redis_recovery(service="budget")
+        logger.info(
+            "budget Redis recovered; new events resume Redis counters "
+            "(%s event(s) remain memory-pinned until reset)",
+            len(self._memory_pinned_events),
+        )
+
     async def _redis_client(self) -> Any | None:
         if self._redis is None:
             return None
@@ -430,6 +485,10 @@ class BudgetService:
             if not await self._redis.ping():
                 self._mark_redis_degraded("ping")
                 return None
+            if self._redis_degraded:
+                await self._maybe_attempt_redis_recovery()
+                if self._redis_degraded:
+                    return None
             return self._redis.get_client()
         except Exception:  # noqa: BLE001
             self._mark_redis_degraded("ping")
@@ -442,7 +501,10 @@ class BudgetService:
                 op,
                 event_id,
             )
+            set_budget_redis_degraded(service="budget", active=True)
+            record_budget_redis_fallback(service="budget", op=op)
         self._redis_degraded = True
+        self._pin_event_to_memory(event_id)
 
 
 class WorkingMemoryBudgetUsageWriter:

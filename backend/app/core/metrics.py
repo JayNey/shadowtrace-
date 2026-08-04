@@ -20,15 +20,21 @@ _writeback_retry_total: Any | None = None
 _action_unknown_total: Any | None = None
 _checkpoint_fallback_total: Any | None = None
 _checkpoint_memory_fallback_gauge: Any | None = None
+_budget_redis_fallback_total: Any | None = None
+_budget_redis_recovery_total: Any | None = None
+_budget_redis_degraded_gauge: Any | None = None
 _initialized = False
 _process_checkpoint_fallback_active = False
 _process_checkpoint_fallback_triggers = 0
+_process_budget_redis_degraded = False
+_process_reservation_redis_degraded = False
 
 
 def _ensure_metrics() -> None:
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
     global _action_unknown_total, _checkpoint_fallback_total
-    global _checkpoint_memory_fallback_gauge, _initialized
+    global _checkpoint_memory_fallback_gauge, _budget_redis_fallback_total
+    global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
 
     if not telemetry.is_telemetry_enabled():
         return
@@ -65,6 +71,21 @@ def _ensure_metrics() -> None:
         _checkpoint_memory_fallback_gauge = _meter.create_up_down_counter(
             name="shadowtrace_checkpoint_memory_fallback",
             description="1 when any checkpointer in this process uses memory fallback, else 0",
+            unit="1",
+        )
+        _budget_redis_fallback_total = _meter.create_counter(
+            name="shadowtrace_budget_redis_fallback_total",
+            description="Budget/reservation Redis failures that triggered in-process fallback",
+            unit="1",
+        )
+        _budget_redis_recovery_total = _meter.create_counter(
+            name="shadowtrace_budget_redis_recovery_total",
+            description="Budget/reservation Redis recovery probes that cleared degraded state",
+            unit="1",
+        )
+        _budget_redis_degraded_gauge = _meter.create_up_down_counter(
+            name="shadowtrace_budget_redis_degraded",
+            description="1 when a budget/reservation service is in Redis degraded mode, else 0",
             unit="1",
         )
     except Exception:
@@ -153,12 +174,67 @@ def checkpoint_health_snapshot() -> dict[str, int | bool]:
     }
 
 
+def record_budget_redis_fallback(*, service: str, op: str) -> None:
+    """Increment budget/reservation Redis fallback counter."""
+    _ensure_metrics()
+    if _budget_redis_fallback_total is None:
+        return
+    try:
+        _budget_redis_fallback_total.add(1, {"service": service, "op": op})
+    except Exception:
+        logger.debug("budget redis fallback metric export failed", exc_info=True)
+
+
+def record_budget_redis_recovery(*, service: str) -> None:
+    """Increment budget/reservation Redis recovery counter."""
+    _ensure_metrics()
+    if _budget_redis_recovery_total is None:
+        return
+    try:
+        _budget_redis_recovery_total.add(1, {"service": service})
+    except Exception:
+        logger.debug("budget redis recovery metric export failed", exc_info=True)
+
+
+def set_budget_redis_degraded(*, service: str, active: bool) -> None:
+    """Set per-service budget Redis degraded gauge (0/1)."""
+    global _process_budget_redis_degraded, _process_reservation_redis_degraded
+    if service == "budget":
+        if active == _process_budget_redis_degraded:
+            return
+        _process_budget_redis_degraded = active
+    elif service == "reservation":
+        if active == _process_reservation_redis_degraded:
+            return
+        _process_reservation_redis_degraded = active
+    else:
+        return
+    _ensure_metrics()
+    if _budget_redis_degraded_gauge is None:
+        return
+    try:
+        delta = 1 if active else -1
+        _budget_redis_degraded_gauge.add(delta, {"service": service})
+    except Exception:
+        logger.debug("budget redis degraded gauge export failed", exc_info=True)
+
+
+def budget_redis_health_snapshot() -> dict[str, bool]:
+    """Process-wide budget/reservation Redis degraded flags for health/tests."""
+    return {
+        "budget_redis_degraded": _process_budget_redis_degraded,
+        "reservation_redis_degraded": _process_reservation_redis_degraded,
+    }
+
+
 def reset_metrics_for_tests() -> None:
     """Allow tests to re-register instruments after telemetry reset."""
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
     global _action_unknown_total, _checkpoint_fallback_total
-    global _checkpoint_memory_fallback_gauge, _initialized
+    global _checkpoint_memory_fallback_gauge, _budget_redis_fallback_total
+    global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _process_checkpoint_fallback_active, _process_checkpoint_fallback_triggers
+    global _process_budget_redis_degraded, _process_reservation_redis_degraded
     _meter = None
     _writeback_total = None
     _writeback_queue_age = None
@@ -166,9 +242,14 @@ def reset_metrics_for_tests() -> None:
     _action_unknown_total = None
     _checkpoint_fallback_total = None
     _checkpoint_memory_fallback_gauge = None
+    _budget_redis_fallback_total = None
+    _budget_redis_recovery_total = None
+    _budget_redis_degraded_gauge = None
     _initialized = False
     _process_checkpoint_fallback_active = False
     _process_checkpoint_fallback_triggers = 0
+    _process_budget_redis_degraded = False
+    _process_reservation_redis_degraded = False
 
 
 def reset_checkpoint_metrics_for_tests() -> None:
@@ -178,14 +259,26 @@ def reset_checkpoint_metrics_for_tests() -> None:
     _process_checkpoint_fallback_triggers = 0
 
 
+def reset_budget_redis_metrics_for_tests() -> None:
+    """Reset only budget/reservation Redis metric process counters."""
+    global _process_budget_redis_degraded, _process_reservation_redis_degraded
+    _process_budget_redis_degraded = False
+    _process_reservation_redis_degraded = False
+
+
 __all__ = [
+    "budget_redis_health_snapshot",
     "checkpoint_health_snapshot",
     "observe_writeback_queue_age",
     "record_action_unknown",
+    "record_budget_redis_fallback",
+    "record_budget_redis_recovery",
     "record_checkpoint_fallback",
     "record_writeback",
     "record_writeback_retry",
+    "reset_budget_redis_metrics_for_tests",
     "reset_checkpoint_metrics_for_tests",
     "reset_metrics_for_tests",
+    "set_budget_redis_degraded",
     "set_checkpoint_memory_fallback",
 ]
