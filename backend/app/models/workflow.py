@@ -388,7 +388,12 @@ EXECUTION_SUBSTATE_TRANSITIONS: dict[ExecutionSubstate, set[ExecutionSubstate]] 
 }
 
 JOB_STATUS_TRANSITIONS: dict[ExecutionJobStatus, set[ExecutionJobStatus]] = {
-    ExecutionJobStatus.QUEUED: {ExecutionJobStatus.RUNNING, ExecutionJobStatus.CANCELLED},
+    ExecutionJobStatus.QUEUED: {
+        ExecutionJobStatus.RUNNING,
+        ExecutionJobStatus.CANCELLED,
+        ExecutionJobStatus.FAILED,  # lease-expired reclaim only (validate gate)
+        ExecutionJobStatus.TIMED_OUT,  # lease-expired reclaim only (validate gate)
+    },
     ExecutionJobStatus.RUNNING: {
         ExecutionJobStatus.PARTIAL_SUCCESS,
         ExecutionJobStatus.SUCCESS,
@@ -1025,6 +1030,16 @@ def validate_job_status_transition(
     ):
         raise InvalidStateTransitionError(
             "RUNNING→QUEUED requires lease-expired reclaim",
+            current=current,
+            target=target,
+        )
+    if (
+        current is ExecutionJobStatus.QUEUED
+        and target in {ExecutionJobStatus.FAILED, ExecutionJobStatus.TIMED_OUT}
+        and not lease_expired_reclaim
+    ):
+        raise InvalidStateTransitionError(
+            "QUEUED→FAILED/TIMED_OUT requires lease-expired reclaim",
             current=current,
             target=target,
         )

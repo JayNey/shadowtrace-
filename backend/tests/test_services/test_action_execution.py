@@ -465,7 +465,9 @@ async def test_xdr_managed_execute_plan_submits_outbox(
         ).all()
         assert len(outboxes) == 1
         assert outboxes[0].intent_kind == "entity_action_submit"
-    assert summary.jobs == []
+    assert len(summary.jobs) == 1
+    assert summary.jobs[0].status is ExecutionJobStatus.RUNNING
+    assert summary.jobs[0].provider_name == "mock_xdr"
 
 
 @pytest.mark.asyncio
@@ -785,6 +787,7 @@ async def test_stale_running_job_reclaimed_and_action_returns_to_approved(
         assert action_row is not None
         assert job_row is not None
         assert action_row.status == ActionStatus.APPROVED.value
+        assert action_row.execution_job_id is None
         assert job_row.status == ExecutionJobStatus.QUEUED.value
         assert job_row.lease_expires_at is None
         assert job_row.claimed_by is None
@@ -904,4 +907,175 @@ async def test_reclaimed_action_can_be_executed_again(
         assert row.status == ActionStatus.APPROVED.value
 
     result = await execution_service.execute_action(action_id)
-    assert result.status in {ActionStatus.SUCCESS, ActionStatus.EXECUTING}
+    assert result.status is ActionStatus.EXECUTING
+    await execution_service._sync.process_ready_outboxes(limit=5)
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action_id)
+        assert row is not None
+        assert row.status in {ActionStatus.SUCCESS.value, ActionStatus.EXECUTING.value}
+        assert row.execution_job_id is not None
+        assert row.execution_job_id != _job_id
+
+
+@pytest.mark.asyncio
+async def test_max_attempts_fails_stale_queued_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import Settings, get_settings
+
+    monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
+    settings = Settings.model_validate(
+        {**get_settings().model_dump(), "ACTION_EXECUTION_MAX_ATTEMPTS": 3}
+    )
+    monkeypatch.setattr("app.services.action_execution_service.get_settings", lambda: settings)
+
+    event_id = await _create_event(session_factory, store, object_id=f"INC-{_sfx()}")
+    expired = datetime.now(UTC) - timedelta(seconds=30)
+    action_id, job_id = await _insert_stale_executing_with_job(
+        session_factory,
+        event_id=event_id,
+        lease_expires_at=expired,
+        attempt=3,
+        job_status=ExecutionJobStatus.QUEUED,
+    )
+
+    reconciled = await execution_service.reconcile_stale_executions(limit=10)
+    assert reconciled >= 1
+
+    async with session_factory() as session:
+        action_row = await session.get(orm.Action, action_id)
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert action_row is not None
+        assert job_row is not None
+        assert action_row.status == ActionStatus.FAILED.value
+        assert action_row.execution_job_id is None
+        assert job_row.status == ExecutionJobStatus.TIMED_OUT.value
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_verification_executing(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    event_id = await _create_event(session_factory, store, object_id=f"INC-{_sfx()}")
+    expired = datetime.now(UTC) - timedelta(seconds=600)
+    stale_action_id, _ = await _insert_stale_executing_with_job(
+        session_factory,
+        event_id=event_id,
+        lease_expires_at=expired,
+        attempt=1,
+    )
+    verification_action_id = f"act-verify-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Action(
+                    action_id=verification_action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{verification_action_id}",
+                    action_category=ActionCategory.VERIFICATION.value,
+                    action_name="verify containment",
+                    tool_name="verify_containment",
+                    action_level=ActionLevel.L0.value,
+                    execution_owner=ExecutionOwner.DIRECT_TOOL.value,
+                    execution_phase=ActionExecutionPhase.IMMEDIATE.value,
+                    status=ActionStatus.EXECUTING.value,
+                    target_type="ip",
+                    target="203.0.113.1",
+                    parameters={},
+                    writeback_required=False,
+                    writeback_applicable=False,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    updated_at=expired,
+                )
+            )
+
+    reconciled = await execution_service.reconcile_stale_executions(limit=10)
+    assert reconciled >= 1
+
+    async with session_factory() as session:
+        stale_row = await session.get(orm.Action, stale_action_id)
+        verify_row = await session.get(orm.Action, verification_action_id)
+        assert stale_row is not None and stale_row.status == ActionStatus.APPROVED.value
+        assert verify_row is not None and verify_row.status == ActionStatus.EXECUTING.value
+
+
+@pytest.mark.asyncio
+async def test_xdr_executing_with_active_outbox_not_reclaimed(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    from app.models.enums import OutboxDeliveryStatus
+
+    oid = f"INC-{_sfx()}"
+    await _seed_connector_and_source(
+        session_factory, object_id=oid, mock_xdr_client=mock_xdr_client
+    )
+    event_id = await _create_event(session_factory, store, object_id=oid)
+    action_id = f"act-xdr-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            source = await session.scalar(
+                select(orm.SourceObject).where(orm.SourceObject.source_object_id == oid)
+            )
+            assert source is not None
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{action_id}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="block ip",
+                    tool_name="block_ip",
+                    action_level=ActionLevel.L2.value,
+                    execution_owner=ExecutionOwner.XDR_MANAGED.value,
+                    execution_phase=ActionExecutionPhase.IMMEDIATE.value,
+                    status=ActionStatus.EXECUTING.value,
+                    target_type="ip",
+                    target="203.0.113.88",
+                    parameters={"target_type": "ip", "target": "203.0.113.88"},
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    disposition_source_ref=_locator(object_id=oid).model_dump(mode="json"),
+                    updated_at=datetime.now(UTC) - timedelta(seconds=600),
+                )
+            )
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-{_sfx()}",
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source.source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{action_id}",
+                    command_payload={"action_id": action_id},
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                )
+            )
+
+    reconciled = await execution_service.reconcile_stale_executions(limit=10)
+    assert reconciled == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action_id)
+        assert row is not None
+        assert row.status == ActionStatus.EXECUTING.value

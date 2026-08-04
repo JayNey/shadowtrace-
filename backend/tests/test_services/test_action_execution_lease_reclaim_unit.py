@@ -37,6 +37,19 @@ def test_running_to_queued_requires_lease_expired_reclaim_gate() -> None:
     )
 
 
+def test_queued_to_timed_out_requires_lease_expired_reclaim_gate() -> None:
+    with pytest.raises(InvalidStateTransitionError, match="lease-expired reclaim"):
+        validate_job_status_transition(
+            ExecutionJobStatus.QUEUED,
+            ExecutionJobStatus.TIMED_OUT,
+        )
+    validate_job_status_transition(
+        ExecutionJobStatus.QUEUED,
+        ExecutionJobStatus.TIMED_OUT,
+        lease_expired_reclaim=True,
+    )
+
+
 def test_executing_to_failed_remains_valid_without_reclaim_gate() -> None:
     validate_action_status_transition(
         ActionCategory.RESPONSE,
