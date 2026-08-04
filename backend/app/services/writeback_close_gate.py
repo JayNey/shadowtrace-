@@ -205,7 +205,7 @@ async def build_closed_gate_actions(
         all_confirmed = False
         worst_outbox: WritebackStatus | None = None
         if has_command:
-            all_confirmed = bool(active_outboxes) and all(
+            all_confirmed = all(
                 o.latest_writeback_status == WritebackStatus.CONFIRMED.value
                 for o in active_outboxes
             )

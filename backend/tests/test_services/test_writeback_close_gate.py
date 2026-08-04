@@ -24,7 +24,11 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
-from app.models.workflow import WritebackCloseGateReason, WritebackCloseGateViolation
+from app.models.workflow import (
+    WritebackCloseGateReason,
+    WritebackCloseGateViolation,
+    check_required_writeback_close_gate,
+)
 from app.services.writeback_close_gate import (
     build_closed_gate_actions,
     raise_api_writeback_gate_error,
@@ -293,3 +297,24 @@ async def test_build_closed_gate_actions_excludes_superseded_from_worst_status(
     assert view.has_command is True
     assert view.all_required_intents_confirmed is False
     assert view.worst_unconfirmed_outbox_status == WritebackStatus.PENDING
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.usefixtures("clean_state")
+async def test_vacuum_outbox_yields_no_command_close_gate_violation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """All-superseded outboxes must map to NO_COMMAND, not vacuum CONFIRMED (ISSUE-185)."""
+    event_id = await _seed_gate_event_with_outboxes(
+        session_factory,
+        outboxes=[(WritebackStatus.CONFIRMED, "obx-head-2")],
+    )
+
+    async with session_factory() as session:
+        views = await build_closed_gate_actions(session, event_id, current_revision=1)
+
+    violation = check_required_writeback_close_gate(views)
+    assert violation is not None
+    assert violation.reason is WritebackCloseGateReason.NO_COMMAND
+    assert violation.action_id is not None

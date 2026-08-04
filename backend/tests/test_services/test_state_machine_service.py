@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -1425,4 +1425,39 @@ async def test_close_rejected_when_terminal_actual_unparseable(
             EventStatus.CLOSED,
             operator="SuperAgent",
             reason="forged terminal actual",
+        )
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_when_only_superseded_outboxes_remain(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    """ISSUE-185: CLOSED must fail when active outbox vacuum would spoof CONFIRMED."""
+    from tests.test_services.test_writeback_close_gate import _seed_gate_event_with_outboxes
+
+    event_id = await _seed_gate_event_with_outboxes(
+        session_factory,
+        outboxes=[(WritebackStatus.CONFIRMED, "obx-head-2")],
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.SecurityEvent, event_id)
+            assert row is not None
+            row.writeback_status = WritebackStatus.CONFIRMED.value
+            action = await session.scalar(
+                select(orm.Action).where(orm.Action.event_id == event_id).limit(1)
+            )
+            assert action is not None
+            action.writeback_status = WritebackStatus.CONFIRMED.value
+
+    await _add_report(session_factory, event_id)
+
+    with pytest.raises(InvalidStateTransitionError, match="no disposition command"):
+        await state_machine.transition(
+            event_id,
+            EventStatus.CLOSED,
+            operator="SuperAgent",
+            reason="vacuum outbox must not close",
         )
