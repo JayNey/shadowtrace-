@@ -223,6 +223,24 @@ class Settings(BaseSettings):
         ge=10.0,
         le=600.0,
     )
+    outbox_max_attempts: int = Field(
+        default=5,
+        alias="OUTBOX_MAX_ATTEMPTS",
+        ge=1,
+        le=50,
+    )
+    outbox_retry_backoff_seconds: float = Field(
+        default=30.0,
+        alias="OUTBOX_RETRY_BACKOFF_SECONDS",
+        ge=1.0,
+        le=3600.0,
+    )
+    outbox_retry_backoff_max_seconds: float = Field(
+        default=900.0,
+        alias="OUTBOX_RETRY_BACKOFF_MAX_SECONDS",
+        ge=30.0,
+        le=86400.0,
+    )
     task_mode: str = Field(default="background", alias="TASK_MODE")
     celery_broker_url: str = Field(default="", alias="CELERY_BROKER_URL")
     approval_timeout_minutes: int = Field(default=30, alias="APPROVAL_TIMEOUT_MINUTES")

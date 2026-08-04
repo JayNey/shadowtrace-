@@ -17,6 +17,7 @@ _meter: Any | None = None
 _writeback_total: Any | None = None
 _writeback_queue_age: Any | None = None
 _writeback_retry_total: Any | None = None
+_writeback_dead_letter_total: Any | None = None
 _action_unknown_total: Any | None = None
 _checkpoint_fallback_total: Any | None = None
 _checkpoint_memory_fallback_gauge: Any | None = None
@@ -32,7 +33,7 @@ _process_reservation_redis_degraded = False
 
 def _ensure_metrics() -> None:
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
-    global _action_unknown_total, _checkpoint_fallback_total
+    global _writeback_dead_letter_total, _action_unknown_total, _checkpoint_fallback_total
     global _checkpoint_memory_fallback_gauge, _budget_redis_fallback_total
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
 
@@ -56,6 +57,11 @@ def _ensure_metrics() -> None:
         _writeback_retry_total = _meter.create_counter(
             name="shadowtrace_writeback_retry_total",
             description="Writeback delivery retries and manual re-enqueues",
+            unit="1",
+        )
+        _writeback_dead_letter_total = _meter.create_counter(
+            name="shadowtrace_writeback_dead_letter_total",
+            description="Outbox rows moved to DEAD_LETTER after max delivery attempts",
             unit="1",
         )
         _action_unknown_total = _meter.create_counter(
@@ -124,6 +130,17 @@ def record_writeback_retry(*, adapter: str) -> None:
         _writeback_retry_total.add(1, {"adapter": adapter})
     except Exception:
         logger.debug("writeback retry metric export failed", exc_info=True)
+
+
+def record_writeback_dead_letter(*, adapter: str) -> None:
+    """Increment ``shadowtrace_writeback_dead_letter_total{adapter}``."""
+    _ensure_metrics()
+    if _writeback_dead_letter_total is None:
+        return
+    try:
+        _writeback_dead_letter_total.add(1, {"adapter": adapter})
+    except Exception:
+        logger.debug("writeback dead letter metric export failed", exc_info=True)
 
 
 def record_action_unknown(*, adapter: str = "unknown") -> None:
@@ -245,7 +262,7 @@ def get_budget_redis_health() -> dict[str, object]:
 def reset_metrics_for_tests() -> None:
     """Allow tests to re-register instruments after telemetry reset."""
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
-    global _action_unknown_total, _checkpoint_fallback_total
+    global _writeback_dead_letter_total, _action_unknown_total, _checkpoint_fallback_total
     global _checkpoint_memory_fallback_gauge, _budget_redis_fallback_total
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _process_checkpoint_fallback_active, _process_checkpoint_fallback_triggers
@@ -254,6 +271,7 @@ def reset_metrics_for_tests() -> None:
     _writeback_total = None
     _writeback_queue_age = None
     _writeback_retry_total = None
+    _writeback_dead_letter_total = None
     _action_unknown_total = None
     _checkpoint_fallback_total = None
     _checkpoint_memory_fallback_gauge = None
@@ -292,6 +310,7 @@ __all__ = [
     "record_checkpoint_fallback",
     "record_writeback",
     "record_writeback_retry",
+    "record_writeback_dead_letter",
     "reset_budget_redis_metrics_for_tests",
     "reset_checkpoint_metrics_for_tests",
     "reset_metrics_for_tests",

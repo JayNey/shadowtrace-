@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.disposition.base import BaseDispositionAdapter
 from app.adapters.registry import DispositionAdapterRegistry
+from app.core.config import get_settings
 from app.core.errors import (
     EventNotFoundError,
     GuardrailViolationError,
@@ -27,6 +28,7 @@ from app.core.metrics import (
     observe_writeback_queue_age,
     record_action_unknown,
     record_writeback,
+    record_writeback_dead_letter,
     record_writeback_retry,
 )
 from app.core.telemetry import disposition_span
@@ -55,6 +57,7 @@ logger = logging.getLogger(__name__)
 
 ResumeInvestigationHook = Callable[[str], Awaitable[None]]
 _DEFAULT_LEASE_SECONDS = 30
+_ERROR_DETAIL_MAX_LEN = 500
 
 
 class _NullResumeHook:
@@ -856,31 +859,6 @@ class DispositionSyncService:
         if summary_payload is not None:
             await self._context_store.set(event_id, "writeback_summary", summary_payload)
 
-    async def _mark_delivery_waiting_retry(self, outbox_id: str) -> None:
-        """Release a leased outbox back to the retry queue after a failed delivery attempt."""
-        async with self._session_factory() as session:
-            async with session.begin():
-                outbox = await session.scalar(
-                    select(orm.DispositionOutbox)
-                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
-                    .with_for_update()
-                )
-                if outbox is None:
-                    return
-                current = OutboxDeliveryStatus(outbox.delivery_status)
-                if current is not OutboxDeliveryStatus.LEASED:
-                    return
-                validate_outbox_delivery_transition(
-                    current,
-                    OutboxDeliveryStatus.WAITING_RETRY,
-                )
-                outbox.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
-                outbox.locked_by = None
-                outbox.locked_at = None
-                outbox.lease_expires_at = None
-                outbox.updated_at = datetime.now(UTC)
-                record_writeback_retry(adapter=self._adapter_label(outbox))
-
     async def _maybe_resume(self, event_id: str) -> None:
         async with self._session_factory() as session:
             substate_raw = await session.scalar(
@@ -900,6 +878,158 @@ class DispositionSyncService:
         }:
             await self._resume(event_id)
 
+    @staticmethod
+    def _truncate_error_detail(detail: str) -> str:
+        if len(detail) <= _ERROR_DETAIL_MAX_LEN:
+            return detail
+        return detail[: _ERROR_DETAIL_MAX_LEN - 3] + "..."
+
+    @staticmethod
+    def _outbox_retry_backoff_seconds(attempt: int) -> float:
+        settings = get_settings()
+        raw = settings.outbox_retry_backoff_seconds * attempt
+        return min(raw, settings.outbox_retry_backoff_max_seconds)
+
+    def _release_leased_outbox_after_failure(
+        self,
+        outbox: orm.DispositionOutbox,
+        *,
+        now: datetime,
+        error_code: str,
+        error_detail: str | None = None,
+    ) -> OutboxDeliveryStatus:
+        """Move a leased outbox to WAITING_RETRY (with backoff) or DEAD_LETTER."""
+        current = OutboxDeliveryStatus(outbox.delivery_status)
+        if current is not OutboxDeliveryStatus.LEASED:
+            return current
+
+        settings = get_settings()
+        attempt = int(outbox.attempt) + 1
+        outbox.attempt = attempt
+        outbox.last_error_code = error_code
+        if error_detail is not None:
+            outbox.last_error_detail = self._truncate_error_detail(error_detail)
+        outbox.locked_by = None
+        outbox.locked_at = None
+        outbox.lease_expires_at = None
+        outbox.updated_at = now
+
+        if attempt >= settings.outbox_max_attempts:
+            validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
+            outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+            outbox.next_retry_at = None
+            record_writeback_dead_letter(adapter=self._adapter_label(outbox))
+            return OutboxDeliveryStatus.DEAD_LETTER
+
+        validate_outbox_delivery_transition(current, OutboxDeliveryStatus.WAITING_RETRY)
+        outbox.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
+        outbox.next_retry_at = now + timedelta(
+            seconds=self._outbox_retry_backoff_seconds(attempt),
+        )
+        record_writeback_retry(adapter=self._adapter_label(outbox))
+        return OutboxDeliveryStatus.WAITING_RETRY
+
+    def _release_leased_outbox_after_lease_expiry(
+        self,
+        outbox: orm.DispositionOutbox,
+        *,
+        now: datetime,
+    ) -> OutboxDeliveryStatus:
+        """Re-queue an expired lease without consuming a delivery attempt."""
+        current = OutboxDeliveryStatus(outbox.delivery_status)
+        if current is not OutboxDeliveryStatus.LEASED:
+            return current
+
+        outbox.last_error_code = "lease_expired"
+        outbox.locked_by = None
+        outbox.locked_at = None
+        outbox.lease_expires_at = None
+        outbox.updated_at = now
+        validate_outbox_delivery_transition(current, OutboxDeliveryStatus.WAITING_RETRY)
+        outbox.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
+        backoff_attempt = max(1, int(outbox.attempt) + 1)
+        outbox.next_retry_at = now + timedelta(
+            seconds=self._outbox_retry_backoff_seconds(backoff_attempt),
+        )
+        record_writeback_retry(adapter=self._adapter_label(outbox))
+        return OutboxDeliveryStatus.WAITING_RETRY
+
+    def _release_leased_outbox_to_dead_letter(
+        self,
+        outbox: orm.DispositionOutbox,
+        *,
+        now: datetime,
+        error_code: str,
+        error_detail: str | None = None,
+    ) -> OutboxDeliveryStatus:
+        """Terminal outbox state for non-retryable delivery failures (e.g. guardrail)."""
+        current = OutboxDeliveryStatus(outbox.delivery_status)
+        if current is not OutboxDeliveryStatus.LEASED:
+            return current
+
+        outbox.last_error_code = error_code
+        if error_detail is not None:
+            outbox.last_error_detail = self._truncate_error_detail(error_detail)
+        outbox.locked_by = None
+        outbox.locked_at = None
+        outbox.lease_expires_at = None
+        outbox.updated_at = now
+        validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
+        outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+        outbox.next_retry_at = None
+        record_writeback_dead_letter(adapter=self._adapter_label(outbox))
+        return OutboxDeliveryStatus.DEAD_LETTER
+
+    async def _mark_delivery_waiting_retry(
+        self,
+        outbox_id: str,
+        *,
+        error_code: str = "delivery_failed",
+        error_detail: str | None = None,
+    ) -> None:
+        """Release a leased outbox back to the retry queue after a failed delivery attempt."""
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
+                    .with_for_update()
+                )
+                if outbox is None:
+                    return
+                self._release_leased_outbox_after_failure(
+                    outbox,
+                    now=now,
+                    error_code=error_code,
+                    error_detail=error_detail,
+                )
+
+    async def _mark_delivery_dead_letter(
+        self,
+        outbox_id: str,
+        *,
+        error_code: str,
+        error_detail: str | None = None,
+    ) -> None:
+        """Move a leased outbox to DEAD_LETTER for non-retryable failures."""
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
+                    .with_for_update()
+                )
+                if outbox is None:
+                    return
+                self._release_leased_outbox_to_dead_letter(
+                    outbox,
+                    now=now,
+                    error_code=error_code,
+                    error_detail=error_detail,
+                )
+
 
 class OutboxWorker:
     def __init__(self, service: DispositionSyncService) -> None:
@@ -910,12 +1040,19 @@ class OutboxWorker:
         for outbox_id in claimed:
             try:
                 await self._service._deliver_outbox(outbox_id)
-            except GuardrailViolationError:
+            except GuardrailViolationError as exc:
                 logger.warning("outbox delivery blocked by guard outbox=%s", outbox_id)
-                await self._service._mark_delivery_waiting_retry(outbox_id)
-            except Exception:
+                await self._service._mark_delivery_dead_letter(
+                    outbox_id,
+                    error_code="guardrail_blocked",
+                    error_detail=str(exc),
+                )
+            except Exception as exc:
                 logger.exception("outbox delivery failed outbox=%s", outbox_id)
-                await self._service._mark_delivery_waiting_retry(outbox_id)
+                await self._service._mark_delivery_waiting_retry(
+                    outbox_id,
+                    error_detail=f"{type(exc).__name__}: {exc}",
+                )
         return len(claimed)
 
     async def _claim_batch(self, *, limit: int) -> list[str]:
@@ -928,11 +1065,24 @@ class OutboxWorker:
                         select(orm.DispositionOutbox)
                         .where(
                             or_(
-                                orm.DispositionOutbox.delivery_status.in_(
-                                    (
-                                        OutboxDeliveryStatus.READY.value,
-                                        OutboxDeliveryStatus.WAITING_RETRY.value,
-                                    )
+                                and_(
+                                    orm.DispositionOutbox.delivery_status
+                                    == OutboxDeliveryStatus.READY.value,
+                                    or_(
+                                        orm.DispositionOutbox.next_retry_at.is_(None),
+                                        orm.DispositionOutbox.next_retry_at <= now,
+                                    ),
+                                ),
+                                and_(
+                                    orm.DispositionOutbox.delivery_status
+                                    == OutboxDeliveryStatus.WAITING_RETRY.value,
+                                    orm.DispositionOutbox.next_retry_at.is_not(None),
+                                    orm.DispositionOutbox.next_retry_at <= now,
+                                ),
+                                and_(
+                                    orm.DispositionOutbox.delivery_status
+                                    == OutboxDeliveryStatus.WAITING_RETRY.value,
+                                    orm.DispositionOutbox.next_retry_at.is_(None),
                                 ),
                                 and_(
                                     orm.DispositionOutbox.delivery_status
@@ -950,19 +1100,27 @@ class OutboxWorker:
                 for row in rows:
                     current = OutboxDeliveryStatus(row.delivery_status)
                     if (
+                        current is OutboxDeliveryStatus.WAITING_RETRY
+                        and row.next_retry_at is None
+                    ):
+                        backoff_attempt = max(1, int(row.attempt) + 1)
+                        row.next_retry_at = now + timedelta(
+                            seconds=self._service._outbox_retry_backoff_seconds(
+                                backoff_attempt,
+                            ),
+                        )
+                        row.updated_at = now
+                        continue
+                    if (
                         current is OutboxDeliveryStatus.LEASED
                         and row.lease_expires_at is not None
                         and row.lease_expires_at < now
                     ):
-                        validate_outbox_delivery_transition(
-                            OutboxDeliveryStatus.LEASED,
-                            OutboxDeliveryStatus.WAITING_RETRY,
+                        self._service._release_leased_outbox_after_lease_expiry(
+                            row,
+                            now=now,
                         )
-                        row.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
-                        row.locked_by = None
-                        row.locked_at = None
-                        row.lease_expires_at = None
-                        current = OutboxDeliveryStatus.WAITING_RETRY
+                        continue
                     validate_outbox_delivery_transition(
                         current,
                         OutboxDeliveryStatus.LEASED,

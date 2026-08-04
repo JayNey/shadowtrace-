@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -45,6 +45,7 @@ from app.models.enums import (
     ExecutionOwner,
     ExecutionSubstate,
     FinalVerdict,
+    OutboxDeliveryStatus,
     Severity,
     SourceObjectKind,
     WritebackReadiness,
@@ -698,6 +699,22 @@ async def test_expired_lease_outbox_reclaimed(
             )
     worker = OutboxWorker(sync)
     claimed = await worker.run_once(limit=1)
+    assert claimed == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.WAITING_RETRY.value
+        assert row.attempt == 0
+        assert row.next_retry_at is not None
+        assert row.next_retry_at > datetime.now(UTC)
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.DispositionOutbox, outbox_id, with_for_update=True)
+            assert row is not None
+            row.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    claimed = await worker.run_once(limit=1)
     assert claimed == 1
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
@@ -857,3 +874,399 @@ def factory_build_min_command(
         entity_action_code="block_ip",
     )
     return command.model_dump(mode="json")
+
+
+async def _insert_leased_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    event_id: str,
+    action_id: str,
+    source_record_id: str,
+    locator: SourceObjectLocator,
+    concurrency_token: str,
+    outbox_id: str | None = None,
+    attempt: int = 0,
+) -> str:
+    oid = outbox_id or f"obx-{_sfx()}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=oid,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.LEASED.value,
+                    locked_by="worker-a",
+                    locked_at=now,
+                    lease_expires_at=now + timedelta(seconds=30),
+                    attempt=attempt,
+                )
+            )
+    return oid
+
+
+@pytest.mark.asyncio
+async def test_waiting_retry_future_next_retry_at_not_claimed(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    future = datetime.now(UTC) + timedelta(minutes=10)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.WAITING_RETRY.value,
+                    attempt=1,
+                    next_retry_at=future,
+                    last_error_code="delivery_failed",
+                )
+            )
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=5) == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.WAITING_RETRY.value
+
+
+@pytest.mark.asyncio
+async def test_waiting_retry_due_is_claimed_and_delivered(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    past = datetime.now(UTC) - timedelta(seconds=5)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.WAITING_RETRY.value,
+                    attempt=1,
+                    next_retry_at=past,
+                    last_error_code="delivery_failed",
+                )
+            )
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=5) == 1
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+
+
+@pytest.mark.asyncio
+async def test_outbox_max_attempts_moves_to_dead_letter(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import Settings, get_settings
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+
+    monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
+    settings = Settings.model_validate({**get_settings().model_dump(), "OUTBOX_MAX_ATTEMPTS": 2})
+    monkeypatch.setattr("app.services.disposition_sync_service.get_settings", lambda: settings)
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = await _insert_leased_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        attempt=1,
+    )
+
+    await sync._mark_delivery_waiting_retry(outbox_id, error_code="delivery_failed")
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.attempt == 2
+        assert row.next_retry_at is None
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=5) == 0
+
+
+@pytest.mark.asyncio
+async def test_delivery_failure_schedules_backoff_not_hot_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.disposition_sync_service import OutboxWorker
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    async def _fail_delivery(_outbox_id: str) -> None:
+        raise RuntimeError("simulated adapter failure")
+
+    monkeypatch.setattr(sync, "_deliver_outbox", _fail_delivery)
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.WAITING_RETRY.value
+        assert row.attempt == 1
+        assert row.next_retry_at is not None
+        assert row.next_retry_at > datetime.now(UTC)
+        assert row.last_error_detail is not None
+        assert "RuntimeError" in row.last_error_detail
+
+    assert await worker.run_once(limit=1) == 0
+
+
+@pytest.mark.asyncio
+async def test_waiting_retry_null_next_retry_at_backfilled_not_claimed(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.WAITING_RETRY.value,
+                    attempt=1,
+                    next_retry_at=None,
+                    last_error_code="delivery_failed",
+                )
+            )
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=5) == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.WAITING_RETRY.value
+        assert row.next_retry_at is not None
+        assert row.next_retry_at > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_guardrail_blocked_moves_to_dead_letter(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.errors import GuardrailViolationError
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    async def _guardrail_block(_outbox_id: str) -> None:
+        raise GuardrailViolationError(
+            "blocked writeback field",
+            error_code="guardrail_violation",
+        )
+
+    monkeypatch.setattr(sync, "_deliver_outbox", _guardrail_block)
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == "guardrail_blocked"
+        assert row.last_error_detail is not None
+        assert row.next_retry_at is None
+
+    assert await worker.run_once(limit=1) == 0

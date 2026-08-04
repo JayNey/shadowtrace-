@@ -27,6 +27,7 @@ from app.core.metrics import (
     observe_writeback_queue_age,
     record_action_unknown,
     record_writeback,
+    record_writeback_dead_letter,
     record_writeback_retry,
     reset_metrics_for_tests,
 )
@@ -302,11 +303,13 @@ def test_business_metrics_record_when_enabled(
     record_writeback(status="confirmed", adapter="mock_xdr")
     record_writeback(status="unknown", adapter="mock_xdr")
     record_writeback_retry(adapter="mock_xdr")
+    record_writeback_dead_letter(adapter="mock_xdr")
     record_action_unknown(adapter="mock_xdr")
     observe_writeback_queue_age(2.0)
 
     assert _metric_sum(metric_reader, "shadowtrace_writeback_total") >= 2.0
     assert _metric_sum(metric_reader, "shadowtrace_writeback_retry_total") >= 1.0
+    assert _metric_sum(metric_reader, "shadowtrace_writeback_dead_letter_total") >= 1.0
     assert _metric_sum(metric_reader, "shadowtrace_action_unknown_total") >= 1.0
 
 
