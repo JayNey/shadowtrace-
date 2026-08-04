@@ -167,6 +167,26 @@ class Settings(BaseSettings):
         ge=1,
         le=720,
     )
+    checkpoint_attempt_redis_recovery: bool = Field(
+        default=False,
+        alias="CHECKPOINT_ATTEMPT_REDIS_RECOVERY",
+        description=(
+            "When true, periodically probe Redis after checkpoint memory fallback; "
+            "only new thread_ids resume Redis persistence (pinned threads stay in-memory)."
+        ),
+    )
+    checkpoint_redis_recovery_interval_seconds: float = Field(
+        default=30.0,
+        alias="CHECKPOINT_REDIS_RECOVERY_INTERVAL_SECONDS",
+        ge=5.0,
+        le=600.0,
+    )
+    checkpoint_fallback_reminder_interval_seconds: float = Field(
+        default=300.0,
+        alias="CHECKPOINT_FALLBACK_REMINDER_INTERVAL_SECONDS",
+        ge=60.0,
+        le=3600.0,
+    )
     task_mode: str = Field(default="background", alias="TASK_MODE")
     celery_broker_url: str = Field(default="", alias="CELERY_BROKER_URL")
     approval_timeout_minutes: int = Field(default=30, alias="APPROVAL_TIMEOUT_MINUTES")

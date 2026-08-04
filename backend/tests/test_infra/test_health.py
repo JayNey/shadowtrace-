@@ -12,6 +12,17 @@ from httpx import ASGITransport, AsyncClient
 from app.api.v1 import health as health_module
 from app.core.config import Settings, get_settings
 from app.main import app
+from app.orchestration.checkpointer import (
+    RedisCheckpointer,
+    reset_checkpoint_health_state_for_tests,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_checkpoint_health_state() -> Iterator[None]:
+    reset_checkpoint_health_state_for_tests()
+    yield
+    reset_checkpoint_health_state_for_tests()
 
 
 @pytest.fixture(autouse=True)
@@ -130,6 +141,9 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     assert body["status"] == "ok"
     assert body["postgres"] == "ok"
     assert body["redis"] == "ok"
+    assert body["checkpoint"]["status"] == "ok"
+    assert body["checkpoint"]["memory_fallback"] is False
+    assert body["checkpoint"]["memory_pinned_thread_count"] == 0
     assert body["embedding_provider"]["status"] == "ok"
     assert body["embedding_provider"]["mode"] == "mock"
     assert "api_key" not in str(body["embedding_provider"]).lower()
@@ -244,6 +258,103 @@ async def test_health_degraded_returns_503_when_redis_down(client: AsyncClient) 
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
     assert response.json()["redis"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_health_checkpoint_fallback_marks_degraded_without_503(
+    client: AsyncClient,
+) -> None:
+    settings = Settings(SIMULATION_ENABLED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    checkpoint_payload = {
+        "status": "degraded",
+        "memory_fallback": True,
+        "recoverable": False,
+        "fallback_triggers": 2,
+        "memory_pinned_thread_count": 3,
+        "redis_recovery_enabled": False,
+    }
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock", "dimension": 1024},
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
+        patch(
+            "app.api.v1.health._check_loaded_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "pipeline_attached": True, "reasons": []},
+        ),
+        patch(
+            "app.api.v1.health._check_playbook_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "mode": "production", "reasons": []},
+        ),
+        patch(
+            "app.orchestration.checkpointer.get_checkpoint_health",
+            return_value=checkpoint_payload,
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "degraded"
+    assert body["checkpoint"] == checkpoint_payload
+
+
+@pytest.mark.asyncio
+async def test_health_reflects_live_checkpointer_fallback_without_mock(
+    client: AsyncClient,
+) -> None:
+    settings = Settings(SIMULATION_ENABLED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+
+    await RedisCheckpointer.create(None)  # type: ignore[arg-type]
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock", "dimension": 1024},
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
+        patch(
+            "app.api.v1.health._check_loaded_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "pipeline_attached": True, "reasons": []},
+        ),
+        patch(
+            "app.api.v1.health._check_playbook_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "mode": "production", "reasons": []},
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "degraded"
+    assert body["checkpoint"]["status"] == "degraded"
+    assert body["checkpoint"]["memory_fallback"] is True
+    assert body["checkpoint"]["fallback_triggers"] == 1
 
 
 @pytest.mark.asyncio

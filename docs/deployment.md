@@ -218,6 +218,18 @@ Mock 模式下预期响应（符合 ISSUE-001 契约）：
 
 当 PostgreSQL 或 Redis 不可达时，顶层 `status` 变为 `"degraded"` 且 HTTP 状态码为 503。
 
+LangGraph checkpoint 在 Redis 读写失败后会 **fail-soft 降级到进程内 memory**（进程重启不可恢复）。`/api/v1/health` 的 `checkpoint` 块会反映该状态：`memory_fallback=true` 时顶层 `status` 为 `degraded`（HTTP 仍 200，除非 postgres/embedding 硬依赖失败）。
+
+可选环境变量（默认关闭）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `CHECKPOINT_ATTEMPT_REDIS_RECOVERY` | `false` | 为 `true` 时，fallback 后周期性 ping Redis；恢复成功后 **仅新 `thread_id`** 恢复 Redis 持久化 |
+| `CHECKPOINT_REDIS_RECOVERY_INTERVAL_SECONDS` | `30` | 回升探测间隔（秒） |
+| `CHECKPOINT_FALLBACK_REMINDER_INTERVAL_SECONDS` | `300` | fallback 持续期间 warning 日志限流间隔 |
+
+已降级到 memory 的 `thread_id` 会保持 memory-pinned 直至事件结束，**不会**写回 Redis（避免半持久化分裂）。指标：`shadowtrace_checkpoint_memory_fallback`（0/1）、`shadowtrace_checkpoint_fallback_total`（按 reason 计数）。
+
 ---
 
 ## 切换到 Live 模式
