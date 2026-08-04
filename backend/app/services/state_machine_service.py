@@ -31,20 +31,17 @@ from app.db import models as orm
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
-    ActionStatus,
     DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
     FinalVerdict,
     SourceDisposition,
-    WritebackReadiness,
     WritebackStatus,
 )
 from app.models.security_event import SecurityEvent
 from app.models.workflow import (
     MAX_REPLAN_COUNT,
     STATE_TRANSITIONS,
-    ClosedGateActionView,
     TerminalEventWritebackView,
     TransitionContext,
     validate_transition,
@@ -56,6 +53,7 @@ from app.services.context_service import (
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.event_audit_log_service import EventAuditLogService
 from app.services.event_service import _security_event_from_row
+from app.services.writeback_close_gate import build_closed_gate_actions
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +131,7 @@ async def _build_authoritative_context(
     # --- CLOSED gate projections ---
 
     report_exists = await _check_report_exists(session, event_id)
-    applicable_required_actions = await _build_closed_gate_actions(
+    applicable_required_actions = await build_closed_gate_actions(
         session, event_id, current_revision
     )
     terminal_event_writeback = await _build_terminal_writeback_view(
@@ -165,135 +163,6 @@ async def _check_report_exists(session: AsyncSession, event_id: str) -> bool:
         select(orm.Report.report_id).where(orm.Report.event_id == event_id).limit(1)
     )
     return row is not None
-
-
-async def _build_closed_gate_actions(
-    session: AsyncSession,
-    event_id: str,
-    current_revision: int | None,
-) -> list[ClosedGateActionView]:
-    """Collect applicable-required response/rollback Actions for the CLOSED gate."""
-    if current_revision is None:
-        return []
-
-    actions: list[orm.Action] = list(
-        (
-            await session.scalars(
-                select(orm.Action).where(
-                    orm.Action.event_id == event_id,
-                    orm.Action.plan_revision == current_revision,
-                    orm.Action.action_category.in_(
-                        (ActionCategory.RESPONSE.value, ActionCategory.ROLLBACK.value)
-                    ),
-                    orm.Action.superseded_by_revision.is_(None),
-                )
-            )
-        ).all()
-    )
-
-    result: list[ClosedGateActionView] = []
-    for a in actions:
-        cat = ActionCategory(a.action_category)
-
-        # writeback_readiness
-        readiness_raw = a.writeback_readiness
-        try:
-            readiness = (
-                WritebackReadiness(readiness_raw)
-                if readiness_raw
-                else WritebackReadiness.NOT_CONFIGURED
-            )
-        except ValueError:
-            readiness = WritebackReadiness.NOT_CONFIGURED
-
-        # writeback_status
-        wb_status: WritebackStatus | None = None
-        if a.writeback_status:
-            try:
-                wb_status = WritebackStatus(a.writeback_status)
-            except ValueError:
-                pass
-
-        # Determine if this action has an outbox record.
-        outbox = await session.scalar(
-            select(orm.DispositionOutbox.outbox_id)
-            .where(orm.DispositionOutbox.action_id == a.action_id)
-            .limit(1)
-        )
-        has_command = outbox is not None
-
-        # Check if all linked outbox records are CONFIRMED.
-        all_confirmed = False
-        if has_command:
-            all_confirmed = await _all_intents_confirmed_for_action(session, a.action_id)
-
-        # Approved terminal dispositions from the action.
-        approved_terminal: list[SourceDisposition] = []
-        for raw in a.approved_terminal_dispositions or []:
-            try:
-                approved_terminal.append(SourceDisposition(str(raw)))
-            except ValueError:
-                pass
-
-        # Check if this action has a job or outbox record.
-        has_job_or_outbox = await _action_has_job_or_outbox(session, a.action_id)
-
-        execution_phase_raw = a.execution_phase or "immediate"
-        try:
-            exec_phase = ActionExecutionPhase(execution_phase_raw)
-        except ValueError:
-            exec_phase = ActionExecutionPhase.IMMEDIATE
-
-        view = ClosedGateActionView(
-            action_id=a.action_id,
-            action_category=cat,
-            writeback_required=bool(a.writeback_required),
-            writeback_applicable=bool(a.writeback_applicable),
-            writeback_readiness=readiness,
-            writeback_status=wb_status,
-            has_command=has_command,
-            all_required_intents_confirmed=all_confirmed,
-            execution_phase=exec_phase,
-            tool_name=a.action_name,
-            approved_terminal_dispositions=approved_terminal,
-            superseded=bool(a.superseded_by_revision),
-            rejected=a.status == ActionStatus.REJECTED.value,
-            has_job_or_outbox=has_job_or_outbox,
-        )
-        result.append(view)
-
-    return result
-
-
-async def _all_intents_confirmed_for_action(session: AsyncSession, action_id: str) -> bool:
-    """Return True when every outbox record for *action_id* is CONFIRMED."""
-    outboxes = (
-        await session.scalars(
-            select(orm.DispositionOutbox).where(
-                orm.DispositionOutbox.action_id == action_id,
-                orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
-            )
-        )
-    ).all()
-    if not outboxes:
-        return False
-    return all(o.latest_writeback_status == WritebackStatus.CONFIRMED.value for o in outboxes)
-
-
-async def _action_has_job_or_outbox(session: AsyncSession, action_id: str) -> bool:
-    job = await session.scalar(
-        select(orm.ActionExecutionJob.job_id)
-        .where(orm.ActionExecutionJob.action_id == action_id)
-        .limit(1)
-    )
-    if job is not None:
-        return True
-    outbox = await session.scalar(
-        select(orm.DispositionOutbox.outbox_id)
-        .where(orm.DispositionOutbox.action_id == action_id)
-        .limit(1)
-    )
-    return outbox is not None
 
 
 async def _build_terminal_writeback_view(

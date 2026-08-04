@@ -145,6 +145,7 @@ async def _seed_reporting_required_event(
     title: str = "Reporting required event",
     writeback_readiness: WritebackReadiness = WritebackReadiness.READY,
     outbox_status: WritebackStatus | None = None,
+    entity_action_writeback_status: WritebackStatus | None = None,
     include_action: bool = True,
 ) -> str:
     """Insert a REPORTING event with optional writeback action/outbox rows."""
@@ -233,9 +234,13 @@ async def _seed_reporting_required_event(
                         writeback_applicable=True,
                         writeback_readiness=writeback_readiness.value,
                         writeback_status=(
-                            WritebackStatus.CONFIRMED.value
-                            if outbox_status is WritebackStatus.CONFIRMED
-                            else None
+                            entity_action_writeback_status.value
+                            if entity_action_writeback_status is not None
+                            else (
+                                WritebackStatus.CONFIRMED.value
+                                if outbox_status is WritebackStatus.CONFIRMED
+                                else None
+                            )
                         ),
                     )
                 )
@@ -1074,6 +1079,50 @@ async def test_close_reporting_writeback_unknown_rejected(
     )
     assert resp.status_code == 409
     assert resp.json()["error_code"] == "writeback_pending"
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_outbox_accepted_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Outbox ACCEPTED must fail API pre-check (intents not all CONFIRMED)."""
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.ACCEPTED,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "outbox accepted test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error_code"] == "writeback_pending"
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_action_status_not_confirmed_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Action writeback_status must be CONFIRMED even when outbox rows are CONFIRMED."""
+    event_id = await _seed_reporting_required_event(
+        session_factory,
+        outbox_status=WritebackStatus.CONFIRMED,
+        entity_action_writeback_status=WritebackStatus.ACCEPTED,
+    )
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "action status mismatch test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 409
+    assert resp.json()["error_code"] == "writeback_pending"
+    assert resp.json()["details"]["writeback_status"] == WritebackStatus.ACCEPTED.value
 
 
 @pytest.mark.asyncio

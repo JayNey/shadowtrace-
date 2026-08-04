@@ -33,8 +33,6 @@ from app.api.v1.errors import (
     InvalidStateTransitionError,
     ResourceNotFoundError,
     WritebackConflictError,
-    WritebackFailedError,
-    WritebackPendingError,
     WritebackUnsupportedError,
 )
 from app.core.auth import (
@@ -326,9 +324,9 @@ async def _validate_writeback_gate(
 ) -> None:
     """Validate the writeback gate before allowing close.
 
-    For REQUIRED disposition_policy events, checks writeback readiness and
-    outbox status.  Raises the appropriate error for each blocked case so
-    callers never need to duplicate the gate logic.
+    For REQUIRED disposition_policy events, runs the same writeback subset of
+    the StateMachine CLOSED gate as an early API pre-check (ISSUE-171).
+    Raises the appropriate HTTP domain error; SM remains authoritative.
 
     No-op for NOT_REQUIRED events.
     """
@@ -336,35 +334,21 @@ async def _validate_writeback_gate(
         return
 
     from app.api.v1.deps import _get_session_factory
-
-    readiness, wb_status, _pending = await _build_writeback_info(
-        event_id, event.disposition_policy, _get_session_factory()
+    from app.models.workflow import check_required_writeback_close_gate
+    from app.services.writeback_close_gate import (
+        build_closed_gate_actions,
+        raise_api_writeback_gate_error,
     )
-    if readiness == WritebackReadiness.NOT_CONFIGURED:
-        raise WritebackUnsupportedError(
-            "required disposition_policy but no disposition Action configured",
-            details={"event_id": event_id},
+
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        current_revision = await session.scalar(
+            select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
         )
-    if readiness not in (WritebackReadiness.READY, WritebackReadiness.NOT_REQUIRED):
-        raise WritebackUnsupportedError(
-            f"writeback readiness is {readiness.value}",
-            details={"event_id": event_id, "readiness": readiness.value},
-        )
-    if wb_status in (WritebackStatus.PENDING, WritebackStatus.UNKNOWN):
-        raise WritebackPendingError(
-            f"writeback is {wb_status.value}",
-            details={"event_id": event_id, "writeback_status": wb_status.value},
-        )
-    if wb_status == WritebackStatus.FAILED:
-        raise WritebackFailedError(
-            "writeback failed",
-            details={"event_id": event_id},
-        )
-    if wb_status == WritebackStatus.CONFLICT:
-        raise WritebackConflictError(
-            "writeback conflict",
-            details={"event_id": event_id},
-        )
+        gate_actions = await build_closed_gate_actions(session, event_id, current_revision)
+        violation = check_required_writeback_close_gate(gate_actions)
+        if violation is not None:
+            raise_api_writeback_gate_error(violation, event_id=event_id)
 
 
 async def _build_writeback_info(

@@ -38,7 +38,9 @@ from app.models.workflow import (
     LateFalsePositiveTier,
     TerminalEventWritebackView,
     TransitionContext,
+    WritebackCloseGateReason,
     apply_external_source_observation,
+    check_required_writeback_close_gate,
     classify_late_false_positive,
     derive_case_label,
     late_fp_allowed_substate,
@@ -342,6 +344,50 @@ def test_closed_gate_required_rejects_non_terminal_disposition() -> None:
 
 def test_closed_gate_required_happy_path() -> None:
     validate_closed_gate(_closed_ctx())
+
+
+def test_check_required_writeback_close_gate_intents_not_confirmed() -> None:
+    violation = check_required_writeback_close_gate(
+        [
+            _applicable_ok(
+                all_required_intents_confirmed=False,
+                writeback_status=WritebackStatus.ACCEPTED,
+            )
+        ]
+    )
+    assert violation is not None
+    assert violation.reason is WritebackCloseGateReason.INTENTS_NOT_CONFIRMED
+
+
+def test_check_required_writeback_close_gate_status_not_confirmed() -> None:
+    violation = check_required_writeback_close_gate(
+        [
+            _applicable_ok(
+                all_required_intents_confirmed=True,
+                writeback_status=WritebackStatus.ACCEPTED,
+            )
+        ]
+    )
+    assert violation is not None
+    assert violation.reason is WritebackCloseGateReason.STATUS_NOT_CONFIRMED
+
+
+def test_check_required_writeback_close_gate_happy_path() -> None:
+    assert check_required_writeback_close_gate([_applicable_ok()]) is None
+
+
+def test_closed_gate_required_rejects_intents_not_confirmed() -> None:
+    with pytest.raises(InvalidStateTransitionError, match="not all CONFIRMED"):
+        validate_closed_gate(
+            _closed_ctx(
+                applicable_required_actions=[
+                    _applicable_ok(
+                        all_required_intents_confirmed=False,
+                        writeback_status=WritebackStatus.ACCEPTED,
+                    )
+                ]
+            )
+        )
 
 
 # --------------------------------------------------------------------------- #

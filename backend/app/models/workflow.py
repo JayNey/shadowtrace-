@@ -13,6 +13,7 @@ Force-close that bypasses the CLOSED writeback gate is **not** available through
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -479,11 +480,6 @@ WRITEBACK_STATUS_TRANSITIONS: dict[WritebackStatus, set[WritebackStatus]] = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# Transition context + CLOSED gate projection
-# --------------------------------------------------------------------------- #
-
-
 class ClosedGateActionView(BaseModel):
     """Minimal projection of an applicable required Action for the CLOSED gate."""
 
@@ -757,6 +753,119 @@ def validate_verdict_status(
     )
 
 
+class WritebackCloseGateReason(StrEnum):
+    NO_APPLICABLE = "no_applicable"
+    READINESS_NOT_READY = "readiness_not_ready"
+    NO_COMMAND = "no_command"
+    INTENTS_NOT_CONFIRMED = "intents_not_confirmed"
+    STATUS_NOT_CONFIRMED = "status_not_confirmed"
+
+
+@dataclass(frozen=True)
+class WritebackCloseGateViolation:
+    reason: WritebackCloseGateReason
+    action_id: str | None = None
+    writeback_readiness: str | None = None
+    writeback_status: str | None = None
+
+
+def filter_applicable_required_writeback_actions(
+    applicable_required_actions: list[ClosedGateActionView],
+) -> list[ClosedGateActionView]:
+    return [
+        action
+        for action in applicable_required_actions
+        if action.writeback_required
+        and action.writeback_applicable
+        and action.action_category in (ActionCategory.RESPONSE, ActionCategory.ROLLBACK)
+        and not action.superseded
+        and not action.rejected
+    ]
+
+
+def check_required_writeback_close_gate(
+    applicable_required_actions: list[ClosedGateActionView],
+) -> WritebackCloseGateViolation | None:
+    """Shared REQUIRED writeback predicate for Close API pre-check and SM CLOSED gate."""
+    applicable = filter_applicable_required_writeback_actions(applicable_required_actions)
+    if not applicable:
+        return WritebackCloseGateViolation(reason=WritebackCloseGateReason.NO_APPLICABLE)
+
+    for action in applicable:
+        if action.writeback_readiness is not WritebackReadiness.READY:
+            return WritebackCloseGateViolation(
+                reason=WritebackCloseGateReason.READINESS_NOT_READY,
+                action_id=action.action_id,
+                writeback_readiness=action.writeback_readiness.value,
+            )
+        if not action.has_command:
+            return WritebackCloseGateViolation(
+                reason=WritebackCloseGateReason.NO_COMMAND,
+                action_id=action.action_id,
+            )
+        if not action.all_required_intents_confirmed:
+            return WritebackCloseGateViolation(
+                reason=WritebackCloseGateReason.INTENTS_NOT_CONFIRMED,
+                action_id=action.action_id,
+                writeback_status=(
+                    action.writeback_status.value if action.writeback_status is not None else None
+                ),
+            )
+        if action.writeback_status is not WritebackStatus.CONFIRMED:
+            return WritebackCloseGateViolation(
+                reason=WritebackCloseGateReason.STATUS_NOT_CONFIRMED,
+                action_id=action.action_id,
+                writeback_status=(
+                    action.writeback_status.value if action.writeback_status is not None else None
+                ),
+            )
+    return None
+
+
+def raise_closed_gate_writeback_error(violation: WritebackCloseGateViolation) -> None:
+    """Map a shared violation to StateMachine InvalidStateTransitionError."""
+    target = EventStatus.CLOSED
+    if violation.reason is WritebackCloseGateReason.NO_APPLICABLE:
+        raise InvalidStateTransitionError(
+            "required CLOSED gate: zero applicable writeback Actions "
+            "(empty / all-rejected sets cannot pass)",
+            target=target,
+            details={"applicable_count": 0},
+        )
+    if violation.reason is WritebackCloseGateReason.READINESS_NOT_READY:
+        raise InvalidStateTransitionError(
+            "required CLOSED gate: applicable Action readiness is not READY",
+            target=target,
+            details={
+                "action_id": violation.action_id,
+                "writeback_readiness": violation.writeback_readiness,
+            },
+        )
+    if violation.reason is WritebackCloseGateReason.NO_COMMAND:
+        raise InvalidStateTransitionError(
+            "required CLOSED gate: applicable Action has no disposition command",
+            target=target,
+            details={"action_id": violation.action_id},
+        )
+    if violation.reason is WritebackCloseGateReason.INTENTS_NOT_CONFIRMED:
+        raise InvalidStateTransitionError(
+            "required CLOSED gate: required intents are not all CONFIRMED",
+            target=target,
+            details={
+                "action_id": violation.action_id,
+                "writeback_status": violation.writeback_status,
+            },
+        )
+    raise InvalidStateTransitionError(
+        "required CLOSED gate: writeback_status must be CONFIRMED",
+        target=target,
+        details={
+            "action_id": violation.action_id,
+            "writeback_status": violation.writeback_status,
+        },
+    )
+
+
 def validate_closed_gate(ctx: TransitionContext) -> None:
     """Hard gate for every transition into CLOSED (required writeback semantics)."""
     if not ctx.report_exists:
@@ -776,58 +885,10 @@ def validate_closed_gate(ctx: TransitionContext) -> None:
             target=EventStatus.CLOSED,
         )
 
-    # disposition_policy=required
-    applicable = [
-        a
-        for a in ctx.applicable_required_actions
-        if a.writeback_required
-        and a.writeback_applicable
-        and a.action_category in (ActionCategory.RESPONSE, ActionCategory.ROLLBACK)
-        and not a.superseded
-        and not a.rejected
-    ]
-    if not applicable:
-        raise InvalidStateTransitionError(
-            "required CLOSED gate: zero applicable writeback Actions "
-            "(empty / all-rejected sets cannot pass)",
-            target=EventStatus.CLOSED,
-            details={"applicable_count": 0},
-        )
-
-    for action in applicable:
-        if action.writeback_readiness is not WritebackReadiness.READY:
-            raise InvalidStateTransitionError(
-                "required CLOSED gate: applicable Action readiness is not READY",
-                target=EventStatus.CLOSED,
-                details={
-                    "action_id": action.action_id,
-                    "writeback_readiness": action.writeback_readiness.value,
-                },
-            )
-        if not action.has_command:
-            raise InvalidStateTransitionError(
-                "required CLOSED gate: applicable Action has no disposition command",
-                target=EventStatus.CLOSED,
-                details={"action_id": action.action_id},
-            )
-        if not action.all_required_intents_confirmed:
-            raise InvalidStateTransitionError(
-                "required CLOSED gate: required intents are not all CONFIRMED",
-                target=EventStatus.CLOSED,
-                details={
-                    "action_id": action.action_id,
-                    "writeback_status": getattr(action.writeback_status, "value", None),
-                },
-            )
-        if action.writeback_status is not WritebackStatus.CONFIRMED:
-            raise InvalidStateTransitionError(
-                "required CLOSED gate: writeback_status must be CONFIRMED",
-                target=EventStatus.CLOSED,
-                details={
-                    "action_id": action.action_id,
-                    "writeback_status": getattr(action.writeback_status, "value", None),
-                },
-            )
+    # disposition_policy=required — shared writeback predicate (ISSUE-171).
+    violation = check_required_writeback_close_gate(ctx.applicable_required_actions)
+    if violation is not None:
+        raise_closed_gate_writeback_error(violation)
 
     terminal = ctx.terminal_event_writeback
     if terminal is None:
