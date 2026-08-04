@@ -1686,6 +1686,53 @@ async def test_investigate_duplicate_celery_mode_returns_409(
 
 
 @pytest.mark.asyncio
+async def test_investigate_celery_dispatch_failure_releases_lease(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-186: celery dispatch failure must release the HTTP-held lease."""
+    from app.api.v1 import events as events_module
+    from app.core.config import get_settings
+    from app.core.errors import DependencyUnavailableError
+
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+
+    event_id = await _create_test_event(event_service, title="Celery dispatch fail release")
+    released: list[tuple[str, str]] = []
+
+    class _TrackingLease:
+        async def acquire(self, _event_id: str, _owner_id: str, ttl_s: int = 600) -> bool:
+            return True
+
+        async def release(self, ev_id: str, owner_id: str) -> bool:
+            released.append((ev_id, owner_id))
+            return True
+
+    async def _fail_dispatch(*_args: object, **_kwargs: object) -> str:
+        raise DependencyUnavailableError(
+            message="broker down",
+            error_code="task_unavailable",
+            details={"dependency": "celery"},
+        )
+
+    monkeypatch.setattr(events_module, "get_event_lease", lambda: _TrackingLease())
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.dispatch_investigation",
+        _fail_dispatch,
+    )
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 503, resp.text
+    assert len(released) == 1
+    assert released[0][0] == event_id
+
+
+@pytest.mark.asyncio
 async def test_analysis_only_concurrent_investigate_second_request_returns_409(
     client: TestClient,
     event_service: EventService,

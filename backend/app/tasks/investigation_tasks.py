@@ -373,13 +373,13 @@ def run_investigation(
             from app.api.v1.deps import get_event_lease
 
             lease = get_event_lease()
-            asyncio.run(lease.release(event_id, owner_id))
+            asyncio.run(lease.release(event_id, resolved_owner))
         except Exception:
             logger.warning(
                 "run_investigation: best-effort lease release failed after soft limit "
                 "event=%s owner=%s",
                 event_id,
-                owner_id,
+                resolved_owner,
                 exc_info=True,
             )
         if intent_id:

@@ -800,3 +800,43 @@ async def test_execute_investigation_defaults_lease_acquired_false(
 
     await tasks.execute_investigation("evt-default-lease")
     assert seen["lease_acquired"] is False
+
+
+def test_run_investigation_soft_time_limit_releases_with_resolved_owner(
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-186: soft time limit must release lease with resolved_owner, not nullable owner_id."""
+    from celery.app.task import Context
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.core.celery_delivery import celery_task_owner_id
+
+    released: list[tuple[str, str]] = []
+
+    class _TrackingLease:
+        async def release(self, event_id: str, owner_id: str) -> bool:
+            released.append((event_id, owner_id))
+            return True
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _TrackingLease())
+
+    async def _boom(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(tasks, "_run_investigation_body", _boom)
+
+    ctx = Context(id="task-soft-limit-001", delivery_info={}, retries=0)
+    tasks.run_investigation.request_stack.push(ctx)
+    try:
+        with pytest.raises(SoftTimeLimitExceeded):
+            tasks.run_investigation.run(
+                "evt-soft-limit",
+                include_response_execution=False,
+                lease_acquired=True,
+            )
+    finally:
+        tasks.run_investigation.request_stack.pop()
+
+    expected_owner = celery_task_owner_id("task-soft-limit-001")
+    assert released == [("evt-soft-limit", expected_owner)]
