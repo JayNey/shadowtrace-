@@ -133,6 +133,13 @@ class DegradedFlagService:
                     for f in current
                 )
                 updated = apply_flag_to_list(current, flag_name, value)
+
+                # ISSUE-179: Skip write and EventContext mirror when flag is
+                # already in the desired state — prevents redundant journal
+                # entries and Redis writes during concurrent rebuild_context.
+                if updated == current:
+                    return updated
+
                 se.degraded_flags = updated
                 await session.flush()
 

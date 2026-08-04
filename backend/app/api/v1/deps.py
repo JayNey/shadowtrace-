@@ -93,6 +93,9 @@ def _get_degraded_flags() -> Any:
         _degraded_flags = DegradedFlagService(store, _get_session_factory())
 
         # ISSUE-179: Wire redis_context_unavailable auto-clear on Redis recovery.
+        # The callback captures the singleton DegradedFlagService by closure;
+        # tests that override _get_degraded_flags via dependency_overrides MUST
+        # also replace the store to avoid stale callback references.
         async def _on_redis_recovery(event_id: str) -> None:
             if await _degraded_flags.has_flag(event_id, "redis_context_unavailable"):
                 await _degraded_flags.set_flag(
