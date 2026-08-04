@@ -48,6 +48,24 @@ def _row_to_promotion_record(row: DetectionPromotionORM) -> DetectionPromotionRe
     )
 
 
+def _should_prefer_promotion_record(
+    existing: DetectionPromotionRecord | None,
+    candidate: DetectionPromotionRecord,
+) -> bool:
+    """Return True when *candidate* should replace *existing* in latest-by-updated_at dedup."""
+    if existing is None:
+        return True
+    candidate_updated_at = candidate.updated_at
+    existing_updated_at = existing.updated_at
+    if candidate_updated_at is None and existing_updated_at is None:
+        return False
+    if candidate_updated_at is None:
+        return False
+    if existing_updated_at is None:
+        return True
+    return candidate_updated_at > existing_updated_at
+
+
 async def list_completed_promotions_by_candidate(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -70,13 +88,7 @@ async def list_completed_promotions_by_candidate(
     by_candidate: dict[str, DetectionPromotionRecord] = {}
     for record in records:
         existing = by_candidate.get(record.candidate_detection_id)
-        record_updated_at = record.updated_at
-        existing_updated_at = existing.updated_at if existing is not None else None
-        if existing is None or (
-            record_updated_at is not None
-            and existing_updated_at is not None
-            and record_updated_at > existing_updated_at
-        ):
+        if _should_prefer_promotion_record(existing, record):
             by_candidate[record.candidate_detection_id] = record
     return by_candidate
 

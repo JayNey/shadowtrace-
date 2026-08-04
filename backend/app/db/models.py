@@ -1319,6 +1319,7 @@ from app.db.orm.shadow_run import (  # noqa: E402,F401
     ShadowRunORM,
 )
 
+# Explicit exports for ORM classes re-imported from app.db.orm.* (mypy attr-defined).
 __all__ = [
     "AgentArtifactORM",
     "AgentTaskAttemptORM",

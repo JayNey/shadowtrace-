@@ -361,8 +361,11 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
     async def _hydrate(self, thread_id: str) -> None:
         if not self._uses_redis_for_thread(thread_id) or thread_id in self._memory.storage:
             return
+        redis = self._redis
+        if redis is None:
+            return
         try:
-            raw = await self._redis.get_client().get(checkpoint_key_for_event(thread_id))
+            raw = await redis.get_client().get(checkpoint_key_for_event(thread_id))
             if raw is not None:
                 value = raw if isinstance(raw, bytes) else str(raw).encode()
                 self._import(thread_id, value)
@@ -378,8 +381,11 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         raw = self._export(thread_id)
         if raw is None:
             return
+        redis = self._redis
+        if redis is None:
+            return
         try:
-            await self._redis.get_client().set(
+            await redis.get_client().set(
                 checkpoint_key_for_event(thread_id),
                 raw,
                 ex=self._ttl_seconds,
