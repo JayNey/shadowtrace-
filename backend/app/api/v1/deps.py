@@ -113,7 +113,11 @@ def _get_tool_call_grant_service() -> Any:
 
         _tool_call_grant_service = ToolCallGrantService(
             _get_session_factory(),
-            budget_reservation=ToolCallBudgetReservationService(_get_redis()),
+            budget_reservation=ToolCallBudgetReservationService(
+                _get_redis(),
+                attempt_redis_recovery=get_settings().budget_attempt_redis_recovery,
+                recovery_interval_seconds=get_settings().budget_redis_recovery_interval_seconds,
+            ),
         )
     return _tool_call_grant_service
 
@@ -681,7 +685,12 @@ async def _build_investigation_agents() -> dict[str, Any]:
     state_machine = await get_state_machine()
     wm = await _get_wm()
     session_factory = _get_session_factory()
-    budget_service = BudgetService(redis=_get_redis(), settings=settings)
+    budget_service = BudgetService(
+        redis=_get_redis(),
+        settings=settings,
+        attempt_redis_recovery=settings.budget_attempt_redis_recovery,
+        recovery_interval_seconds=settings.budget_redis_recovery_interval_seconds,
+    )
     output_guard = OutputGuard()
     trace_service = AgentTraceService(
         session_factory,

@@ -81,6 +81,7 @@ class ToolCallBudgetReservationService:
         key = budget_reservation_key(mode, namespace_key=namespace_key, grant_id=grant_id)
         client = await self._redis_client()
         if client is None or not self._uses_redis_for_key(key):
+            self._ensure_key_pinned_for_degraded_fallback(key)
             counter = self._memory.counters.setdefault(key, _GrantBudgetCounter())
             if counter.reserved >= max_calls:
                 raise ValueError("grant max_calls exhausted")
@@ -124,6 +125,7 @@ class ToolCallBudgetReservationService:
         key = budget_reservation_key(mode, namespace_key=namespace_key, grant_id=grant_id)
         client = await self._redis_client()
         if client is None or not self._uses_redis_for_key(key):
+            self._ensure_key_pinned_for_degraded_fallback(key)
             counter = self._memory.counters.setdefault(key, _GrantBudgetCounter())
             counter.reserved = max(0, counter.reserved - count)
             return
@@ -173,6 +175,10 @@ class ToolCallBudgetReservationService:
     def _pin_key_to_memory(self, reservation_key: str | None) -> None:
         if reservation_key:
             self._memory_pinned_keys.add(reservation_key)
+
+    def _ensure_key_pinned_for_degraded_fallback(self, reservation_key: str) -> None:
+        if self._redis_degraded:
+            self._pin_key_to_memory(reservation_key)
 
     async def _maybe_attempt_redis_recovery(self) -> None:
         if not self._attempt_redis_recovery or not self._redis_degraded or self._redis is None:

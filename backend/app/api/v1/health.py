@@ -176,6 +176,9 @@ async def health(
     from app.orchestration.checkpointer import get_checkpoint_health
 
     checkpoint_health = get_checkpoint_health()
+    from app.core.metrics import get_budget_redis_health
+
+    budget_redis_health = get_budget_redis_health()
 
     hard_deps_ok = postgres == "ok" and redis_status == "ok"
     embedding_ok = embedding_provider.get("status") == "ok"
@@ -205,6 +208,8 @@ async def health(
         overall = "degraded"
     elif checkpoint_health.get("status") == "degraded":
         overall = "degraded"
+    elif budget_redis_health.get("status") == "degraded":
+        overall = "degraded"
 
     # 503 only for hard dependency / embedding failures — not missing workers alone (#622).
     # LLM affects HTTP status only when explicitly required (#609).
@@ -222,6 +227,7 @@ async def health(
         "postgres": postgres,
         "redis": redis_status,
         "checkpoint": checkpoint_health,
+        "budget_redis": budget_redis_health,
         "embedding_provider": embedding_provider,
         "loaded_resources": loaded_resources,
         "playbook_resources": playbook_resources,

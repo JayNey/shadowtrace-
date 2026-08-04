@@ -187,6 +187,20 @@ class Settings(BaseSettings):
         ge=60.0,
         le=3600.0,
     )
+    budget_attempt_redis_recovery: bool = Field(
+        default=True,
+        alias="BUDGET_ATTEMPT_REDIS_RECOVERY",
+        description=(
+            "When true, probe Redis after budget/reservation memory fallback; "
+            "new events/grants resume Redis counters (pinned ones stay in-memory)."
+        ),
+    )
+    budget_redis_recovery_interval_seconds: float = Field(
+        default=5.0,
+        alias="BUDGET_REDIS_RECOVERY_INTERVAL_SECONDS",
+        ge=0.0,
+        le=600.0,
+    )
     task_mode: str = Field(default="background", alias="TASK_MODE")
     celery_broker_url: str = Field(default="", alias="CELERY_BROKER_URL")
     approval_timeout_minutes: int = Field(default=30, alias="APPROVAL_TIMEOUT_MINUTES")

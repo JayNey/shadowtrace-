@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -15,7 +17,10 @@ from app.services.budget_service import (
     SYSTEM_BUDGET_KEY,
     BudgetService,
 )
-from app.services.tool_call_budget_reservation import ToolCallBudgetReservationService
+from app.services.tool_call_budget_reservation import (
+    ToolCallBudgetReservationService,
+    budget_reservation_key,
+)
 
 
 class _FakePipeline:
@@ -308,3 +313,165 @@ async def test_reservation_pinned_grant_stays_on_memory_after_recovery() -> None
     )
     assert pinned_count == 2
     assert redis.store.eval_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_budget_ping_fail_pins_event_and_no_split_after_recovery() -> None:
+    redis = _FakeBudgetRedisClient()
+    service = BudgetService(
+        redis=redis,  # type: ignore[arg-type]
+        settings=_budget_settings(),
+        attempt_redis_recovery=True,
+        recovery_interval_seconds=0.0,
+    )
+
+    redis.available = False
+    await service.charge_llm(
+        "evt-ping-fail",
+        "TriageAgent",
+        "mock-model",
+        prompt_tokens=40,
+        completion_tokens=0,
+    )
+    assert "evt-ping-fail" in service._memory_pinned_events
+
+    redis.available = True
+    await service.charge_llm(
+        "evt-ping-fail",
+        "TriageAgent",
+        "mock-model",
+        prompt_tokens=10,
+        completion_tokens=0,
+    )
+    usage = await service.get_usage("evt-ping-fail")
+    assert usage.event_tokens == 50
+    event_key = f"{EVENT_BUDGET_KEY_PREFIX}evt-ping-fail"
+    assert event_key not in redis.store.hashes
+
+
+@pytest.mark.asyncio
+async def test_reservation_ping_fail_pins_grant_and_no_split_after_recovery() -> None:
+    redis = _FakeBudgetRedisClient()
+    service = ToolCallBudgetReservationService(
+        redis=redis,
+        attempt_redis_recovery=True,
+        recovery_interval_seconds=0.0,
+    )
+    key = budget_reservation_key(
+        ToolCallMode.PRODUCTION,
+        namespace_key="production:evt-ping",
+        grant_id="tcg-ping-fail",
+    )
+
+    redis.available = False
+    seq = await service.reserve(
+        mode=ToolCallMode.PRODUCTION,
+        namespace_key="production:evt-ping",
+        grant_id="tcg-ping-fail",
+        max_calls=3,
+    )
+    assert seq == 1
+    assert key in service._memory_pinned_keys
+
+    redis.available = True
+    redis.store.eval_calls = 0
+    seq2 = await service.reserve(
+        mode=ToolCallMode.PRODUCTION,
+        namespace_key="production:evt-ping",
+        grant_id="tcg-ping-fail",
+        max_calls=3,
+    )
+    assert seq2 == 2
+    assert redis.store.eval_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_budget_global_system_tokens_include_pinned_memory() -> None:
+    redis = _FakeBudgetRedisClient()
+    service = BudgetService(
+        redis=redis,  # type: ignore[arg-type]
+        settings=_budget_settings(global_token_budget=200),
+        attempt_redis_recovery=True,
+        recovery_interval_seconds=0.0,
+    )
+
+    redis.store.fail_execute = True
+    await service.charge_llm(
+        "evt-pinned-global",
+        "TriageAgent",
+        "mock-model",
+        prompt_tokens=120,
+        completion_tokens=0,
+    )
+    redis.store.fail_execute = False
+    await service.charge_llm(
+        "evt-redis-global",
+        "TriageAgent",
+        "mock-model",
+        prompt_tokens=30,
+        completion_tokens=0,
+    )
+
+    redis_usage = await service.get_usage("evt-redis-global")
+    assert redis_usage.system_tokens == 150
+    assert redis.store.strings[SYSTEM_BUDGET_KEY] == 30
+
+
+@pytest.mark.asyncio
+async def test_budget_recovery_metrics_recorded() -> None:
+    redis = _FakeBudgetRedisClient()
+    service = BudgetService(
+        redis=redis,  # type: ignore[arg-type]
+        settings=_budget_settings(),
+        attempt_redis_recovery=True,
+        recovery_interval_seconds=0.0,
+    )
+
+    with (
+        patch("app.services.budget_service.record_budget_redis_fallback") as fallback,
+        patch("app.services.budget_service.record_budget_redis_recovery") as recovery,
+    ):
+        redis.store.fail_execute = True
+        await service.charge_llm(
+            "evt-metrics",
+            "TriageAgent",
+            "mock-model",
+            prompt_tokens=10,
+            completion_tokens=0,
+        )
+        fallback.assert_called_once_with(service="budget", op="charge_llm")
+
+        redis.store.fail_execute = False
+        await service.charge_llm(
+            "evt-metrics-new",
+            "TriageAgent",
+            "mock-model",
+            prompt_tokens=5,
+            completion_tokens=0,
+        )
+        recovery.assert_called_once_with(service="budget")
+
+
+@pytest.mark.asyncio
+async def test_budget_recovery_throttled_until_interval_elapses() -> None:
+    redis = _FakeBudgetRedisClient()
+    service = BudgetService(
+        redis=redis,  # type: ignore[arg-type]
+        settings=_budget_settings(),
+        attempt_redis_recovery=True,
+        recovery_interval_seconds=3600.0,
+    )
+
+    redis.store.fail_execute = True
+    await service.charge_llm(
+        "evt-throttle",
+        "TriageAgent",
+        "mock-model",
+        prompt_tokens=15,
+        completion_tokens=0,
+    )
+    redis.store.fail_execute = False
+    service._last_recovery_probe_at = time.monotonic()
+
+    await service._maybe_attempt_redis_recovery()
+    assert service._redis_degraded is True

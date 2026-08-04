@@ -321,6 +321,7 @@ class BudgetService:
     ) -> None:
         client = await self._redis_client()
         if client is None or not self._uses_redis_for_event(event_id):
+            self._ensure_event_pinned_for_degraded_fallback(event_id)
             self._apply_memory_llm_charge(event_id, agent_name, tokens, cost_usd)
             return
         try:
@@ -339,6 +340,7 @@ class BudgetService:
     async def _apply_tool_charge(self, *, event_id: str, agent_name: str) -> None:
         client = await self._redis_client()
         if client is None or not self._uses_redis_for_event(event_id):
+            self._ensure_event_pinned_for_degraded_fallback(event_id)
             self._apply_memory_tool_charge(event_id, agent_name)
             return
         try:
@@ -423,12 +425,13 @@ class BudgetService:
                 per_agent.setdefault(agent_name, {"tokens": 0, "tool_calls": 0})
                 per_agent[agent_name]["tool_calls"] = _decode_int(value)
 
+        redis_system_tokens = _decode_int(system_raw)
         return BudgetUsage(
             event_tokens=_decode_int(decoded.get(_FIELD_TOKENS)),
             event_cost_usd=_decode_float(decoded.get(_FIELD_COST_USD)),
             tool_calls=_decode_int(decoded.get(_FIELD_TOOL_CALLS)),
             per_agent=per_agent,
-            system_tokens=_decode_int(system_raw),
+            system_tokens=redis_system_tokens + self._memory.system_tokens,
         )
 
     async def _mirror_usage(self, event_id: str, usage: BudgetUsage) -> None:
@@ -449,6 +452,10 @@ class BudgetService:
     def _pin_event_to_memory(self, event_id: str | None) -> None:
         if event_id:
             self._memory_pinned_events.add(event_id)
+
+    def _ensure_event_pinned_for_degraded_fallback(self, event_id: str) -> None:
+        if self._redis_degraded:
+            self._pin_event_to_memory(event_id)
 
     async def _maybe_attempt_redis_recovery(self) -> None:
         if not self._attempt_redis_recovery or not self._redis_degraded or self._redis is None:

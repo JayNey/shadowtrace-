@@ -11,6 +11,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.api.v1 import health as health_module
 from app.core.config import Settings, get_settings
+from app.core.metrics import reset_budget_redis_metrics_for_tests
 from app.main import app
 from app.orchestration.checkpointer import (
     RedisCheckpointer,
@@ -21,8 +22,10 @@ from app.orchestration.checkpointer import (
 @pytest.fixture(autouse=True)
 def _reset_checkpoint_health_state() -> Iterator[None]:
     reset_checkpoint_health_state_for_tests()
+    reset_budget_redis_metrics_for_tests()
     yield
     reset_checkpoint_health_state_for_tests()
+    reset_budget_redis_metrics_for_tests()
 
 
 @pytest.fixture(autouse=True)
@@ -413,3 +416,55 @@ async def test_check_redis_returns_error_on_exception() -> None:
     failing.ping.side_effect = RuntimeError("boom")
     with patch("app.api.v1.health._get_redis", return_value=failing):
         assert await health_module.check_redis("redis://x") == "error"
+
+
+@pytest.mark.asyncio
+async def test_health_reflects_budget_redis_degraded(client: AsyncClient) -> None:
+    settings = Settings(SIMULATION_ENABLED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+    budget_payload = {
+        "status": "degraded",
+        "budget_redis_degraded": True,
+        "reservation_redis_degraded": False,
+        "redis_recovery_enabled": True,
+    }
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock", "dimension": 1024},
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
+        patch(
+            "app.api.v1.health._check_loaded_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "pipeline_attached": True, "reasons": []},
+        ),
+        patch(
+            "app.api.v1.health._check_playbook_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "mode": "production", "reasons": []},
+        ),
+        patch(
+            "app.orchestration.checkpointer.get_checkpoint_health",
+            return_value={"status": "ok", "memory_fallback": False},
+        ),
+        patch(
+            "app.core.metrics.get_budget_redis_health",
+            return_value=budget_payload,
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "degraded"
+    assert body["budget_redis"] == budget_payload

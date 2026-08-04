@@ -227,6 +227,21 @@ def budget_redis_health_snapshot() -> dict[str, bool]:
     }
 
 
+def get_budget_redis_health() -> dict[str, object]:
+    """Process-wide budget/reservation Redis readiness for health probes (ISSUE-174)."""
+    from app.core.config import get_settings
+
+    snapshot = budget_redis_health_snapshot()
+    settings = get_settings()
+    degraded = snapshot["budget_redis_degraded"] or snapshot["reservation_redis_degraded"]
+    return {
+        "status": "degraded" if degraded else "ok",
+        "budget_redis_degraded": snapshot["budget_redis_degraded"],
+        "reservation_redis_degraded": snapshot["reservation_redis_degraded"],
+        "redis_recovery_enabled": settings.budget_attempt_redis_recovery,
+    }
+
+
 def reset_metrics_for_tests() -> None:
     """Allow tests to re-register instruments after telemetry reset."""
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
@@ -269,6 +284,7 @@ def reset_budget_redis_metrics_for_tests() -> None:
 __all__ = [
     "budget_redis_health_snapshot",
     "checkpoint_health_snapshot",
+    "get_budget_redis_health",
     "observe_writeback_queue_age",
     "record_action_unknown",
     "record_budget_redis_fallback",
