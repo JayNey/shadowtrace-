@@ -89,7 +89,20 @@ def _get_degraded_flags() -> Any:
     if _degraded_flags is None:
         from app.services.degraded_flag_service import DegradedFlagService
 
-        _degraded_flags = DegradedFlagService(_get_context_store(), _get_session_factory())
+        store = _get_context_store()
+        _degraded_flags = DegradedFlagService(store, _get_session_factory())
+
+        # ISSUE-179: Wire redis_context_unavailable auto-clear on Redis recovery.
+        async def _on_redis_recovery(event_id: str) -> None:
+            if await _degraded_flags.has_flag(event_id, "redis_context_unavailable"):
+                await _degraded_flags.set_flag(
+                    event_id,
+                    "redis_context_unavailable",
+                    False,
+                    writer="EventContextStore",
+                )
+
+        store.set_on_redis_recovery(_on_redis_recovery)
     return _degraded_flags
 
 

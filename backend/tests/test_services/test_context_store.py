@@ -698,3 +698,168 @@ async def test_redis_recovery_rebuilds_when_database_version_is_newer(
     )
     full = await store.get_full_context(event_id)
     assert full.degraded_flags == ["disposition_writeback_blocked=capability_unknown"]
+
+
+# --------------------------------------------------------------------------- #
+# ISSUE-179: redis_context_unavailable sticky flag auto-clear on Redis recovery
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_on_redis_recovery_clears_sticky_redis_context_unavailable(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: RedisClient,
+) -> None:
+    """ISSUE-179: flag cleared when rebuild_context writes to Redis after recovery."""
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+
+    degraded = DegradedFlagService(store, session_factory)
+    cleared_events: list[str] = []
+
+    async def _on_recovery(eid: str) -> None:
+        if await degraded.has_flag(eid, "redis_context_unavailable"):
+            await degraded.set_flag(
+                eid,
+                "redis_context_unavailable",
+                False,
+                writer="EventContextStore",
+            )
+            cleared_events.append(eid)
+
+    store.set_on_redis_recovery(_on_recovery)
+
+    # Set the sticky flag (simulating prior Redis outage).
+    await degraded.set_flag(
+        event_id,
+        "redis_context_unavailable",
+        True,
+        writer="WorkingMemory",
+    )
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is True
+
+    # Simulate Redis failure — force a degraded write so the Redis version
+    # lags behind PostgreSQL, which will trigger rebuild_context on next read.
+    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+        with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
+            await degraded.set_flag(
+                event_id,
+                "disposition_writeback_blocked",
+                "capability_unknown",
+                writer="EventService",
+            )
+
+    # Flag still set in PostgreSQL after degraded write.
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is True
+
+    # Recovery: get_full_context detects version mismatch → rebuild_context →
+    # writes to Redis → callback fires → clears the sticky flag.
+    ctx = await store.get_full_context(event_id)
+
+    assert cleared_events == [event_id]
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is False
+    assert "redis_context_unavailable=true" not in ctx.degraded_flags
+
+
+@pytest.mark.asyncio
+async def test_recovery_callback_noop_when_flag_not_set(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-179: callback is invoked but no DB write when flag is not set."""
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+
+    degraded = DegradedFlagService(store, session_factory)
+    calls: list[str] = []
+
+    async def _on_recovery(eid: str) -> None:
+        calls.append(eid)
+        # has_flag returns False → no set_flag call
+        assert await degraded.has_flag(eid, "redis_context_unavailable") is False
+
+    store.set_on_redis_recovery(_on_recovery)
+
+    # Trigger rebuild_context via direct call (bypasses cache).
+    await store.rebuild_context(event_id)
+
+    # Callback fired but no flag write happened.
+    assert calls == [event_id]
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is False
+
+
+@pytest.mark.asyncio
+async def test_flag_still_set_on_write_failure_no_regression(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-179: Redis write failure path still allows callers to set the flag."""
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+
+    degraded = DegradedFlagService(store, session_factory)
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is False
+
+    # Simulate Redis down — write should still persist to PostgreSQL.
+    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+        with patch("app.services.context_service.asyncio.sleep", new_callable=AsyncMock):
+            result = await degraded.set_flag(
+                event_id,
+                "redis_context_unavailable",
+                True,
+                writer="WorkingMemory",
+            )
+
+    assert "redis_context_unavailable=true" in result
+    # PostgreSQL must still reflect the flag even though Redis was down.
+    assert await degraded.has_flag(event_id, "redis_context_unavailable") is True
+
+
+@pytest.mark.asyncio
+async def test_degraded_flag_service_logs_on_true_to_false_transition(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-179: info log emitted once when flag transitions true→false."""
+    import logging
+
+    from app.services.degraded_flag_service import logger as dfs_logger
+
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+
+    degraded = DegradedFlagService(store, session_factory)
+
+    # Set the flag.
+    await degraded.set_flag(
+        event_id,
+        "redis_context_unavailable",
+        True,
+        writer="WorkingMemory",
+    )
+
+    # Clear it and capture the info log.
+    with patch.object(dfs_logger, "info") as mock_info:
+        await degraded.set_flag(
+            event_id,
+            "redis_context_unavailable",
+            False,
+            writer="EventContextStore",
+        )
+
+    mock_info.assert_called_once()
+    log_args = mock_info.call_args[0]
+    assert "degraded flag cleared" in log_args[0]
+    assert event_id in log_args[0]
+    assert "redis_context_unavailable" in log_args[0]
+
+    # Clearing again (no transition) should NOT log.
+    with patch.object(dfs_logger, "info") as mock_info2:
+        await degraded.set_flag(
+            event_id,
+            "redis_context_unavailable",
+            False,
+            writer="EventContextStore",
+        )
+    mock_info2.assert_not_called()
