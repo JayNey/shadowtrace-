@@ -25,6 +25,11 @@ class Settings(BaseSettings):
 
     app_version: str = Field(default="0.1.0", alias="APP_VERSION")
     app_env: str = Field(default="development", alias="APP_ENV")
+    trusted_auth_proxy_enabled: bool = Field(
+        default=False,
+        alias="TRUSTED_AUTH_PROXY_ENABLED",
+    )
+    trusted_proxy_allowlist: str = Field(default="", alias="TRUSTED_PROXY_ALLOWLIST")
 
     database_url: str = Field(
         default="postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace",
@@ -355,6 +360,14 @@ class Settings(BaseSettings):
                 error_code="configuration_error",
                 details={"app_env": self.app_env, "violations": violations},
             )
+        proxy_violations = self.trusted_proxy_fail_closed_violations()
+        if proxy_violations:
+            raise ConfigurationError(
+                "app_env=production forbids unsafe trusted-proxy configuration: "
+                + ", ".join(proxy_violations),
+                error_code="configuration_error",
+                details={"app_env": self.app_env, "violations": proxy_violations},
+            )
 
     def auto_response_fail_closed_violations(self) -> list[str]:
         """Reject live connector/provider combinations when auto-response is on."""
@@ -421,6 +434,30 @@ class Settings(BaseSettings):
             violations.append(
                 "react_shadow_pivot_enabled=true forbids retrieval_fixture_fallback=true"
             )
+        return violations
+
+    def trusted_proxy_allowlist_hosts(self) -> frozenset[str]:
+        """Parse ``TRUSTED_PROXY_ALLOWLIST`` into normalized host entries."""
+        return frozenset(
+            host.strip()
+            for host in self.trusted_proxy_allowlist.split(",")
+            if host.strip()
+        )
+
+    def trusted_proxy_fail_closed_violations(self) -> list[str]:
+        """Unsafe trusted-proxy settings when ``app_env=production`` (ISSUE-180)."""
+        if self.app_env.strip().lower() != "production":
+            return []
+        if not self.trusted_auth_proxy_enabled:
+            return []
+        hosts = self.trusted_proxy_allowlist_hosts()
+        violations: list[str] = []
+        if not hosts:
+            violations.append(
+                "trusted_auth_proxy_enabled=true requires non-empty TRUSTED_PROXY_ALLOWLIST"
+            )
+        if "*" in hosts:
+            violations.append("TRUSTED_PROXY_ALLOWLIST must not contain wildcard '*'")
         return violations
 
 

@@ -4,7 +4,8 @@ Identity is always established server-side. Two mechanisms are supported:
 
 1. A trusted reverse proxy: only when ``TRUSTED_AUTH_PROXY_ENABLED`` is on AND the
    direct client address is in ``TRUSTED_PROXY_ALLOWLIST`` are the identity headers
-   (``X-Auth-Subject`` / ``X-Auth-Roles``) honored.
+   (``X-Auth-Subject`` / ``X-Auth-Roles``) honored. Unknown role names are dropped
+   (ISSUE-180); production rejects empty or wildcard allowlists at startup.
 2. Development tokens: ``DEV_AUTH_TOKENS`` maps a bearer token to a fixed
    Principal, and is rejected outright in production (``APP_ENV=production``).
 
@@ -81,13 +82,18 @@ def _dev_token_registry() -> dict[str, Principal]:
     return registry
 
 
+def _filter_known_roles(roles: list[str]) -> list[str]:
+    """Drop unknown role names from trusted-proxy headers (ISSUE-180)."""
+    return [role for role in roles if role in ALL_ROLES]
+
+
 def _proxy_allowlist() -> set[str]:
-    raw = os.environ.get("TRUSTED_PROXY_ALLOWLIST", "")
-    return {h.strip() for h in raw.split(",") if h.strip()}
+    return set(get_settings().trusted_proxy_allowlist_hosts())
 
 
 def _principal_from_trusted_proxy(request: Request) -> Principal | None:
-    if os.environ.get("TRUSTED_AUTH_PROXY_ENABLED", "").lower() not in ("1", "true", "yes"):
+    settings = get_settings()
+    if not settings.trusted_auth_proxy_enabled:
         return None
     client_host = request.client.host if request.client else ""
     if client_host not in _proxy_allowlist():
@@ -96,7 +102,7 @@ def _principal_from_trusted_proxy(request: Request) -> Principal | None:
     if not subject:
         return None
     roles_header = request.headers.get("X-Auth-Roles", "")
-    roles = [r.strip() for r in roles_header.split(",") if r.strip()]
+    roles = _filter_known_roles([r.strip() for r in roles_header.split(",") if r.strip()])
     tenant_id = request.headers.get("X-Auth-Tenant-Id")
     tenant_id = tenant_id.strip() if isinstance(tenant_id, str) and tenant_id.strip() else None
     return Principal(

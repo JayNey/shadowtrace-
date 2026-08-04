@@ -127,3 +127,46 @@ def test_production_accepts_react_with_tool_call_grant() -> None:
     assert settings.react_enabled is True
     assert settings.tool_call_grant_required is True
     assert settings.production_fail_closed_violations() == []
+
+
+def test_development_allows_trusted_proxy_with_empty_allowlist() -> None:
+    settings = Settings(
+        APP_ENV="development",
+        TRUSTED_AUTH_PROXY_ENABLED=True,
+        TRUSTED_PROXY_ALLOWLIST="",
+    )
+    assert settings.trusted_proxy_fail_closed_violations() == []
+
+
+def test_production_rejects_trusted_proxy_with_empty_allowlist() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(
+            **_base_kwargs(
+                TRUSTED_AUTH_PROXY_ENABLED=True,
+                TRUSTED_PROXY_ALLOWLIST="",
+            )
+        )
+    assert exc_info.value.error_code == "configuration_error"
+    assert "TRUSTED_PROXY_ALLOWLIST" in str(exc_info.value)
+
+
+def test_production_rejects_trusted_proxy_with_wildcard_allowlist() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(
+            **_base_kwargs(
+                TRUSTED_AUTH_PROXY_ENABLED=True,
+                TRUSTED_PROXY_ALLOWLIST="*",
+            )
+        )
+    violations = exc_info.value.details["violations"]
+    assert any("wildcard" in v for v in violations)
+
+
+def test_production_accepts_trusted_proxy_with_explicit_allowlist() -> None:
+    settings = Settings(
+        **_base_kwargs(
+            TRUSTED_AUTH_PROXY_ENABLED=True,
+            TRUSTED_PROXY_ALLOWLIST="10.0.0.5,127.0.0.1",
+        )
+    )
+    assert settings.trusted_proxy_fail_closed_violations() == []

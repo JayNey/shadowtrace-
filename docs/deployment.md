@@ -268,6 +268,31 @@ curl -s http://localhost:8000/api/v1/health | python3 -c "import json,sys; print
 **安全栅栏**：`APP_ENV=production` 时，应用启动即拒绝任何 mock/simulation 模式组合（fail-closed）。  
 Mock 模式下的 `ALLOW_*` 始终为 `false`。
 
+### 生产认证与 Trusted Proxy（ISSUE-180）
+
+生产环境身份来源：
+
+| 机制 | 生产可用 | 说明 |
+|------|----------|------|
+| `DEV_AUTH_TOKENS` | **否** | 启动后一律拒绝，仅本地/Compose 开发用 |
+| Trusted reverse proxy | **是** | 需 `TRUSTED_AUTH_PROXY_ENABLED=true` 且客户端直连地址在 allowlist 内 |
+
+**部署硬性要求：**
+
+1. **禁止**将 backend `:8000` 直接暴露到公网。必须由内网 ingress / 反向代理终止 TLS，并由该代理注入 `X-Auth-Subject` / `X-Auth-Roles`；backend 只信任 allowlist 中的代理直连地址。
+2. `APP_ENV=production` 且 `TRUSTED_AUTH_PROXY_ENABLED=true` 时，`TRUSTED_PROXY_ALLOWLIST` 必须为非空、**不含** `*` 的显式地址列表；否则进程 **拒绝启动**（fail-closed）。
+3. `X-Auth-Roles` 仅接受已知角色（`analyst` / `approver` / `disposition_operator` / `admin`）；未知角色会被丢弃，可能导致 403。
+4. Mock P0 闭环默认使用 `DEV_AUTH_TOKENS`，**不依赖** trusted-proxy 路径。
+
+示例（内网 ingress 位于 `10.0.0.5`，backend 仅接受来自该地址的身份头）：
+
+```ini
+APP_ENV=production
+TRUSTED_AUTH_PROXY_ENABLED=true
+TRUSTED_PROXY_ALLOWLIST=10.0.0.5
+# DEV_AUTH_TOKENS 留空或不设置
+```
+
 ---
 
 ## 故障排除

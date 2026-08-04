@@ -148,19 +148,56 @@ def test_trusted_proxy_headers_only_honored_when_enabled(
 ) -> None:
     headers = {"X-Auth-Subject": "proxied-user", "X-Auth-Roles": "analyst"}
     # Disabled proxy: identity headers are ignored -> anonymous -> 401.
+    monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
+    get_settings.cache_clear()
     disabled = client.get("/api/v1/events", headers=headers)
     assert disabled.status_code == 401
 
     # Enabled + client host allowlisted: headers are honored.
     monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "true")
     monkeypatch.setenv("TRUSTED_PROXY_ALLOWLIST", "testclient")
+    get_settings.cache_clear()
     enabled = client.get("/api/v1/events", headers=headers)
     assert enabled.status_code == 200
 
     # Enabled but client host NOT allowlisted: headers ignored -> 401.
     monkeypatch.setenv("TRUSTED_PROXY_ALLOWLIST", "10.0.0.1")
+    get_settings.cache_clear()
     blocked = client.get("/api/v1/events", headers=headers)
     assert blocked.status_code == 401
+
+
+def test_trusted_proxy_strips_unknown_roles(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_ALLOWLIST", "testclient")
+    get_settings.cache_clear()
+
+    mixed = client.get(
+        "/api/v1/events",
+        headers={
+            "X-Auth-Subject": "proxied-user",
+            "X-Auth-Roles": "analyst,superuser",
+        },
+    )
+    assert mixed.status_code == 200
+
+    unknown_only = client.post(
+        "/api/v1/events",
+        headers={
+            "X-Auth-Subject": "proxied-user",
+            "X-Auth-Roles": "superuser,root",
+        },
+        json={
+            "title": "probe",
+            "description": "probe",
+            "event_type": "malicious_process",
+            "severity": "high",
+        },
+    )
+    assert unknown_only.status_code == 403
+    assert unknown_only.json()["error_code"] == "forbidden"
 
 
 def test_dev_token_rejected_in_production(
@@ -175,7 +212,9 @@ def test_dev_token_rejected_in_production(
     monkeypatch.setenv("DISPOSITION_MODE", "live_xdr")
     monkeypatch.setenv("DISPOSITION_ADAPTER_KIND", "http")
     monkeypatch.setenv("LLM_MODE", "openai_compatible")
+    monkeypatch.setenv("EMBEDDING_MODE", "remote")
     monkeypatch.setenv("SIMULATION_ENABLED", "false")
+    monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
     get_settings.cache_clear()
     resp = client.get("/api/v1/events", headers=_hdr("admin"))
     assert resp.status_code == 401
