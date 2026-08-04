@@ -822,8 +822,6 @@ async def test_degraded_flag_service_logs_on_true_to_false_transition(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """ISSUE-179: info log emitted once when flag transitions true→false."""
-    import logging
-
     from app.services.degraded_flag_service import logger as dfs_logger
 
     event_id = await _seed_event(session_factory)
