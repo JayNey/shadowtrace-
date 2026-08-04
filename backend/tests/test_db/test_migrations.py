@@ -573,3 +573,30 @@ def test_downgrade_base_then_upgrade_head_roundtrip(migrated: None) -> None:
 
     assert asyncio.run(_remaining_core_tables()) == set()
     command.upgrade(cfg, "head")
+
+
+def test_0023_retention_upgrade_idempotent_when_column_from_0022(migrated: None) -> None:
+    """ISSUE-166: 0023 must not fail when 0022 already created retention_expires_at."""
+    cfg = _alembic_config()
+    command.downgrade(cfg, "0022_shadow_run")
+    command.upgrade(cfg, "head")
+
+    async def _assert_retention_column_not_nullable() -> None:
+        engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                row = await conn.execute(
+                    text(
+                        "SELECT is_nullable FROM information_schema.columns "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name = 'shadow_query_artifact' "
+                        "AND column_name = 'retention_expires_at'"
+                    )
+                )
+                result = row.one_or_none()
+                assert result is not None, "retention_expires_at column missing after 0023"
+                assert result[0] == "NO", f"expected NOT NULL, got is_nullable={result[0]}"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_assert_retention_column_not_nullable())

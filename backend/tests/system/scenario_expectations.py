@@ -114,7 +114,8 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
             FinalVerdict.NONE,
         ),
         # Regression golden baseline: confirmed_threat @ 70.
-        # Rule-fallback band is <70 → NONE is expected (same as host_compromise pack).
+        # Rule-fallback band is <70 → NONE under ISSUE-035; also allow advisory FP
+        # from pre-evidence signals (unlike host_compromise, which omits advisory FP).
         risk_min=65,
         risk_max=75,
         rule_fallback_risk_min=40,

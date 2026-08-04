@@ -45,7 +45,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Do not drop: current ``0022_shadow_run`` owns the column on create_table.
-    # Environments that only gained the column via this revision keep it
-    # (harmless additive) so downgrade stays compatible with amended 0022.
+    # Intentional no-op (ISSUE-166): ``0022_shadow_run`` owns ``retention_expires_at``
+    # on create_table for fresh installs. Dropping here would break amended 0022
+    # downgrade/upgrade roundtrips; environments that gained the column only via
+    # this revision keep the additive column harmlessly.
     pass
