@@ -881,6 +881,39 @@ class TestMultipleWritebackProcessing:
             "first writeback must not misroute it to LOOKUP"
         )
 
+    async def test_heterogeneous_multi_writeback_reaches_conflict_after_unknown_resolves(
+        self,
+    ):
+        """Queue advances naturally: wbk-001 UNKNOWN resolves via LOOKUP, then
+        wbk-002 CONFLICT escalates by its map entry (no hand-built head list)."""
+        ds = FakeDispositionSync()
+        ds._lookup_result = WritebackStatus.CONFIRMED
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+            disposition_sync=ds,
+        )
+        statuses = {"wbk-001": "unknown", "wbk-002": "conflict"}
+
+        state1 = _base_state(
+            verify_failed_writebacks=["wbk-001", "wbk-002"],
+            verify_writeback_status="unknown",
+            verify_writeback_status_map=statuses,
+        )
+        result1 = await writeback_recovery_graph_node(state1, handler=handler)
+        assert result1["verify_need_manual_resolution"] is False
+        assert result1["verify_failed_writebacks"] == ["wbk-002"]
+
+        state2 = _base_state(
+            verify_failed_writebacks=list(result1["verify_failed_writebacks"]),
+            verify_writeback_status="unknown",
+            verify_writeback_status_map=statuses,
+            writeback_lookup_count=int(result1.get("writeback_lookup_count") or 0),
+            writeback_retry_count=int(result1.get("writeback_retry_count") or 0),
+        )
+        result2 = await writeback_recovery_graph_node(state2, handler=handler)
+        assert result2["verify_need_manual_resolution"] is True
+
     async def test_legacy_scalar_fallback_without_status_map(self):
         """States written before ISSUE-170 (no map) still route via the scalar."""
         ds = FakeDispositionSync()

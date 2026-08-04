@@ -553,6 +553,9 @@ def _resolve_verify_writeback_statuses(
     Replaces the per-cycle scalar for routing purposes: heterogeneous failures
     (e.g. wbk-001 UNKNOWN + wbk-002 CONFLICT) must be recovered by their own
     status instead of inheriting the first writeback's scalar value.
+
+    Only the verify graph node writes this map; recovery nodes read it and
+    must not mutate it across LOOKUP/RETRY cycles.
     """
     failed = verification_result.failed_writebacks
     if not failed:
@@ -563,8 +566,19 @@ def _resolve_verify_writeback_statuses(
         if item.writeback_status is None:
             continue
         for wb_id in item.writeback_ids:
-            if wb_id in failed_set:
-                statuses[wb_id] = item.writeback_status.value
+            if wb_id not in failed_set:
+                continue
+            new_status = item.writeback_status.value
+            prior = statuses.get(wb_id)
+            if prior is not None and prior != new_status:
+                logger.warning(
+                    "verify_writeback_status_map: conflicting status for %s "
+                    "(%s vs %s) — using latest result entry",
+                    wb_id,
+                    prior,
+                    new_status,
+                )
+            statuses[wb_id] = new_status
     return statuses or None
 
 

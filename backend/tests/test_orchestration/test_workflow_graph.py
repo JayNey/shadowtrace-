@@ -549,6 +549,33 @@ class TestResolveVerifyWritebackStatus:
         )
         assert _resolve_verify_writeback_statuses(result) is None
 
+    def test_status_map_uses_latest_status_on_duplicate_writeback_id(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Duplicate writeback_id entries keep the latest status and log a warning."""
+        import logging
+
+        result = self._result(
+            failed_writebacks=["wbk-dup"],
+            results=[
+                self._action(
+                    writeback_ids=["wbk-dup"],
+                    writeback_status=WritebackStatus.UNKNOWN,
+                ),
+                self._action(
+                    writeback_ids=["wbk-dup"],
+                    writeback_status=WritebackStatus.CONFLICT,
+                ),
+            ],
+        )
+        with caplog.at_level(logging.WARNING):
+            statuses = _resolve_verify_writeback_statuses(result)
+        assert statuses == {"wbk-dup": "conflict"}
+        assert any(
+            "conflicting status for wbk-dup" in record.message for record in caplog.records
+        )
+
 
 class TestRouteAfterTriage:
     def test_not_required_no_investigation_closes(self) -> None:
