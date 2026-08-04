@@ -546,7 +546,7 @@ class EventContextStore:
                 try:
                     await self._on_redis_recovery(event_id)
                 except Exception:  # noqa: BLE001 — best-effort side effect
-                    logger.debug(
+                    logger.warning(
                         "on_redis_recovery callback failed event_id=%s",
                         event_id,
                         exc_info=True,

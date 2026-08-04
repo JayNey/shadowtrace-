@@ -11,7 +11,7 @@ from app.core.redis_client import RedisClient
 from app.db.session import get_session_factory
 from app.ingestion.ingestion_scheduler import IngestionScheduler
 from app.services.context_service import EventContextStore
-from app.services.degraded_flag_service import DegradedFlagService
+from app.services.degraded_flag_service import create_degraded_flag_service
 from app.services.event_service import EventService
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ async def _run_poll_sources_async() -> dict[str, Any]:
     redis = RedisClient()
     try:
         store = EventContextStore(redis, factory)
-        degraded = DegradedFlagService(store, factory)
+        degraded = create_degraded_flag_service(store, factory)
         from app.services.auto_investigate_policy import AutoInvestigatePolicyService
         from app.services.investigation_intent_service import InvestigationIntentService
 

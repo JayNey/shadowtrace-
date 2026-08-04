@@ -13,7 +13,7 @@ from app.core.redis_client import RedisClient
 from app.db.session import get_session_factory
 from app.services.action_execution_service import ActionExecutionService
 from app.services.context_service import EventContextStore
-from app.services.degraded_flag_service import DegradedFlagService
+from app.services.degraded_flag_service import create_degraded_flag_service
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.state_machine_service import StateMachineService
 from app.tools.executor import ToolExecutor
@@ -29,7 +29,7 @@ async def _build_execution_service() -> ActionExecutionService:
     factory = get_session_factory()
     redis = RedisClient()
     store = EventContextStore(redis, factory)
-    degraded = DegradedFlagService(store, factory)
+    degraded = create_degraded_flag_service(store, factory)
     registry = DispositionAdapterRegistry()
     return ActionExecutionService(
         factory,

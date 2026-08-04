@@ -39,7 +39,7 @@ from app.services.context_service import (
     SetResult,
     ctx_key,
 )
-from app.services.degraded_flag_service import DegradedFlagService
+from app.services.degraded_flag_service import DegradedFlagService, wire_redis_context_recovery
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -716,19 +716,7 @@ async def test_on_redis_recovery_clears_sticky_redis_context_unavailable(
     await store.init_context(event_id, _summary(event_id))
 
     degraded = DegradedFlagService(store, session_factory)
-    cleared_events: list[str] = []
-
-    async def _on_recovery(eid: str) -> None:
-        if await degraded.has_flag(eid, "redis_context_unavailable"):
-            await degraded.set_flag(
-                eid,
-                "redis_context_unavailable",
-                False,
-                writer="EventContextStore",
-            )
-            cleared_events.append(eid)
-
-    store.set_on_redis_recovery(_on_recovery)
+    wire_redis_context_recovery(store, degraded)
 
     # Set the sticky flag (simulating prior Redis outage).
     await degraded.set_flag(
@@ -757,7 +745,6 @@ async def test_on_redis_recovery_clears_sticky_redis_context_unavailable(
     # writes to Redis → callback fires → clears the sticky flag.
     ctx = await store.get_full_context(event_id)
 
-    assert cleared_events == [event_id]
     assert await degraded.has_flag(event_id, "redis_context_unavailable") is False
     assert "redis_context_unavailable=true" not in ctx.degraded_flags
 

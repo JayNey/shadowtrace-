@@ -11,7 +11,7 @@ from app.core.redis_client import RedisClient
 from app.db.session import get_session_factory
 from app.services.auto_investigate_policy import AutoInvestigatePolicyService
 from app.services.context_service import EventContextStore
-from app.services.degraded_flag_service import DegradedFlagService
+from app.services.degraded_flag_service import create_degraded_flag_service
 from app.services.investigation_intent_service import InvestigationIntentService
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ async def _dispatch_once_async() -> dict[str, Any]:
     redis = RedisClient()
     try:
         store = EventContextStore(redis, factory)
-        degraded = DegradedFlagService(store, factory)
+        degraded = create_degraded_flag_service(store, factory)
         service = InvestigationIntentService(
             factory,
             policy=AutoInvestigatePolicyService(),
@@ -43,7 +43,7 @@ async def _reconcile_once_async() -> dict[str, Any]:
     redis = RedisClient()
     try:
         store = EventContextStore(redis, factory)
-        degraded = DegradedFlagService(store, factory)
+        degraded = create_degraded_flag_service(store, factory)
         service = InvestigationIntentService(
             factory,
             policy=AutoInvestigatePolicyService(),

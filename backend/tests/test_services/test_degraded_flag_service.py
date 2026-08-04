@@ -31,6 +31,7 @@ from app.services.degraded_flag_service import (
     DEGRADED_FLAG_ALLOWLIST,
     DegradedFlagService,
     apply_flag_to_list,
+    wire_redis_context_recovery,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -135,6 +136,17 @@ def test_apply_flag_to_list_set_and_clear() -> None:
 def test_allowlist_contains_p0_flags() -> None:
     assert "redis_context_unavailable" in DEGRADED_FLAG_ALLOWLIST
     assert "disposition_writeback_blocked" in DEGRADED_FLAG_ALLOWLIST
+
+
+def test_wire_redis_context_recovery_registers_callback() -> None:
+    from unittest.mock import MagicMock
+
+    store = MagicMock()
+    degraded = MagicMock(spec=DegradedFlagService)
+    wire_redis_context_recovery(store, degraded)
+    store.set_on_redis_recovery.assert_called_once()
+    callback = store.set_on_redis_recovery.call_args[0][0]
+    assert callable(callback)
 
 
 @pytest.mark.asyncio

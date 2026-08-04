@@ -74,6 +74,37 @@ def apply_flag_to_list(flags: list[str], flag_name: str, value: Any) -> list[str
     return remaining
 
 
+REDIS_CONTEXT_UNAVAILABLE_FLAG = "redis_context_unavailable"
+
+
+def wire_redis_context_recovery(
+    store: EventContextStore,
+    degraded_flags: DegradedFlagService,
+) -> None:
+    """Register ISSUE-179 callback: clear sticky flag after rebuild_context Redis write."""
+
+    async def _on_redis_recovery(event_id: str) -> None:
+        if await degraded_flags.has_flag(event_id, REDIS_CONTEXT_UNAVAILABLE_FLAG):
+            await degraded_flags.set_flag(
+                event_id,
+                REDIS_CONTEXT_UNAVAILABLE_FLAG,
+                False,
+                writer="EventContextStore",
+            )
+
+    store.set_on_redis_recovery(_on_redis_recovery)
+
+
+def create_degraded_flag_service(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> DegradedFlagService:
+    """Construct DegradedFlagService with redis_context_unavailable recovery wired."""
+    service = DegradedFlagService(store, session_factory)
+    wire_redis_context_recovery(store, service)
+    return service
+
+
 class DegradedFlagService:
     """Unique write path for ``security_event.degraded_flags`` + EventContext mirror."""
 
