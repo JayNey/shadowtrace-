@@ -390,6 +390,12 @@ class ActionExecutionService:
                 )
 
     async def _execute_direct_tool(self, action: Action, *, operator: str) -> None:
+        # Contract: Job is created as RUNNING + lease (not QUEUED-first).
+        # Doc: models/execution.py module docstring.
+        # Crash recovery: lease reclaim (ISSUE-173) + idempotency.
+        # Verified by: tests/test_services/test_action_execution_lease_reclaim_unit.py
+        #              tests/test_services/test_action_execution.py
+        # Do NOT change back to QUEUED without updating reclaim state set & recovery matrix.
         job_id = new_job_id()
         idempotency_key = action.idempotency_key or f"{action.action_id}:direct"
         settings = get_settings()
