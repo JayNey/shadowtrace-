@@ -493,6 +493,8 @@ class ClosedGateActionView(BaseModel):
     writeback_status: WritebackStatus | None = None
     has_command: bool = False
     all_required_intents_confirmed: bool = False
+    # Worst non-CONFIRMED outbox status for this action (API error mapping only).
+    worst_unconfirmed_outbox_status: WritebackStatus | None = None
     execution_phase: ActionExecutionPhase = ActionExecutionPhase.IMMEDIATE
     tool_name: str | None = None
     approved_terminal_dispositions: list[SourceDisposition] = Field(default_factory=list)
@@ -804,11 +806,14 @@ def check_required_writeback_close_gate(
                 action_id=action.action_id,
             )
         if not action.all_required_intents_confirmed:
+            status_for_error = (
+                action.worst_unconfirmed_outbox_status or action.writeback_status
+            )
             return WritebackCloseGateViolation(
                 reason=WritebackCloseGateReason.INTENTS_NOT_CONFIRMED,
                 action_id=action.action_id,
                 writeback_status=(
-                    action.writeback_status.value if action.writeback_status is not None else None
+                    status_for_error.value if status_for_error is not None else None
                 ),
             )
         if action.writeback_status is not WritebackStatus.CONFIRMED:

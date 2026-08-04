@@ -327,6 +327,8 @@ async def _validate_writeback_gate(
     For REQUIRED disposition_policy events, runs the same writeback subset of
     the StateMachine CLOSED gate as an early API pre-check (ISSUE-171).
     Raises the appropriate HTTP domain error; SM remains authoritative.
+    This is best-effort before ``transition_status`` — a concurrent writeback
+    change can still be rejected by the SM CLOSED gate (fail-closed).
 
     No-op for NOT_REQUIRED events.
     """

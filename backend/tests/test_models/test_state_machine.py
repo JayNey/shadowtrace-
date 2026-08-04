@@ -352,11 +352,13 @@ def test_check_required_writeback_close_gate_intents_not_confirmed() -> None:
             _applicable_ok(
                 all_required_intents_confirmed=False,
                 writeback_status=WritebackStatus.ACCEPTED,
+                worst_unconfirmed_outbox_status=WritebackStatus.FAILED,
             )
         ]
     )
     assert violation is not None
     assert violation.reason is WritebackCloseGateReason.INTENTS_NOT_CONFIRMED
+    assert violation.writeback_status == WritebackStatus.FAILED.value
 
 
 def test_check_required_writeback_close_gate_status_not_confirmed() -> None:

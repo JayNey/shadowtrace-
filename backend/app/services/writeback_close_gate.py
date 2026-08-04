@@ -59,6 +59,11 @@ def raise_api_writeback_gate_error(
             details=details,
         )
     if violation.reason is WritebackCloseGateReason.INTENTS_NOT_CONFIRMED:
+        status = violation.writeback_status
+        if status == WritebackStatus.FAILED.value:
+            raise WritebackFailedError("writeback failed", details=details)
+        if status == WritebackStatus.CONFLICT.value:
+            raise WritebackConflictError("writeback conflict", details=details)
         raise WritebackPendingError(
             "required writeback intents are not all CONFIRMED",
             details=details,
@@ -90,6 +95,43 @@ async def all_intents_confirmed_for_action(session: AsyncSession, action_id: str
         return False
     return all(
         outbox.latest_writeback_status == WritebackStatus.CONFIRMED.value for outbox in outboxes
+    )
+
+
+def worst_unconfirmed_outbox_status(
+    outboxes: list[orm.DispositionOutbox],
+) -> WritebackStatus | None:
+    """Pick the most severe non-CONFIRMED outbox status for API error mapping."""
+    parsed: list[WritebackStatus] = []
+    for outbox in outboxes:
+        raw = outbox.latest_writeback_status
+        if raw is None or raw == WritebackStatus.CONFIRMED.value:
+            continue
+        try:
+            parsed.append(WritebackStatus(raw))
+        except ValueError:
+            continue
+    if not parsed:
+        return None
+    if WritebackStatus.CONFLICT in parsed:
+        return WritebackStatus.CONFLICT
+    if WritebackStatus.FAILED in parsed:
+        return WritebackStatus.FAILED
+    return parsed[0]
+
+
+async def load_active_outboxes(
+    session: AsyncSession, action_id: str
+) -> list[orm.DispositionOutbox]:
+    return list(
+        (
+            await session.scalars(
+                select(orm.DispositionOutbox).where(
+                    orm.DispositionOutbox.action_id == action_id,
+                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                )
+            )
+        ).all()
     )
 
 
@@ -160,9 +202,17 @@ async def build_closed_gate_actions(
             .limit(1)
         )
         has_command = outbox is not None
+        active_outboxes = (
+            await load_active_outboxes(session, action_row.action_id) if has_command else []
+        )
         all_confirmed = False
+        worst_outbox: WritebackStatus | None = None
         if has_command:
-            all_confirmed = await all_intents_confirmed_for_action(session, action_row.action_id)
+            all_confirmed = all(
+                o.latest_writeback_status == WritebackStatus.CONFIRMED.value
+                for o in active_outboxes
+            )
+            worst_outbox = worst_unconfirmed_outbox_status(active_outboxes)
 
         approved_terminal: list[SourceDisposition] = []
         for raw in action_row.approved_terminal_dispositions or []:
@@ -189,6 +239,7 @@ async def build_closed_gate_actions(
                 writeback_status=wb_status,
                 has_command=has_command,
                 all_required_intents_confirmed=all_confirmed,
+                worst_unconfirmed_outbox_status=worst_outbox,
                 execution_phase=exec_phase,
                 tool_name=action_row.action_name,
                 approved_terminal_dispositions=approved_terminal,
@@ -205,5 +256,7 @@ __all__ = [
     "action_has_job_or_outbox",
     "all_intents_confirmed_for_action",
     "build_closed_gate_actions",
+    "load_active_outboxes",
     "raise_api_writeback_gate_error",
+    "worst_unconfirmed_outbox_status",
 ]
