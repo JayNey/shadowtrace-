@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.core.metrics import (
     record_budget_redis_fallback,
@@ -212,7 +213,7 @@ class ToolCallBudgetReservationService:
             len(self._memory_pinned_keys),
         )
 
-    async def _redis_client(self) -> object | None:
+    async def _redis_client(self) -> Any | None:
         if self._redis is None:
             return None
         try:
