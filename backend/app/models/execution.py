@@ -50,7 +50,14 @@ class ActionExecutionJob(BaseModel):
     provider_name: str
     idempotency_key: str
     provider_job_id: str | None = None
-    status: ExecutionJobStatus = ExecutionJobStatus.QUEUED
+    status: ExecutionJobStatus = Field(
+        default=ExecutionJobStatus.QUEUED,
+        description=(
+            "PG ActionExecutionService creates jobs as RUNNING with a lease; "
+            "QUEUED applies after lease-expired reclaim (ISSUE-173) or on the "
+            "separate ToolProvider adapter channel."
+        ),
+    )
     claimed_by: str | None = None
     lease_expires_at: datetime | None = None
     created_at: datetime | None = None
