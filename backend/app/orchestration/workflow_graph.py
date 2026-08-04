@@ -1472,9 +1472,7 @@ def build_investigation_graph(
             "verify_failed_actions": verification_result.failed_actions,
             "verify_failed_writebacks": verification_result.failed_writebacks,
             "verify_writeback_status": _resolve_verify_writeback_status(verification_result),
-            "verify_writeback_status_map": _resolve_verify_writeback_statuses(
-                verification_result
-            ),
+            "verify_writeback_status_map": _resolve_verify_writeback_statuses(verification_result),
             "verify_has_partial_success": verification_result.overall_status.value == "partial",
         }
 

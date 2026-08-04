@@ -37,8 +37,10 @@ def compare_production_case(
     *,
     phase_a_artifact: DetectionEvaluationArtifact,
 ) -> DetectionProductionCaseComparison:
-    expect_promotion = binding.expect_promotion if binding is not None else (
-        case.slice_type == SliceType.THREAT and bool(case.observation.candidates)
+    expect_promotion = (
+        binding.expect_promotion
+        if binding is not None
+        else (case.slice_type == SliceType.THREAT and bool(case.observation.candidates))
     )
     candidate_id = _primary_candidate_id(case)
     shadow_candidate_count = len(case.observation.candidates)

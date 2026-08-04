@@ -73,9 +73,7 @@ def get_checkpoint_health() -> dict[str, object]:
     live = _live_checkpointers()
     if live:
         memory_fallback = any(saver.memory_fallback for saver in live)
-        memory_pinned_thread_count = sum(
-            saver.memory_pinned_thread_count for saver in live
-        )
+        memory_pinned_thread_count = sum(saver.memory_pinned_thread_count for saver in live)
     else:
         memory_fallback = bool(snapshot["memory_fallback"])
         memory_pinned_thread_count = 0

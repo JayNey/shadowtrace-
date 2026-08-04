@@ -1099,10 +1099,7 @@ class OutboxWorker:
                 ).all()
                 for row in rows:
                     current = OutboxDeliveryStatus(row.delivery_status)
-                    if (
-                        current is OutboxDeliveryStatus.WAITING_RETRY
-                        and row.next_retry_at is None
-                    ):
+                    if current is OutboxDeliveryStatus.WAITING_RETRY and row.next_retry_at is None:
                         backoff_attempt = max(1, int(row.attempt) + 1)
                         row.next_retry_at = now + timedelta(
                             seconds=self._service._outbox_retry_backoff_seconds(

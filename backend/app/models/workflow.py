@@ -806,15 +806,11 @@ def check_required_writeback_close_gate(
                 action_id=action.action_id,
             )
         if not action.all_required_intents_confirmed:
-            status_for_error = (
-                action.worst_unconfirmed_outbox_status or action.writeback_status
-            )
+            status_for_error = action.worst_unconfirmed_outbox_status or action.writeback_status
             return WritebackCloseGateViolation(
                 reason=WritebackCloseGateReason.INTENTS_NOT_CONFIRMED,
                 action_id=action.action_id,
-                writeback_status=(
-                    status_for_error.value if status_for_error is not None else None
-                ),
+                writeback_status=(status_for_error.value if status_for_error is not None else None),
             )
         if action.writeback_status is not WritebackStatus.CONFIRMED:
             return WritebackCloseGateViolation(

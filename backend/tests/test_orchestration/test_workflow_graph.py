@@ -572,9 +572,7 @@ class TestResolveVerifyWritebackStatus:
         with caplog.at_level(logging.WARNING):
             statuses = _resolve_verify_writeback_statuses(result)
         assert statuses == {"wbk-dup": "conflict"}
-        assert any(
-            "conflicting status for wbk-dup" in record.message for record in caplog.records
-        )
+        assert any("conflicting status for wbk-dup" in record.message for record in caplog.records)
 
 
 class TestRouteAfterTriage:

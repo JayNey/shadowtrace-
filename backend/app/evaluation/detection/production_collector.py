@@ -80,7 +80,9 @@ async def list_completed_promotions_by_candidate(
                 select(DetectionPromotionORM).where(
                     DetectionPromotionORM.tenant_id == tenant_id,
                     DetectionPromotionORM.status == DetectionPromotionStatus.COMPLETED.value,
-                    DetectionPromotionORM.candidate_detection_id.in_(sorted(candidate_detection_ids)),
+                    DetectionPromotionORM.candidate_detection_id.in_(
+                        sorted(candidate_detection_ids)
+                    ),
                 )
             )
         )

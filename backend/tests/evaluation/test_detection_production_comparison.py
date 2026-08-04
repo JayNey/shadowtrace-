@@ -818,4 +818,3 @@ def test_production_dataset_manifest_matches_bindings() -> None:
     binding_manifest = load_production_binding_manifest(PRODUCTION_DATASET_DIR)
     assert dataset_manifest.shadow_dataset_id == binding_manifest.shadow_dataset_id
     assert dataset_manifest.content_hash == binding_manifest.content_hash
-
