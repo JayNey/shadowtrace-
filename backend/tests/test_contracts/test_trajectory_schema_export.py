@@ -9,6 +9,7 @@ from app.models import MODEL_REGISTRY
 from app.models.trajectory import TrajectoryReport
 
 CONTRACTS = Path(__file__).resolve().parents[3] / "contracts" / "schemas"
+OPENAPI = Path(__file__).resolve().parents[3] / "contracts" / "openapi" / "openapi.json"
 
 
 def test_trajectory_report_registered() -> None:
@@ -24,6 +25,14 @@ def test_committed_trajectory_report_schema_matches_model() -> None:
     committed = json.loads(path.read_text(encoding="utf-8"))
     current = TrajectoryReport.model_json_schema(mode="serialization")
     assert committed == current
+
+
+def test_trajectory_report_openapi_component_matches_standalone_schema() -> None:
+    """OpenAPI component must stay aligned with the standalone exported schema."""
+    committed = json.loads((CONTRACTS / "TrajectoryReport.json").read_text(encoding="utf-8"))
+    openapi = json.loads(OPENAPI.read_text(encoding="utf-8"))
+    component = openapi["components"]["schemas"]["TrajectoryReport"]
+    assert component == committed
 
 
 def test_trajectory_report_insufficient_trace_semantic_preserved() -> None:

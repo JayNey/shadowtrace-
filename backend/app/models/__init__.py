@@ -259,7 +259,6 @@ from app.models.execution import (
     TargetExecutionResult,
 )
 from app.models.report import InvestigationReport, ReportSection
-from app.models.trajectory import TrajectoryReport
 from app.models.security_event import SecurityEvent
 from app.models.source import (
     SourceAlert,
@@ -270,6 +269,7 @@ from app.models.source import (
     SourceObjectState,
     SourceReference,
 )
+from app.models.trajectory import TrajectoryReport
 from app.models.tool_meta import (
     CapabilityBindingEntry,
     CapabilityManifest,
