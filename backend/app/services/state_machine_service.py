@@ -19,6 +19,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -28,6 +29,7 @@ from app.core.errors import (
 )
 from app.core.event_bus import EventBus
 from app.db import models as orm
+from app.models.disposition import DispositionCommand, SetEventDispositionParams
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -62,6 +64,32 @@ _STATE_MACHINE_OPERATOR = "StateMachineService"
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _actual_disposition_from_command_payload(
+    payload: dict[str, Any],
+) -> SourceDisposition | None:
+    """Read EVENT_STATUS_UPDATE target from nested ``operation_params`` (ISSUE-184)."""
+    if not payload:
+        return None
+    try:
+        command = DispositionCommand.model_validate(payload)
+    except ValidationError:
+        op_params = payload.get("operation_params")
+        if isinstance(op_params, dict):
+            raw = op_params.get("target_disposition")
+            if raw is not None:
+                try:
+                    return SourceDisposition(str(raw))
+                except ValueError:
+                    return None
+        return None
+    if command.intent_kind is not DispositionIntentKind.EVENT_STATUS_UPDATE:
+        return None
+    params = command.operation_params
+    if isinstance(params, SetEventDispositionParams):
+        return params.target_disposition
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -221,15 +249,12 @@ async def _build_terminal_writeback_view(
         except (ValueError, IndexError):
             pass
 
-    # Parse actual disposition from command_payload.
-    actual_enum = approved
+    # Parse actual disposition from denormalized command_payload (nested path).
     payload = outbox.command_payload or {}
-    actual_raw = payload.get("target_disposition")
-    if actual_raw:
-        try:
-            actual_enum = SourceDisposition(str(actual_raw))
-        except ValueError:
-            pass
+    actual_parsed = _actual_disposition_from_command_payload(payload)
+    actual_enum = (
+        actual_parsed if actual_parsed is not None else SourceDisposition.PENDING
+    )
 
     return TerminalEventWritebackView(
         action_id=deferred_action.action_id,

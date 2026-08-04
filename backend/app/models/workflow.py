@@ -939,6 +939,15 @@ def validate_closed_gate(ctx: TransitionContext) -> None:
             target=EventStatus.CLOSED,
             details={"actual_disposition": terminal.actual_disposition.value},
         )
+    if terminal.actual_disposition != terminal.approved_disposition:
+        raise InvalidStateTransitionError(
+            "required CLOSED gate: actual disposition must match approved",
+            target=EventStatus.CLOSED,
+            details={
+                "approved_disposition": terminal.approved_disposition.value,
+                "actual_disposition": terminal.actual_disposition.value,
+            },
+        )
     if terminal.receipt_status is not WritebackStatus.CONFIRMED:
         raise InvalidStateTransitionError(
             "required CLOSED gate: terminal receipt must be CONFIRMED",

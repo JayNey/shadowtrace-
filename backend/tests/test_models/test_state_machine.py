@@ -342,8 +342,57 @@ def test_closed_gate_required_rejects_non_terminal_disposition() -> None:
         )
 
 
+def test_closed_gate_required_rejects_actual_disposition_mismatch() -> None:
+    with pytest.raises(InvalidStateTransitionError, match="must match approved"):
+        validate_closed_gate(
+            _closed_ctx(
+                terminal_event_writeback=_terminal_ok(
+                    approved_disposition=SourceDisposition.CONTAINED,
+                    actual_disposition=SourceDisposition.IGNORED,
+                )
+            )
+        )
+
+
 def test_closed_gate_required_happy_path() -> None:
     validate_closed_gate(_closed_ctx())
+
+
+def test_actual_disposition_from_command_payload_reads_nested_operation_params() -> None:
+    from app.services.state_machine_service import _actual_disposition_from_command_payload
+
+    payload = {
+        "disposition_id": "disp-1",
+        "action_id": "act-1",
+        "closure_cycle": 1,
+        "intent_kind": "event_status_update",
+        "source_locator": {
+            "source_product": "mock_xdr",
+            "source_tenant_id": "t1",
+            "connector_id": "conn-1",
+            "source_kind": "incident",
+            "source_object_id": "INC-1",
+        },
+        "operation_code": "set_event_disposition",
+        "operation_params": {
+            "operation_code": "set_event_disposition",
+            "target_disposition": "contained",
+        },
+        "operator_id": "system",
+        "idempotency_key": "idem-1",
+        "execution_owner": "xdr_managed",
+    }
+    assert (
+        _actual_disposition_from_command_payload(payload) is SourceDisposition.CONTAINED
+    )
+
+
+def test_actual_disposition_from_command_payload_ignores_forged_top_level_only() -> None:
+    from app.services.state_machine_service import _actual_disposition_from_command_payload
+
+    assert _actual_disposition_from_command_payload(
+        {"target_disposition": SourceDisposition.CONTAINED.value}
+    ) is None
 
 
 def test_check_required_writeback_close_gate_intents_not_confirmed() -> None:

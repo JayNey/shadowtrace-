@@ -31,20 +31,27 @@ from app.core.errors import (
 from app.core.event_bus import EventBus
 from app.core.redis_client import RedisClient
 from app.db import models as orm
+from app.models.disposition import DispositionCommand, SetEventDispositionParams, SourceObjectLocator
 from app.models.enums import (
+    ActionExecutionPhase,
+    DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
     EventType,
+    ExecutionOwner,
     FinalVerdict,
     Severity,
+    SourceDisposition,
     SourceObjectKind,
+    WritebackStatus,
 )
 from app.models.source import SourceReference
+from app.models.tool_meta import TERMINAL_DISPOSITION_TOOL
 from app.models.workflow import MAX_REPLAN_COUNT, TransitionContext
 from app.services.context_service import EventContextStore, event_summary_from_security_event
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.event_audit_log_service import EventAuditLogService
-from app.services.state_machine_service import StateMachineService
+from app.services.state_machine_service import StateMachineService, _build_terminal_writeback_view
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -290,6 +297,109 @@ async def _add_response_action(
                     action_name=action_name,
                     tool_name=action_name,
                     action_level="l2",
+                )
+            )
+    return action_id
+
+
+def _event_status_update_payload(
+    *,
+    action_id: str,
+    target_disposition: SourceDisposition,
+    disposition_id: str | None = None,
+) -> dict[str, object]:
+    disp_id = disposition_id or f"disp-{action_id}"
+    command = DispositionCommand(
+        disposition_id=disp_id,
+        action_id=action_id,
+        closure_cycle=1,
+        intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE,
+        source_locator=SourceObjectLocator(
+            source_product="mock_xdr",
+            source_tenant_id="tenant-1",
+            connector_id="conn-mock",
+            source_kind=SourceObjectKind.INCIDENT,
+            source_object_id="INC-terminal",
+        ),
+        operation_code="set_event_disposition",
+        operation_params=SetEventDispositionParams(target_disposition=target_disposition),
+        operator_id="system",
+        idempotency_key=f"{action_id}:terminal",
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+    )
+    return command.model_dump(mode="json")
+
+
+async def _seed_terminal_writeback_fixture(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    *,
+    plan_revision: int = 1,
+    approved: SourceDisposition = SourceDisposition.CONTAINED,
+    target_disposition: SourceDisposition = SourceDisposition.CONTAINED,
+    command_payload: dict[str, object] | None = None,
+) -> str:
+    action_id = f"act-term-{_sfx()}"
+    writeback_id = f"wbk-{_sfx()}"
+    outbox_id = f"obx-{_sfx()}"
+    disposition_id = f"disp-{_sfx()}"
+    source_record_id = f"src-{_sfx()}"
+    payload = command_payload or _event_status_update_payload(
+        action_id=action_id,
+        target_disposition=target_disposition,
+        disposition_id=disposition_id,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SourceObject(
+                    source_record_id=source_record_id,
+                    source_product="mock_xdr",
+                    source_tenant_id="tenant-1",
+                    connector_id="conn-mock",
+                    source_kind=SourceObjectKind.INCIDENT.value,
+                    source_object_id="INC-terminal",
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=plan_revision,
+                    action_fingerprint=f"fp-{action_id}",
+                    action_category="response",
+                    action_name=TERMINAL_DISPOSITION_TOOL,
+                    tool_name=TERMINAL_DISPOSITION_TOOL,
+                    action_level="l4",
+                    execution_phase=ActionExecutionPhase.POST_VERIFY.value,
+                    activation_condition="after_effect_resolution",
+                    approved_terminal_dispositions=[approved.value],
+                    status="success",
+                    auto_execute=False,
+                    reason="terminal disposition",
+                    execution_owner=ExecutionOwner.XDR_MANAGED.value,
+                    writeback_required=False,
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=writeback_id,
+                    disposition_id=disposition_id,
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="a" * 64,
+                    source_sequence=1,
+                    intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    logical_slot="terminal",
+                    idempotency_key=f"idem-{action_id}",
+                    command_payload=payload,
+                    command_payload_sha256="b" * 64,
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.CONFIRMED.value,
                 )
             )
     return action_id
@@ -1137,3 +1247,60 @@ async def test_fp_close_reason_with_case_id_in_audit(
     close_logs = [row for row in logs if row.to_status == EventStatus.CLOSED.value]
     assert close_logs
     assert "case-00000001" in (close_logs[-1].reason or "")
+
+
+# ===================================================================
+# ISSUE-184: CLOSED gate actual_disposition parsing
+# ===================================================================
+
+
+@pytest.mark.asyncio
+async def test_build_terminal_writeback_view_reads_nested_target_disposition(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+    )
+    await _seed_terminal_writeback_fixture(
+        session_factory,
+        event_id,
+        approved=SourceDisposition.CONTAINED,
+        target_disposition=SourceDisposition.CONTAINED,
+    )
+
+    async with session_factory() as session:
+        view = await _build_terminal_writeback_view(session, event_id, 1)
+
+    assert view is not None
+    assert view.approved_disposition is SourceDisposition.CONTAINED
+    assert view.actual_disposition is SourceDisposition.CONTAINED
+    assert view.receipt_status is WritebackStatus.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_build_terminal_writeback_view_fails_closed_on_forged_top_level_only(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    """Top-level target_disposition without operation_params must not spoof actual."""
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+    )
+    await _seed_terminal_writeback_fixture(
+        session_factory,
+        event_id,
+        approved=SourceDisposition.CONTAINED,
+        command_payload={"target_disposition": SourceDisposition.CONTAINED.value},
+    )
+
+    async with session_factory() as session:
+        view = await _build_terminal_writeback_view(session, event_id, 1)
+
+    assert view is not None
+    assert view.approved_disposition is SourceDisposition.CONTAINED
+    assert view.actual_disposition is SourceDisposition.PENDING
