@@ -1,9 +1,13 @@
 """Async execution models (intro §4.3 / ISSUE-002 field spec).
 
-``ActionExecutionJob`` doubles as the pre-persisted dispatch intent for the
-DIRECT_TOOL path: a QUEUED job must be committed transactionally BEFORE calling
-the external Provider, and recovery must query the Provider by the stable
-idempotency key rather than inferring "not executed" from a missing local result.
+``ActionExecutionJob`` is the pre-persisted execution record.  The PG
+``ActionExecutionService`` path creates jobs as RUNNING with a lease
+(claim → RUNNING + lease → Provider → terminal state); crash recovery
+uses lease reclaim (ISSUE-173) + idempotency, not a QUEUED-first
+handshake.  The separate ToolProvider→ToolResult path may map ACCEPTED
+to QUEUED via the adapter layer (see ``tools/adapters/base.py``), but
+that is a distinct channel and does not flow through
+``ActionExecutionService``.
 """
 
 from __future__ import annotations
