@@ -1414,6 +1414,216 @@ async def test_investigate_duplicate_returns_409(
 
 
 @pytest.mark.asyncio
+async def test_investigate_duplicate_returns_409_analysis_only_mode(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-183: analysis_only investigate uses the same lease gate as graph (409)."""
+    from app.api.v1 import events as events_module
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    get_settings.cache_clear()
+
+    event_id = await _create_test_event(event_service, title="Analysis-only duplicate 409")
+
+    class _BlockedLease:
+        async def acquire(self, _event_id: str, _owner_id: str, ttl_s: int = 600) -> bool:
+            return False
+
+        async def release(self, _event_id: str, _owner_id: str) -> bool:
+            return True
+
+    monkeypatch.setattr(events_module, "get_event_lease", lambda: _BlockedLease())
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 409, resp.text
+    data = resp.json()
+    assert data["error_code"] == "investigation_in_progress"
+    assert data["details"]["event_id"] == event_id
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_concurrent_investigate_second_request_returns_409(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-183: while the first analysis_only run holds the lease, the second gets 409."""
+    from app.api.v1 import events as events_module
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    get_settings.cache_clear()
+
+    event_id = await _create_test_event(event_service, title="Analysis-only concurrent 409")
+    release_pipeline = asyncio.Event()
+    pipeline_started = asyncio.Event()
+    released: list[tuple[str, str]] = []
+
+    class _SingleHolderLease:
+        def __init__(self) -> None:
+            self._owner_id: str | None = None
+
+        async def acquire(self, _event_id: str, owner_id: str, ttl_s: int = 600) -> bool:
+            if self._owner_id is not None:
+                return False
+            self._owner_id = owner_id
+            return True
+
+        async def release(self, _event_id: str, owner_id: str) -> bool:
+            if self._owner_id == owner_id:
+                self._owner_id = None
+            released.append((_event_id, owner_id))
+            return True
+
+    class _SlowPipeline:
+        async def run(self, _event_id: str) -> None:
+            pipeline_started.set()
+            await release_pipeline.wait()
+
+    async def _pipeline_factory() -> _SlowPipeline:
+        return _SlowPipeline()
+
+    monkeypatch.setattr(events_module, "get_event_lease", lambda: _SingleHolderLease())
+    monkeypatch.setattr(events_module, "get_pipeline", _pipeline_factory)
+
+    resp_first = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp_first.status_code == 202, resp_first.text
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not pipeline_started.is_set():
+        await asyncio.sleep(0.05)
+    assert pipeline_started.is_set(), "background pipeline must start before second request"
+
+    resp_second = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp_second.status_code == 409, resp_second.text
+    data = resp_second.json()
+    assert data["error_code"] == "investigation_in_progress"
+    assert data["details"]["event_id"] == event_id
+
+    release_pipeline.set()
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not released:
+        await asyncio.sleep(0.05)
+    assert released, "first investigation must release lease after pipeline completes"
+
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert event.status is not EventStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_investigate_invalid_transition_does_not_mark_failed(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-183: concurrent/stale InvalidStateTransition must not poison event to FAILED."""
+    from app.api.v1 import events as events_module
+    from app.api.v1.errors import InvalidStateTransitionError
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    get_settings.cache_clear()
+
+    event_id = await _create_test_event(event_service, title="Analysis-only ISTE guard")
+    released: list[tuple[str, str]] = []
+
+    class _ConcurrentLoserPipeline:
+        async def run(self, _event_id: str) -> None:
+            raise InvalidStateTransitionError(
+                "AnalysisOnlyPipeline requires event in NEW status, got triaging",
+                current=EventStatus.TRIAGING,
+                target=EventStatus.TRIAGING,
+                details={"event_id": _event_id},
+            )
+
+    class _TrackingLease:
+        async def acquire(self, _event_id: str, _owner_id: str, ttl_s: int = 600) -> bool:
+            return True
+
+        async def release(self, _event_id: str, _owner_id: str) -> bool:
+            released.append((_event_id, _owner_id))
+            return True
+
+    async def _pipeline_factory() -> _ConcurrentLoserPipeline:
+        return _ConcurrentLoserPipeline()
+
+    monkeypatch.setattr(events_module, "get_event_lease", lambda: _TrackingLease())
+    monkeypatch.setattr(events_module, "get_pipeline", _pipeline_factory)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, resp.text
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not released:
+        await asyncio.sleep(0.05)
+    assert released, "background pipeline must complete and release lease"
+
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert event.status is not EventStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_investigate_releases_lease_when_pipeline_wiring_fails(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-183: analysis_only background wiring failure must release the HTTP-held lease."""
+    from app.api.v1 import events as events_module
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    get_settings.cache_clear()
+
+    event_id = await _create_test_event(event_service, title="Analysis-only wiring fail")
+    released: list[tuple[str, str]] = []
+
+    class _TrackingLease:
+        async def acquire(self, eid: str, owner_id: str, ttl_s: int = 600) -> bool:
+            return True
+
+        async def release(self, eid: str, owner_id: str) -> bool:
+            released.append((eid, owner_id))
+            return True
+
+    async def _boom_pipeline() -> None:
+        raise RuntimeError("pipeline wiring failed")
+
+    monkeypatch.setattr(events_module, "get_event_lease", lambda: _TrackingLease())
+    monkeypatch.setattr(events_module, "get_pipeline", _boom_pipeline)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, resp.text
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not released:
+        await asyncio.sleep(0.05)
+
+    assert released, "lease must be released after analysis_only pipeline completes"
+    assert released[0][0] == event_id
+
+
+@pytest.mark.asyncio
 async def test_investigate_lease_unavailable_returns_503(
     client: TestClient,
     event_service: EventService,

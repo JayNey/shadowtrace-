@@ -718,6 +718,25 @@ def _guidance_fields(event: Any, settings: Any) -> dict[str, Any]:
     }
 
 
+async def _acquire_investigation_lease(event_id: str) -> tuple[Any, str]:
+    """Acquire per-event orchestration lease; 409 when held, 503 when store down."""
+    lease = get_event_lease()
+    from app.orchestration.lease import generate_owner_id
+
+    owner_id = generate_owner_id()
+    try:
+        acquired = await lease.acquire(event_id, owner_id)
+    except DependencyUnavailableError:
+        raise
+    if not acquired:
+        raise InvestigationInProgressError(
+            message="investigation already in progress for this event",
+            error_code="investigation_in_progress",
+            details={"event_id": event_id},
+        )
+    return lease, owner_id
+
+
 # --------------------------------------------------------------------------- #
 # POST /events/{event_id}/investigate — start analysis
 # --------------------------------------------------------------------------- #
@@ -780,6 +799,7 @@ async def investigate_event(
             )
 
     if mode == "analysis_only":
+        lease, owner_id = await _acquire_investigation_lease(event_id)
 
         async def _run_pipeline() -> None:
             try:
@@ -793,6 +813,13 @@ async def investigate_event(
                 with bind_evidence_projection(projection):
                     await pipeline.run(event_id)
                 await _record_workflow_path()
+            except (InvestigationInProgressError, InvalidStateTransitionError) as exc:
+                # Concurrent loser or stale state — do not poison a live investigation.
+                logger.warning(
+                    "AnalysisOnlyPipeline skipped for event=%s (concurrent or stale): %s",
+                    event_id,
+                    exc,
+                )
             except Exception as exc:
                 logger.error(
                     "Background pipeline failed for event=%s: %s",
@@ -808,6 +835,8 @@ async def investigate_event(
                     )
                 except Exception:
                     logger.exception("Failed to mark event as FAILED: %s", event_id)
+            finally:
+                await lease.release(event_id, owner_id)
 
         background.add_task(_run_pipeline)
         task_id = event_id
@@ -819,20 +848,7 @@ async def investigate_event(
             include_response_execution=include_response,
         )
     else:
-        lease = get_event_lease()
-        from app.orchestration.lease import generate_owner_id
-
-        owner_id = generate_owner_id()
-        try:
-            acquired = await lease.acquire(event_id, owner_id)
-        except DependencyUnavailableError:
-            raise
-        if not acquired:
-            raise InvestigationInProgressError(
-                message="investigation already in progress for this event",
-                error_code="investigation_in_progress",
-                details={"event_id": event_id},
-            )
+        lease, owner_id = await _acquire_investigation_lease(event_id)
 
         async def _run_super_agent() -> None:
             investigate_started = False
