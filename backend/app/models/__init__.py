@@ -259,6 +259,7 @@ from app.models.execution import (
     TargetExecutionResult,
 )
 from app.models.report import InvestigationReport, ReportSection
+from app.models.trajectory import TrajectoryReport
 from app.models.security_event import SecurityEvent
 from app.models.source import (
     SourceAlert,
@@ -321,6 +322,7 @@ MODEL_REGISTRY: dict[str, type[BaseModel]] = {
     # report
     "ReportSection": ReportSection,
     "InvestigationReport": InvestigationReport,
+    "TrajectoryReport": TrajectoryReport,
     # security event + context
     "SecurityEvent": SecurityEvent,
     "EventContext": EventContext,
