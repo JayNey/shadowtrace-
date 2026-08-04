@@ -39,6 +39,7 @@ from app.models.enums import (
     ActionExecutionPhase,
     ActionLevel,
     ActionStatus,
+    ConfirmationEvidence,
     DispositionPolicy,
     EventStatus,
     EventType,
@@ -1270,3 +1271,161 @@ async def test_guardrail_blocked_moves_to_dead_letter(
         assert row.next_retry_at is None
 
     assert await worker.run_once(limit=1) == 0
+
+
+@pytest.mark.asyncio
+async def test_append_receipt_sanitizes_sensitive_raw_result_before_persist(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-181: malicious adapter raw_result must not land verbatim in DB."""
+    from app.models.disposition import DispositionReceipt
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        _locator,
+        _concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id = f"wbk-{_sfx()}"
+    outbox_id = f"obx-{_sfx()}"
+    disposition_id = f"disp-{_sfx()}"
+    malicious_raw = {
+        "token": "secret-token-value",
+        "password": "hunter2",
+        "details": {"api_key": "sk-test1234567890"},
+        "provider_status": "accepted",
+    }
+    receipt = DispositionReceipt(
+        writeback_id=writeback_id,
+        sequence=0,
+        disposition_id=disposition_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        status=WritebackStatus.CONFIRMED,
+        confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+        provider_message="Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.sig",
+        raw_result=dict(malicious_raw),
+        simulated=True,
+    )
+    original_raw = dict(receipt.raw_result)
+    original_message = receipt.provider_message
+
+    async with session_factory() as session:
+        async with session.begin():
+            outbox = orm.DispositionOutbox(
+                outbox_id=outbox_id,
+                writeback_id=writeback_id,
+                disposition_id=disposition_id,
+                action_id=action_id,
+                event_id=event_id,
+                closure_cycle=1,
+                source_record_id=source_record_id,
+                source_locator_hash="hash",
+                source_sequence=1,
+                intent_kind="entity_action_submit",
+                logical_slot="default",
+                idempotency_key=f"idem-{_sfx()}",
+                command_payload={"intent_kind": "entity_action_submit"},
+                command_payload_sha256="deadbeef",
+                delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+                latest_writeback_status=WritebackStatus.CONFIRMED.value,
+            )
+            session.add(outbox)
+            persisted = await sync._append_receipt(session, outbox, receipt=receipt)
+
+    assert receipt.raw_result == original_raw
+    assert receipt.provider_message == original_message
+    assert persisted.status is WritebackStatus.CONFIRMED
+    assert persisted.confirmation_evidence is ConfirmationEvidence.READBACK_VERIFIED
+    assert persisted.raw_result["provider_status"] == "accepted"
+    assert persisted.raw_result["token"] == "***"
+    assert persisted.raw_result["password"] == "***"
+    assert persisted.raw_result["details"]["api_key"] == "***"
+    assert "[REDACTED]" in (persisted.provider_message or "")
+
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(orm.DispositionReceipt).where(
+                orm.DispositionReceipt.writeback_id == writeback_id,
+                orm.DispositionReceipt.sequence == 1,
+            )
+        )
+        assert row is not None
+        assert row.status == WritebackStatus.CONFIRMED.value
+        assert row.confirmation_evidence == ConfirmationEvidence.READBACK_VERIFIED.value
+        assert row.raw_result["token"] == "***"
+        assert row.raw_result["password"] == "***"
+        assert "secret-token-value" not in str(row.raw_result)
+        assert "hunter2" not in str(row.raw_result)
+
+
+@pytest.mark.asyncio
+async def test_append_receipt_preserves_mock_receipt_gate_fields(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-181: sanitize must not strip confirmation_evidence or writeback status."""
+    from app.models.disposition import DispositionReceipt
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        _locator,
+        _concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id = f"wbk-{_sfx()}"
+    outbox_id = f"obx-{_sfx()}"
+    disposition_id = f"disp-{_sfx()}"
+    receipt = DispositionReceipt(
+        writeback_id=writeback_id,
+        sequence=0,
+        disposition_id=disposition_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        status=WritebackStatus.CONFIRMED,
+        confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+        provider_record_id="mock-record-1",
+        provider_job_id="mock-job-1",
+        raw_result={"simulated": True, "status": "confirmed"},
+        simulated=True,
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            outbox = orm.DispositionOutbox(
+                outbox_id=outbox_id,
+                writeback_id=writeback_id,
+                disposition_id=disposition_id,
+                action_id=action_id,
+                event_id=event_id,
+                closure_cycle=1,
+                source_record_id=source_record_id,
+                source_locator_hash="hash",
+                source_sequence=1,
+                intent_kind="entity_action_submit",
+                logical_slot="default",
+                idempotency_key=f"idem-{_sfx()}",
+                command_payload={"intent_kind": "entity_action_submit"},
+                command_payload_sha256="deadbeef",
+                delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+                latest_writeback_status=WritebackStatus.CONFIRMED.value,
+            )
+            session.add(outbox)
+            persisted = await sync._append_receipt(session, outbox, receipt=receipt)
+
+    assert persisted.status is WritebackStatus.CONFIRMED
+    assert persisted.confirmation_evidence is ConfirmationEvidence.READBACK_VERIFIED
+    assert persisted.provider_record_id == "mock-record-1"
+    assert persisted.provider_job_id == "mock-job-1"
+    assert persisted.raw_result["simulated"] is True
+    assert persisted.raw_result["status"] == "confirmed"
+    assert persisted.simulated is True

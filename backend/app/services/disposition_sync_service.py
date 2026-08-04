@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.adapters._util import sanitize_disposition_receipt
 from app.adapters.disposition.base import BaseDispositionAdapter
 from app.adapters.registry import DispositionAdapterRegistry
 from app.core.config import get_settings
@@ -769,6 +770,7 @@ class DispositionSyncService:
                 submitted_at=now,
                 confirmed_at=now if status is WritebackStatus.CONFIRMED else None,
             )
+        parsed = sanitize_disposition_receipt(parsed)
         session.add(
             orm.DispositionReceipt(
                 writeback_id=parsed.writeback_id,
