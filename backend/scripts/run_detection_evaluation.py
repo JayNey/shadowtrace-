@@ -48,6 +48,11 @@ def cli_exit_code(
     ``fail_closed`` (expected cold-start / resource-limit ERROR slices). Flip
     CI back to required by dropping ``--allow-gate-fail`` once fixtures make
     ``required_gate`` + gate pass deterministic.
+
+    We use a CLI flag instead of ``threshold_manifest.required_gate: false``
+    because lowering ``required_gate`` would emit ``fail`` rather than
+    ``fail_closed`` (see ``app.evaluation.threshold``), breaking the pinned
+    ``baseline_artifact.json`` contract while artifact semantics must stay stable.
     """
     if baseline_compare_failed:
         return 1

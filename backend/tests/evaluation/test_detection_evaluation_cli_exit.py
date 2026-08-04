@@ -60,3 +60,27 @@ def test_cli_exit_code_success_when_completed_and_gate_pass() -> None:
         )
         == 0
     )
+
+
+def test_cli_exit_code_required_mode_fails_on_non_completed_status() -> None:
+    assert (
+        cli_exit_code(
+            artifact_status="failed",
+            gate_verdict=None,
+            baseline_compare_failed=False,
+            allow_gate_fail=False,
+        )
+        == 1
+    )
+
+
+def test_cli_exit_code_report_only_allows_non_completed_with_gate_pass() -> None:
+    assert (
+        cli_exit_code(
+            artifact_status="failed",
+            gate_verdict="pass",
+            baseline_compare_failed=False,
+            allow_gate_fail=True,
+        )
+        == 0
+    )
