@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "description": "Structured quality analysis of one investigation trajectory.",
+  "properties": {
+    "event_id": {
+      "title": "Event Id",
+      "type": "string"
+    },
+    "total_steps": {
+      "default": 0,
+      "title": "Total Steps",
+      "type": "integer"
+    },
+    "agent_invocations": {
+      "default": 0,
+      "title": "Agent Invocations",
+      "type": "integer"
+    },
+    "tool_calls": {
+      "default": 0,
+      "title": "Tool Calls",
+      "type": "integer"
+    },
+    "llm_calls": {
+      "default": 0,
+      "title": "Llm Calls",
+      "type": "integer"
+    },
+    "metrics": {
+      "additionalProperties": {
+        "type": "number"
+      },
+      "title": "Metrics",
+      "type": "object"
+    },
+    "findings": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "insufficient_trace": {
+      "default": false,
+      "title": "Insufficient Trace",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "event_id"
+  ],
+  "title": "TrajectoryReport",
+  "type": "object"
+}
