@@ -31,9 +31,15 @@ from app.core.errors import (
 from app.core.event_bus import EventBus
 from app.core.redis_client import RedisClient
 from app.db import models as orm
-from app.models.disposition import DispositionCommand, SetEventDispositionParams, SourceObjectLocator
+from app.models.disposition import (
+    DispositionCommand,
+    SetEventDispositionParams,
+    SourceObjectLocator,
+)
 from app.models.enums import (
+    ActionCategory,
     ActionExecutionPhase,
+    ActionStatus,
     DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
@@ -43,6 +49,7 @@ from app.models.enums import (
     Severity,
     SourceDisposition,
     SourceObjectKind,
+    WritebackReadiness,
     WritebackStatus,
 )
 from app.models.source import SourceReference
@@ -302,6 +309,88 @@ async def _add_response_action(
     return action_id
 
 
+async def _ensure_mock_connector(session: AsyncSession) -> None:
+    existing = await session.get(orm.SourceConnector, "conn-mock")
+    if existing is None:
+        session.add(
+            orm.SourceConnector(
+                connector_id="conn-mock",
+                source_product="mock_xdr",
+                display_name="Mock XDR",
+            )
+        )
+
+
+async def _seed_applicable_confirmed_writeback_action(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    *,
+    plan_revision: int = 1,
+) -> str:
+    """Seed one response Action that satisfies the REQUIRED writeback close gate."""
+    action_id = f"act-wb-{_sfx()}"
+    writeback_id = f"wbk-{_sfx()}"
+    outbox_id = f"obx-{_sfx()}"
+    disposition_id = f"disp-{_sfx()}"
+    source_record_id = f"src-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            await _ensure_mock_connector(session)
+            session.add(
+                orm.SourceObject(
+                    source_record_id=source_record_id,
+                    source_product="mock_xdr",
+                    source_tenant_id="tenant-1",
+                    connector_id="conn-mock",
+                    source_kind=SourceObjectKind.INCIDENT.value,
+                    source_object_id="INC-writeback",
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=plan_revision,
+                    action_fingerprint=f"fp-{action_id}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="block_ip",
+                    tool_name="block_ip",
+                    action_level="l2",
+                    execution_phase=ActionExecutionPhase.IMMEDIATE.value,
+                    status=ActionStatus.SUCCESS.value,
+                    auto_execute=False,
+                    reason="confirmed writeback",
+                    execution_owner=ExecutionOwner.XDR_MANAGED.value,
+                    writeback_required=True,
+                    writeback_applicable=True,
+                    writeback_readiness=WritebackReadiness.READY.value,
+                    writeback_status=WritebackStatus.CONFIRMED.value,
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=writeback_id,
+                    disposition_id=disposition_id,
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="c" * 64,
+                    source_sequence=1,
+                    intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    logical_slot="default",
+                    idempotency_key=f"idem-{action_id}",
+                    command_payload={"intent_kind": "entity_action_submit"},
+                    command_payload_sha256="d" * 64,
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.CONFIRMED.value,
+                )
+            )
+    return action_id
+
+
 def _event_status_update_payload(
     *,
     action_id: str,
@@ -351,6 +440,7 @@ async def _seed_terminal_writeback_fixture(
     )
     async with session_factory() as session:
         async with session.begin():
+            await _ensure_mock_connector(session)
             session.add(
                 orm.SourceObject(
                     source_record_id=source_record_id,
@@ -1304,3 +1394,35 @@ async def test_build_terminal_writeback_view_fails_closed_on_forged_top_level_on
     assert view is not None
     assert view.approved_disposition is SourceDisposition.CONTAINED
     assert view.actual_disposition is SourceDisposition.PENDING
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_when_terminal_actual_unparseable(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    """Forged top-level disposition must block CLOSED, not only the parsed view."""
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        severity=Severity.LOW.value,
+    )
+    await _walk_to_reporting(state_machine, event_id)
+    await _add_report(session_factory, event_id)
+    await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+    await _seed_terminal_writeback_fixture(
+        session_factory,
+        event_id,
+        approved=SourceDisposition.CONTAINED,
+        command_payload={"target_disposition": SourceDisposition.CONTAINED.value},
+    )
+
+    with pytest.raises(InvalidStateTransitionError, match="actual disposition not terminal"):
+        await state_machine.transition(
+            event_id,
+            EventStatus.CLOSED,
+            operator="SuperAgent",
+            reason="forged terminal actual",
+        )
