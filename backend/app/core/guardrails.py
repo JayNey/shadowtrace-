@@ -15,7 +15,14 @@ from app.core.config import Settings, get_settings
 from app.core.errors import GuardrailViolationError
 from app.core.sanitization import is_sensitive_key, redact_sensitive_text, sanitize_data
 from app.models.action import Action
-from app.models.agent_io import EvidenceOutput, GraphOutput, RAGOutput, ResponsePlan, RiskAssessment
+from app.models.agent_io import (
+    EvidenceOutput,
+    GraphOutput,
+    RAGOutput,
+    ResponsePlan,
+    RiskAssessment,
+    VerificationResult,
+)
 from app.models.disposition import DispositionCommand, SourceObjectLocator
 from app.models.entities import EntitySet
 from app.models.enums import GuardRailDimension
@@ -243,6 +250,7 @@ def _check_schema(
         "risk_agent": RiskAssessment,
         "response_agent": ResponsePlan,
         "report_agent": InvestigationReport,
+        "verify_agent": VerificationResult,
     }.get(agent_name)
     if expected is None:
         if isinstance(output, BaseModel):

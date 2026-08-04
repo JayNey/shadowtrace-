@@ -25,6 +25,7 @@ from app.models.agent_io import (
     RiskAssessment,
     RiskFactor,
     ScoringMode,
+    TriageResult,
     VerificationOverallStatus,
     VerificationPhase,
     VerificationResult,
@@ -35,6 +36,7 @@ from app.models.enums import (
     ActionCategory,
     ActionLevel,
     DispositionIntentKind,
+    EventType,
     ExecutionOwner,
     Severity,
     SourceObjectKind,
@@ -465,3 +467,16 @@ async def test_verify_agent_schema_rule_blocks_unstructured_output() -> None:
     guard = OutputGuard(mode=GuardrailMode.ENFORCE)
     with pytest.raises(GuardrailViolationError, match="output guard blocked"):
         await guard.validate("verify_agent", {"overall_status": "SUCCESS"}, {"event_id": "evt-bad"})
+
+
+@pytest.mark.asyncio
+async def test_verify_agent_schema_rule_blocks_wrong_model_type() -> None:
+    """VerifyAgent must reject another BaseModel type, not just unstructured dicts."""
+    guard = OutputGuard(mode=GuardrailMode.ENFORCE)
+    wrong = TriageResult(
+        event_type=EventType.ACCOUNT_ANOMALY,
+        severity=Severity.LOW,
+        need_investigation=False,
+    )
+    with pytest.raises(GuardrailViolationError, match="output guard blocked"):
+        await guard.validate("verify_agent", wrong, {"event_id": "evt-verify-wrong-model"})

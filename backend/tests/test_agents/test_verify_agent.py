@@ -4644,3 +4644,31 @@ async def test_apply_guardrails_blocks_unstructured_verification_output() -> Non
     agent = VerifyAgent(output_guard=guard)
     with pytest.raises(GuardrailViolationError, match="output guard blocked"):
         await agent._apply_guardrails({"overall_status": "SUCCESS"})
+
+
+async def test_execute_applies_output_guard_on_verification_result() -> None:
+    """execute() must run _apply_guardrails after _run on the shared guard path."""
+    from app.core.errors import GuardrailViolationError
+    from app.core.guardrails import GuardrailMode, OutputGuard
+
+    guard = OutputGuard(mode=GuardrailMode.ENFORCE)
+    agent = VerifyAgent(output_guard=guard, trace_service=MagicMock())
+    agent._publish_agent_progress = AsyncMock()
+    agent._publish_agent_completed = AsyncMock()
+    agent._publish_agent_failed = AsyncMock()
+    agent._record_trace = AsyncMock()
+
+    ok = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    agent._run = AsyncMock(return_value=ok)
+
+    result = await agent.execute(_input(actions=[]))
+
+    assert result == ok
+    agent._run.assert_awaited_once()
+
+    agent._run = AsyncMock(return_value={"overall_status": "SUCCESS"})
+    with pytest.raises(GuardrailViolationError, match="output guard blocked"):
+        await agent.execute(_input(actions=[]))
