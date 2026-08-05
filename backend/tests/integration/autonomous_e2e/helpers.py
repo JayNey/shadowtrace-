@@ -493,7 +493,13 @@ async def build_approval_engine(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
 ) -> Any:
-    """Minimal ApprovalEngine wiring for ISSUE-110 scenario B."""
+    """Minimal ApprovalEngine wiring for ISSUE-110 scenario B.
+
+    Intentionally omits ``resume_investigation`` — those tests manually drive
+    ``ActionExecutionService.execute_action`` after approve. Production resume
+    hook coverage lives in ``tests/integration/test_production_graph_resume.py``
+    (ISSUE-194).
+    """
     from unittest.mock import AsyncMock
 
     from app.agents.response_agent import build_mock_capability_manifest
