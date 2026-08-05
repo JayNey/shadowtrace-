@@ -4,7 +4,7 @@
  * read that env, so roles are resolved in this order:
  * 1. ``VITE_AUTH_ROLES`` (explicit override — keep in sync with the token's roles)
  * 2. Known compose/dev tokens from ``VITE_DEV_AUTH_TOKEN`` (mirrors docker-compose)
- * 3. Safe default matching ``e2e-token`` / bootstrap approver capability
+ * 3. Analyst-only when token is unknown (set ``VITE_AUTH_ROLES`` to grant approver)
  */
 
 const APPROVER_ROLE = "approver";
@@ -38,8 +38,8 @@ export function currentAuthRoles(): string[] {
     return [...KNOWN_DEV_TOKEN_ROLES[token]];
   }
 
-  // Compose default token carries approver; analyst-only must set VITE_AUTH_ROLES.
-  return ["analyst", APPROVER_ROLE];
+  // Unknown tokens: hide promote until VITE_AUTH_ROLES explicitly grants approver.
+  return ["analyst"];
 }
 
 export function canPromoteKnowledgeReviews(): boolean {

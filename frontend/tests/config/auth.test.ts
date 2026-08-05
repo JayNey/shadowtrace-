@@ -35,4 +35,14 @@ describe("config/auth", () => {
     expect(currentAuthRoles()).toContain("approver");
     expect(currentAuthRoles()).toContain("admin");
   });
+
+  it("defaults unknown dev token to analyst-only", async () => {
+    vi.stubEnv("VITE_AUTH_ROLES", "");
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "custom-analyst-token");
+    const { currentAuthRoles, canPromoteKnowledgeReviews } = await import(
+      "../../src/config/auth"
+    );
+    expect(currentAuthRoles()).toEqual(["analyst"]);
+    expect(canPromoteKnowledgeReviews()).toBe(false);
+  });
 });

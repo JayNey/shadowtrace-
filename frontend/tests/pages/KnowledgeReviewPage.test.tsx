@@ -205,6 +205,28 @@ describe("KnowledgeReviewPage", () => {
     await waitFor(() => expect(mockRejectMemoryReview).toHaveBeenCalled());
     expect(await screen.findByText(/already demoted|memory_review_conflict/)).toBeInTheDocument();
     expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(mockListMemoryReviews).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps list row on promote memory_review_conflict", async () => {
+    const user = userEvent.setup();
+    mockListMemoryReviews.mockResolvedValue({
+      data: { total: 1, items: [makeReview()] },
+    });
+    mockPromoteMemoryReview.mockRejectedValue(
+      new ApiError({
+        error_code: "memory_review_conflict",
+        error_message: "memory review is already demoted",
+      }),
+    );
+
+    renderPage();
+    await user.click(await screen.findByTestId("promote-rev-profile-1"));
+    await user.click(await screen.findByRole("button", { name: "入 库" }));
+
+    await waitFor(() => expect(mockPromoteMemoryReview).toHaveBeenCalled());
+    expect(screen.getByTestId("promote-rev-profile-1")).toBeInTheDocument();
+    expect(mockListMemoryReviews).toHaveBeenCalledTimes(1);
   });
 
   it("shows load error and retries", async () => {
