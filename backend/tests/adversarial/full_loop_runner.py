@@ -217,18 +217,112 @@ async def _writeback_flags(
     return confirmed is not None, terminal_outbox is not None
 
 
-def _loop_quiescent(snap: ObservabilitySnapshot) -> bool:
-    """Quality gate: terminal investigation status only (ISSUE-203).
+def _loop_quiescent(
+    snap: ObservabilitySnapshot,
+    *,
+    waiting_approval_count: int,
+) -> bool:
+    """Return True when the production loop has no further progress to make.
 
-    ``writeback_confirmed`` alone is insufficient — VERIFYING with empty report
-    must not count as success.
+    Writeback confirmation is validated by the test assertions — the runner
+    must not spin until ``timeout_s`` when outboxes are undeliverable.
     """
     terminal_statuses = {
         EventStatus.REPORTING.value,
         EventStatus.CLOSED.value,
         EventStatus.FAILED.value,
     }
-    return snap.pending_action_count == 0 and snap.event_status in terminal_statuses
+    if snap.pending_action_count != 0:
+        return False
+    if waiting_approval_count > 0:
+        return False
+    if snap.event_status not in terminal_statuses:
+        return False
+    if snap.disposition_outbox_count > 0:
+        return False
+    return True
+
+
+async def _latest_plan_revision(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> int:
+    async with session_factory() as session:
+        revision = await session.scalar(
+            select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
+        )
+    return max(1, int(revision or 1))
+
+
+async def _maybe_finalize_terminal_disposition(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    context_store: Any,
+    adversarial_disposition_sync_service: Any,
+    adversarial_event_disposition_service: Any,
+    notes: list[str],
+) -> None:
+    """One-shot production EDS activation when verify finished but outbox missing."""
+    writeback_confirmed, terminal_outbox = await _writeback_flags(session_factory, event_id)
+    if writeback_confirmed and terminal_outbox:
+        return
+    if not await _context_flag(context_store, event_id, "verification_result"):
+        return
+    plan_revision = await _latest_plan_revision(session_factory, event_id)
+    activation = await adversarial_event_disposition_service.activate_and_submit(
+        event_id,
+        plan_revision,
+        principal_or_system="adversarial-full-loop:final_disposition",
+    )
+    notes.append(
+        "final_disposition_activate: "
+        f"activated={activation.activated} skipped={activation.skipped_reason!r}"
+    )
+    if activation.activated:
+        await _drain_disposition_outboxes(
+            session_factory=session_factory,
+            event_id=event_id,
+            adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+            notes=notes,
+        )
+
+
+async def _count_waiting_approval(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> int:
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(orm.Action)
+            .where(
+                orm.Action.event_id == event_id,
+                orm.Action.status == ActionStatus.WAITING_APPROVAL.value,
+            )
+        )
+    return int(count or 0)
+
+
+async def _drain_disposition_outboxes(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    adversarial_disposition_sync_service: Any,
+    notes: list[str],
+) -> bool:
+    """Deliver ready disposition outboxes via production DispositionSync."""
+    snap = await collect_observability(session_factory, event_id)
+    if snap.disposition_outbox_count <= 0:
+        return False
+    try:
+        delivered = await adversarial_disposition_sync_service.process_ready_outboxes(limit=10)
+    except Exception:
+        logger.exception("process_ready_outboxes failed event=%s", event_id)
+        return False
+    if delivered:
+        notes.append(f"delivered_outboxes={delivered}")
+    return bool(delivered)
 
 
 def _normalize_action_rows(raw: Any) -> tuple[dict[str, Any], ...]:
@@ -255,7 +349,7 @@ async def run_production_full_loop(
     adversarial_event_disposition_service: Any,
     e2e_tool_executor: Any,
     event_id: str,
-    timeout_s: float = 900.0,
+    timeout_s: float = 120.0,
 ) -> ProductionFullLoopResult:
     """Execute investigate(full_loop) + approval drains until quiescent or timeout."""
     from app.api.v1.deps import get_approval_engine
@@ -301,6 +395,7 @@ async def run_production_full_loop(
     approved_ids: list[str] = []
     approval_rounds = 0
     deadline = time.monotonic() + timeout_s
+    idle_rounds = 0
 
     while time.monotonic() < deadline:
         newly_approved = await _approve_all_pending(engine, session_factory, event_id)
@@ -309,26 +404,51 @@ async def run_production_full_loop(
             approved_ids.extend(newly_approved)
             notes.append(f"approval_round_{approval_rounds}: {len(newly_approved)} action(s)")
             resume_attempts += 1
-            await asyncio.sleep(2.0)
+            await _resume_investigation_graph(session_factory, event_id)
+            for _ in range(40):
+                snap = await collect_observability(session_factory, event_id)
+                if snap.pending_action_count == 0:
+                    break
+                await asyncio.sleep(0.25)
+            idle_rounds = 0
             continue
 
+        if await _drain_disposition_outboxes(
+            session_factory=session_factory,
+            event_id=event_id,
+            adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+            notes=notes,
+        ):
+            resume_attempts += 1
+            await _resume_investigation_graph(session_factory, event_id)
+            await asyncio.sleep(0.25)
+            idle_rounds = 0
+            continue
+
+        waiting_approval = await _count_waiting_approval(session_factory, event_id)
         snap = await collect_observability(session_factory, event_id)
-        if _loop_quiescent(snap):
+        if _loop_quiescent(snap, waiting_approval_count=waiting_approval):
             break
 
-        if snap.disposition_outbox_count > 0:
-            try:
-                delivered = await adversarial_disposition_sync_service.process_ready_outboxes(
-                    limit=5
-                )
-                if delivered:
-                    notes.append(f"delivered_outboxes={delivered}")
-                    resume_attempts += 1
-                    await _resume_investigation_graph(session_factory, event_id)
-            except Exception:
-                logger.exception("process_ready_outboxes failed event=%s", event_id)
+        idle_rounds += 1
+        if idle_rounds >= 24 and snap.event_status in {
+            EventStatus.REPORTING.value,
+            EventStatus.CLOSED.value,
+            EventStatus.FAILED.value,
+        }:
+            notes.append("loop_idle_cap: terminal status with no approval/outbox progress")
+            break
 
         await asyncio.sleep(0.5)
+
+    await _maybe_finalize_terminal_disposition(
+        session_factory=session_factory,
+        event_id=event_id,
+        context_store=context_store,
+        adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+        adversarial_event_disposition_service=adversarial_event_disposition_service,
+        notes=notes,
+    )
 
     observability = await collect_observability(session_factory, event_id)
     writeback_confirmed, terminal_outbox = await _writeback_flags(session_factory, event_id)

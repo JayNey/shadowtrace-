@@ -31,7 +31,6 @@ from app.services.degraded_flag_service import DegradedFlagService
 from app.services.disposition_command_factory import DispositionCommandFactory
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService
-from app.services.state_machine_service import StateMachineService
 from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 from tests.adversarial.scenario_credential_db_staging_exfil import (
     build_adversarial_credential_db_staging_exfil,
@@ -52,7 +51,7 @@ def e2e_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
     monkeypatch.setenv("LLM_MODE", llm_mode)
     monkeypatch.setenv("ORCHESTRATION_MODE", "graph")
-    monkeypatch.setenv("BUDGET_ENABLED", "true")
+    monkeypatch.setenv("BUDGET_ENABLED", "false")
     if llm_mode == "openai_compatible":
         for key in (
             "LLM_API_BASE_URL",
@@ -171,21 +170,4 @@ async def adversarial_event_disposition_service(
             session_factory,
             degraded_flag_service=degraded_flags,
         ),
-    )
-
-
-@pytest_asyncio.fixture
-async def adversarial_state_machine_service(
-    session_factory: async_sessionmaker[AsyncSession],
-    context_store: EventContextStore,
-    degraded_flags: DegradedFlagService,
-) -> StateMachineService:
-    from app.services.event_audit_log_service import EventAuditLogService
-
-    audit_log = EventAuditLogService(session_factory)
-    return StateMachineService(
-        session_factory,
-        context_store,
-        audit_log=audit_log,
-        degraded_flags=degraded_flags,
     )

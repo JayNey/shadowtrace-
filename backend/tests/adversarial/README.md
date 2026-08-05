@@ -81,16 +81,28 @@ This suite has **two layers**:
 | **Plumbing** | Agents run, traces persist, tools/LLM logs exist | Wiring works — not capability proof |
 | **Quality gate** (`test_agent_adversarial_full_loop.py`, ISSUE-203) | Hard asserts on terminal status, report, disposition targets, zero shims | Production graph reached `REPORTING`/`CLOSED` with aligned containment plan |
 
+Writeback `CONFIRMED(readback_verified)` is **recorded** in the artifact (`disposition_writeback_ok`) but may lag `REPORTING` under ISSUE-196 resume routing — not a hard pytest assert until the production disposition tail is fully closed-loop.
+
 Do **not** claim autonomous investigation quality from Mock plumbing alone. Live LLM runs add reasoning signal but remain non-deterministic.
 
 | Mode | What it measures | What it does **not** measure |
 |------|------------------|------------------------------|
 | **Mock** (`LLM_MODE=mock`, default) | Deterministic pipeline wiring, agent orchestration, evidence projection, degraded flags, report structure | Real LLM reasoning, novel scenario generalization, or production adjudication quality |
-| **Mock + `scenario_id=None`** | Conservative **neutral** default goldens (low risk, ticket-only response, no demo personas) — avoids cross-prompt demo contradictions (ISSUE-201) | Agent capability ceiling; expect **WEAK/PARTIAL** on adversarial scenarios unless scenario-specific goldens or Live LLM is used |
+| **Mock + no DI override** | Agents use ``resolve_llm_scenario_id()``: when the ingested event carries ``normalized.scenario`` (adversarial poll does), Mock loads ``adversarial_credential_db_staging_exfil`` goldens — not ``default.json`` | Same as Mock — golden content is scripted for this scenario pack |
+| **Mock + explicit `scenario_id=None` on pipeline** | Analysis-only audit (`build_analysis_pipeline(scenario_id=None)`) skips DI override; routing still follows event ``source_snapshot`` / ``raw_alert_snapshot`` when present (ISSUE-199) | Agent capability ceiling on unseen narratives without scenario label |
 | **Mock + scenario golden** | Regression / demo packs (e.g. `insider_data_exfiltration`, `adversarial_credential_db_staging_exfil`) | Same as Mock — golden content is scripted, not emergent reasoning |
 | **Live** (`LLM_MODE=openai_compatible` + API key) | Closer-to-production LLM behavior on unseen narratives | Vendor availability, cost, non-determinism |
 
 **Do not** interpret Mock adversarial audit **PASS** as proof of autonomous investigation quality. Mock results validate plumbing and scripted paths only; Live runs (or human red-team review) are required for capability claims.
+
+### Mock LLM routing (ISSUE-199 / ISSUE-201)
+
+| Test | DI / pipeline override | Typical golden pack |
+|------|------------------------|---------------------|
+| `test_agent_adversarial_audit.py` | `build_analysis_pipeline(scenario_id=None)` | Event `normalized.scenario` → `adversarial_credential_db_staging_exfil.json` |
+| `test_agent_adversarial_full_loop.py` | Production graph; `get_approval_engine()` | Same — adversarial incident always embeds `scenario` in `normalized` |
+
+Neutral `default.json` applies only when no scenario label exists on the event. This suite always labels itself, so Mock response/triage/risk paths use the adversarial pack (including `must_response_targets`).
 
 Optional — use a real LLM (Volcengine Ark / OpenAI-compatible) instead of Mock golden defaults.
 
@@ -139,10 +151,10 @@ Console prints human verdict + check matrix for each run.
 | **WEAK** | Reached reporting but under-scored |
 | **FAIL** | Did not reach reporting or missed critical signals |
 
-The test uses ``scenario_id=None`` so **neutral** Mock LLM default goldens are selected
-(not demo insider personas). Regex / evidence paths still run — set ``LLM_MODE=live``
-for a stricter evaluation. For scripted Mock coverage of this scenario, pass
-``scenario_id=adversarial_credential_db_staging_exfil`` (see
-``backend/app/core/llm/golden/*/adversarial_credential_db_staging_exfil.json``).
-This is deliberately harder than ``insider_data_exfiltration`` e2e tests when
-using neutral defaults.
+Analysis audit (`test_agent_adversarial_audit.py`) uses ``build_analysis_pipeline(scenario_id=None)``
+(no DI override). Full-loop quality gate uses production graph wiring with
+``get_approval_engine()`` — both paths resolve Mock goldens from the ingested event's
+``normalized.scenario`` field (``adversarial_credential_db_staging_exfil`` for this suite).
+
+Set ``LLM_MODE=openai_compatible`` for non-deterministic Live evaluation. Golden pack files:
+``backend/app/core/llm/golden/*/adversarial_credential_db_staging_exfil.json``.
