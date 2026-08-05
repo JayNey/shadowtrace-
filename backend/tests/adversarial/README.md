@@ -74,6 +74,15 @@ uv run --frozen python -m pytest tests/test_core/test_golden_defaults.py -q
 
 ## Mock vs Live evaluation boundary
 
+This suite has **two layers**:
+
+| Layer | Role | Pass means |
+|-------|------|------------|
+| **Plumbing** | Agents run, traces persist, tools/LLM logs exist | Wiring works — not capability proof |
+| **Quality gate** (`test_agent_adversarial_full_loop.py`, ISSUE-203) | Hard asserts on terminal status, report, disposition targets, zero shims | Production graph reached `REPORTING`/`CLOSED` with aligned containment plan |
+
+Do **not** claim autonomous investigation quality from Mock plumbing alone. Live LLM runs add reasoning signal but remain non-deterministic.
+
 | Mode | What it measures | What it does **not** measure |
 |------|------------------|------------------------------|
 | **Mock** (`LLM_MODE=mock`, default) | Deterministic pipeline wiring, agent orchestration, evidence projection, degraded flags, report structure | Real LLM reasoning, novel scenario generalization, or production adjudication quality |
@@ -113,7 +122,11 @@ test and call `build_super_agent(scenario_id=None)` from integration fixtures.
 | Test | Artifact | Terminal state |
 |------|----------|----------------|
 | `test_agent_adversarial_audit.py` | `artifacts/latest_audit.json` | `REPORTING` |
-| `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | writeback `CONFIRMED` + terminal outbox |
+| `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | `REPORTING`/`CLOSED` + writeback `CONFIRMED` + aligned response targets |
+
+Full-loop artifact includes `response_plan_actions`, `shims_used` (must be `[]`), and
+`disposition_target_gaps`. Sunset shims removed in ISSUE-203: verify_tail,
+writeback_activation seeding, minimum disposition audit seed on this path.
 
 Console prints human verdict + check matrix for each run.
 
@@ -121,10 +134,10 @@ Console prints human verdict + check matrix for each run.
 
 | Verdict | Meaning |
 |---------|---------|
-| **PASS** | `confirmed_threat` + risk ≥ 65 |
-| **PARTIAL** | High risk but type/verdict off |
+| **PASS** | Reached reporting + `confirmed_threat` + risk ≥ 65 |
+| **PARTIAL** | Reached reporting with high risk but type/verdict off |
 | **WEAK** | Reached reporting but under-scored |
-| **FAIL** | Did not complete investigation |
+| **FAIL** | Did not reach reporting or missed critical signals |
 
 The test uses ``scenario_id=None`` so **neutral** Mock LLM default goldens are selected
 (not demo insider personas). Regex / evidence paths still run — set ``LLM_MODE=live``

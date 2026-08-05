@@ -146,7 +146,7 @@ async def test_production_resume_hook_after_real_approval_wait_halt(
         verify_trace = await session.scalar(
             select(orm.AgentTrace.trace_id).where(
                 orm.AgentTrace.event_id == event_id,
-                orm.AgentTrace.agent_name == "VerifyAgent",
+                orm.AgentTrace.agent_name == "verify_agent",
             )
         )
         approved_status = await session.scalar(

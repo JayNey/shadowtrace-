@@ -54,9 +54,10 @@ packages = ["app"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
-addopts = "-m 'not opensearch and not neo4j and not system and not regression and not baseline_refresh and not autonomous_mock_e2e'"
+addopts = "-m 'not opensearch and not neo4j and not system and not regression and not baseline_refresh and not autonomous_mock_e2e and not adversarial_audit'"
 markers = [
   "integration: requires real PostgreSQL and Redis services",
+  "adversarial_audit: optional local full-loop quality gate (ISSUE-203; long-running)",
   "tool_system: Registry/Executor/Mock tool-system integration chains (ISSUE-025)",
   "rag: RAG + risk scoring integration (ISSUE-047)",
   "e2e_basic: analysis-only golden-path integration (ISSUE-039)",

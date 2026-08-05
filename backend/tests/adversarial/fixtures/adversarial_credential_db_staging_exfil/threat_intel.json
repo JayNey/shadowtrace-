@@ -1,0 +1,29 @@
+[
+  {
+    "record_id": "adv-key-ti-9918-014",
+    "channel": "threat_intel",
+    "logged_at": "2025-11-18T02:23:20+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "indicator": "198.51.100.77",
+    "indicator_type": "ip",
+    "confidence": 0.86,
+    "tags": [
+      "object_storage",
+      "recently_observed"
+    ]
+  },
+  {
+    "record_id": "adv-key-ti-9918-015",
+    "channel": "threat_intel",
+    "logged_at": "2025-11-18T02:23:30+00:00",
+    "is_key_event": true,
+    "is_conflict_seed": false,
+    "indicator": "storage-sync-cdn.example",
+    "indicator_type": "domain",
+    "confidence": 0.84,
+    "tags": [
+      "sync_client_target"
+    ]
+  }
+]

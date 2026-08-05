@@ -498,7 +498,8 @@ async def build_approval_engine(
     Intentionally omits ``resume_investigation`` — those tests manually drive
     ``ActionExecutionService.execute_action`` after approve. Production resume
     hook coverage lives in ``tests/integration/test_production_graph_resume.py``
-    (ISSUE-194).
+    (ISSUE-194). Adversarial full loop uses ``get_approval_engine()`` instead
+    (ISSUE-203).
     """
     from unittest.mock import AsyncMock
 
@@ -513,5 +514,45 @@ async def build_approval_engine(
         event_bus=AsyncMock(),
         state_machine=state_machine,
         context_store=store,
+        capability_manifest=build_mock_capability_manifest(),
+    )
+
+
+async def build_production_aligned_approval_engine(
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+    *,
+    resume_investigation: Any | None = None,
+) -> Any:
+    """Production-parity ApprovalEngine when ``get_approval_engine()`` is unavailable."""
+    from app.agents.response_agent import build_mock_capability_manifest
+    from app.core.event_bus import EventBus
+    from app.services.approval_engine import ApprovalEngine
+    from app.services.degraded_flag_service import DegradedFlagService
+    from app.services.event_audit_log_service import EventAuditLogService
+    from app.services.impact_assessment_service import (
+        ImpactAssessmentService,
+        create_default_asset_provider,
+    )
+    from app.services.state_machine_service import StateMachineService
+
+    store = EventContextStore(redis_client, session_factory)
+    audit_log = EventAuditLogService(session_factory)
+    degraded_flags = DegradedFlagService(redis_client)
+    state_machine = StateMachineService(
+        session_factory,
+        store,
+        audit_log=audit_log,
+        degraded_flags=degraded_flags,
+    )
+    return ApprovalEngine(
+        session_factory,
+        event_bus=EventBus(redis_client),
+        state_machine=state_machine,
+        context_store=store,
+        resume_investigation=resume_investigation,
+        impact_assessment_service=ImpactAssessmentService(
+            asset_info_provider=create_default_asset_provider(),
+        ),
         capability_manifest=build_mock_capability_manifest(),
     )

@@ -1,0 +1,170 @@
+"""Dynamic adversarial audit — ingest a fresh Mock XDR scenario and score agent output.
+
+Run (requires Postgres + Redis, same as integration tests):
+
+    cd backend
+    uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+
+For a closer-to-production evaluation, set a real LLM before running:
+
+    LLM_MODE=live LLM_API_BASE_URL=... LLM_API_KEY=... \\
+      uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+
+Reports are written to ``tests/adversarial/artifacts/latest_audit.json``.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from app.ingestion.source_ingester import SourceIngester
+from app.models.enums import EventStatus
+from app.services.context_service import EventContextStore
+from app.services.event_service import EventService
+from app.services.evidence_projection import bind_evidence_projection
+from tests.adversarial.audit_report import (
+    AdversarialAuditChecks,
+    collect_entity_tokens,
+    normalize_enum,
+)
+from tests.adversarial.helpers import ingest_true_positive_event
+from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
+
+pytestmark = [pytest.mark.integration, pytest.mark.adversarial_audit]
+
+ARTIFACT_PATH = Path(__file__).resolve().parent / "artifacts" / "latest_audit.json"
+
+
+async def _ingest_adversarial_incident(
+    source_adapter,
+    source_ingester: SourceIngester,
+    event_service: EventService,
+) -> str:
+    return await ingest_true_positive_event(
+        source_adapter,
+        source_ingester,
+        event_service,
+    )
+
+
+async def _audit_status_sequence(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> list[str]:
+    from app.db import models as orm
+
+    async with session_factory() as session:
+        rows = list(
+            await session.scalars(
+                select(orm.EventAuditLog)
+                .where(
+                    orm.EventAuditLog.event_id == event_id,
+                    orm.EventAuditLog.to_status.is_not(None),
+                )
+                .order_by(orm.EventAuditLog.created_at.asc(), orm.EventAuditLog.id.asc())
+            )
+        )
+    return [row.to_status for row in rows if row.to_status]
+
+
+def _report_excerpt(report: Any) -> str:
+    if report is None:
+        return ""
+    title = str(getattr(report, "title", "") or "")
+    summary = str(getattr(report, "summary", "") or "")
+    return (title + "\n" + summary).strip()[:1200]
+
+
+@pytest.mark.usefixtures("clean_state")
+@pytest.mark.asyncio
+async def test_adversarial_credential_db_staging_exfil_audit(
+    adversarial_source_adapter,
+    source_ingester: SourceIngester,
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    build_analysis_pipeline,
+) -> None:
+    """Ingest a fresh adversarial incident and produce a scored audit artifact.
+
+    This test intentionally uses ``scenario_id=None`` so neutral Mock LLM default
+    goldens are selected (ISSUE-201). Demo insider goldens are scenario-scoped under
+    ``insider_data_exfiltration.json``; adversarial goldens live under
+    ``adversarial_credential_db_staging_exfil.json``. Regex / evidence / default
+    paths still run — set ``LLM_MODE=live`` for a stricter evaluation.
+    """
+    event_id = await _ingest_adversarial_incident(
+        adversarial_source_adapter,
+        source_ingester,
+        event_service,
+    )
+
+    event_before = await event_service.get_event(event_id)
+    assert event_before is not None
+    new_events = await event_service.list_events(status=EventStatus.NEW)
+    print(
+        f"\n[adversarial-audit] ingested event_id={event_id} "
+        f"title={event_before.title!r} "
+        f"(NEW queue={new_events.total}, decoys={GROUND_TRUTH['noise_profile']['decoy_incidents']})"
+    )
+
+    pipeline, projection = build_analysis_pipeline(scenario_id=None)
+    started = time.perf_counter()
+    with bind_evidence_projection(projection):
+        result = await pipeline.run(event_id)
+    elapsed = time.perf_counter() - started
+    print(f"[adversarial-audit] pipeline finished in {elapsed:.1f}s")
+
+    event_after = await event_service.get_event(event_id)
+    assert event_after is not None
+
+    triage_ctx = await context_store.get(event_id, "triage_result") or {}
+    evidence_ctx = await context_store.get(event_id, "evidence_output") or {}
+    report_ctx = await context_store.get(event_id, "report") or {}
+
+    token_sources: list[Any] = [
+        triage_ctx,
+        evidence_ctx,
+        report_ctx,
+        event_after.model_dump(mode="json"),
+        result.model_dump(mode="json") if hasattr(result, "model_dump") else result,
+    ]
+    tokens = collect_entity_tokens(token_sources)
+    joined = "\n".join(tokens).lower()
+
+    entities_found = [e for e in GROUND_TRUTH["must_identify_entities"] if e.lower() in joined]
+    indicators_found = [i for i in GROUND_TRUTH["must_identify_indicators"] if i.lower() in joined]
+
+    checks = AdversarialAuditChecks(
+        ground_truth=GROUND_TRUTH,
+        event_type=normalize_enum(triage_ctx.get("event_type") or event_after.event_type),
+        severity=normalize_enum(triage_ctx.get("severity") or event_after.severity),
+        risk_score=int(event_after.risk_score or 0),
+        final_verdict=normalize_enum(result.final_verdict or event_after.final_verdict),
+        entities_found=entities_found,
+        indicators_found=indicators_found,
+        report_excerpt=_report_excerpt(result.report),
+        triage_summary=str(triage_ctx.get("decision_summary") or ""),
+        evidence_collection_status=str(
+            evidence_ctx.get("collection_status") or evidence_ctx.get("status") or ""
+        ),
+        status_sequence=await _audit_status_sequence(session_factory, event_id),
+    )
+    report = checks.to_dict()
+    checks.write_json(ARTIFACT_PATH)
+
+    print("\n[adversarial-audit] human verdict:", report["verdict_for_human"])
+    print("[adversarial-audit] checks:", json.dumps(report["checks"], ensure_ascii=False, indent=2))
+    print(f"[adversarial-audit] full report → {ARTIFACT_PATH}")
+
+    # Soft assertion: pipeline must at least reach reporting for the audit to be meaningful.
+    assert EventStatus.REPORTING.value in report["observed"]["status_sequence"], (
+        "pipeline did not reach REPORTING — see artifact for details"
+    )
