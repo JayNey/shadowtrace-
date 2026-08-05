@@ -1,11 +1,4 @@
-"""Probe production approval_wait → END → _resume_investigation path (debug only).
-
-Run:
-  cd backend
-  export DATABASE_URL=postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
-  export REDIS_URL=redis://localhost:6379/0
-  uv run --frozen python -m pytest tests/debug/test_production_resume_probe.py -v -s
-"""
+"""Production approval_wait → END → resume_investigation regression (ISSUE-192)."""
 
 from __future__ import annotations
 
@@ -20,7 +13,6 @@ from app.api.v1.deps import get_approval_engine, get_super_agent, reset_deps
 from app.core.auth import Principal
 from app.core.config import get_settings
 from app.db import models as orm
-from app.debug.session_log import debug_session_log
 from app.models.enums import ActionStatus, EventStatus, ExecutionSubstate
 from app.services.context_service import EventContextStore
 from app.services.event_service import EventService
@@ -28,7 +20,11 @@ from app.tasks import investigation_tasks as tasks
 from tests.adversarial.helpers import ingest_true_positive_event
 from tests.integration.autonomous_e2e.helpers import patch_production_session_factory
 
-pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("clean_state")]
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.e2e_response,
+    pytest.mark.usefixtures("clean_state"),
+]
 
 
 async def _checkpoint_snapshot(event_id: str) -> dict[str, Any]:
@@ -62,7 +58,7 @@ async def test_production_resume_after_approval_wait(
     session_factory: async_sessionmaker[AsyncSession],
     context_store: EventContextStore,
 ) -> None:
-    """Reproduce production path: graph halts at approval_wait, then deps resume."""
+    """Production path: graph halts at approval_wait, then deps resume hook continues."""
     reset_deps()
     get_settings.cache_clear()
     monkeypatch.setenv("ORCHESTRATION_MODE", "graph")
@@ -78,9 +74,6 @@ async def test_production_resume_after_approval_wait(
     await tasks.execute_investigation(event_id, include_response_execution=True)
 
     async with session_factory() as session:
-        db_status = await session.scalar(
-            select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
-        )
         pending = list(
             await session.scalars(
                 select(orm.Action).where(
@@ -95,39 +88,19 @@ async def test_production_resume_after_approval_wait(
     assert pre_checkpoint.get("halted") is True
     assert pre_checkpoint.get("execution_substate") == ExecutionSubstate.WAITING_APPROVAL.value
     assert pre_checkpoint.get("next") == []
-    debug_session_log(
-        location="test_production_resume_probe.py:post_investigate",
-        message="investigate halted before approval",
-        data={
-            "event_id": event_id,
-            "db_status": str(db_status),
-            "pending_count": len(pending),
-            **pre_checkpoint,
-        },
-        hypothesis_id="B,E",
-    )
 
     engine = await get_approval_engine()
     action_id = pending[0].action_id
     await engine.approve(
         action_id,
         Principal(subject="probe-approver", roles=["approver"]),
-        "production resume probe",
+        "production resume regression",
         f"dec-probe-{uuid.uuid4().hex[:10]}",
     )
 
     async with session_factory() as session:
         db_status_after = await session.scalar(
             select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
-        )
-        substate_raw = await session.scalar(
-            select(orm.EventContextJournal.value)
-            .where(
-                orm.EventContextJournal.event_id == event_id,
-                orm.EventContextJournal.field_name == "execution_substate",
-            )
-            .order_by(orm.EventContextJournal.version.desc())
-            .limit(1)
         )
         verify_trace = await session.scalar(
             select(orm.AgentTrace.trace_id).where(
@@ -143,22 +116,8 @@ async def test_production_resume_after_approval_wait(
         f"status={db_status_after} trace={node_trace}"
     )
     assert post_checkpoint.get("needs_approval_wait") is False, post_checkpoint
+    assert post_checkpoint.get("halted") is False, post_checkpoint
     assert "execute_node" in node_trace, node_trace
     assert "verify_node" in node_trace or verify_trace is not None or bool(verification), (
         f"resume must reach verify tail after approval; trace={node_trace}"
-    )
-
-    debug_session_log(
-        location="test_production_resume_probe.py:post_approve_resume",
-        message="after production approve+resume hook",
-        data={
-            "event_id": event_id,
-            "db_status_after": str(db_status_after),
-            "journal_execution_substate": substate_raw,
-            "verify_agent_traced": verify_trace is not None,
-            "verification_present": bool(verification),
-            **post_checkpoint,
-        },
-        hypothesis_id="A,B,C,E",
-        run_id="probe",
     )

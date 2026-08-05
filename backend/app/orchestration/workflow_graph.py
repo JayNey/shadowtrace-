@@ -285,6 +285,9 @@ def route_after_report(state: InvestigationState) -> str:
 def route_after_approval(state: InvestigationState) -> str:
     if state.get("execution_substate") == ExecutionSubstate.WAITING_APPROVAL.value:
         return ROUTE_WAIT
+    event_status = EventStatus(state.get("event_status", EventStatus.WAITING_APPROVAL.value))
+    if event_status is EventStatus.REPORTING:
+        return ROUTE_REPORT
     return ROUTE_EXECUTE
 
 
@@ -1678,6 +1681,7 @@ def build_investigation_graph(
         {
             ROUTE_EXECUTE: NODE_EXECUTE,
             ROUTE_WAIT: NODE_APPROVAL_WAIT,
+            ROUTE_REPORT: NODE_REPORT,
         },
     )
     graph.add_edge(NODE_APPROVAL_WAIT, END)

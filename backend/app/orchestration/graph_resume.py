@@ -28,6 +28,25 @@ logger = logging.getLogger(__name__)
 GetSuperAgent = Callable[[], Awaitable[Any]]
 GetWorkflowRuntime = Callable[[], Awaitable[Any]]
 
+# Resume may delegate to Celery only when the event never entered the graph.
+_GRAPH_NEVER_STARTED_STATUSES = frozenset(
+    {
+        EventStatus.NEW.value,
+        EventStatus.TRIAGING.value,
+    }
+)
+
+
+async def _read_event_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> str:
+    async with session_factory() as session:
+        event_status = await session.scalar(
+            select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
+        )
+    return str(event_status or "")
+
 
 async def prepare_graph_resume_state(
     session_factory: async_sessionmaker[AsyncSession],
@@ -45,11 +64,7 @@ async def prepare_graph_resume_state(
     if snapshot is None or not snapshot.values:
         return False
 
-    async with session_factory() as session:
-        event_status = await session.scalar(
-            select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
-        )
-    status_value = str(event_status or "")
+    status_value = await _read_event_status(session_factory, event_id)
     values = snapshot.values
 
     if status_value == EventStatus.VERIFYING.value:
@@ -65,6 +80,38 @@ async def prepare_graph_resume_state(
                 ExecutionSubstate.WAITING_WRITEBACK,
                 event_status=EventStatus.VERIFYING,
             )
+        return True
+
+    if status_value == EventStatus.REPORTING.value:
+        await runtime.set_execution_substate(
+            event_id,
+            ExecutionSubstate.NONE,
+            event_status=EventStatus.REPORTING,
+        )
+        needs_patch = bool(
+            values.get("halted")
+            or values.get("needs_approval_wait")
+            or values.get("execution_substate") == ExecutionSubstate.WAITING_APPROVAL.value
+        )
+        if needs_patch:
+            await graph.aupdate_state(
+                config,
+                {
+                    "halted": False,
+                    "needs_approval_wait": False,
+                    "execution_substate": ExecutionSubstate.NONE.value,
+                    "event_status": EventStatus.REPORTING.value,
+                },
+                as_node=NODE_APPROVAL,
+            )
+        return True
+
+    if status_value != EventStatus.EXECUTING_RESPONSE.value:
+        logger.warning(
+            "prepare_graph_resume: unexpected DB status=%s event=%s; skipping checkpoint patch",
+            status_value,
+            event_id,
+        )
         return True
 
     await runtime.set_execution_substate(
@@ -129,9 +176,26 @@ async def resume_investigation_from_checkpoint(
         runtime,
     )
     if not has_checkpoint:
+        status_value = await _read_event_status(session_factory, event_id)
+        if status_value in _GRAPH_NEVER_STARTED_STATUSES:
+            from app.services.investigation_guidance import (
+                resolve_include_response_execution_for_resume,
+            )
+            from app.tasks.investigation_tasks import execute_investigation
+
+            include_response = await resolve_include_response_execution_for_resume(
+                session_factory,
+                event_id,
+            )
+            await execute_investigation(
+                event_id,
+                include_response_execution=include_response,
+            )
+            return
         logger.warning(
-            "resume_investigation: no checkpoint for event=%s; skipping full restart",
+            "resume_investigation: no checkpoint for event=%s status=%s; skipping full restart",
             event_id,
+            status_value,
         )
         return
 

@@ -639,6 +639,10 @@ def test_remaining_route_truth_tables() -> None:
         == ROUTE_WAIT
     )
     assert route_after_approval(_base_state()) == ROUTE_EXECUTE
+    assert (
+        route_after_approval(_base_state(event_status=EventStatus.REPORTING.value))
+        == ROUTE_REPORT
+    )
     assert route_after_verify(_base_state(verify_need_manual_resolution=True)) == ROUTE_MANUAL
     assert route_after_verify(_base_state(verify_need_writeback_recovery=True)) == ROUTE_WRITEBACK
     assert route_after_verify(_base_state(verify_need_action_replan=True)) == ROUTE_REPLAN
@@ -1372,6 +1376,149 @@ async def test_prepare_graph_resume_continues_from_real_approval_wait_halt() -> 
     assert NODE_EXECUTE in final["node_trace"], final["node_trace"]
     assert NODE_VERIFY in final["node_trace"], final["node_trace"]
     assert final["halted"] is False
+
+
+class _ResumeScalarSession:
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    async def scalar(self, _stmt: Any) -> str:
+        return self._status
+
+
+class _ResumeSessionCtx:
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    async def __aenter__(self) -> _ResumeScalarSession:
+        return _ResumeScalarSession(self._status)
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+class _ResumeSessionFactory:
+    def __init__(self, status: str) -> None:
+        self._status = status
+
+    def __call__(self) -> _ResumeSessionCtx:
+        return _ResumeSessionCtx(self._status)
+
+
+@pytest.mark.asyncio
+async def test_prepare_graph_resume_after_full_rejection_routes_to_reporting() -> None:
+    """ISSUE-192: rejected plan resumes to report/close, not execute."""
+    from app.orchestration.graph_resume import prepare_graph_resume_state
+    from app.orchestration.workflow_graph import invoke_investigation_graph
+
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    event_id = "evt-rejection-resume"
+
+    services1 = _services()
+    services1["approval_engine"] = FakeApprovalEngine(needs_wait=True, evaluated_count=2)
+    graph = build_investigation_graph(_agents(), services1, checkpointer=saver)
+    config = {"configurable": {"thread_id": event_id}}
+
+    halted = await graph.ainvoke(_base_state(event_id=event_id), config)
+    assert halted["halted"] is True
+    assert NODE_EXECUTE not in halted["node_trace"]
+
+    machine2 = FakeStateMachine(
+        status=EventStatus.REPORTING,
+        statuses={event_id: EventStatus.REPORTING},
+    )
+    services2 = _services(machine2)
+    graph2 = build_investigation_graph(_agents(), services2, checkpointer=saver)
+    runtime = services2["workflow_runtime"]
+
+    await prepare_graph_resume_state(
+        _ResumeSessionFactory(EventStatus.REPORTING.value),
+        graph2,
+        event_id,
+        runtime,
+    )
+
+    post_snap = await graph2.aget_state(config)
+    assert post_snap is not None
+    assert post_snap.values.get("halted") is False
+    assert post_snap.values.get("event_status") == EventStatus.REPORTING.value
+
+    final = await invoke_investigation_graph(graph2, None, config)
+    assert NODE_EXECUTE not in final["node_trace"], final["node_trace"]
+    assert NODE_REPORT in final["node_trace"], final["node_trace"]
+    assert final.get("event_status") != EventStatus.FAILED.value
+
+
+@pytest.mark.asyncio
+async def test_prepare_graph_resume_from_waiting_writeback_halt() -> None:
+    """ISSUE-192: writeback WAIT halt clears checkpoint and continues verify tail."""
+    from app.orchestration.graph_resume import prepare_graph_resume_state
+    from app.orchestration.workflow_graph import invoke_investigation_graph
+
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    event_id = "evt-writeback-resume"
+
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    services = _services(machine)
+    graph = build_investigation_graph(_agents(), services, checkpointer=saver)
+    config = {"configurable": {"thread_id": event_id}}
+
+    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+    risk = RiskAssessment(
+        risk_score=80,
+        severity=Severity.HIGH,
+        confidence=0.9,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        reasoning="investigate",
+    )
+    halted_state = _base_state(
+        event_id=event_id,
+        event_status=EventStatus.VERIFYING.value,
+        execution_substate=ExecutionSubstate.NONE.value,
+        halted=True,
+        verify_need_writeback_recovery=False,
+        verify_need_action_replan=False,
+        verify_need_manual_resolution=False,
+        evidence_output=evidence.model_dump(mode="json"),
+        risk_assessment=risk.model_dump(mode="json"),
+        triage_result=triage.model_dump(mode="json"),
+        plan_revision=1,
+        replan_count=0,
+        escalated=False,
+    )
+    await graph.aupdate_state(config, halted_state, as_node=NODE_VERIFY)
+
+    pre_snap = await graph.aget_state(config)
+    assert pre_snap is not None
+    assert pre_snap.values.get("halted") is True
+
+    await prepare_graph_resume_state(
+        _ResumeSessionFactory(EventStatus.VERIFYING.value),
+        graph,
+        event_id,
+        services["workflow_runtime"],
+    )
+
+    post_snap = await graph.aget_state(config)
+    assert post_snap is not None
+    assert post_snap.values.get("halted") is False
+
+    final = await invoke_investigation_graph(graph, None, config)
+    assert final["halted"] is False
+    assert final.get("event_status") != EventStatus.FAILED.value
+    assert (
+        NODE_REPORT in final["node_trace"] or NODE_CLOSE in final["node_trace"]
+    ), final["node_trace"]
 
 
 @pytest.mark.asyncio
