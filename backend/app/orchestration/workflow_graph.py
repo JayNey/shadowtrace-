@@ -16,6 +16,7 @@ from app.core.config import get_settings
 from app.core.errors import InvalidStateTransitionError, ValidationError
 from app.models.agent_io import (
     CollectionStatus,
+    EffectStatus,
     EvidenceAgentInput,
     EvidenceOutput,
     ExecutionPlan,
@@ -31,6 +32,8 @@ from app.models.agent_io import (
     RiskAssessment,
     ScoringMode,
     TriageResult,
+    VerificationActionResult,
+    VerificationOverallStatus,
     VerificationPhase,
     VerificationResult,
     VerifyAgentInput,
@@ -526,6 +529,42 @@ async def _hydrate_context(
         target["severity"] = context.event.severity.value
         target["event_status"] = context.event.status.value
         target["final_verdict"] = context.event.final_verdict.value
+
+
+async def _persist_verify_degraded_result(
+    services: dict[str, Any],
+    event_id: str,
+    *,
+    detail: str,
+) -> None:
+    """Persist structured verification failure before routing to manual (ISSUE-196)."""
+    store = services.get("context_store")
+    if store is None:
+        return
+    result = VerificationResult(
+        overall_status=VerificationOverallStatus.FAILED,
+        verification_phase=VerificationPhase.EFFECT,
+        need_manual_resolution=True,
+        results=[
+            VerificationActionResult(
+                action_id="__verify_node_degraded__",
+                effect_status=EffectStatus.UNVERIFIABLE,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                detail=detail,
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ],
+        wm_persisted=True,
+    )
+    try:
+        await store.set(event_id, "verification_result", result.model_dump(mode="json"))
+    except Exception:
+        logger.warning(
+            "verify_node: failed to persist degraded verification_result for event=%s (%s)",
+            event_id,
+            detail,
+        )
 
 
 def _resolve_verify_writeback_status(
@@ -1451,6 +1490,11 @@ def build_investigation_graph(
                 event_id=state["event_id"],
                 degraded_flags=degraded_flags,
             )
+            await _persist_verify_degraded_result(
+                services,
+                state["event_id"],
+                detail="verify_degraded",
+            )
             await runtime.set_execution_substate(
                 state["event_id"],
                 ExecutionSubstate.MANUAL_RESOLUTION,
@@ -1559,6 +1603,13 @@ def build_investigation_graph(
         )
 
     async def report_node(state: InvestigationState) -> InvestigationState:
+        verification_result: VerificationResult | None = None
+        context_store = services.get("context_store")
+        if context_store is not None:
+            raw_verification = await context_store.get(state["event_id"], "verification_result")
+            if raw_verification is not None:
+                verification_result = VerificationResult.model_validate(raw_verification)
+
         report = await report_agent.execute(
             ReportAgentInput(
                 event_id=state["event_id"],
@@ -1566,6 +1617,7 @@ def build_investigation_graph(
                 risk_assessment=RiskAssessment.model_validate(state["risk_assessment"]),
                 escalated=bool(state.get("escalated", False)),
                 replan_count=int(state.get("replan_count", 0)),
+                verification_result=verification_result,
             )
         )
         # ISSUE-062 B2: When the writeback recovery path routes to report_node,

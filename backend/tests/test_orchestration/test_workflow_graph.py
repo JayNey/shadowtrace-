@@ -372,8 +372,17 @@ class FakeDegradedFlags:
 
 
 class FakeContextStore:
+    def __init__(self) -> None:
+        self.data: dict[tuple[str, str], Any] = {}
+
     async def get_full_context(self, event_id: str) -> EventContext:
         return EventContext()
+
+    async def get(self, event_id: str, key: str) -> Any:
+        return self.data.get((event_id, key))
+
+    async def set(self, event_id: str, key: str, value: Any, **_kwargs: Any) -> None:
+        self.data[(event_id, key)] = value
 
 
 class FakeRedisStore:
@@ -640,8 +649,7 @@ def test_remaining_route_truth_tables() -> None:
     )
     assert route_after_approval(_base_state()) == ROUTE_EXECUTE
     assert (
-        route_after_approval(_base_state(event_status=EventStatus.REPORTING.value))
-        == ROUTE_REPORT
+        route_after_approval(_base_state(event_status=EventStatus.REPORTING.value)) == ROUTE_REPORT
     )
     assert route_after_verify(_base_state(verify_need_manual_resolution=True)) == ROUTE_MANUAL
     assert route_after_verify(_base_state(verify_need_writeback_recovery=True)) == ROUTE_WRITEBACK
@@ -1379,30 +1387,65 @@ async def test_prepare_graph_resume_continues_from_real_approval_wait_halt() -> 
 
 
 class _ResumeScalarSession:
-    def __init__(self, status: str) -> None:
+    def __init__(
+        self,
+        status: str,
+        *,
+        outbox_wb_statuses: list[str | None] | None = None,
+    ) -> None:
         self._status = status
+        self._outbox_wb_statuses = outbox_wb_statuses or []
 
     async def scalar(self, _stmt: Any) -> str:
         return self._status
 
+    async def scalars(self, _stmt: Any) -> _ResumeOutboxScalars:
+        return _ResumeOutboxScalars(self._outbox_wb_statuses)
+
+
+class _ResumeOutboxScalars:
+    def __init__(self, statuses: list[str | None]) -> None:
+        self._statuses = statuses
+
+    def __iter__(self) -> Any:
+        return iter(self._statuses)
+
 
 class _ResumeSessionCtx:
-    def __init__(self, status: str) -> None:
+    def __init__(
+        self,
+        status: str,
+        *,
+        outbox_wb_statuses: list[str | None] | None = None,
+    ) -> None:
         self._status = status
+        self._outbox_wb_statuses = outbox_wb_statuses
 
     async def __aenter__(self) -> _ResumeScalarSession:
-        return _ResumeScalarSession(self._status)
+        return _ResumeScalarSession(
+            self._status,
+            outbox_wb_statuses=self._outbox_wb_statuses,
+        )
 
     async def __aexit__(self, *_args: Any) -> None:
         return None
 
 
 class _ResumeSessionFactory:
-    def __init__(self, status: str) -> None:
+    def __init__(
+        self,
+        status: str,
+        *,
+        outbox_wb_statuses: list[str | None] | None = None,
+    ) -> None:
         self._status = status
+        self._outbox_wb_statuses = outbox_wb_statuses
 
     def __call__(self) -> _ResumeSessionCtx:
-        return _ResumeSessionCtx(self._status)
+        return _ResumeSessionCtx(
+            self._status,
+            outbox_wb_statuses=self._outbox_wb_statuses,
+        )
 
 
 @pytest.mark.asyncio
@@ -1516,9 +1559,183 @@ async def test_prepare_graph_resume_from_waiting_writeback_halt() -> None:
     final = await invoke_investigation_graph(graph, None, config)
     assert final["halted"] is False
     assert final.get("event_status") != EventStatus.FAILED.value
+    assert NODE_REPORT in final["node_trace"] or NODE_CLOSE in final["node_trace"], final[
+        "node_trace"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_graph_resume_clears_stale_manual_when_writeback_confirmed() -> None:
+    """ISSUE-196: confirmed writebacks must re-route VERIFYING resume to report."""
+    from app.orchestration.graph_resume import prepare_graph_resume_state
+    from app.orchestration.workflow_graph import invoke_investigation_graph
+
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    event_id = "evt-stale-manual-resume"
+
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    services = _services(machine)
+    graph = build_investigation_graph(_agents(), services, checkpointer=saver)
+    config = {"configurable": {"thread_id": event_id}}
+
+    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+    risk = RiskAssessment(
+        risk_score=80,
+        severity=Severity.HIGH,
+        confidence=0.9,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        reasoning="investigate",
+    )
+    halted_state = _base_state(
+        event_id=event_id,
+        event_status=EventStatus.VERIFYING.value,
+        execution_substate=ExecutionSubstate.MANUAL_RESOLUTION.value,
+        halted=True,
+        verify_need_writeback_recovery=False,
+        verify_need_action_replan=False,
+        verify_need_manual_resolution=True,
+        degraded_flags=["verify_degraded=True"],
+        evidence_output=evidence.model_dump(mode="json"),
+        risk_assessment=risk.model_dump(mode="json"),
+        triage_result=triage.model_dump(mode="json"),
+        plan_revision=1,
+        replan_count=0,
+        escalated=False,
+    )
+    await graph.aupdate_state(config, halted_state, as_node=NODE_VERIFY)
+
+    await prepare_graph_resume_state(
+        _ResumeSessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_wb_statuses=[WritebackStatus.CONFIRMED.value],
+        ),
+        graph,
+        event_id,
+        services["workflow_runtime"],
+    )
+
+    post_snap = await graph.aget_state(config)
+    assert post_snap is not None
+    assert post_snap.values.get("halted") is False
+    assert post_snap.values.get("verify_need_manual_resolution") is False
+    assert post_snap.values.get("verify_need_writeback_recovery") is False
+
+    final = await invoke_investigation_graph(graph, None, config)
+    assert final["halted"] is False
+    assert NODE_MANUAL_HOLD not in final["node_trace"], final["node_trace"]
+    assert NODE_REPORT in final["node_trace"], final["node_trace"]
+    assert machine.status in {EventStatus.REPORTING, EventStatus.CLOSED}
+
+
+@pytest.mark.asyncio
+async def test_verify_degraded_persists_verification_result() -> None:
+    """ISSUE-196: verify degradation writes structured verification_result."""
+    store = FakeContextStore()
+
+    class _ExplodingVerifyAgent:
+        async def execute(self, _input: Any) -> VerificationResult:
+            raise RuntimeError("hydrate failed")
+
+    services = _services()
+    services["context_store"] = store
+    graph = build_investigation_graph(
+        _agents_with_verify(_ExplodingVerifyAgent()),
+        services,
+    )
+    event_id = "evt-verify-degraded-persist"
+    config = {"configurable": {"thread_id": event_id}}
+    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+    risk = RiskAssessment(
+        risk_score=70,
+        severity=Severity.MEDIUM,
+        confidence=0.8,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    state = _base_state(
+        event_id=event_id,
+        event_status=EventStatus.VERIFYING.value,
+        evidence_output=evidence.model_dump(mode="json"),
+        risk_assessment=risk.model_dump(mode="json"),
+        response_plan=ResponsePlan(
+            plan_id="pln-verify-degraded",
+            actions=[],
+            strategy_summary="",
+            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        ).model_dump(mode="json"),
+    )
+    final = await graph.ainvoke(state, config)
+    assert final["verify_need_manual_resolution"] is True
+    persisted = await store.get(event_id, "verification_result")
+    assert persisted is not None
+    parsed = VerificationResult.model_validate(persisted)
+    assert parsed.overall_status is VerificationOverallStatus.FAILED
+    assert parsed.need_manual_resolution is True
+    assert parsed.wm_persisted is True
+    assert len(parsed.results) == 1
+    assert parsed.results[0].detail == "verify_degraded"
+    assert parsed.results[0].effect_status.value == "unverifiable"
+
+
+@pytest.mark.asyncio
+async def test_report_node_loads_verification_result_from_context() -> None:
+    """ISSUE-196: report_node passes persisted verification_result to ReportAgent."""
+    store = FakeContextStore()
+    report_agent = CapturingReportAgent()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+        wm_persisted=True,
+    )
+    event_id = "evt-report-verification"
+    await store.set(
+        event_id,
+        "verification_result",
+        verification.model_dump(mode="json"),
+    )
+
+    services = _services()
+    services["context_store"] = store
+    graph = build_investigation_graph(
+        _agents_with_verify_and_report(StubAgent(verification), report_agent),
+        services,
+    )
+    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+    risk = RiskAssessment(
+        risk_score=60,
+        severity=Severity.MEDIUM,
+        confidence=0.7,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    state = _base_state(
+        event_id=event_id,
+        event_status=EventStatus.VERIFYING.value,
+        evidence_output=evidence.model_dump(mode="json"),
+        risk_assessment=risk.model_dump(mode="json"),
+        response_plan=ResponsePlan(
+            plan_id="pln-report-verification",
+            actions=[],
+            strategy_summary="",
+            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        ).model_dump(mode="json"),
+    )
+    config = {"configurable": {"thread_id": event_id}}
+    final = await graph.ainvoke(state, config)
+    assert NODE_REPORT in final["node_trace"]
+    assert len(report_agent.calls) == 1
+    assert report_agent.calls[0].verification_result is not None
     assert (
-        NODE_REPORT in final["node_trace"] or NODE_CLOSE in final["node_trace"]
-    ), final["node_trace"]
+        report_agent.calls[0].verification_result.overall_status
+        is VerificationOverallStatus.SUCCESS
+    )
 
 
 @pytest.mark.asyncio

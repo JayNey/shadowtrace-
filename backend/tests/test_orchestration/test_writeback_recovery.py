@@ -797,8 +797,7 @@ class TestMultipleWritebackProcessing:
 
         assert result["verify_failed_writebacks"] == []
         assert result["verify_need_writeback_recovery"] is False
-
-    async def test_multiple_writebacks_all_wait_sequentially(self):
+        assert result["execution_substate"] == ExecutionSubstate.NONE.value
         """When processing multiple WAIT writebacks sequentially, each call
         pops the head until the list is empty."""
         handler = WritebackRecoveryHandler(

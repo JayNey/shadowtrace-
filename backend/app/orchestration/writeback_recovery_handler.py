@@ -821,13 +821,21 @@ async def writeback_recovery_graph_node(
         if result.action in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
         else failed_writebacks
     )
+    still_recovering = len(remaining) > 0 or result.action in (
+        WritebackRecoveryAction.LOOKUP,
+        WritebackRecoveryAction.RETRY,
+    )
     return cast(
         InvestigationState,
         {
-            "verify_need_writeback_recovery": len(remaining) > 0,
+            "verify_need_writeback_recovery": still_recovering,
             "verify_need_action_replan": False,
             "verify_need_manual_resolution": False,
-            "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+            "execution_substate": (
+                ExecutionSubstate.WAITING_WRITEBACK.value
+                if still_recovering
+                else ExecutionSubstate.NONE.value
+            ),
             "halted": False,
             "verify_failed_writebacks": remaining,
             "writeback_lookup_count": wb_state.lookup_count,

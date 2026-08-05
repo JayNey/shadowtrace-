@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
-from app.models.enums import EventStatus, ExecutionSubstate
+from app.models.enums import EventStatus, ExecutionSubstate, WritebackStatus
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_VERIFY,
@@ -35,6 +35,104 @@ _GRAPH_NEVER_STARTED_STATUSES = frozenset(
         EventStatus.TRIAGING.value,
     }
 )
+
+# Manual holds that must survive VERIFYING resume even when writebacks confirm.
+_LEGITIMATE_MANUAL_DEGRADED_PREFIXES = frozenset(
+    {
+        "missing_response_plan_for_required_policy",
+        "disposition_activation_failed",
+        "execution_failed_unverified",
+    }
+)
+
+
+def _degraded_flag_name(raw: Any) -> str:
+    return str(raw).split("=", 1)[0]
+
+
+def _has_legitimate_manual_hold(degraded_flags: list[Any]) -> bool:
+    return any(
+        _degraded_flag_name(flag) in _LEGITIMATE_MANUAL_DEGRADED_PREFIXES for flag in degraded_flags
+    )
+
+
+def _strip_stale_verify_degraded(degraded_flags: list[Any]) -> list[Any]:
+    return [flag for flag in degraded_flags if _degraded_flag_name(flag) != "verify_degraded"]
+
+
+async def _active_outbox_writeback_statuses(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> list[str | None]:
+    async with session_factory() as session:
+        return list(
+            await session.scalars(
+                select(orm.DispositionOutbox.latest_writeback_status).where(
+                    orm.DispositionOutbox.event_id == event_id,
+                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                )
+            )
+        )
+
+
+# Non-failed outbox statuses that allow VERIFYING resume to route toward REPORTING.
+# CLOSED gate still requires CONFIRMED separately (workflow.validate_closed_gate).
+_RESUME_ROUTING_TERMINAL_STATUSES = frozenset(
+    {
+        WritebackStatus.CONFIRMED.value,
+        WritebackStatus.ACCEPTED.value,
+    }
+)
+
+
+def _writebacks_resolved_for_resume_routing(statuses: list[str | None]) -> bool:
+    """Return True when every active outbox reached a non-failed terminal status."""
+    if not statuses:
+        return False
+    return all(status in _RESUME_ROUTING_TERMINAL_STATUSES for status in statuses)
+
+
+async def _reconcile_verify_resume_patch(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    """Re-evaluate verify routing flags after external writeback/resume (ISSUE-196).
+
+    Production resume previously cleared only ``halted``, leaving stale
+    ``verify_need_manual_resolution`` / ``verify_need_writeback_recovery`` that
+    routed back to ``manual_hold`` despite confirmed writebacks.
+    """
+    patch: dict[str, Any] = {}
+    if values.get("halted"):
+        patch["halted"] = False
+
+    need_writeback = bool(values.get("verify_need_writeback_recovery"))
+    need_manual = bool(values.get("verify_need_manual_resolution"))
+    failed_writebacks = list(values.get("verify_failed_writebacks") or [])
+    if not (need_writeback or need_manual or values.get("halted")):
+        return patch
+
+    degraded_flags = list(values.get("degraded_flags") or [])
+    legitimate_manual = _has_legitimate_manual_hold(degraded_flags)
+    wb_statuses = await _active_outbox_writeback_statuses(session_factory, event_id)
+    writebacks_resolved = not failed_writebacks and _writebacks_resolved_for_resume_routing(
+        wb_statuses
+    )
+
+    if need_writeback and writebacks_resolved:
+        patch["verify_need_writeback_recovery"] = False
+        patch["verify_failed_writebacks"] = []
+        patch["execution_substate"] = ExecutionSubstate.NONE.value
+
+    if need_manual and not legitimate_manual and writebacks_resolved:
+        patch["verify_need_manual_resolution"] = False
+        patch.setdefault("execution_substate", ExecutionSubstate.NONE.value)
+        stripped = _strip_stale_verify_degraded(degraded_flags)
+        if stripped != degraded_flags:
+            patch["degraded_flags"] = stripped
+
+    return patch
 
 
 async def _read_event_status(
@@ -68,12 +166,18 @@ async def prepare_graph_resume_state(
     values = snapshot.values
 
     if status_value == EventStatus.VERIFYING.value:
-        if values.get("halted"):
+        resume_patch = await _reconcile_verify_resume_patch(
+            session_factory,
+            event_id,
+            values,
+        )
+        if resume_patch:
             await graph.aupdate_state(
                 config,
-                {"halted": False},
+                resume_patch,
                 as_node=NODE_VERIFY,
             )
+            values = {**values, **resume_patch}
         if values.get("execution_substate") == ExecutionSubstate.WAITING_WRITEBACK.value:
             await runtime.set_execution_substate(
                 event_id,
