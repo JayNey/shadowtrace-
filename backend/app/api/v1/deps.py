@@ -780,6 +780,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         trace_service=trace_service,
         event_bus=event_bus,
         fp_matcher=fp_matcher,
+        degraded_flags=_get_degraded_flags(),
     )
     evidence = EvidenceAgent(
         llm_client=llm_client,

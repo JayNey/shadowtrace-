@@ -275,7 +275,10 @@ def _heuristic_event_type(alert_text: str) -> EventType | None:
         for kw in (
             "exfil",
             "upload",
-            "export",
+            "data export",
+            "bulk export",
+            "export monitor",
+            "exported to",
             "外传",
             "外泄",
             "数据外",
@@ -429,6 +432,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         event_bus: Any | None = None,
         fp_matcher: Any | None = None,
         scenario_id: str | None = None,
+        degraded_flags: Any | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -441,6 +445,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             event_bus=event_bus,
         )
         self.scenario_id = scenario_id
+        self.degraded_flags = degraded_flags
 
         # Convenience aliases matching the Issue-032 naming convention.
         self.pre_triage_hooks = self.pre_hooks
@@ -497,6 +502,11 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
 
         if authoritative_type is None and event_type is not EventType.OTHER:
             degradation_reasons.append("event_type_from_heuristic")
+            await self._persist_event_type_audit_flag(
+                input.event_id,
+                "event_type_from_heuristic",
+                event_type.value,
+            )
 
         if (
             event_type is EventType.OTHER
@@ -507,6 +517,11 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             event_type = extraction.llm_event_type
             degradation_reasons.append("event_type_from_llm_fallback")
             summary_notes.append(f"Event type adopted from LLM fallback: {event_type.value}.")
+            await self._persist_event_type_audit_flag(
+                input.event_id,
+                "event_type_from_llm_fallback",
+                event_type.value,
+            )
 
         if extraction.text_degraded and not degraded:
             summary_notes.append("Text entity extraction empty; using structured source entities.")
@@ -843,6 +858,30 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 await self._try_persist_degraded_flag(input.event_id)
             else:
                 raise
+
+    async def _persist_event_type_audit_flag(
+        self,
+        event_id: str,
+        flag_name: str,
+        value: str,
+    ) -> None:
+        """Mirror ISSUE-197 fallback reasons into security_event.degraded_flags."""
+        if self.degraded_flags is None:
+            return
+        try:
+            await self.degraded_flags.set_flag(
+                event_id,
+                flag_name,
+                value,
+                writer="TriageAgent",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist degraded flag %s for event=%s",
+                flag_name,
+                event_id,
+                exc_info=True,
+            )
 
     async def _try_persist_degraded_flag(self, event_id: str) -> None:
         """Best-effort write of a lightweight ``triage_degraded`` flag.

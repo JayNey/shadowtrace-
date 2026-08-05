@@ -76,6 +76,22 @@ class _MockBoundWorkingMemory:
         return []
 
 
+class _MockDegradedFlags:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str, str]] = []
+
+    async def set_flag(
+        self,
+        event_id: str,
+        flag_name: str,
+        value: object,
+        writer: str,
+    ) -> list[str]:
+        normalized = str(value)
+        self.calls.append((event_id, flag_name, normalized, writer))
+        return [f"{flag_name}={normalized}"]
+
+
 class _GuardrailMockBoundWorkingMemory:
     """Mock that enforces FIELD_OWNERSHIP like the real WorkingMemory.
 
@@ -573,12 +589,13 @@ class TestTriageAgentLLM:
     async def test_source_other_upgrades_via_heuristic_with_audit(self):
         """ISSUE-197: source alert_type=other + export keywords → data_exfiltration."""
         wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        degraded_flags = _MockDegradedFlags()
         await wm.write(
             "evt-197-heuristic",
             "source_snapshot",
             {"alert_type": "other", "creation_source_ref": {"source_object_id": "inc-1"}},
         )
-        agent = TriageAgent(working_memory=wm)
+        agent = TriageAgent(working_memory=wm, degraded_flags=degraded_flags)
         input_ = _make_input(
             "evt-197-heuristic",
             raw_event_summary=(
@@ -588,6 +605,12 @@ class TestTriageAgentLLM:
         result = await agent._run(input_)
         assert result.event_type is EventType.DATA_EXFILTRATION
         assert "event_type_from_heuristic" in result.degradation_reasons
+        assert (
+            "evt-197-heuristic",
+            "event_type_from_heuristic",
+            "data_exfiltration",
+            "TriageAgent",
+        ) in degraded_flags.calls
 
     @pytest.mark.asyncio
     async def test_explicit_source_type_not_overridden_by_llm_fallback(self, monkeypatch):
@@ -650,12 +673,17 @@ class TestTriageAgentLLM:
             model_name="mock",
         )
         wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        degraded_flags = _MockDegradedFlags()
         await wm.write(
             "evt-197-llm-fallback",
             "source_snapshot",
             {"alert_type": "other"},
         )
-        agent = TriageAgent(llm_client=_MockLLMClient(response=llm_response), working_memory=wm)
+        agent = TriageAgent(
+            llm_client=_MockLLMClient(response=llm_response),
+            working_memory=wm,
+            degraded_flags=degraded_flags,
+        )
         result = await agent._run(
             _make_input(
                 "evt-197-llm-fallback",
@@ -664,6 +692,56 @@ class TestTriageAgentLLM:
         )
         assert result.event_type is EventType.DATA_EXFILTRATION
         assert "event_type_from_llm_fallback" in result.degradation_reasons
+        assert (
+            "evt-197-llm-fallback",
+            "event_type_from_llm_fallback",
+            "data_exfiltration",
+            "TriageAgent",
+        ) in degraded_flags.calls
+
+    @pytest.mark.asyncio
+    async def test_llm_event_type_fallback_disabled_by_default(self, monkeypatch):
+        """ISSUE-197: LLM event_type is ignored unless TRIAGE_LLM_EVENT_TYPE_FALLBACK=true."""
+        from app.core.config import get_settings
+
+        monkeypatch.delenv("TRIAGE_LLM_EVENT_TYPE_FALLBACK", raising=False)
+        get_settings.cache_clear()
+
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.DATA_EXFILTRATION,
+                entities=EntitySet(
+                    accounts=[AccountEntity(entity_id="acct-1", username="alice")],
+                ),
+                decision_summary="LLM classified exfil",
+            ),
+            model_name="mock",
+        )
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        degraded_flags = _MockDegradedFlags()
+        await wm.write(
+            "evt-197-llm-off",
+            "source_snapshot",
+            {"alert_type": "other"},
+        )
+        agent = TriageAgent(
+            llm_client=_MockLLMClient(response=llm_response),
+            working_memory=wm,
+            degraded_flags=degraded_flags,
+        )
+        result = await agent._run(
+            _make_input(
+                "evt-197-llm-off",
+                raw_event_summary="ambiguous correlated alerts during maintenance window",
+            )
+        )
+        assert result.event_type is EventType.OTHER
+        assert "event_type_from_llm_fallback" not in result.degradation_reasons
+        assert degraded_flags.calls == []
 
     @pytest.mark.asyncio
     async def test_empty_source_snapshot_no_crash(self):
@@ -1400,6 +1478,9 @@ class TestMapEventTypeCoverage:
             )
             is EventType.DATA_EXFILTRATION
         )
+
+    def test_heuristic_ignores_benign_export_phrase(self):
+        assert _heuristic_event_type("User exported audit log for compliance review") is None
 
     def test_source_authoritative_rejects_other(self):
         assert _source_event_type_authoritative("other") is None

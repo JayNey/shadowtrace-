@@ -137,6 +137,8 @@ def test_allowlist_contains_p0_flags() -> None:
     assert "redis_context_unavailable" in DEGRADED_FLAG_ALLOWLIST
     assert "disposition_writeback_blocked" in DEGRADED_FLAG_ALLOWLIST
     assert "graph_resume_failed" in DEGRADED_FLAG_ALLOWLIST
+    assert "event_type_from_heuristic" in DEGRADED_FLAG_ALLOWLIST
+    assert "event_type_from_llm_fallback" in DEGRADED_FLAG_ALLOWLIST
 
 
 def test_wire_redis_context_recovery_registers_callback() -> None:

@@ -33,6 +33,9 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         "auto_response_dispatch_unavailable",
         # ISSUE-193 graph resume observability
         "graph_resume_failed",
+        # ISSUE-197 triage event_type fallback audit
+        "event_type_from_heuristic",
+        "event_type_from_llm_fallback",
     }
 )
 
@@ -53,6 +56,8 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "EventContextStore",
         # ISSUE-193 — graph resume failure observability
         "GraphResumeService",
+        # ISSUE-197 — auditable event_type heuristic / LLM fallback
+        "TriageAgent",
     }
 )
 
