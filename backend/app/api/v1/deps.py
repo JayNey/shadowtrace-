@@ -401,18 +401,13 @@ async def _resume_investigation(event_id: str) -> None:
     if mode != "graph":
         return
     try:
-        from app.services.investigation_guidance import (
-            resolve_include_response_execution_for_resume,
-        )
+        from app.orchestration.graph_resume import resume_investigation_from_checkpoint
 
-        include_response = await resolve_include_response_execution_for_resume(
+        await resume_investigation_from_checkpoint(
             _get_session_factory(),
             event_id,
-        )
-        agent = await get_super_agent()
-        await agent.investigate(
-            event_id,
-            include_response_execution=include_response,
+            get_super_agent=get_super_agent,
+            get_workflow_runtime=_get_workflow_runtime,
         )
     except Exception:
         logger.exception("resume_investigation failed event=%s", event_id)

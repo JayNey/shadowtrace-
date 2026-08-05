@@ -1315,6 +1315,66 @@ async def test_approval_halts_at_wait_node_not_before() -> None:
 
 
 @pytest.mark.asyncio
+async def test_prepare_graph_resume_continues_from_real_approval_wait_halt() -> None:
+    """ISSUE-192: approval_wait→END (no interrupt_before) resumes via checkpoint patch."""
+    from app.orchestration.graph_resume import prepare_graph_resume_state
+    from app.orchestration.workflow_graph import invoke_investigation_graph
+
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    event_id = "evt-real-approval-resume"
+
+    services1 = _services()
+    services1["approval_engine"] = FakeApprovalEngine(needs_wait=True, evaluated_count=2)
+    graph = build_investigation_graph(_agents(), services1, checkpointer=saver)
+    config = {"configurable": {"thread_id": event_id}}
+
+    halted = await graph.ainvoke(_base_state(event_id=event_id), config)
+    assert halted["halted"] is True
+    assert halted["node_trace"][-1] == NODE_APPROVAL_WAIT
+    assert NODE_EXECUTE not in halted["node_trace"]
+
+    pre_snap = await graph.aget_state(config)
+    assert pre_snap is not None
+    assert tuple(pre_snap.next or ()) == ()
+
+    machine2 = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+    services2 = _services(machine2)
+    services2["approval_engine"] = FakeApprovalEngine(needs_wait=False, evaluated_count=2)
+    graph2 = build_investigation_graph(_agents(), services2, checkpointer=saver)
+    runtime = services2["workflow_runtime"]
+
+    class _ScalarSession:
+        async def scalar(self, _stmt: Any) -> str:
+            return EventStatus.EXECUTING_RESPONSE.value
+
+    class _SessionCtx:
+        async def __aenter__(self) -> _ScalarSession:
+            return _ScalarSession()
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class _SessionFactory:
+        def __call__(self) -> _SessionCtx:
+            return _SessionCtx()
+
+    await prepare_graph_resume_state(_SessionFactory(), graph2, event_id, runtime)
+
+    post_snap = await graph2.aget_state(config)
+    assert post_snap is not None
+    assert post_snap.values.get("halted") is False
+
+    final = await invoke_investigation_graph(graph2, None, config)
+    assert NODE_EXECUTE in final["node_trace"], final["node_trace"]
+    assert NODE_VERIFY in final["node_trace"], final["node_trace"]
+    assert final["halted"] is False
+
+
+@pytest.mark.asyncio
 async def test_approval_gate_is_reentrant() -> None:
     """The approval gate (NODE_APPROVAL → route_after_approval →
     NODE_APPROVAL_WAIT or NODE_EXECUTE) is re-entrant: any path that
