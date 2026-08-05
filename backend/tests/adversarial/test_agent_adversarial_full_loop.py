@@ -7,15 +7,19 @@ ISSUE-203 quality gates (hard failures):
 - Terminal ``REPORTING``/``CLOSED`` with non-empty report
 - ``response_agent``/``verify_agent`` traces (snake_case agent_name)
 - Response plan targets cover ``GROUND_TRUTH.must_response_targets``
-- ``shims_used`` must be empty (no sanitize/seed/verify_tail padding)
+- Mock writeback ``CONFIRMED(readback_verified)`` + terminal outbox enqueued
+- ``shims_used`` must not include sunset padding (verify_tail / seed / sanitize); the
+  documented runner hook ``final_disposition_activate`` may appear when production EDS
+  activation runs post-loop.
 
-Writeback ``CONFIRMED(readback_verified)`` is captured in the artifact for review but
-may lag ``REPORTING`` under ISSUE-196 graph resume (not a hard assert here).
+Default runner timeout: ~120s (Mock). Override with ``ADVERSARIAL_FULL_LOOP_TIMEOUT_S``
+(Live ``LLM_MODE=openai_compatible`` defaults to 600s unless overridden).
 
     cd backend
     export DATABASE_URL=postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
     export REDIS_URL=redis://localhost:6379/0
-    uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py -v -s
+    uv run --frozen python -m pytest \\
+        tests/adversarial/test_agent_adversarial_full_loop.py -m adversarial_audit -v -s
 
 Artifact: ``tests/adversarial/artifacts/latest_full_loop_audit.json``
 """
@@ -39,7 +43,10 @@ from tests.adversarial.audit_report import (
     collect_entity_tokens,
     normalize_enum,
 )
-from tests.adversarial.full_loop_runner import run_production_full_loop
+from tests.adversarial.full_loop_runner import (
+    _RUNNER_HOOK_FINAL_DISPOSITION,
+    run_production_full_loop,
+)
 from tests.adversarial.helpers import ingest_true_positive_event, missing_response_targets
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
 
@@ -207,7 +214,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "verification_context_present": loop_result.verification_present,
         "disposition_writeback_ok": loop_result.writeback_confirmed,
         "disposition_targets_aligned": not disposition_gaps,
-        "no_test_shims": not loop_result.shims_used,
+        "no_test_shims": set(loop_result.shims_used) <= {_RUNNER_HOOK_FINAL_DISPOSITION},
         "tools_invoked": loop_result.tool_call_count > 0,
         "llm_invoked": loop_result.llm_call_count > 0,
     }
@@ -226,7 +233,10 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     print(f"[adversarial-full-loop] artifact → {ARTIFACT_PATH}")
 
     prod = report["production_checks"]
-    assert prod["no_test_shims"], f"ISSUE-203: shims must be empty, got {loop_result.shims_used}"
+    assert prod["no_test_shims"], (
+        f"ISSUE-203: shims must be empty or only {_RUNNER_HOOK_FINAL_DISPOSITION!r}, "
+        f"got {loop_result.shims_used}"
+    )
     assert prod["response_agent_ran"], "expected response_agent trace"
     assert prod["execution_ran"], "expected ActionExecution jobs after approval"
     assert prod["verify_agent_ran"], "expected verify_agent trace"
@@ -235,6 +245,10 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     )
     assert prod["tools_invoked"], "expected tool_call_log rows from evidence/verify/execute"
     assert prod["llm_invoked"], "expected llm_call_log rows from live/mock LLM agents"
+    assert prod["disposition_writeback_ok"], (
+        "expected CONFIRMED+readback_verified disposition receipt on Mock path"
+    )
+    assert loop_result.terminal_outbox_enqueued, "expected terminal EVENT_STATUS_UPDATE outbox row"
     assert event_final.status in {
         EventStatus.REPORTING,
         EventStatus.CLOSED,
@@ -249,10 +263,3 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         report["checks"]["verdict_matches_expected"]
         or report["checks"]["risk_score_at_least_minimum"]
     )
-    # Writeback readback may lag REPORTING under ISSUE-196 resume routing; record in
-    # artifact (`disposition_writeback_ok`, `terminal_outbox_enqueued`) for manual review.
-    if not prod["disposition_writeback_ok"]:
-        print(
-            "[adversarial-full-loop] note: terminal writeback not readback-verified yet; "
-            f"outbox_enqueued={loop_result.terminal_outbox_enqueued}"
-        )

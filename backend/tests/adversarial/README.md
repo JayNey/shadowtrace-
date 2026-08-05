@@ -79,9 +79,12 @@ This suite has **two layers**:
 | Layer | Role | Pass means |
 |-------|------|------------|
 | **Plumbing** | Agents run, traces persist, tools/LLM logs exist | Wiring works — not capability proof |
-| **Quality gate** (`test_agent_adversarial_full_loop.py`, ISSUE-203) | Hard asserts on terminal status, report, disposition targets, zero shims | Production graph reached `REPORTING`/`CLOSED` with aligned containment plan |
+| **Quality gate** (`test_agent_adversarial_full_loop.py`, ISSUE-203) | Hard asserts on terminal status, report, disposition targets, Mock writeback, no sunset shims | Production graph reached `REPORTING`/`CLOSED` with aligned containment + readback_verified |
 
-Writeback `CONFIRMED(readback_verified)` is **recorded** in the artifact (`disposition_writeback_ok`) but may lag `REPORTING` under ISSUE-196 resume routing — not a hard pytest assert until the production disposition tail is fully closed-loop.
+Mock full loop typically finishes in **~20–40s** (see artifact `elapsed_s`). Runner default
+timeout is **120s**; set ``ADVERSARIAL_FULL_LOOP_TIMEOUT_S`` for Live runs (default 600s when
+``LLM_MODE=openai_compatible``). Adversarial conftest sets ``BUDGET_ENABLED=false`` so token
+budget does not truncate the audit path.
 
 Do **not** claim autonomous investigation quality from Mock plumbing alone. Live LLM runs add reasoning signal but remain non-deterministic.
 
@@ -121,10 +124,14 @@ LLM_MODE=openai_compatible \
 LLM_API_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3 \
 LLM_API_KEY=... \
 LLM_PRIMARY_MODEL=glm-5.2 \
-  uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py -v -s
+  uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py -m adversarial_audit -v -s
 ```
 
-Production full-loop test may run **10–20+ minutes** with a live LLM.
+Live runs are slower and non-deterministic; increase timeout if needed:
+
+```bash
+ADVERSARIAL_FULL_LOOP_TIMEOUT_S=600 LLM_MODE=openai_compatible ... pytest ...
+```
 
 Optional — graph-mode SuperAgent instead of analysis-only pipeline: duplicate the
 test and call `build_super_agent(scenario_id=None)` from integration fixtures.
@@ -134,11 +141,18 @@ test and call `build_super_agent(scenario_id=None)` from integration fixtures.
 | Test | Artifact | Terminal state |
 |------|----------|----------------|
 | `test_agent_adversarial_audit.py` | `artifacts/latest_audit.json` | `REPORTING` |
-| `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | `REPORTING`/`CLOSED` + writeback `CONFIRMED` + aligned response targets |
+| `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | `REPORTING`/`CLOSED` + Mock writeback `CONFIRMED(readback_verified)` + aligned response targets |
 
-Full-loop artifact includes `response_plan_actions`, `shims_used` (must be `[]`), and
-`disposition_target_gaps`. Sunset shims removed in ISSUE-203: verify_tail,
-writeback_activation seeding, minimum disposition audit seed on this path.
+Full-loop artifact includes `response_plan_actions`, `shims_used` (no sunset padding;
+optional documented hook `final_disposition_activate`), and
+`disposition_target_gaps`. Sunset shims removed in ISSUE-203: verify_tail, writeback_activation seeding,
+minimum disposition audit seed. Documented runner hooks (recorded in ``shims_used``):
+
+- ``final_disposition_activate`` — one-shot production ``EventDispositionService.activate_and_submit`` post-loop when graph verify leaves deferred POST_VERIFY pending.
+- Pre-finalize steps (not in ``shims_used``): reconcile ``verification_result`` from persisted XDR writeback rows; seed minimum VERIFY decision audit for EDS auto-disposition gate.
+
+Mock XDR ``check_*`` verify tools read ``MockEnvironmentState``, not MockXDR disposition
+facts — adversarial conftest wraps ``e2e_tool_executor`` to observe writeback rows instead.
 
 Console prints human verdict + check matrix for each run.
 

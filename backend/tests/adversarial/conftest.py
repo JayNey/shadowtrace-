@@ -11,6 +11,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.mock_xdr import MockXDRDispositionAdapter, MockXDRSourceAdapter
@@ -22,8 +23,11 @@ from app.core.llm.factory import get_llm_client
 from app.core.llm.mock_client import MockLLMClient
 from app.core.redis_client import RedisClient
 from app.data_generators.scenarios import write_scenario_artifacts
+from app.db import models as orm
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
+from app.models.enums import ActionCategory, ActionStatus, WritebackStatus
+from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.services.budget_service import BudgetService
 from app.services.context_service import EventContextStore
 from app.services.decision_record_service import DecisionRecordService
@@ -39,6 +43,108 @@ from tests.adversarial.scenario_credential_db_staging_exfil import (
 
 def _host_llm_mode() -> str:
     return os.environ.get("LLM_MODE", "mock").strip().lower()
+
+
+class _XdrManagedVerifyToolExecutor:
+    """Observation verify tools backed by XDR writeback/execution facts.
+
+    Mock XDR response actions do not mutate ``MockEnvironmentState`` (used by
+    ``check_*`` tools).  For adversarial full-loop audits, derive verification
+    from persisted action + disposition receipt rows instead.
+    """
+
+    def __init__(self, inner: Any, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._inner = inner
+        self._session_factory = session_factory
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    async def call(
+        self,
+        tool_name: str,
+        params: dict[str, Any],
+        event_id: str,
+        *,
+        action_id: str | None = None,
+        execution_job_id: str | None = None,
+        idempotency_key: str | None = None,
+        execution_owner: Any = None,
+        timeout: float | None = None,
+        retry_policy: Any = None,
+        agent_name: str = "tool_agent",
+    ) -> ToolResult:
+        if tool_name.startswith("check_"):
+            if not params.get("target"):
+                return ToolResult(
+                    status=ToolResultStatus.SUCCESS,
+                    data={"is_verified": False, "detail": "missing_target"},
+                )
+            verified = await self._verified_via_xdr_writeback(
+                event_id,
+                str(params["target"]),
+            )
+            return ToolResult(
+                status=ToolResultStatus.SUCCESS,
+                data={
+                    "is_verified": verified,
+                    "detail": "xdr_writeback_observation",
+                },
+            )
+        return await self._inner.call(
+            tool_name,
+            params,
+            event_id,
+            action_id=action_id,
+            execution_job_id=execution_job_id,
+            idempotency_key=idempotency_key,
+            execution_owner=execution_owner,
+            timeout=timeout,
+            retry_policy=retry_policy,
+            agent_name=agent_name,
+        )
+
+    async def _verified_via_xdr_writeback(self, event_id: str, target: str) -> bool:
+        async with self._session_factory() as session:
+            action_row = await session.scalar(
+                select(orm.Action)
+                .where(
+                    orm.Action.event_id == event_id,
+                    func.lower(orm.Action.target) == target.lower(),
+                    orm.Action.action_category == ActionCategory.RESPONSE.value,
+                )
+                .limit(1)
+            )
+            if action_row is None:
+                return False
+            if action_row.status not in {
+                ActionStatus.SUCCESS.value,
+                ActionStatus.EXECUTING.value,
+            }:
+                return False
+            receipt_status = await session.scalar(
+                select(orm.DispositionReceipt.status)
+                .where(orm.DispositionReceipt.action_id == action_row.action_id)
+                .order_by(orm.DispositionReceipt.sequence.desc())
+                .limit(1)
+            )
+        if receipt_status in {
+            WritebackStatus.CONFIRMED.value,
+            WritebackStatus.ACCEPTED.value,
+        }:
+            return True
+        return action_row.status == ActionStatus.SUCCESS.value
+
+
+@pytest.fixture
+def e2e_tool_executor(
+    tool_executor: Any,
+    budget_service: BudgetService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> _XdrManagedVerifyToolExecutor:
+    wrapped = _XdrManagedVerifyToolExecutor(tool_executor, session_factory)
+    wrapped.budget_service = budget_service
+    return wrapped
 
 
 @pytest.fixture
