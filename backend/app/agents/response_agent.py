@@ -16,6 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.base import BaseAgent
 from app.agents.prompts.response_prompt import build_response_plan_messages
 from app.agents.rules.default_response_rules import ResponseRuleAction, get_rule_actions
+from app.agents.rules.response_plan_quality_gate import (
+    CONTAINMENT_TOOLS,
+    apply_containment_quality_gate,
+    requires_threat_aligned_containment,
+)
 from app.core.errors import LLMError
 from app.core.errors import ValidationError as ShadowValidationError
 from app.db import models as orm
@@ -722,6 +727,29 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             )
 
         candidates = policy_filter.filter_candidates(candidates)
+        rule_actions = get_rule_actions(event_type, severity)
+        if requires_threat_aligned_containment(
+            severity=severity,
+            risk_assessment=input.risk_assessment,
+            final_verdict=ctx.get("final_verdict"),
+            entities=entities,
+            disposition_only=disposition_only,
+        ) and not any(item.tool_name in CONTAINMENT_TOOLS for item in rule_actions):
+            rule_actions = get_rule_actions(event_type, Severity.HIGH)
+        rule_fallback_pool = policy_filter.filter_candidates(
+            expand_rule_candidates(rule_actions, entities),
+        )
+        candidates, generated_by, strategy = apply_containment_quality_gate(
+            candidates=candidates,
+            rule_fallback_candidates=rule_fallback_pool,
+            generated_by=generated_by,
+            strategy=strategy,
+            severity=severity,
+            risk_assessment=input.risk_assessment,
+            final_verdict=ctx.get("final_verdict"),
+            entities=entities,
+            disposition_only=disposition_only,
+        )
         candidates = sort_candidates(candidates)
         candidates = _cap_low_severity_candidates(
             candidates,

@@ -78,9 +78,13 @@ class _FakeWorkingMemory:
 
 class _FakeEventService:
     def __init__(
-        self, *, disposition_policy: DispositionPolicy = DispositionPolicy.REQUIRED
+        self,
+        *,
+        disposition_policy: DispositionPolicy = DispositionPolicy.REQUIRED,
+        final_verdict: FinalVerdict = FinalVerdict.NONE,
     ) -> None:
         self.disposition_policy = disposition_policy
+        self.final_verdict = final_verdict
         self.actions_by_fp: dict[str, dict[str, Any]] = {}
         self.supersede_calls: list[dict[str, Any]] = []
 
@@ -88,7 +92,7 @@ class _FakeEventService:
         return SimpleNamespace(
             event_id=event_id,
             disposition_policy=self.disposition_policy,
-            final_verdict=FinalVerdict.NONE,
+            final_verdict=self.final_verdict,
             creation_source_ref=SourceReference(
                 source_kind=SourceObjectKind.INCIDENT,
                 source_product="mock_xdr",
@@ -160,6 +164,49 @@ class _FakeEventService:
 class _FailingLLM:
     async def chat(self, *args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("llm unavailable")
+
+
+class _UngroundedOnlyLLM:
+    """LLM proposes targets absent from EntitySet — PolicyFilter drops containment."""
+
+    async def chat(self, *args: Any, **kwargs: Any) -> Any:
+        import json
+
+        from app.core.llm.base import LLMResponse
+
+        payload = {
+            "actions": [
+                {
+                    "tool_name": "reset_password",
+                    "target_type": "account",
+                    "target": "zhangsan",
+                    "parameters": {},
+                    "reason": "ungrounded insider account",
+                },
+                {
+                    "tool_name": "block_ip",
+                    "target_type": "ip",
+                    "target": "198.51.100.44",
+                    "parameters": {},
+                    "reason": "ungrounded external IOC",
+                },
+                {
+                    "tool_name": "create_ticket",
+                    "target_type": "ticket",
+                    "target": "ticket",
+                    "parameters": {"title": "track", "description": "track"},
+                    "reason": "ticket only after filter",
+                },
+            ],
+            "strategy_summary": "LLM-only ungrounded plan",
+        }
+        return LLMResponse(
+            content=json.dumps(payload),
+            model_name="mock",
+            prompt_tokens=1,
+            completion_tokens=1,
+            total_tokens=2,
+        )
 
 
 def _playbook_ref(playbook_id: str) -> dict[str, str | int]:
@@ -452,6 +499,116 @@ async def test_policy_filter_rejects_unknown_tool() -> None:
     )
     plan = await agent.execute(_agent_input(event_id))
     assert all(a.tool_name != "totally_fake_tool" for a in plan.actions)
+
+
+@pytest.mark.asyncio
+async def test_containment_quality_gate_rule_fallback_after_ungrounded_llm() -> None:
+    """ISSUE-198: high-confidence plans must not stay ticket-only after PolicyFilter."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage())
+    agent = ResponseAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+
+    tool_names = {action.tool_name for action in plan.actions}
+    assert "block_ip" in tool_names
+    assert "disable_account" in tool_names
+    block = next(a for a in plan.actions if a.tool_name == "block_ip")
+    assert block.target == "203.0.113.50"
+    assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    assert "containment_quality_gate" in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_containment_quality_gate_skips_low_severity_ticket_only() -> None:
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(
+        wm,
+        event_id,
+        triage=_triage(severity=Severity.LOW, event_type=EventType.DATA_EXFILTRATION),
+    )
+    agent = ResponseAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(
+        ResponseAgentInput(
+            event_id=event_id,
+            risk_assessment=_risk(Severity.LOW, score=25),
+            evidence_output=EvidenceOutput(
+                evidence_list=[],
+                collection_status=CollectionStatus.COMPLETED,
+                overall_confidence=0.5,
+            ),
+        )
+    )
+    response_tools = {
+        action.tool_name
+        for action in plan.actions
+        if action.tool_name
+        not in {TERMINAL_DISPOSITION_TOOL, "create_ticket", "notify_security_team"}
+    }
+    assert not response_tools
+
+
+@pytest.mark.asyncio
+async def test_containment_quality_gate_confirmed_threat_at_medium_severity() -> None:
+    """ISSUE-198: confirmed_threat triggers containment even when triage severity is MEDIUM."""
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(
+        wm,
+        event_id,
+        triage=_triage(severity=Severity.MEDIUM, event_type=EventType.OTHER),
+    )
+    agent = ResponseAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(
+        ResponseAgentInput(
+            event_id=event_id,
+            risk_assessment=_risk(Severity.MEDIUM, score=55),
+            evidence_output=EvidenceOutput(
+                evidence_list=[],
+                collection_status=CollectionStatus.COMPLETED,
+                overall_confidence=0.9,
+            ),
+        )
+    )
+    tool_names = {action.tool_name for action in plan.actions}
+    assert "block_ip" in tool_names
+    assert "containment_quality_gate" in plan.strategy_summary
+
+
+@pytest.mark.asyncio
+async def test_containment_quality_gate_aligns_block_ip_with_grounded_entity() -> None:
+    """ISSUE-198: rule fallback block_ip must target a grounded EntitySet IOC."""
+    grounded_ip = "203.0.113.50"
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage())
+    agent = ResponseAgent(
+        llm_client=_UngroundedOnlyLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    block_targets = {action.target for action in plan.actions if action.tool_name == "block_ip"}
+    assert grounded_ip in block_targets
+    assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    assert "containment_quality_gate" in plan.strategy_summary
 
 
 @pytest.mark.asyncio
