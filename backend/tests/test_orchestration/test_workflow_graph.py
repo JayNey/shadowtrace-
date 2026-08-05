@@ -35,6 +35,7 @@ from app.models.agent_io import (
 )
 from app.models.context import EventContext
 from app.models.enums import (
+    DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
     EventType,
@@ -1391,24 +1392,24 @@ class _ResumeScalarSession:
         self,
         status: str,
         *,
-        outbox_wb_statuses: list[str | None] | None = None,
+        outbox_rows: list[tuple[str, str | None]] | None = None,
     ) -> None:
         self._status = status
-        self._outbox_wb_statuses = outbox_wb_statuses or []
+        self._outbox_rows = outbox_rows or []
 
     async def scalar(self, _stmt: Any) -> str:
         return self._status
 
-    async def scalars(self, _stmt: Any) -> _ResumeOutboxScalars:
-        return _ResumeOutboxScalars(self._outbox_wb_statuses)
+    async def execute(self, _stmt: Any) -> _ResumeOutboxExecuteResult:
+        return _ResumeOutboxExecuteResult(self._outbox_rows)
 
 
-class _ResumeOutboxScalars:
-    def __init__(self, statuses: list[str | None]) -> None:
-        self._statuses = statuses
+class _ResumeOutboxExecuteResult:
+    def __init__(self, rows: list[tuple[str, str | None]]) -> None:
+        self._rows = rows
 
-    def __iter__(self) -> Any:
-        return iter(self._statuses)
+    def all(self) -> list[tuple[str, str | None]]:
+        return self._rows
 
 
 class _ResumeSessionCtx:
@@ -1416,15 +1417,15 @@ class _ResumeSessionCtx:
         self,
         status: str,
         *,
-        outbox_wb_statuses: list[str | None] | None = None,
+        outbox_rows: list[tuple[str, str | None]] | None = None,
     ) -> None:
         self._status = status
-        self._outbox_wb_statuses = outbox_wb_statuses
+        self._outbox_rows = outbox_rows
 
     async def __aenter__(self) -> _ResumeScalarSession:
         return _ResumeScalarSession(
             self._status,
-            outbox_wb_statuses=self._outbox_wb_statuses,
+            outbox_rows=self._outbox_rows,
         )
 
     async def __aexit__(self, *_args: Any) -> None:
@@ -1436,15 +1437,15 @@ class _ResumeSessionFactory:
         self,
         status: str,
         *,
-        outbox_wb_statuses: list[str | None] | None = None,
+        outbox_rows: list[tuple[str, str | None]] | None = None,
     ) -> None:
         self._status = status
-        self._outbox_wb_statuses = outbox_wb_statuses
+        self._outbox_rows = outbox_rows
 
     def __call__(self) -> _ResumeSessionCtx:
         return _ResumeSessionCtx(
             self._status,
-            outbox_wb_statuses=self._outbox_wb_statuses,
+            outbox_rows=self._outbox_rows,
         )
 
 
@@ -1616,7 +1617,12 @@ async def test_prepare_graph_resume_clears_stale_manual_when_writeback_confirmed
     await prepare_graph_resume_state(
         _ResumeSessionFactory(
             EventStatus.VERIFYING.value,
-            outbox_wb_statuses=[WritebackStatus.CONFIRMED.value],
+            outbox_rows=[
+                (
+                    DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    WritebackStatus.CONFIRMED.value,
+                )
+            ],
         ),
         graph,
         event_id,
@@ -1634,6 +1640,84 @@ async def test_prepare_graph_resume_clears_stale_manual_when_writeback_confirmed
     assert NODE_MANUAL_HOLD not in final["node_trace"], final["node_trace"]
     assert NODE_REPORT in final["node_trace"], final["node_trace"]
     assert machine.status in {EventStatus.REPORTING, EventStatus.CLOSED}
+
+
+@pytest.mark.asyncio
+async def test_prepare_graph_resume_keeps_manual_for_entity_only_writebacks() -> None:
+    """ISSUE-205: entity outbox ACCEPTED alone must not clear manual on required policy."""
+    from app.orchestration.graph_resume import prepare_graph_resume_state
+    from app.orchestration.workflow_graph import invoke_investigation_graph
+
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    event_id = "evt-entity-only-manual-hold"
+
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    services = _services(machine)
+    graph = build_investigation_graph(_agents(), services, checkpointer=saver)
+    config = {"configurable": {"thread_id": event_id}}
+
+    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+    risk = RiskAssessment(
+        risk_score=80,
+        severity=Severity.HIGH,
+        confidence=0.9,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        reasoning="investigate",
+    )
+    halted_state = _base_state(
+        event_id=event_id,
+        event_status=EventStatus.VERIFYING.value,
+        execution_substate=ExecutionSubstate.MANUAL_RESOLUTION.value,
+        halted=True,
+        verify_need_writeback_recovery=False,
+        verify_need_action_replan=False,
+        verify_need_manual_resolution=True,
+        degraded_flags=["verify_degraded=True"],
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        evidence_output=evidence.model_dump(mode="json"),
+        risk_assessment=risk.model_dump(mode="json"),
+        triage_result=triage.model_dump(mode="json"),
+        plan_revision=1,
+        replan_count=0,
+        escalated=False,
+    )
+    await graph.aupdate_state(config, halted_state, as_node=NODE_VERIFY)
+
+    await prepare_graph_resume_state(
+        _ResumeSessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[
+                (
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    WritebackStatus.ACCEPTED.value,
+                ),
+                (
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    WritebackStatus.ACCEPTED.value,
+                ),
+            ],
+        ),
+        graph,
+        event_id,
+        services["workflow_runtime"],
+    )
+
+    post_snap = await graph.aget_state(config)
+    assert post_snap is not None
+    assert post_snap.values.get("verify_need_manual_resolution") is True
+
+    final = await invoke_investigation_graph(graph, None, config)
+    assert NODE_MANUAL_HOLD in final["node_trace"], final["node_trace"]
+    assert NODE_REPORT not in final["node_trace"], final["node_trace"]
 
 
 @pytest.mark.asyncio

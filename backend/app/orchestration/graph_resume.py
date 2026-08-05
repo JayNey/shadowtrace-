@@ -15,7 +15,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
-from app.models.enums import EventStatus, ExecutionSubstate, WritebackStatus
+from app.models.enums import (
+    DispositionIntentKind,
+    DispositionPolicy,
+    EventStatus,
+    ExecutionSubstate,
+    WritebackStatus,
+)
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_VERIFY,
@@ -41,6 +47,7 @@ _LEGITIMATE_MANUAL_DEGRADED_PREFIXES = frozenset(
     {
         "missing_response_plan_for_required_policy",
         "disposition_activation_failed",
+        "disposition_writeback_blocked",
         "execution_failed_unverified",
     }
 )
@@ -60,19 +67,27 @@ def _strip_stale_verify_degraded(degraded_flags: list[Any]) -> list[Any]:
     return [flag for flag in degraded_flags if _degraded_flag_name(flag) != "verify_degraded"]
 
 
-async def _active_outbox_writeback_statuses(
+def _only_stale_verify_degraded(degraded_flags: list[Any]) -> bool:
+    return bool(degraded_flags) and all(
+        _degraded_flag_name(flag) == "verify_degraded" for flag in degraded_flags
+    )
+
+
+async def _active_outbox_writeback_rows(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
-) -> list[str | None]:
+) -> list[tuple[str, str | None]]:
     async with session_factory() as session:
-        return list(
-            await session.scalars(
-                select(orm.DispositionOutbox.latest_writeback_status).where(
-                    orm.DispositionOutbox.event_id == event_id,
-                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
-                )
+        result = await session.execute(
+            select(
+                orm.DispositionOutbox.intent_kind,
+                orm.DispositionOutbox.latest_writeback_status,
+            ).where(
+                orm.DispositionOutbox.event_id == event_id,
+                orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
             )
         )
+        return [(str(intent), status) for intent, status in result.all()]
 
 
 # Non-failed outbox statuses that allow VERIFYING resume to route toward REPORTING.
@@ -85,11 +100,60 @@ _RESUME_ROUTING_TERMINAL_STATUSES = frozenset(
 )
 
 
-def _writebacks_resolved_for_resume_routing(statuses: list[str | None]) -> bool:
+def _all_writebacks_resolved(statuses: list[str | None]) -> bool:
     """Return True when every active outbox reached a non-failed terminal status."""
     if not statuses:
         return False
     return all(status in _RESUME_ROUTING_TERMINAL_STATUSES for status in statuses)
+
+
+def _terminal_writeback_resolved(rows: list[tuple[str, str | None]]) -> bool:
+    """True when every active EVENT_STATUS_UPDATE outbox is CONFIRMED/ACCEPTED."""
+    terminal_statuses = [
+        status
+        for intent, status in rows
+        if intent == DispositionIntentKind.EVENT_STATUS_UPDATE.value
+    ]
+    if not terminal_statuses:
+        return False
+    return all(status in _RESUME_ROUTING_TERMINAL_STATUSES for status in terminal_statuses)
+
+
+def _has_active_terminal_outbox(rows: list[tuple[str, str | None]]) -> bool:
+    return any(
+        intent == DispositionIntentKind.EVENT_STATUS_UPDATE.value for intent, _status in rows
+    )
+
+
+def _can_clear_manual_resolution(
+    *,
+    degraded_flags: list[Any],
+    rows: list[tuple[str, str | None]],
+    failed_writebacks: list[str],
+    disposition_policy: str | None,
+) -> bool:
+    """ISSUE-205: entity-only writebacks must not clear legitimate manual holds."""
+    if failed_writebacks:
+        return False
+    if _has_legitimate_manual_hold(degraded_flags):
+        return False
+
+    statuses = [status for _intent, status in rows]
+    if not _all_writebacks_resolved(statuses):
+        return False
+
+    if _terminal_writeback_resolved(rows):
+        return True
+
+    # Optional-disposition stale path: no terminal outbox expected; verify_degraded-only.
+    if (
+        _only_stale_verify_degraded(degraded_flags)
+        and not _has_active_terminal_outbox(rows)
+        and disposition_policy == DispositionPolicy.NOT_REQUIRED.value
+    ):
+        return True
+
+    return False
 
 
 async def _reconcile_verify_resume_patch(
@@ -115,17 +179,22 @@ async def _reconcile_verify_resume_patch(
 
     degraded_flags = list(values.get("degraded_flags") or [])
     legitimate_manual = _has_legitimate_manual_hold(degraded_flags)
-    wb_statuses = await _active_outbox_writeback_statuses(session_factory, event_id)
-    writebacks_resolved = not failed_writebacks and _writebacks_resolved_for_resume_routing(
-        wb_statuses
-    )
+    outbox_rows = await _active_outbox_writeback_rows(session_factory, event_id)
+    wb_statuses = [status for _intent, status in outbox_rows]
+    writebacks_resolved = not failed_writebacks and _all_writebacks_resolved(wb_statuses)
+    disposition_policy = values.get("disposition_policy")
 
     if need_writeback and writebacks_resolved:
         patch["verify_need_writeback_recovery"] = False
         patch["verify_failed_writebacks"] = []
         patch["execution_substate"] = ExecutionSubstate.NONE.value
 
-    if need_manual and not legitimate_manual and writebacks_resolved:
+    if need_manual and not legitimate_manual and _can_clear_manual_resolution(
+        degraded_flags=degraded_flags,
+        rows=outbox_rows,
+        failed_writebacks=failed_writebacks,
+        disposition_policy=disposition_policy,
+    ):
         patch["verify_need_manual_resolution"] = False
         patch.setdefault("execution_substate", ExecutionSubstate.NONE.value)
         stripped = _strip_stale_verify_degraded(degraded_flags)

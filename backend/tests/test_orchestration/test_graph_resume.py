@@ -1,4 +1,4 @@
-"""Unit tests for graph checkpoint resume helpers (ISSUE-192 / ISSUE-196)."""
+"""Unit tests for graph checkpoint resume helpers (ISSUE-192 / ISSUE-196 / ISSUE-205)."""
 
 from __future__ import annotations
 
@@ -7,12 +7,20 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.models.enums import EventStatus, ExecutionSubstate, WritebackStatus
+from app.models.enums import (
+    DispositionIntentKind,
+    DispositionPolicy,
+    EventStatus,
+    ExecutionSubstate,
+    WritebackStatus,
+)
 from app.orchestration.graph_resume import (
     _reconcile_verify_resume_patch,
     resume_investigation_from_checkpoint,
 )
 from app.orchestration.graph_resume_observability import GraphResumeFailedError
+
+OutboxRow = tuple[str, str | None]
 
 
 class _SessionFactory:
@@ -20,21 +28,21 @@ class _SessionFactory:
         self,
         status: str,
         *,
-        outbox_wb_statuses: list[str | None] | None = None,
+        outbox_rows: list[OutboxRow] | None = None,
     ) -> None:
         self._status = status
-        self._outbox_wb_statuses = outbox_wb_statuses or []
+        self._outbox_rows = outbox_rows or []
 
     def __call__(self) -> _SessionCtx:
-        return _SessionCtx(self._status, outbox_wb_statuses=self._outbox_wb_statuses)
+        return _SessionCtx(self._status, outbox_rows=self._outbox_rows)
 
 
-class _OutboxScalars:
-    def __init__(self, statuses: list[str | None]) -> None:
-        self._statuses = statuses
+class _OutboxExecuteResult:
+    def __init__(self, rows: list[OutboxRow]) -> None:
+        self._rows = rows
 
-    def __iter__(self) -> Any:
-        return iter(self._statuses)
+    def all(self) -> list[OutboxRow]:
+        return self._rows
 
 
 class _ScalarSession:
@@ -42,16 +50,16 @@ class _ScalarSession:
         self,
         status: str,
         *,
-        outbox_wb_statuses: list[str | None] | None = None,
+        outbox_rows: list[OutboxRow] | None = None,
     ) -> None:
         self._status = status
-        self._outbox_wb_statuses = outbox_wb_statuses or []
+        self._outbox_rows = outbox_rows or []
 
     async def scalar(self, _stmt: Any) -> str:
         return self._status
 
-    async def scalars(self, _stmt: Any) -> _OutboxScalars:
-        return _OutboxScalars(self._outbox_wb_statuses)
+    async def execute(self, _stmt: Any) -> _OutboxExecuteResult:
+        return _OutboxExecuteResult(self._outbox_rows)
 
 
 class _SessionCtx:
@@ -59,27 +67,36 @@ class _SessionCtx:
         self,
         status: str,
         *,
-        outbox_wb_statuses: list[str | None] | None = None,
+        outbox_rows: list[OutboxRow] | None = None,
     ) -> None:
         self._status = status
-        self._outbox_wb_statuses = outbox_wb_statuses
+        self._outbox_rows = outbox_rows
 
     async def __aenter__(self) -> _ScalarSession:
         return _ScalarSession(
             self._status,
-            outbox_wb_statuses=self._outbox_wb_statuses,
+            outbox_rows=self._outbox_rows,
         )
 
     async def __aexit__(self, *_args: Any) -> None:
         return None
 
 
+def _terminal_confirmed() -> list[OutboxRow]:
+    return [
+        (
+            DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+            WritebackStatus.CONFIRMED.value,
+        )
+    ]
+
+
 @pytest.mark.asyncio
-async def test_reconcile_verify_resume_clears_stale_manual_when_writeback_confirmed() -> None:
+async def test_reconcile_verify_resume_clears_stale_manual_when_terminal_confirmed() -> None:
     patch = await _reconcile_verify_resume_patch(
         _SessionFactory(
             EventStatus.VERIFYING.value,
-            outbox_wb_statuses=[WritebackStatus.CONFIRMED.value],
+            outbox_rows=_terminal_confirmed(),
         ),
         "evt-196",
         {
@@ -88,6 +105,7 @@ async def test_reconcile_verify_resume_clears_stale_manual_when_writeback_confir
             "verify_need_writeback_recovery": False,
             "verify_failed_writebacks": [],
             "degraded_flags": ["verify_degraded=True"],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
         },
     )
     assert patch["halted"] is False
@@ -101,13 +119,14 @@ async def test_reconcile_verify_resume_keeps_legitimate_manual_hold() -> None:
     patch = await _reconcile_verify_resume_patch(
         _SessionFactory(
             EventStatus.VERIFYING.value,
-            outbox_wb_statuses=[WritebackStatus.CONFIRMED.value],
+            outbox_rows=_terminal_confirmed(),
         ),
         "evt-196-legit",
         {
             "halted": True,
             "verify_need_manual_resolution": True,
             "degraded_flags": ["missing_response_plan_for_required_policy=True"],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
         },
     )
     assert patch.get("halted") is False
@@ -120,9 +139,195 @@ async def test_reconcile_verify_resume_keeps_manual_when_no_outbox() -> None:
     patch = await _reconcile_verify_resume_patch(
         _SessionFactory(
             EventStatus.VERIFYING.value,
-            outbox_wb_statuses=[],
+            outbox_rows=[],
         ),
         "evt-196-no-outbox",
+        {
+            "halted": True,
+            "verify_need_manual_resolution": True,
+            "verify_need_writeback_recovery": False,
+            "verify_failed_writebacks": [],
+            "degraded_flags": ["verify_degraded=True"],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+        },
+    )
+    assert patch.get("halted") is False
+    assert patch.get("verify_need_manual_resolution") is not False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verify_resume_clears_stale_manual_when_terminal_accepted() -> None:
+    """ISSUE-196: ACCEPTED terminal outbox is sufficient to resume toward REPORTING."""
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[
+                (
+                    DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    WritebackStatus.ACCEPTED.value,
+                )
+            ],
+        ),
+        "evt-196-accepted",
+        {
+            "halted": True,
+            "verify_need_manual_resolution": True,
+            "verify_need_writeback_recovery": False,
+            "verify_failed_writebacks": [],
+            "degraded_flags": ["verify_degraded=True"],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+        },
+    )
+    assert patch["halted"] is False
+    assert patch["verify_need_manual_resolution"] is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verify_resume_keeps_manual_for_entity_only_accepted() -> None:
+    """ISSUE-205: entity outbox alone must not clear manual without terminal writeback."""
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[
+                (
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    WritebackStatus.ACCEPTED.value,
+                ),
+                (
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    WritebackStatus.ACCEPTED.value,
+                ),
+            ],
+        ),
+        "evt-205-entity-only",
+        {
+            "halted": True,
+            "verify_need_manual_resolution": True,
+            "verify_need_writeback_recovery": False,
+            "verify_failed_writebacks": [],
+            "degraded_flags": ["verify_degraded=True"],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+        },
+    )
+    assert patch.get("halted") is False
+    assert patch.get("verify_need_manual_resolution") is not False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verify_resume_clears_manual_when_terminal_and_entity_accepted() -> None:
+    """ISSUE-205: terminal + entity outboxes resolved clears stale manual."""
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[
+                (
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    WritebackStatus.ACCEPTED.value,
+                ),
+                (
+                    DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    WritebackStatus.ACCEPTED.value,
+                ),
+            ],
+        ),
+        "evt-205-terminal-entity",
+        {
+            "halted": True,
+            "verify_need_manual_resolution": True,
+            "verify_need_writeback_recovery": False,
+            "verify_failed_writebacks": [],
+            "degraded_flags": ["verify_degraded=True"],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+        },
+    )
+    assert patch["verify_need_manual_resolution"] is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verify_resume_keeps_disposition_writeback_blocked_manual() -> None:
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=_terminal_confirmed(),
+        ),
+        "evt-205-blocked",
+        {
+            "halted": True,
+            "verify_need_manual_resolution": True,
+            "degraded_flags": ["disposition_writeback_blocked=capability_unknown"],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+        },
+    )
+    assert "verify_need_manual_resolution" not in patch
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verify_resume_optional_policy_stale_without_terminal() -> None:
+    """Optional disposition: verify_degraded-only may clear when no terminal outbox exists."""
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[
+                (
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    WritebackStatus.CONFIRMED.value,
+                ),
+            ],
+        ),
+        "evt-205-optional-stale",
+        {
+            "halted": True,
+            "verify_need_manual_resolution": True,
+            "verify_need_writeback_recovery": False,
+            "verify_failed_writebacks": [],
+            "degraded_flags": ["verify_degraded=True"],
+            "disposition_policy": DispositionPolicy.NOT_REQUIRED.value,
+        },
+    )
+    assert patch["verify_need_manual_resolution"] is False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verify_resume_keeps_manual_entity_only_no_degraded() -> None:
+    """ISSUE-205: phase2 legitimate manual (no verify_degraded) must not clear on entity-only."""
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[
+                (
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    WritebackStatus.ACCEPTED.value,
+                ),
+            ],
+        ),
+        "evt-205-legit-no-degraded",
+        {
+            "halted": True,
+            "verify_need_manual_resolution": True,
+            "verify_need_writeback_recovery": False,
+            "verify_failed_writebacks": [],
+            "degraded_flags": [],
+            "disposition_policy": DispositionPolicy.REQUIRED.value,
+        },
+    )
+    assert patch.get("halted") is False
+    assert patch.get("verify_need_manual_resolution") is not False
+
+
+@pytest.mark.asyncio
+async def test_reconcile_verify_resume_keeps_manual_when_policy_missing_and_entity_only() -> None:
+    """Missing disposition_policy must not use optional stale path with entity-only outboxes."""
+    patch = await _reconcile_verify_resume_patch(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=[
+                (
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    WritebackStatus.ACCEPTED.value,
+                ),
+            ],
+        ),
+        "evt-205-missing-policy",
         {
             "halted": True,
             "verify_need_manual_resolution": True,
@@ -133,27 +338,6 @@ async def test_reconcile_verify_resume_keeps_manual_when_no_outbox() -> None:
     )
     assert patch.get("halted") is False
     assert patch.get("verify_need_manual_resolution") is not False
-
-
-@pytest.mark.asyncio
-async def test_reconcile_verify_resume_clears_stale_manual_when_writeback_accepted() -> None:
-    """ISSUE-196: ACCEPTED outbox is sufficient to resume toward REPORTING."""
-    patch = await _reconcile_verify_resume_patch(
-        _SessionFactory(
-            EventStatus.VERIFYING.value,
-            outbox_wb_statuses=[WritebackStatus.ACCEPTED.value],
-        ),
-        "evt-196-accepted",
-        {
-            "halted": True,
-            "verify_need_manual_resolution": True,
-            "verify_need_writeback_recovery": False,
-            "verify_failed_writebacks": [],
-            "degraded_flags": ["verify_degraded=True"],
-        },
-    )
-    assert patch["halted"] is False
-    assert patch["verify_need_manual_resolution"] is False
 
 
 @pytest.mark.asyncio
