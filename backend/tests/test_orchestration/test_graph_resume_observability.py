@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -170,6 +170,18 @@ async def test_approve_returns_resume_failed_without_rollback() -> None:
 
     status = await engine._maybe_advance_plan("evt-1", 1)
     assert status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_maybe_advance_plan_returns_skipped_without_resume_hook() -> None:
+    engine = ApprovalEngine(MagicMock(), resume_investigation=None)
+    engine.is_plan_fully_decided = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    engine._load_plan_response_actions = AsyncMock(return_value=[MagicMock(status=MagicMock())])  # type: ignore[method-assign]
+    engine._event_status = AsyncMock(return_value=EventStatus.WAITING_APPROVAL)  # type: ignore[method-assign]
+    engine._state_machine = None
+
+    status = await engine._maybe_advance_plan("evt-skipped", 1)
+    assert status == "skipped"
 
 
 @pytest.mark.asyncio

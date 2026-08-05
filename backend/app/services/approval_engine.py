@@ -788,7 +788,7 @@ class ApprovalEngine:
             "resume_investigation not injected; approval facts persisted event=%s",
             event_id,
         )
-        return None
+        return "skipped"
 
     async def _event_status(self, event_id: str) -> EventStatus | None:
         async with self._session_factory() as session:

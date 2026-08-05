@@ -11,6 +11,7 @@ from app.api.v1 import schemas as s
 from app.api.v1.deps import get_approval_engine
 from app.core.config import get_settings
 from app.main import app
+from app.services.approval_engine import ApprovalOutcome
 
 _DEV_TOKENS = json.dumps(
     {
@@ -42,11 +43,11 @@ def client() -> TestClient:
     )
 
     class _StubApprovalEngine:
-        async def approve(self, *args: object, **kwargs: object) -> None:
-            return None
+        async def approve(self, *args: object, **kwargs: object) -> ApprovalOutcome:
+            return ApprovalOutcome()
 
-        async def reject(self, *args: object, **kwargs: object) -> None:
-            return None
+        async def reject(self, *args: object, **kwargs: object) -> ApprovalOutcome:
+            return ApprovalOutcome()
 
         async def scan_timeouts(self) -> list[str]:
             return []
