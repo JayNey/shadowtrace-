@@ -2,34 +2,34 @@
   "content": {
     "factors": {
       "asset_impact": {
-        "score": 80,
-        "reason": "Finance endpoint PC-FIN-023 is a high-value workstation"
+        "score": 38,
+        "reason": "Asset impact unclear without enriched investigation context"
       },
       "behavior_anomaly": {
-        "score": 88,
-        "reason": "PowerShell archive and upload chain indicates abnormal exfil behavior"
+        "score": 42,
+        "reason": "Behavioral baseline not established from alert text alone"
       },
       "evidence_confidence": {
-        "score": 82,
-        "reason": "Multi-source evidence collection completed with strong overall confidence"
+        "score": 40,
+        "reason": "Evidence collection may be incomplete for default mock path"
       },
       "attack_stage": {
-        "score": 92,
-        "reason": "Activity reaches data staging and external upload / exfiltration stage"
+        "score": 35,
+        "reason": "Attack stage undetermined pending correlated telemetry"
       },
       "data_sensitivity": {
-        "score": 78,
-        "reason": "Finance report archive suggests confidential business data exposure"
+        "score": 36,
+        "reason": "Data sensitivity unknown without asset or DLP context"
       },
       "threat_intel": {
-        "score": 85,
-        "reason": "External IP/domain tagged as unknown infrastructure used for exfiltration"
+        "score": 34,
+        "reason": "No corroborating threat-intelligence signal in default mock path"
       }
     },
-    "raw_confidence": 0.88
+    "raw_confidence": 0.42
   },
   "model_name": "mock-model",
-  "prompt_tokens": 220,
-  "completion_tokens": 160,
-  "total_tokens": 380
+  "prompt_tokens": 180,
+  "completion_tokens": 120,
+  "total_tokens": 300
 }

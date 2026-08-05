@@ -227,7 +227,10 @@ class _GoldenLLMClient:
         prompt_key = kwargs.get("prompt_key", "")
         if prompt_key != "storyline_generate":
             raise LLMProviderError("unknown prompt_key")
-        with open("app/core/llm/golden/storyline_generate/default.json", encoding="utf-8") as fh:
+        with open(
+            "app/core/llm/golden/storyline_generate/insider_data_exfiltration.json",
+            encoding="utf-8",
+        ) as fh:
             data = json.loads(fh.read())
         content = data["content"]
         if isinstance(content, dict):

@@ -2,34 +2,20 @@
   "content": {
     "actions": [
       {
-        "tool_name": "reset_password",
-        "target_type": "account",
-        "target": "zhangsan",
-        "parameters": {},
-        "reason": "Reset credentials for suspected insider account"
-      },
-      {
-        "tool_name": "isolate_host",
-        "target_type": "host",
-        "target": "PC-FIN-023",
-        "parameters": {},
-        "reason": "Isolate finance endpoint pending investigation"
-      },
-      {
         "tool_name": "create_ticket",
         "target_type": "ticket",
         "target": "ticket",
         "parameters": {
-          "title": "Data exfiltration response",
-          "description": "Automated containment plan"
+          "title": "Security alert triage",
+          "description": "Default mock plan: manual analyst review required"
         },
-        "reason": "Track investigation actions"
+        "reason": "Conservative default — track for human review without automated containment"
       }
     ],
-    "strategy_summary": "Reset insider account credentials and isolate finance endpoint"
+    "strategy_summary": "Default mock response plan: ticket-only pending analyst review"
   },
   "model_name": "mock-model",
-  "prompt_tokens": 180,
-  "completion_tokens": 140,
-  "total_tokens": 320
+  "prompt_tokens": 120,
+  "completion_tokens": 80,
+  "total_tokens": 200
 }

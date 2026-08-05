@@ -9,7 +9,7 @@
       "processes": [],
       "files": []
     },
-    "decision_summary": "Insufficient alert context for confident classification; defer to evidence collection."
+    "decision_summary": "No clear threat pattern detected."
   },
   "model_name": "mock-model",
   "prompt_tokens": 12,

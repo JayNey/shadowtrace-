@@ -346,6 +346,7 @@ async def test_main_scenario_has_disable_account_and_block_ip() -> None:
         working_memory=wm,
         event_service=event_service,
         capability_manifest=build_mock_capability_manifest(),
+        scenario_id="insider_data_exfiltration",
     )
 
     plan = await agent.execute(_agent_input(event_id))

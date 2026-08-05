@@ -355,6 +355,7 @@ async def test_main_scenario_fifteen_sections_and_key_facts(
         working_memory=wm,
         event_service=event_service,
         event_bus=event_bus,
+        scenario_id="insider_data_exfiltration",
     )
     report = await agent.execute(
         ReportAgentInput(

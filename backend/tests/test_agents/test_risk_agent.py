@@ -56,6 +56,8 @@ from app.models.enums import (
 from app.models.evidence import Evidence
 from app.models.ids import new_evidence_id
 
+_DEMO_SCENARIO_ID = "insider_data_exfiltration"
+
 
 class _FakeWorkingMemory:
     def __init__(self) -> None:
@@ -528,6 +530,7 @@ async def test_main_scenario_score_ge_70_confirmed_threat(
         working_memory=wm,
         event_service=event_service,
         calibration_temperature=1.2,
+        scenario_id=_DEMO_SCENARIO_ID,
     )
     output = await agent.execute(
         RiskAgentInput(
@@ -623,6 +626,7 @@ async def test_verdict_written_only_via_event_service(
         llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
         working_memory=wm,
         event_service=event_service,
+        scenario_id=_DEMO_SCENARIO_ID,
     )
     await agent.execute(
         RiskAgentInput(
@@ -892,6 +896,7 @@ async def test_full_evidence_path_not_raised_by_floor(
         llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
         working_memory=wm,
         event_service=event_service,
+        scenario_id=_DEMO_SCENARIO_ID,
     )
     output = await agent.execute(
         RiskAgentInput(
@@ -1034,6 +1039,7 @@ async def test_valid_llm_zero_evidence_still_applies_floor_and_cap(
         llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
         working_memory=wm,
         event_service=event_service,
+        scenario_id=_DEMO_SCENARIO_ID,
     )
     output = await agent.execute(
         RiskAgentInput(
@@ -1174,6 +1180,7 @@ async def test_risk_agent_flags_triage_risk_inconsistency(
         working_memory=wm,
         event_service=event_service,
         degraded_flags=degraded_flags,
+        scenario_id=_DEMO_SCENARIO_ID,
     )
     output = await agent.execute(
         RiskAgentInput(
@@ -1201,6 +1208,7 @@ async def test_risk_agent_skips_inconsistency_flag_for_aligned_triage(
         working_memory=wm,
         event_service=event_service,
         degraded_flags=degraded_flags,
+        scenario_id=_DEMO_SCENARIO_ID,
     )
     await agent.execute(
         RiskAgentInput(

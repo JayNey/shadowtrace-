@@ -1,0 +1,93 @@
+"""ISSUE-201: Mock LLM default golden cross-prompt consistency."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from app.agents.prompts.risk_prompt import FACTOR_NAMES
+from app.core.llm.base import default_golden_root
+
+_DEMO_MARKERS = ("zhangsan", "pc-fin-023", "203.0.113.88")
+_CONFLICTING_TRIAGE_PHRASES = (
+    "no clear threat pattern",
+    "no threat pattern detected",
+    "likely not a threat",
+)
+_CONFIRMED_THREAT_THRESHOLD = 70
+
+
+def _load_golden(prompt_key: str, filename: str = "default.json") -> dict:
+    path = default_golden_root() / prompt_key / filename
+    assert path.is_file(), f"missing golden file: {path}"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _average_risk_score(content: dict) -> float:
+    factors = content.get("factors") or {}
+    scores: list[float] = []
+    for name in FACTOR_NAMES:
+        entry = factors.get(name) or {}
+        if isinstance(entry, dict) and entry.get("score") is not None:
+            scores.append(float(entry["score"]))
+    assert len(scores) == len(FACTOR_NAMES)
+    return sum(scores) / len(scores)
+
+
+def test_default_goldens_avoid_demo_persona_markers() -> None:
+    for prompt_key in ("risk_score", "response_plan", "report_generate", "storyline_generate"):
+        payload = _load_golden(prompt_key)
+        content = payload.get("content", payload)
+        blob = json.dumps(content, ensure_ascii=False).lower()
+        for marker in _DEMO_MARKERS:
+            assert marker not in blob, f"{prompt_key}/default.json must not contain demo marker {marker!r}"
+
+
+def test_default_risk_score_is_conservative() -> None:
+    content = _load_golden("risk_score").get("content", {})
+    assert isinstance(content, dict)
+    average = _average_risk_score(content)
+    assert average < _CONFIRMED_THREAT_THRESHOLD
+
+
+def test_default_triage_and_risk_defaults_are_not_confirmed_threat_pair() -> None:
+    triage_content = _load_golden("triage_extract").get("content", {})
+    risk_content = _load_golden("risk_score").get("content", {})
+    assert isinstance(triage_content, dict)
+    assert isinstance(risk_content, dict)
+
+    summary = str(triage_content.get("decision_summary") or "").lower()
+    weak_triage = triage_content.get("event_type") == "other" or any(
+        phrase in summary for phrase in _CONFLICTING_TRIAGE_PHRASES
+    )
+    high_risk = _average_risk_score(risk_content) >= _CONFIRMED_THREAT_THRESHOLD
+    assert not (weak_triage and high_risk), "default triage/risk must not simulate confirmed-threat conflict"
+
+
+def test_insider_scenario_goldens_preserve_demo_regression_pack() -> None:
+    risk_content = _load_golden("risk_score", "insider_data_exfiltration.json").get("content", {})
+    assert isinstance(risk_content, dict)
+    assert _average_risk_score(risk_content) >= _CONFIRMED_THREAT_THRESHOLD
+
+    report_content = _load_golden("report_generate", "insider_data_exfiltration.json").get("content", {})
+    blob = json.dumps(report_content, ensure_ascii=False).lower()
+    assert "zhangsan" in blob
+    assert "pc-fin-023" in blob
+
+
+@pytest.mark.parametrize(
+    "prompt_key",
+    [
+        "triage_extract",
+        "risk_score",
+        "response_plan",
+        "report_generate",
+    ],
+)
+def test_adversarial_scenario_golden_exists(prompt_key: str) -> None:
+    path = default_golden_root() / prompt_key / "adversarial_credential_db_staging_exfil.json"
+    assert path.is_file(), f"missing adversarial golden for {prompt_key}"

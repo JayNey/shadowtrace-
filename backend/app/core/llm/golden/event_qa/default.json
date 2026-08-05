@@ -1,15 +1,10 @@
 {
   "content": {
-    "answer": "该事件被判定为高危，主要依据是风险评分中的行为异常、攻击阶段和证据置信度均处于高位，同时关键登录证据支持异常活动判断。",
-    "references": [
-      {
-        "ref_type": "evidence",
-        "ref_id": "evd-event-qa-001"
-      }
-    ]
+    "answer": "当前为默认 Mock 问答路径：尚未绑定具体场景黄金。请结合证据链与风险评分人工解读，勿将本回答视为已确认威胁结论。",
+    "references": []
   },
   "model_name": "mock-model",
-  "prompt_tokens": 180,
-  "completion_tokens": 90,
-  "total_tokens": 270
+  "prompt_tokens": 120,
+  "completion_tokens": 60,
+  "total_tokens": 180
 }
