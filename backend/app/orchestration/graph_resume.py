@@ -192,12 +192,13 @@ async def resume_investigation_from_checkpoint(
                 include_response_execution=include_response,
             )
             return
-        logger.warning(
-            "resume_investigation: no checkpoint for event=%s status=%s; skipping full restart",
-            event_id,
-            status_value,
+        from app.orchestration.graph_resume_observability import GraphResumeFailedError
+
+        raise GraphResumeFailedError(
+            f"no checkpoint for event in status {status_value}",
+            event_id=event_id,
+            error_type="checkpoint_missing",
         )
-        return
 
     projection = EvidenceProjection(session_factory)
     with bind_evidence_projection(projection):

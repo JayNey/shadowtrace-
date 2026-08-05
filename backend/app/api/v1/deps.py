@@ -400,17 +400,15 @@ async def _resume_investigation(event_id: str) -> None:
     mode = (settings.orchestration_mode or "graph").strip().lower()
     if mode != "graph":
         return
-    try:
-        from app.orchestration.graph_resume import resume_investigation_from_checkpoint
+    from app.orchestration.graph_resume_observability import execute_graph_resume_with_retry
 
-        await resume_investigation_from_checkpoint(
-            _get_session_factory(),
-            event_id,
-            get_super_agent=get_super_agent,
-            get_workflow_runtime=_get_workflow_runtime,
-        )
-    except Exception:
-        logger.exception("resume_investigation failed event=%s", event_id)
+    await execute_graph_resume_with_retry(
+        event_id,
+        session_factory=_get_session_factory(),
+        get_super_agent=get_super_agent,
+        get_workflow_runtime=_get_workflow_runtime,
+        degraded_flags=_get_degraded_flags(),
+    )
 
 
 async def get_disposition_sync() -> Any:

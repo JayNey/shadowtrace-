@@ -31,6 +31,8 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         "decision_audit_degraded",
         "auto_investigate_dispatch_unavailable",
         "auto_response_dispatch_unavailable",
+        # ISSUE-193 graph resume observability
+        "graph_resume_failed",
     }
 )
 
@@ -49,6 +51,8 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "InvestigationIntentService",
         # ISSUE-179 — EventContextStore clears redis_context_unavailable on recovery.
         "EventContextStore",
+        # ISSUE-193 — graph resume failure observability
+        "GraphResumeService",
     }
 )
 

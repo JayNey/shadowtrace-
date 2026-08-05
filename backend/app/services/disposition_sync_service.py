@@ -878,7 +878,23 @@ class DispositionSyncService:
             ExecutionSubstate.WAITING_WRITEBACK.value,
             ExecutionSubstate.WAITING_EXECUTION.value,
         }:
-            await self._resume(event_id)
+            try:
+                await self._resume(event_id)
+            except Exception as exc:
+                from app.orchestration.graph_resume_observability import GraphResumeFailedError
+
+                if isinstance(exc, GraphResumeFailedError):
+                    logger.warning(
+                        "resume_investigation hook failed event=%s error_type=%s",
+                        event_id,
+                        exc.error_type,
+                    )
+                    return
+                logger.warning(
+                    "resume_investigation hook failed event=%s",
+                    event_id,
+                    exc_info=True,
+                )
 
     @staticmethod
     def _truncate_error_detail(detail: str) -> str:

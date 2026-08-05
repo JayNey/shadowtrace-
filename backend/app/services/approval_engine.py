@@ -6,7 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -70,6 +70,14 @@ class EvaluatePlanResult:
     needs_wait: bool
     plan_revision: int
     evaluated_count: int
+
+
+@dataclass(frozen=True)
+class ApprovalOutcome:
+    """Result of a human or timeout approval decision (ISSUE-193)."""
+
+    resume_status: Literal["ok", "failed", "skipped"] | None = None
+    resume_degraded: bool = False
 
 
 def evaluate_hard_gates(
@@ -324,8 +332,8 @@ class ApprovalEngine:
         principal: Principal,
         comment: str | None,
         decision_id: str | None,
-    ) -> None:
-        await self._decide(
+    ) -> ApprovalOutcome:
+        return await self._decide(
             action_id,
             principal=principal,
             comment=comment,
@@ -339,8 +347,8 @@ class ApprovalEngine:
         principal: Principal,
         comment: str | None,
         decision_id: str | None,
-    ) -> None:
-        await self._decide(
+    ) -> ApprovalOutcome:
+        return await self._decide(
             action_id,
             principal=principal,
             comment=comment,
@@ -450,7 +458,7 @@ class ApprovalEngine:
         comment: str | None,
         decision_id: str | None,
         target_status: ActionStatus,
-    ) -> None:
+    ) -> ApprovalOutcome:
         async with self._session_factory() as session:
             async with session.begin():
                 row = await self._load_action_row(session, action_id, for_update=True)
@@ -570,7 +578,14 @@ class ApprovalEngine:
             principal.subject,
             comment,
         )
-        await self._maybe_advance_plan(decided_action.event_id, decided_action.plan_revision)
+        resume_status = await self._maybe_advance_plan(
+            decided_action.event_id,
+            decided_action.plan_revision,
+        )
+        return ApprovalOutcome(
+            resume_status=resume_status,
+            resume_degraded=resume_status == "failed",
+        )
 
     async def _persist_evaluation(
         self,
@@ -706,9 +721,13 @@ class ApprovalEngine:
                 reason="approval_required",
             )
 
-    async def _maybe_advance_plan(self, event_id: str, plan_revision: int) -> None:
+    async def _maybe_advance_plan(
+        self,
+        event_id: str,
+        plan_revision: int,
+    ) -> Literal["ok", "failed", "skipped"] | None:
         if not await self.is_plan_fully_decided(event_id, plan_revision):
-            return
+            return None
         actions = await self._load_plan_response_actions(event_id, plan_revision)
         approved = [a for a in actions if a.status is ActionStatus.APPROVED]
         rejected = [a for a in actions if a.status is ActionStatus.REJECTED]
@@ -748,13 +767,28 @@ class ApprovalEngine:
         if self._resume is not None:
             try:
                 await self._resume(event_id)
-            except Exception:
-                logger.warning("resume_investigation hook failed event=%s", event_id, exc_info=True)
-        elif self._resume is None:
-            logger.warning(
-                "resume_investigation not injected; approval facts persisted event=%s",
-                event_id,
-            )
+            except Exception as exc:
+                from app.orchestration.graph_resume_observability import GraphResumeFailedError
+
+                if isinstance(exc, GraphResumeFailedError):
+                    logger.warning(
+                        "resume_investigation hook failed event=%s error_type=%s",
+                        event_id,
+                        exc.error_type,
+                    )
+                    return "failed"
+                logger.warning(
+                    "resume_investigation hook failed event=%s",
+                    event_id,
+                    exc_info=True,
+                )
+                return "failed"
+            return "ok"
+        logger.warning(
+            "resume_investigation not injected; approval facts persisted event=%s",
+            event_id,
+        )
+        return None
 
     async def _event_status(self, event_id: str) -> EventStatus | None:
         async with self._session_factory() as session:

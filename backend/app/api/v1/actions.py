@@ -20,7 +20,7 @@ async def approve_action(
     principal: Annotated[Principal, require_roles(ROLE_APPROVER)],
     engine: ApprovalEngineDep,
 ) -> s.ActionOperationResponse:
-    await engine.approve(
+    outcome = await engine.approve(
         action_id,
         principal,
         body.comment,
@@ -32,6 +32,8 @@ async def approve_action(
         status="approved",
         decision_id=body.decision_id,
         message="approved",
+        resume_status=outcome.resume_status,
+        degraded=outcome.resume_degraded if outcome.resume_degraded else None,
     )
 
 
@@ -42,7 +44,7 @@ async def reject_action(
     principal: Annotated[Principal, require_roles(ROLE_APPROVER)],
     engine: ApprovalEngineDep,
 ) -> s.ActionOperationResponse:
-    await engine.reject(
+    outcome = await engine.reject(
         action_id,
         principal,
         body.comment,
@@ -54,6 +56,8 @@ async def reject_action(
         status="rejected",
         decision_id=body.decision_id,
         message="rejected",
+        resume_status=outcome.resume_status,
+        degraded=outcome.resume_degraded if outcome.resume_degraded else None,
     )
 
 

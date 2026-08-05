@@ -9,6 +9,7 @@ import pytest
 
 from app.models.enums import EventStatus
 from app.orchestration.graph_resume import resume_investigation_from_checkpoint
+from app.orchestration.graph_resume_observability import GraphResumeFailedError
 
 
 class _ScalarSession:
@@ -39,8 +40,8 @@ class _SessionFactory:
 
 
 @pytest.mark.asyncio
-async def test_resume_skips_full_restart_when_checkpoint_missing_mid_flight() -> None:
-    """ISSUE-192: lost checkpoint during pause must not call investigate() restart."""
+async def test_resume_raises_when_checkpoint_missing_mid_flight() -> None:
+    """ISSUE-193: lost checkpoint during pause surfaces GraphResumeFailedError."""
     graph = MagicMock()
     graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
     agent = MagicMock()
@@ -58,10 +59,7 @@ async def test_resume_skips_full_restart_when_checkpoint_missing_mid_flight() ->
 
     session_factory = _SessionFactory(EventStatus.EXECUTING_RESPONSE.value)
 
-    with patch(
-        "app.tasks.investigation_tasks.execute_investigation",
-        new_callable=AsyncMock,
-    ) as execute:
+    with pytest.raises(GraphResumeFailedError) as exc_info:
         await resume_investigation_from_checkpoint(
             session_factory,
             "evt-no-checkpoint",
@@ -69,9 +67,9 @@ async def test_resume_skips_full_restart_when_checkpoint_missing_mid_flight() ->
             get_workflow_runtime=_get_runtime,
         )
 
+    assert exc_info.value.error_type == "checkpoint_missing"
     agent.investigate.assert_not_called()
     graph.ainvoke.assert_not_called()
-    execute.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -365,6 +365,8 @@ class ActionOperationResponse(BaseModel):
     status: str
     decision_id: str | None = None
     message: str = ""
+    resume_status: Literal["ok", "failed", "skipped"] | None = None
+    degraded: bool | None = None
 
 
 # --------------------------------------------------------------------------- #
