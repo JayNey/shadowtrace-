@@ -26,8 +26,10 @@ class TriageLLMResponse(BaseModel):
     The prompt's few-shot examples produce ``event_type``, ``entities``, and
     ``decision_summary`` at the top level.  Passing ``EntitySet`` directly as the
     ``response_model`` would reject ``event_type`` and ``decision_summary`` as
-    forbidden extra fields.  This wrapper accepts all three; the agent then
-    extracts ``.entities`` for downstream use.
+    forbidden extra fields.  This wrapper accepts all three; the agent extracts
+    ``.entities`` for downstream use.  ``event_type`` is only adopted when
+    ``TRIAGE_LLM_EVENT_TYPE_FALLBACK`` is enabled and source+heuristic both
+    resolved to OTHER (ISSUE-197).
     """
 
     model_config = ConfigDict(extra="forbid")

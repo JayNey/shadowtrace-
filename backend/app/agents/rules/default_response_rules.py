@@ -212,8 +212,19 @@ DEFAULT_RESPONSE_RULES: dict[EventType, dict[Severity, list[ResponseRuleAction]]
     EventType.OTHER: {
         Severity.LOW: _actions(_ticket()),
         Severity.MEDIUM: _actions(_ticket(), _notify()),
-        Severity.HIGH: _actions(_ticket(), _notify()),
-        Severity.CRITICAL: _actions(_ticket(), _notify()),
+        # ISSUE-197: unresolved OTHER at high severity still needs conservative
+        # containment when triage heuristics/LLM fallback could not upgrade type.
+        Severity.HIGH: _actions(
+            ResponseRuleAction("block_ip", 1),
+            _ticket(2),
+            _notify(3),
+        ),
+        Severity.CRITICAL: _actions(
+            ResponseRuleAction("isolate_host", 1),
+            ResponseRuleAction("block_ip", 2),
+            _ticket(3),
+            _notify(4),
+        ),
     },
 }
 

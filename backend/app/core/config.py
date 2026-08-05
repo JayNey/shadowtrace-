@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     llm_probe_ttl_seconds: int = Field(default=60, alias="LLM_PROBE_TTL_SECONDS")
     llm_probe_method: str = Field(default="chat", alias="LLM_PROBE_METHOD")
     llm_required: bool = Field(default=False, alias="LLM_REQUIRED")
+    triage_llm_event_type_fallback: bool = Field(
+        default=False,
+        alias="TRIAGE_LLM_EVENT_TYPE_FALLBACK",
+        description=(
+            "When true, adopt validated LLM event_type only if source+heuristic "
+            "both resolve to OTHER (ISSUE-197)."
+        ),
+    )
     llm_audit_window_minutes: int = Field(default=60, alias="LLM_AUDIT_WINDOW_MINUTES")
     event_chat_enabled: bool = Field(default=True, alias="EVENT_CHAT_ENABLED")
 

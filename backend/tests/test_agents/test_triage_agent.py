@@ -13,8 +13,10 @@ from app.agents.triage_agent import (
     TriageAgent,
     _apply_severity_rules,
     _extract_iocs,
+    _heuristic_event_type,
     _map_event_type,
     _resolve_alert_type_from_snapshot,
+    _source_event_type_authoritative,
 )
 from app.core.errors import (
     DependencyUnavailableError,
@@ -298,6 +300,19 @@ class TestMapEventType:
     def test_no_match_returns_other(self):
         assert _map_event_type(None, "some random text") == EventType.OTHER
 
+    def test_source_other_falls_through_to_heuristic(self):
+        """ISSUE-197: ingestion OTHER must not block keyword classification."""
+        assert (
+            _map_event_type("other", "schema-export monitor detected volume anomaly")
+            == EventType.DATA_EXFILTRATION
+        )
+
+    def test_explicit_source_type_not_overridden_by_heuristic(self):
+        assert (
+            _map_event_type("malicious_process", "upload exfil to external host")
+            == EventType.MALICIOUS_PROCESS
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Tests: _merge_hint_entities (idempotency + non-mutation)
@@ -553,6 +568,102 @@ class TestTriageAgentLLM:
         assert "203.0.113.88" in result.ioc_list
         # LLM client should have been called (and then timed out).
         assert len(llm_client.chat_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_source_other_upgrades_via_heuristic_with_audit(self):
+        """ISSUE-197: source alert_type=other + export keywords → data_exfiltration."""
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        await wm.write(
+            "evt-197-heuristic",
+            "source_snapshot",
+            {"alert_type": "other", "creation_source_ref": {"source_object_id": "inc-1"}},
+        )
+        agent = TriageAgent(working_memory=wm)
+        input_ = _make_input(
+            "evt-197-heuristic",
+            raw_event_summary=(
+                "Correlated medium alerts across schema-export monitors and network volume."
+            ),
+        )
+        result = await agent._run(input_)
+        assert result.event_type is EventType.DATA_EXFILTRATION
+        assert "event_type_from_heuristic" in result.degradation_reasons
+
+    @pytest.mark.asyncio
+    async def test_explicit_source_type_not_overridden_by_llm_fallback(self, monkeypatch):
+        """ISSUE-197: concrete source type must remain authoritative."""
+        from app.core.config import get_settings
+
+        monkeypatch.setenv("TRIAGE_LLM_EVENT_TYPE_FALLBACK", "true")
+        get_settings.cache_clear()
+
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.DATA_EXFILTRATION,
+                entities=EntitySet(
+                    accounts=[AccountEntity(entity_id="acct-1", username="alice")],
+                ),
+                decision_summary="LLM guessed exfil",
+            ),
+            model_name="mock",
+        )
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        await wm.write(
+            "evt-197-source-wins",
+            "source_snapshot",
+            {"alert_type": "malicious_process"},
+        )
+        agent = TriageAgent(llm_client=_MockLLMClient(response=llm_response), working_memory=wm)
+        result = await agent._run(
+            _make_input(
+                "evt-197-source-wins",
+                raw_event_summary="benign summary without classification keywords",
+            )
+        )
+        assert result.event_type is EventType.MALICIOUS_PROCESS
+        assert "event_type_from_llm_fallback" not in result.degradation_reasons
+
+    @pytest.mark.asyncio
+    async def test_llm_event_type_fallback_when_enabled(self, monkeypatch):
+        """ISSUE-197: optional LLM fallback applies only after source+heuristic OTHER."""
+        from app.core.config import get_settings
+
+        monkeypatch.setenv("TRIAGE_LLM_EVENT_TYPE_FALLBACK", "true")
+        get_settings.cache_clear()
+
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.DATA_EXFILTRATION,
+                entities=EntitySet(
+                    accounts=[AccountEntity(entity_id="acct-1", username="alice")],
+                ),
+                decision_summary="LLM classified exfil",
+            ),
+            model_name="mock",
+        )
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        await wm.write(
+            "evt-197-llm-fallback",
+            "source_snapshot",
+            {"alert_type": "other"},
+        )
+        agent = TriageAgent(llm_client=_MockLLMClient(response=llm_response), working_memory=wm)
+        result = await agent._run(
+            _make_input(
+                "evt-197-llm-fallback",
+                raw_event_summary="ambiguous correlated alerts during maintenance window",
+            )
+        )
+        assert result.event_type is EventType.DATA_EXFILTRATION
+        assert "event_type_from_llm_fallback" in result.degradation_reasons
 
     @pytest.mark.asyncio
     async def test_empty_source_snapshot_no_crash(self):
@@ -1281,6 +1392,18 @@ class TestMapEventTypeCoverage:
         """'de-escalation' does NOT match \bescalation\b (word-boundary check)."""
         result = _map_event_type(None, "de-escalation procedure completed")
         assert result == EventType.OTHER
+
+    def test_heuristic_detects_schema_export_monitoring(self):
+        assert (
+            _heuristic_event_type(
+                "Correlated alerts across schema-export monitors during maintenance."
+            )
+            is EventType.DATA_EXFILTRATION
+        )
+
+    def test_source_authoritative_rejects_other(self):
+        assert _source_event_type_authoritative("other") is None
+        assert _source_event_type_authoritative("data_exfiltration") is EventType.DATA_EXFILTRATION
 
 
 # --------------------------------------------------------------------------- #

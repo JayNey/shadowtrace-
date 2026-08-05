@@ -26,6 +26,7 @@ from app.agents.rules.entity_extraction_rules import (
     extract_entities_regex,
 )
 from app.agents.rules.entity_validation import EntityValidationResult, validate_entity_set
+from app.core.config import get_settings
 from app.core.errors import (
     DependencyUnavailableError,
     GuardrailViolationError,
@@ -251,28 +252,41 @@ def _resolve_alert_type_from_snapshot(snapshot: dict[str, Any] | None) -> str | 
     return None
 
 
-def _map_event_type(
-    raw_type: str | None,
-    alert_text: str = "",
-) -> EventType:
-    """Map raw event_type string to EventType enum with fallback heuristics.
+def _source_event_type_authoritative(raw_type: str | None) -> EventType | None:
+    """Return a concrete source-mapped type; treat OTHER/missing as unresolved."""
+    if not raw_type:
+        return None
+    try:
+        mapped = EventType(raw_type.lower())
+    except ValueError:
+        return None
+    if mapped is EventType.OTHER:
+        return None
+    return mapped
 
-    When raw_type is None or unrecognized, keyword matching on alert_text is
-    used as a best-effort fallback.
-    """
-    if raw_type:
-        try:
-            return EventType(raw_type.lower())
-        except ValueError:
-            pass
 
-    # Fallback keyword matching.
+def _heuristic_event_type(alert_text: str) -> EventType | None:
+    """Keyword/type inference when source type is missing or only OTHER."""
     text = alert_text.lower()
-    if "exfil" in text or "upload" in text:
+    if not text.strip():
+        return None
+    if any(
+        kw in text
+        for kw in (
+            "exfil",
+            "upload",
+            "export",
+            "外传",
+            "外泄",
+            "数据外",
+            "schema-export",
+            "staging area",
+        )
+    ):
         return EventType.DATA_EXFILTRATION
     if "login fail" in text or "failed to login" in text or "login attempt" in text:
         return EventType.ACCOUNT_ANOMALY
-    if "process" in text or "executed" in text or "malware" in text:
+    if "process" in text or "executed" in text or "malware" in text or "powershell" in text:
         return EventType.MALICIOUS_PROCESS
     if "domain" in text or "dns" in text:
         return EventType.SUSPICIOUS_DOMAIN
@@ -282,6 +296,25 @@ def _map_event_type(
         return EventType.HOST_COMPROMISE
     if "insider" in text or "privilege" in text or _re.search(r"(?<!de-)escalation\b", text):
         return EventType.INSIDER_THREAT
+    return None
+
+
+def _map_event_type(
+    raw_type: str | None,
+    alert_text: str = "",
+) -> EventType:
+    """Map source alert_type to EventType with auditable heuristic fallback.
+
+    Explicit non-OTHER source labels remain authoritative (ISSUE-032). When
+    ingestion only supplies OTHER or the field is missing, keyword heuristics
+    on alert text may upgrade the classification (ISSUE-197).
+    """
+    authoritative = _source_event_type_authoritative(raw_type)
+    if authoritative is not None:
+        return authoritative
+    heuristic = _heuristic_event_type(alert_text)
+    if heuristic is not None:
+        return heuristic
     return EventType.OTHER
 
 
@@ -366,6 +399,7 @@ class TextExtractionResult:
     text_degraded: bool
     decision_summary: str
     rejection_summary: dict[str, Any]
+    llm_event_type: EventType | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -440,6 +474,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         # 1. Map event type from source_snapshot (file fallback via raw_alert_snapshot).
         snapshot = await self._read_source_snapshot(input.event_id)
         raw_type = _resolve_alert_type_from_snapshot(snapshot)
+        authoritative_type = _source_event_type_authoritative(raw_type)
         event_type = _map_event_type(raw_type, input.raw_event_summary)
 
         # 2. Entity extraction — LLM primary, regex fallback; merge with source hints.
@@ -459,6 +494,19 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         entities = merge_result.entities
         degradation_reasons = list(merge_result.degradation_reasons)
         degraded = extraction.text_degraded and source_validated.entity_set == EntitySet()
+
+        if authoritative_type is None and event_type is not EventType.OTHER:
+            degradation_reasons.append("event_type_from_heuristic")
+
+        if (
+            event_type is EventType.OTHER
+            and extraction.llm_event_type is not None
+            and extraction.llm_event_type is not EventType.OTHER
+            and get_settings().triage_llm_event_type_fallback
+        ):
+            event_type = extraction.llm_event_type
+            degradation_reasons.append("event_type_from_llm_fallback")
+            summary_notes.append(f"Event type adopted from LLM fallback: {event_type.value}.")
 
         if extraction.text_degraded and not degraded:
             summary_notes.append("Text entity extraction empty; using structured source entities.")
@@ -593,6 +641,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                         text_degraded=False,
                         decision_summary=summary[:512],
                         rejection_summary=llm_validated.rejection_summary,
+                        llm_event_type=parsed.event_type,
                     )
 
                 regex_result = await self._regex_fallback(alert_text)
@@ -605,6 +654,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                         llm_validated,
                         regex_result,
                     ),
+                    llm_event_type=parsed.event_type,
                 )
 
             regex_result = await self._regex_fallback(alert_text)

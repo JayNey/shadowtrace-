@@ -490,11 +490,20 @@ def test_data_exfiltration_high_rules_include_required_tools() -> None:
     assert "notify_security_team" in names
 
 
-def test_other_rules_never_include_destructive_tools() -> None:
+def test_other_low_medium_never_include_destructive_tools() -> None:
     destructive = {"block_ip", "disable_account", "isolate_host", "quarantine_file"}
-    for severity in Severity:
+    for severity in (Severity.LOW, Severity.MEDIUM):
         names = {item.tool_name for item in get_rule_actions(EventType.OTHER, severity)}
         assert names.isdisjoint(destructive)
+
+
+def test_other_high_critical_include_containment_tools() -> None:
+    """ISSUE-197: unresolved OTHER at high severity gets conservative containment."""
+    high = {item.tool_name for item in get_rule_actions(EventType.OTHER, Severity.HIGH)}
+    critical = {item.tool_name for item in get_rule_actions(EventType.OTHER, Severity.CRITICAL)}
+    assert "block_ip" in high
+    assert "isolate_host" in critical
+    assert "block_ip" in critical
 
 
 @pytest.mark.asyncio
