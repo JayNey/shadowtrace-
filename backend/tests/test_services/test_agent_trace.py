@@ -20,7 +20,16 @@ from sqlalchemy.pool import NullPool
 
 from app.agents.base import BaseAgent
 from app.db import models as orm
-from app.models.agent_io import TriageAgentInput
+from app.models.agent_io import (
+    EffectStatus,
+    TriageAgentInput,
+    VerificationActionResult,
+    VerificationOverallStatus,
+    VerificationPhase,
+    VerificationResult,
+)
+from app.models.decision_record import DecisionStage
+from app.models.enums import WritebackReadiness
 from app.services.agent_trace_service import (
     MAX_AUDIT_FIELD_BYTES,
     AgentTraceService,
@@ -332,6 +341,48 @@ async def test_log_trace_redacts_injected_cot_and_secrets(
     record = await service_with_decision_records._decision_record_service.get_by_trace_ref(trace_id)
     assert record is not None
     assert secret not in record.decision_summary
+
+
+@pytest.mark.asyncio
+async def test_log_trace_persists_verify_agent_decision_record(
+    service_with_decision_records: AgentTraceService,
+) -> None:
+    event_id = _id("evt")
+    started_at = datetime(2026, 7, 31, 10, 0, 0, tzinfo=UTC)
+    completed_at = started_at + timedelta(milliseconds=500)
+    output = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+        results=[
+            VerificationActionResult(
+                action_id="act-dead0001",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            )
+        ],
+    )
+
+    trace_id = await service_with_decision_records.log_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        input_data={"event_id": event_id},
+        output_data=output,
+        status="success",
+        started_at=started_at,
+        completed_at=completed_at,
+    )
+
+    row = await service_with_decision_records.get_trace(trace_id)
+    assert row is not None
+    record_ref = row.output_data.get("decision_record_ref")
+    assert isinstance(record_ref, str) and record_ref.startswith("dec-")
+
+    record = await service_with_decision_records._decision_record_service.get_by_trace_ref(trace_id)
+    assert record is not None
+    assert record.stage == DecisionStage.VERIFY.value
+    assert record.reason_codes == ["success"]
+    assert record.selected == {"selected_action": "verify:effect:success"}
 
 
 @pytest.mark.asyncio

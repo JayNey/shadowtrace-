@@ -348,6 +348,67 @@ def _enrich_agent_output(
             )[:512],
         )
         enriched.setdefault("selected_action", f"evidence:{output_data.get('collection_status')}")
+    elif agent_name == "verify_agent":
+        overall_status = output_data.get("overall_status")
+        verification_phase = output_data.get("verification_phase")
+        results = output_data.get("results") or []
+        failed_actions = output_data.get("failed_actions") or []
+        failed_writebacks = output_data.get("failed_writebacks") or []
+        blocked_writebacks = output_data.get("blocked_writebacks") or []
+
+        if output_data.get("need_manual_resolution"):
+            reason_code = "need_manual_resolution"
+        elif output_data.get("need_writeback_recovery"):
+            reason_code = "need_writeback_recovery"
+        elif output_data.get("need_action_replan"):
+            reason_code = "need_action_replan"
+        elif overall_status is not None:
+            reason_code = str(overall_status)
+        else:
+            reason_code = "unspecified"
+        enriched.setdefault("reason_code", reason_code)
+
+        phase_label = str(verification_phase or "unknown")
+        status_label = str(overall_status or "unknown")
+        result_count = len(results) if isinstance(results, list) else 0
+        failed_count = len(failed_actions) if isinstance(failed_actions, list) else 0
+        enriched.setdefault(
+            "decision_summary",
+            (
+                f"overall_status={status_label} "
+                f"verification_phase={phase_label} "
+                f"results={result_count} failed_actions={failed_count}"
+            )[:512],
+        )
+        enriched.setdefault("selected_action", f"verify:{phase_label}:{status_label}")
+
+        if isinstance(results, list):
+            enriched["candidate_actions"] = [
+                {
+                    "candidate_type": "verification_action",
+                    "name": str(item.get("effect_status") or item.get("writeback_status") or ""),
+                    "candidate_id": str(item.get("action_id") or ""),
+                }
+                for item in results[:50]
+                if isinstance(item, dict) and item.get("action_id")
+            ]
+        if isinstance(failed_writebacks, list) and failed_writebacks:
+            enriched.setdefault(
+                "gap_refs",
+                [
+                    {"source": "writeback", "reason": str(action_id)}
+                    for action_id in failed_writebacks[:20]
+                ],
+            )
+        if isinstance(blocked_writebacks, list) and blocked_writebacks:
+            enriched.setdefault("gap_refs", [])
+            if isinstance(enriched["gap_refs"], list):
+                enriched["gap_refs"].extend(
+                    [
+                        {"source": "writeback_blocked", "reason": str(action_id)}
+                        for action_id in blocked_writebacks[:20]
+                    ]
+                )
     if isinstance(input_data.get("event_id"), str):
         enriched.setdefault("event_id", input_data["event_id"])
     return enriched

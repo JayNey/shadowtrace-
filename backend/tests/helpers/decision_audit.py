@@ -20,7 +20,12 @@ async def seed_minimum_disposition_audit(
     *,
     actor: str = "test_fixture",
 ) -> str:
-    """Insert the minimum durable audit record required for auto-disposition paths."""
+    """Insert a VERIFY DecisionRecord for tests that skip the full agent trace chain.
+
+    Production auto-disposition is satisfied by material TRIAGE/RISK/RESPONSE records
+    from AgentTraceService; use this helper only for disposition-only or partial-chain
+    fixtures (e.g. EDS integration without trace_service wiring).
+    """
     service = DecisionRecordService(session_factory)
     record_id = f"dec-{uuid.uuid4().hex[:12]}"
     idempotency_key = f"{event_id}:verify:{actor}:minimum_audit:r1"

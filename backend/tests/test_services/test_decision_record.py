@@ -64,10 +64,12 @@ async def clean_decision_records(
 ) -> AsyncIterator[None]:
     async with session_factory() as session:
         async with session.begin():
+            await session.execute(delete(orm.AgentTrace))
             await session.execute(delete(orm.DecisionRecord))
     yield
     async with session_factory() as session:
         async with session.begin():
+            await session.execute(delete(orm.AgentTrace))
             await session.execute(delete(orm.DecisionRecord))
 
 
@@ -278,6 +280,68 @@ async def test_evidence_agent_output_enriched_into_decision_record(
         for item in candidates
         if isinstance(item, dict)
     )
+
+
+@pytest.mark.asyncio
+async def test_verify_agent_output_enriched_into_decision_record(
+    service: DecisionRecordService,
+) -> None:
+    event_id = _event_id()
+    record_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-verify001",
+        input_data={"event_id": event_id},
+        output_data={
+            "overall_status": "success",
+            "verification_phase": "effect",
+            "results": [
+                {
+                    "action_id": "act-dead0001",
+                    "effect_status": "verified",
+                    "writeback_required": False,
+                }
+            ],
+            "failed_actions": [],
+            "need_action_replan": False,
+            "need_writeback_recovery": False,
+            "need_manual_resolution": False,
+        },
+    )
+    assert record_id is not None
+    row = await service.get_by_trace_ref("trc-verify001")
+    assert row is not None
+    assert row.stage == DecisionStage.VERIFY.value
+    assert row.selected == {"selected_action": "verify:effect:success"}
+    assert row.reason_codes == ["success"]
+
+
+@pytest.mark.asyncio
+async def test_verify_agent_failed_output_enriched_into_decision_record(
+    service: DecisionRecordService,
+) -> None:
+    event_id = _event_id()
+    record_id = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-verify-fail",
+        input_data={"event_id": event_id},
+        output_data={
+            "overall_status": "failed",
+            "verification_phase": "effect",
+            "results": [],
+            "failed_actions": ["act-beef0002"],
+            "need_action_replan": True,
+            "need_writeback_recovery": False,
+            "need_manual_resolution": False,
+        },
+    )
+    assert record_id is not None
+    row = await service.get_by_trace_ref("trc-verify-fail")
+    assert row is not None
+    assert row.stage == DecisionStage.VERIFY.value
+    assert row.reason_codes == ["need_action_replan"]
+    assert "overall_status=failed" in (row.decision_summary or "")
 
 
 @pytest.mark.asyncio
