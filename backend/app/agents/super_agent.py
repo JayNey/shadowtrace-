@@ -131,6 +131,7 @@ async def _run_orchestration_with_renewal_watch(
         with contextlib.suppress(asyncio.CancelledError):
             await renewal_wait
 
+
 # --------------------------------------------------------------------------- #
 # Agent protocol for type-safe dependency injection
 # --------------------------------------------------------------------------- #

@@ -382,17 +382,18 @@ def test_actual_disposition_from_command_payload_reads_nested_operation_params()
         "idempotency_key": "idem-1",
         "execution_owner": "xdr_managed",
     }
-    assert (
-        _actual_disposition_from_command_payload(payload) is SourceDisposition.CONTAINED
-    )
+    assert _actual_disposition_from_command_payload(payload) is SourceDisposition.CONTAINED
 
 
 def test_actual_disposition_from_command_payload_ignores_forged_top_level_only() -> None:
     from app.services.state_machine_service import _actual_disposition_from_command_payload
 
-    assert _actual_disposition_from_command_payload(
-        {"target_disposition": SourceDisposition.CONTAINED.value}
-    ) is None
+    assert (
+        _actual_disposition_from_command_payload(
+            {"target_disposition": SourceDisposition.CONTAINED.value}
+        )
+        is None
+    )
 
 
 def test_check_required_writeback_close_gate_intents_not_confirmed() -> None:

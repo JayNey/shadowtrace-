@@ -159,10 +159,7 @@ class DegradedFlagService:
                         details={"event_id": event_id},
                     )
                 current = [str(f) for f in (se.degraded_flags or [])]
-                was_set = any(
-                    f == flag_name or str(f).startswith(f"{flag_name}=")
-                    for f in current
-                )
+                was_set = any(f == flag_name or str(f).startswith(f"{flag_name}=") for f in current)
                 updated = apply_flag_to_list(current, flag_name, value)
 
                 # ISSUE-179: Skip write and EventContext mirror when flag is

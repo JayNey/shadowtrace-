@@ -439,9 +439,7 @@ class Settings(BaseSettings):
     def trusted_proxy_allowlist_hosts(self) -> frozenset[str]:
         """Parse ``TRUSTED_PROXY_ALLOWLIST`` into normalized host entries."""
         return frozenset(
-            host.strip()
-            for host in self.trusted_proxy_allowlist.split(",")
-            if host.strip()
+            host.strip() for host in self.trusted_proxy_allowlist.split(",") if host.strip()
         )
 
     def trusted_proxy_fail_closed_violations(self) -> list[str]:

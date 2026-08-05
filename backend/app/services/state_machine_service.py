@@ -252,9 +252,7 @@ async def _build_terminal_writeback_view(
     # Parse actual disposition from denormalized command_payload (nested path).
     payload = outbox.command_payload or {}
     actual_parsed = _actual_disposition_from_command_payload(payload)
-    actual_enum = (
-        actual_parsed if actual_parsed is not None else SourceDisposition.PENDING
-    )
+    actual_enum = actual_parsed if actual_parsed is not None else SourceDisposition.PENDING
 
     return TerminalEventWritebackView(
         action_id=deferred_action.action_id,
