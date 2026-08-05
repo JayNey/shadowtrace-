@@ -26,6 +26,7 @@ from sqlalchemy.pool import NullPool
 
 from app.adapters.mock_xdr import MockXDRDispositionAdapter
 from app.adapters.registry import DispositionAdapterRegistry
+from app.agents.verify_agent import _action_from_row
 from app.core.errors import InvalidStateTransitionError, WritebackConflictError
 from app.core.guardrails import OutboundDispositionGuard
 from app.data_generators.scenarios import build_scenario
@@ -538,6 +539,190 @@ async def test_resolve_writeback_manual_confirmed(
         evidence_ref="evidence://ticket-123",
     )
     assert status is WritebackStatus.CONFIRMED
+
+
+async def _mark_action_writeback_not_applicable(
+    session_factory: async_sessionmaker[AsyncSession],
+    action_id: str,
+) -> None:
+    async with session_factory() as session:
+        async with session.begin():
+            action = await session.get(orm.Action, action_id, with_for_update=True)
+            assert action is not None
+            action.writeback_applicable = False
+            action.writeback_readiness = WritebackReadiness.NOT_REQUIRED.value
+            action.writeback_status = None
+
+
+@pytest.mark.asyncio
+async def test_sync_lookup_and_resolve_skip_writeback_status_when_not_applicable(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-195: lookup/resolve paths must not denormalize writeback_status."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    await _mark_action_writeback_not_applicable(session_factory, action_id)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+
+    lookup_writeback_id = f"wbk-lookup-{_sfx()}"
+    resolve_writeback_id = f"wbk-resolve-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-lookup-{_sfx()}",
+                    writeback_id=lookup_writeback_id,
+                    disposition_id=f"disp-lookup-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-lookup-{_sfx()}",
+                    command_payload={"source_locator": locator.model_dump(mode="json")},
+                    command_payload_sha256="deadbeef",
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.FAILED.value,
+                )
+            )
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-resolve-{_sfx()}",
+                    writeback_id=resolve_writeback_id,
+                    disposition_id=f"disp-resolve-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=2,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-resolve-{_sfx()}",
+                    command_payload={"source_locator": locator.model_dump(mode="json")},
+                    command_payload_sha256="deadbeef",
+                    delivery_status="delivered",
+                    latest_writeback_status=WritebackStatus.UNKNOWN.value,
+                )
+            )
+
+    await sync.update_writeback_status_from_lookup(
+        lookup_writeback_id,
+        WritebackStatus.CONFIRMED,
+    )
+    await sync.resolve_writeback(
+        resolve_writeback_id,
+        "manual_confirmed",
+        principal="admin-1",
+        comment="ticket-195",
+        evidence_ref="evidence://ticket-195",
+    )
+
+    async with session_factory() as session:
+        action_row = await session.get(orm.Action, action_id)
+        assert action_row is not None
+        assert action_row.writeback_applicable is False
+        assert action_row.writeback_status is None
+        lookup_outbox = await session.scalar(
+            select(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.writeback_id == lookup_writeback_id
+            )
+        )
+        assert lookup_outbox is not None
+        assert lookup_outbox.latest_writeback_status == WritebackStatus.CONFIRMED.value
+        resolve_outbox = await session.scalar(
+            select(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.writeback_id == resolve_writeback_id
+            )
+        )
+        assert resolve_outbox is not None
+        assert resolve_outbox.latest_writeback_status == WritebackStatus.CONFIRMED.value
+
+
+@pytest.mark.asyncio
+async def test_entity_action_submit_skips_writeback_status_when_not_applicable(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-195: delivery receipt must not set writeback_status on non-applicable rows."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    await _mark_action_writeback_not_applicable(session_factory, action_id)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-test",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": False,
+            "writeback_readiness": WritebackReadiness.NOT_REQUIRED,
+            "disposition_source_ref": locator,
+            "idempotency_key": f"idem-{_sfx()}",
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            record = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+    delivered = await sync.process_ready_outboxes(limit=1)
+    assert delivered == 1
+    async with session_factory() as session:
+        outbox_row = await session.scalar(
+            select(orm.DispositionOutbox).where(orm.DispositionOutbox.outbox_id == record.outbox_id)
+        )
+        assert outbox_row is not None
+        assert outbox_row.delivery_status == "delivered"
+        assert outbox_row.latest_writeback_status in {
+            WritebackStatus.ACCEPTED.value,
+            WritebackStatus.CONFIRMED.value,
+        }
+        action_row = await session.get(orm.Action, action_id)
+        assert action_row is not None
+        assert action_row.writeback_applicable is False
+        assert action_row.writeback_status is None
+        _action_from_row(action_row)
 
 
 @pytest.mark.asyncio

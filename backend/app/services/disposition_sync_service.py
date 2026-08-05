@@ -75,6 +75,18 @@ def _payload_sha256(payload: dict[str, Any]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _mirror_writeback_status_to_action(action: orm.Action | None, status: str) -> None:
+    """Denormalize outbox writeback status onto the bound action when allowed.
+
+    ``Action`` forbids ``writeback_status`` when ``writeback_applicable`` is
+    false (ISSUE-195). Disposition sync still updates outbox/receipt state for
+    entity-action submits bound to non-applicable rows; only the action mirror
+    is skipped.
+    """
+    if action is not None and action.writeback_applicable:
+        action.writeback_status = status
+
+
 class DispositionSyncService:
     """Owns disposition_commands/receipts/writeback_summary WorkingMemory fields."""
 
@@ -335,8 +347,7 @@ class DispositionSyncService:
                 outbox.latest_writeback_status = status.value
                 outbox.updated_at = datetime.now(UTC)
                 action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-                if action is not None:
-                    action.writeback_status = status.value
+                _mirror_writeback_status_to_action(action, status.value)
                 event_id = outbox.event_id
                 adapter_label = self._adapter_label(outbox)
         record_writeback(status=status.value, adapter=adapter_label)
@@ -477,8 +488,7 @@ class DispositionSyncService:
                 outbox.latest_writeback_status = target.value
                 outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
                 action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-                if action is not None:
-                    action.writeback_status = target.value
+                _mirror_writeback_status_to_action(action, target.value)
                 event_id = outbox.event_id
                 adapter_label = self._adapter_label(outbox)
         record_writeback(status=target.value, adapter=adapter_label)
@@ -701,7 +711,7 @@ class DispositionSyncService:
                 record_writeback(status=receipt.status.value, adapter=adapter_label)
                 action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
                 if action is not None:
-                    action.writeback_status = receipt.status.value
+                    _mirror_writeback_status_to_action(action, receipt.status.value)
                     await self._apply_action_terminal_from_receipt(
                         session,
                         action,
