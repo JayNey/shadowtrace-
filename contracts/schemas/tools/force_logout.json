@@ -375,7 +375,8 @@
       },
       "status": {
         "$ref": "#/$defs/ExecutionJobStatus",
-        "default": "queued"
+        "default": "queued",
+        "description": "PG ActionExecutionService creates jobs as RUNNING with a lease; QUEUED applies after lease-expired reclaim (ISSUE-173) or on the separate ToolProvider adapter channel."
       },
       "claimed_by": {
         "anyOf": [
