@@ -23,6 +23,7 @@ from app.agents.rules.response_plan_quality_gate import (
 )
 from app.core.errors import LLMError
 from app.core.errors import ValidationError as ShadowValidationError
+from app.core.llm.scenario_context import resolve_llm_scenario_id
 from app.db import models as orm
 from app.models.action import Action
 from app.models.agent_io import (
@@ -940,6 +941,28 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         entities: EntitySet,
     ) -> list[ActionCandidate]:
         assert self.llm_client is not None
+        source_snapshot: dict[str, Any] | None = None
+        if self.working_memory is not None:
+            try:
+                raw_snapshot = await self.working_memory.read(input.event_id, "source_snapshot")
+                if isinstance(raw_snapshot, dict):
+                    source_snapshot = raw_snapshot
+            except Exception:
+                logger.debug("optional WM read failed key=source_snapshot", exc_info=True)
+        raw_alert_snapshot: dict[str, Any] | None = None
+        if self.event_service is not None:
+            getter = getattr(self.event_service, "get_event", None)
+            if getter is not None:
+                try:
+                    event = await getter(input.event_id)
+                    snapshot = getattr(event, "raw_alert_snapshot", None)
+                    if isinstance(snapshot, dict):
+                        raw_alert_snapshot = snapshot
+                except Exception:
+                    logger.debug(
+                        "event_service.get_event failed for scenario resolve",
+                        exc_info=True,
+                    )
         available = sorted(
             name
             for name in self.capability_manifest.allowed_operations
@@ -957,7 +980,11 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
             event_id=input.event_id,
             agent_name=self.agent_name,
             prompt_key="response_plan",
-            scenario_id=self.scenario_id,
+            scenario_id=resolve_llm_scenario_id(
+                override=self.scenario_id,
+                source_snapshot=source_snapshot,
+                raw_alert_snapshot=raw_alert_snapshot,
+            ),
             json_mode=True,
         )
         payload = response.parsed

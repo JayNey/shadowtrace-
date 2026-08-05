@@ -34,6 +34,7 @@ from app.core.errors import (
     ShadowTraceError,
 )
 from app.core.llm.base import LLMResponse
+from app.core.llm.scenario_context import resolve_llm_scenario_id
 from app.core.network_utils import is_internal_ip
 from app.models.agent_io import (
     EntityConflictRecord,
@@ -483,7 +484,11 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         event_type = _map_event_type(raw_type, input.raw_event_summary)
 
         # 2. Entity extraction — LLM primary, regex fallback; merge with source hints.
-        extraction = await self._extract_entities(input.raw_event_summary, input.event_id)
+        extraction = await self._extract_entities(
+            input.raw_event_summary,
+            input.event_id,
+            source_snapshot=snapshot,
+        )
         source_validated = validate_entity_set(
             input.hint_entities,
             provenance="source",
@@ -589,7 +594,13 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
     # Entity extraction (LLM primary → regex fallback)
     # ------------------------------------------------------------------ #
 
-    async def _extract_entities(self, alert_text: str, event_id: str) -> TextExtractionResult:
+    async def _extract_entities(
+        self,
+        alert_text: str,
+        event_id: str,
+        *,
+        source_snapshot: dict[str, Any] | None = None,
+    ) -> TextExtractionResult:
         """Extract entities via LLM (JSON mode) with optional regex fallback."""
         empty = EntitySet()
         empty_summary: dict[str, Any] = {}
@@ -619,7 +630,10 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 event_id=event_id,
                 agent_name=self.agent_name,
                 prompt_key="triage_extract",
-                scenario_id=self.scenario_id,
+                scenario_id=resolve_llm_scenario_id(
+                    override=self.scenario_id,
+                    source_snapshot=source_snapshot,
+                ),
                 json_mode=True,
                 response_model=TriageLLMResponse,
                 temperature=0.3,

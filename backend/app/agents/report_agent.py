@@ -30,6 +30,7 @@ from app.agents.report_section_builder import (
     ReportSectionBuilder,
 )
 from app.core.errors import LLMError
+from app.core.llm.scenario_context import resolve_llm_scenario_id
 from app.models.agent_io import ReportAgentInput, TriageResult
 from app.models.detection_context_snapshot import DetectionContextSnapshot
 from app.models.enums import (
@@ -213,6 +214,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                     draft_sections=draft_sections,
                     final_verdict=final_verdict,
                     rag=rag,
+                    source_snapshot=source_snapshot,
                 )
                 title = llm_title or title
                 summary = llm_summary or summary
@@ -289,6 +291,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         draft_sections: list[ReportSection],
         final_verdict: FinalVerdict,
         rag: dict[str, Any] | None,
+        source_snapshot: dict[str, Any] | None = None,
     ) -> tuple[str, str, dict[str, str]]:
         assert self.llm_client is not None
         context_summary = self._context_summary(
@@ -309,7 +312,10 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 event_id=input.event_id,
                 agent_name=self.agent_name,
                 prompt_key="report_generate",
-                scenario_id=self.scenario_id,
+                scenario_id=resolve_llm_scenario_id(
+                    override=self.scenario_id,
+                    source_snapshot=source_snapshot,
+                ),
                 json_mode=True,
                 max_tokens=8192,
             ),

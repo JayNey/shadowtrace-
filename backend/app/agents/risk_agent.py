@@ -19,6 +19,7 @@ from app.agents.risk_scoring_engine import (
 )
 from app.agents.verdict_resolver import VerdictResolver
 from app.core.errors import LLMError
+from app.core.llm.scenario_context import resolve_llm_scenario_id
 from app.models.agent_io import (
     LlmAdmissibility,
     RiskAgentInput,
@@ -239,7 +240,10 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             event_id=input.event_id,
             agent_name=self.agent_name,
             prompt_key="risk_score",
-            scenario_id=self.scenario_id,
+            scenario_id=resolve_llm_scenario_id(
+                override=self.scenario_id,
+                source_snapshot=source_snapshot,
+            ),
             json_mode=True,
         )
         payload = response.parsed

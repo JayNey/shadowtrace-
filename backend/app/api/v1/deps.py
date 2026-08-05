@@ -469,7 +469,6 @@ async def _build_production_investigation_graph(
         session_factory=stack["session_factory"],
         playbook_kb_service=stack.get("playbook_kb_service"),
         playbook_release_service=stack.get("playbook_release_service"),
-        scenario_id="insider_data_exfiltration",
     )
     verify_agent = VerifyAgent(
         tool_executor=stack["tool_executor"],
@@ -852,7 +851,6 @@ async def _build_investigation_agents() -> dict[str, Any]:
         trace_service=trace_service,
         event_bus=event_bus,
         event_service=event_service,
-        scenario_id="insider_data_exfiltration",
     )
     report = ReportAgent(
         llm_client=llm_client,
@@ -863,7 +861,6 @@ async def _build_investigation_agents() -> dict[str, Any]:
         event_service=event_service,
         detection_context_service=get_detection_context_service(),
         event_bus=event_bus,
-        scenario_id="insider_data_exfiltration",
     )
     graph_sync = await get_graph_sync_service()
     graph_agent = GraphAgent(
