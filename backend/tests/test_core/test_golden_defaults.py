@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -44,7 +43,9 @@ def test_default_goldens_avoid_demo_persona_markers() -> None:
         content = payload.get("content", payload)
         blob = json.dumps(content, ensure_ascii=False).lower()
         for marker in _DEMO_MARKERS:
-            assert marker not in blob, f"{prompt_key}/default.json must not contain demo marker {marker!r}"
+            assert marker not in blob, (
+                f"{prompt_key}/default.json must not contain demo marker {marker!r}"
+            )
 
 
 def test_default_risk_score_is_conservative() -> None:
@@ -65,7 +66,18 @@ def test_default_triage_and_risk_defaults_are_not_confirmed_threat_pair() -> Non
         phrase in summary for phrase in _CONFLICTING_TRIAGE_PHRASES
     )
     high_risk = _average_risk_score(risk_content) >= _CONFIRMED_THREAT_THRESHOLD
-    assert not (weak_triage and high_risk), "default triage/risk must not simulate confirmed-threat conflict"
+    assert not (weak_triage and high_risk), (
+        "default triage/risk must not simulate confirmed-threat conflict"
+    )
+
+
+def test_default_event_qa_and_storyline_are_neutral() -> None:
+    for prompt_key in ("event_qa", "storyline_generate"):
+        content = _load_golden(prompt_key).get("content", {})
+        blob = json.dumps(content, ensure_ascii=False).lower()
+        for marker in _DEMO_MARKERS:
+            assert marker not in blob, f"{prompt_key}/default.json must not contain {marker!r}"
+        assert "no clear threat pattern" not in blob
 
 
 def test_insider_scenario_goldens_preserve_demo_regression_pack() -> None:
@@ -73,10 +85,29 @@ def test_insider_scenario_goldens_preserve_demo_regression_pack() -> None:
     assert isinstance(risk_content, dict)
     assert _average_risk_score(risk_content) >= _CONFIRMED_THREAT_THRESHOLD
 
-    report_content = _load_golden("report_generate", "insider_data_exfiltration.json").get("content", {})
+    report_content = _load_golden(
+        "report_generate", "insider_data_exfiltration.json"
+    ).get("content", {})
     blob = json.dumps(report_content, ensure_ascii=False).lower()
     assert "zhangsan" in blob
     assert "pc-fin-023" in blob
+
+
+def test_insider_scenario_goldens_are_internally_consistent() -> None:
+    triage_content = _load_golden("triage_extract", "insider_data_exfiltration.json").get(
+        "content", {}
+    )
+    risk_content = _load_golden("risk_score", "insider_data_exfiltration.json").get("content", {})
+    assert isinstance(triage_content, dict)
+    assert isinstance(risk_content, dict)
+
+    summary = str(triage_content.get("decision_summary") or "").lower()
+    weak_triage = triage_content.get("event_type") == "other" or any(
+        phrase in summary for phrase in _CONFLICTING_TRIAGE_PHRASES
+    )
+    high_risk = _average_risk_score(risk_content) >= _CONFIRMED_THREAT_THRESHOLD
+    assert not (weak_triage and high_risk), "insider scenario pack must not repeat default conflict"
+    assert triage_content.get("event_type") == "data_exfiltration"
 
 
 @pytest.mark.parametrize(

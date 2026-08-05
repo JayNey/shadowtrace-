@@ -32,27 +32,45 @@ Poll ingests **6 incidents** (5 decoy + 1 true positive) and **~600+ telemetry r
 The test selects the true incident by `true_positive_incident_id=88190001`, simulating
 an analyst picking one case from a noisy queue.
 
-Ground truth lives in `scenario_credential_db_staging_exfil.py` (`GROUND_TRUTH`).
+Ground truth lives in `scenario_credential_db_staging_exfil.py` (`GROUND_TRUTH`) when the
+adversarial pytest suite is present locally.
 
-## Run
+## Golden packs (in repository)
 
-Requires Postgres + Redis (same as integration tests):
+Scenario-specific Mock LLM goldens ship under:
+
+```text
+backend/app/core/llm/golden/*/default.json
+backend/app/core/llm/golden/*/insider_data_exfiltration.json
+backend/app/core/llm/golden/*/adversarial_credential_db_staging_exfil.json
+```
+
+Use `scenario_id=None` for neutral defaults (ISSUE-201) or pass an explicit scenario id
+to load the matching pack.
+
+## Run (adversarial pytest — optional / local)
+
+The dynamic audit **pytest modules** (`test_agent_adversarial_audit.py`,
+`test_agent_adversarial_full_loop.py`) are maintained outside the default CI path and
+may be absent in a minimal checkout. When present locally, they require Postgres +
+Redis (same as integration tests):
 
 ```bash
 cd backend
 
-# 1) Analysis-only audit (→ REPORTING)
+# Analysis-only audit (→ REPORTING) — only when tests/adversarial/*.py exists
 uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
 
-# 2) Production full loop (ResponseAgent + approval + VerifyAgent + writeback)
+# Production full loop — only when tests/adversarial/*.py exists
 uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py -v -s
 ```
 
-Uses ``execute_investigation(include_response_execution=True)`` — not the
-``run_full_response_chain`` helper. Pending actions are approved via real
-``ApprovalEngine``; graph resume continues execute; when the graph stalls in
-``VERIFYING``, the runner drives production ``VerifyAgent`` +
-``EventDispositionService.activate_and_submit`` + ``DispositionSync``.
+When the adversarial pytest tree is **not** checked in, validate golden packs via:
+
+```bash
+cd backend
+uv run --frozen python -m pytest tests/test_core/test_golden_defaults.py -q
+```
 
 ## Mock vs Live evaluation boundary
 

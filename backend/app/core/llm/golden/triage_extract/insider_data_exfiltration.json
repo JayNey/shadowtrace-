@@ -1,18 +1,55 @@
 {
   "content": {
-    "event_type": "other",
+    "event_type": "data_exfiltration",
     "entities": {
-      "accounts": [],
-      "hosts": [],
-      "ips": [],
-      "domains": [],
-      "processes": [],
+      "accounts": [
+        {
+          "entity_id": "acct-zhangsan",
+          "entity_type": "account",
+          "username": "zhangsan"
+        }
+      ],
+      "hosts": [
+        {
+          "entity_id": "host-pc-fin-023",
+          "entity_type": "host",
+          "hostname": "PC-FIN-023"
+        }
+      ],
+      "ips": [
+        {
+          "entity_id": "ip-int-fin",
+          "entity_type": "ip",
+          "address": "10.20.30.23",
+          "scope": "internal"
+        },
+        {
+          "entity_id": "ip-ext-exfil",
+          "entity_type": "ip",
+          "address": "203.0.113.88",
+          "scope": "external"
+        }
+      ],
+      "domains": [
+        {
+          "entity_id": "dom-cloud-storage",
+          "entity_type": "domain",
+          "fqdn": "cloud-storage.example.com"
+        }
+      ],
+      "processes": [
+        {
+          "entity_id": "proc-powershell",
+          "entity_type": "process",
+          "name": "powershell.exe"
+        }
+      ],
       "files": []
     },
-    "decision_summary": "No clear threat pattern detected."
+    "decision_summary": "Insider data exfiltration pattern: zhangsan archived finance data on PC-FIN-023 and uploaded to external IP 203.0.113.88."
   },
   "model_name": "mock-model",
-  "prompt_tokens": 12,
-  "completion_tokens": 8,
-  "total_tokens": 20
+  "prompt_tokens": 18,
+  "completion_tokens": 14,
+  "total_tokens": 32
 }
