@@ -8,9 +8,7 @@ ISSUE-203 quality gates (hard failures):
 - ``response_agent``/``verify_agent`` traces (snake_case agent_name)
 - Response plan targets cover ``GROUND_TRUTH.must_response_targets``
 - Mock writeback ``CONFIRMED(readback_verified)`` + terminal outbox enqueued
-- ``shims_used`` must not include sunset padding (verify_tail / seed / sanitize); the
-  documented runner hook ``final_disposition_activate`` may appear when production EDS
-  activation runs post-loop.
+- ``shims_used`` must be empty (ISSUE-204: no runner hooks or sunset shims).
 
 Default runner timeout: ~120s (Mock). Override with ``ADVERSARIAL_FULL_LOOP_TIMEOUT_S``
 (Live ``LLM_MODE=openai_compatible`` defaults to 600s unless overridden).
@@ -43,10 +41,7 @@ from tests.adversarial.audit_report import (
     collect_entity_tokens,
     normalize_enum,
 )
-from tests.adversarial.full_loop_runner import (
-    _RUNNER_HOOK_FINAL_DISPOSITION,
-    run_production_full_loop,
-)
+from tests.adversarial.full_loop_runner import run_production_full_loop
 from tests.adversarial.helpers import ingest_true_positive_event, missing_response_targets
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
 
@@ -214,7 +209,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "verification_context_present": loop_result.verification_present,
         "disposition_writeback_ok": loop_result.writeback_confirmed,
         "disposition_targets_aligned": not disposition_gaps,
-        "no_test_shims": set(loop_result.shims_used) <= {_RUNNER_HOOK_FINAL_DISPOSITION},
+        "no_test_shims": len(loop_result.shims_used) == 0,
         "tools_invoked": loop_result.tool_call_count > 0,
         "llm_invoked": loop_result.llm_call_count > 0,
     }
@@ -234,8 +229,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
 
     prod = report["production_checks"]
     assert prod["no_test_shims"], (
-        f"ISSUE-203: shims must be empty or only {_RUNNER_HOOK_FINAL_DISPOSITION!r}, "
-        f"got {loop_result.shims_used}"
+        f"ISSUE-204: shims_used must be empty, got {loop_result.shims_used}"
     )
     assert prod["response_agent_ran"], "expected response_agent trace"
     assert prod["execution_ran"], "expected ActionExecution jobs after approval"

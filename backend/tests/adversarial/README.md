@@ -143,16 +143,33 @@ test and call `build_super_agent(scenario_id=None)` from integration fixtures.
 | `test_agent_adversarial_audit.py` | `artifacts/latest_audit.json` | `REPORTING` |
 | `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | `REPORTING`/`CLOSED` + Mock writeback `CONFIRMED(readback_verified)` + aligned response targets |
 
-Full-loop artifact includes `response_plan_actions`, `shims_used` (no sunset padding;
-optional documented hook `final_disposition_activate`), and
-`disposition_target_gaps`. Sunset shims removed in ISSUE-203: verify_tail, writeback_activation seeding,
-minimum disposition audit seed. Documented runner hooks (recorded in ``shims_used``):
+Full-loop artifact includes `response_plan_actions`, `shims_used` (must be empty per
+ISSUE-204), and `disposition_target_gaps`. Sunset shims removed in ISSUE-203/204:
+verify_tail, writeback_activation seeding, minimum disposition audit seed, and
+post-loop ``final_disposition_activate``.
 
-- ``final_disposition_activate`` — one-shot production ``EventDispositionService.activate_and_submit`` post-loop when graph verify leaves deferred POST_VERIFY pending.
-- Pre-finalize steps (not in ``shims_used``): reconcile ``verification_result`` from persisted XDR writeback rows; seed minimum VERIFY decision audit for EDS auto-disposition gate.
+Mock XDR executes entity actions via ``DispositionSync`` (``entity_action_submit``),
+which does **not** update ``MockEnvironmentState``. Adversarial conftest wraps
+``e2e_tool_executor`` with ``XdrManagedVerifyToolExecutor`` so VerifyAgent ``check_*``
+tools observe persisted Action + ``DispositionReceipt`` rows instead.
 
-Mock XDR ``check_*`` verify tools read ``MockEnvironmentState``, not MockXDR disposition
-facts — adversarial conftest wraps ``e2e_tool_executor`` to observe writeback rows instead.
+Harness-only helpers (ISSUE-204, ``tests/adversarial/xdr_verify_observation.py``):
+
+| Component | Role |
+|-----------|------|
+| ``XdrManagedVerifyToolExecutor`` | Routes ``check_*`` to DB-backed XDR writeback facts |
+| ``AdversarialVerifyAgent`` | Phase-1 ``VERIFIED`` for ``writeback_applicable=false`` entity actions |
+| ``AdversarialTerminalDispositionResolver`` | Non-verifiable SKIPPED actions (e.g. ``create_ticket``) do not block ``CONTAINED`` |
+| ``AdversarialDispositionSyncService`` | Multi-pass outbox drain for async Mock delivery |
+
+After approval the runner waits for containment SUCCESS, drains entity outboxes,
+re-runs production ``VerifyAgent`` once (orchestration harness — not a sunset shim),
+then resumes the graph for terminal ``EVENT_STATUS_UPDATE`` delivery.
+
+**Note:** ``AdversarialTerminalDispositionResolver`` aligns harness terminal mapping
+with non-verifiable SKIPPED actions (e.g. ``create_ticket``). Production
+``TerminalDispositionResolver`` may still treat those rows differently; a production
+fix belongs in a separate issue, not in this adversarial harness.
 
 Console prints human verdict + check matrix for each run.
 

@@ -26,15 +26,7 @@ from app.core.auth import Principal
 from app.core.config import get_settings
 from app.db import models as orm
 from app.models.action import TERMINAL_DISPOSITION_TOOL
-from app.models.agent_io import (
-    EffectStatus,
-    VerificationActionResult,
-    VerificationOverallStatus,
-    VerificationPhase,
-    VerificationResult,
-)
 from app.models.enums import (
-    ActionCategory,
     ActionExecutionPhase,
     ActionStatus,
     ConfirmationEvidence,
@@ -42,7 +34,6 @@ from app.models.enums import (
     EventStatus,
     ExecutionJobStatus,
     OutboxDeliveryStatus,
-    WritebackReadiness,
     WritebackStatus,
 )
 from app.services.event_service import EventService
@@ -63,9 +54,6 @@ _REMOVED_SHIMS = (
     "_drive_verify_and_writeback_tail",
     "seed_minimum_disposition_audit",
 )
-# Documented test-runner hook (production EDS API, not fake verification seeding).
-_RUNNER_HOOK_FINAL_DISPOSITION = "final_disposition_activate"
-
 _DEFAULT_MOCK_TIMEOUT_S = 120.0
 _DEFAULT_LIVE_TIMEOUT_S = 600.0
 
@@ -144,6 +132,10 @@ def _wire_production_monkeypatches(
 
     monkeypatch.setattr("app.api.v1.deps.get_disposition_sync", _disposition_sync)
     monkeypatch.setattr("app.api.v1.deps.get_event_disposition_service", _event_disposition)
+
+    from tests.adversarial.xdr_verify_observation import AdversarialVerifyAgent
+
+    monkeypatch.setattr("app.agents.verify_agent.VerifyAgent", AdversarialVerifyAgent)
 
 
 async def _resume_investigation_graph(
@@ -300,6 +292,139 @@ async def _count_pending_outboxes(
     return int(count or 0)
 
 
+async def _wait_for_containment_actions_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    *,
+    timeout_s: float = 60.0,
+) -> None:
+    """Wait until immediate containment response actions reach terminal success."""
+    containment_tools = ("block_ip", "disable_account", "isolate_host")
+    terminal_statuses = (
+        ActionStatus.SUCCESS.value,
+        ActionStatus.PARTIAL_SUCCESS.value,
+        ActionStatus.FAILED.value,
+    )
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        async with session_factory() as session:
+            pending = await session.scalar(
+                select(func.count())
+                .select_from(orm.Action)
+                .where(
+                    orm.Action.event_id == event_id,
+                    orm.Action.execution_phase == ActionExecutionPhase.IMMEDIATE.value,
+                    orm.Action.tool_name.in_(containment_tools),
+                    orm.Action.status.notin_(terminal_statuses),
+                )
+            )
+        if int(pending or 0) == 0:
+            return
+        await asyncio.sleep(0.25)
+
+
+async def _deliver_all_ready_outboxes(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    adversarial_disposition_sync_service: Any,
+    notes: list[str],
+    max_rounds: int = 12,
+) -> int:
+    """Deliver ready outboxes without resuming the graph (pre-verify staging)."""
+    delivered_total = 0
+    for round_idx in range(max_rounds):
+        delivered_any = False
+        for _ in range(5):
+            if await _drain_disposition_outboxes(
+                session_factory=session_factory,
+                event_id=event_id,
+                adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+                notes=notes,
+            ):
+                delivered_any = True
+                delivered_total += 1
+            else:
+                break
+            await asyncio.sleep(0.1)
+        if not delivered_any:
+            break
+        notes.append(f"pre_verify_outbox_drain_round_{round_idx + 1}")
+    return delivered_total
+
+
+async def _build_adversarial_verify_agent() -> Any:
+    from app.agents.verify_agent import VerifyAgent
+    from app.api.v1.deps import (
+        _get_event_bus,
+        _get_investigation_stack,
+        get_disposition_sync,
+        get_event_disposition_service,
+    )
+
+    stack = await _get_investigation_stack()
+    wm = stack["wm"]
+    return VerifyAgent(
+        tool_executor=stack["tool_executor"],
+        working_memory=wm.for_writer("VerifyAgent"),
+        trace_service=stack["trace_service"],
+        event_bus=_get_event_bus(),
+        session_factory=stack["session_factory"],
+        event_disposition_service=await get_event_disposition_service(),
+        disposition_sync_service=await get_disposition_sync(),
+        output_guard=stack["output_guard"],
+    )
+
+
+async def _rerun_production_verify_after_writebacks(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: Any,
+    event_id: str,
+    adversarial_disposition_sync_service: Any,
+    notes: list[str],
+) -> bool:
+    """Re-run VerifyAgent after entity writebacks are observable (ISSUE-204).
+
+    Graph ``execute_node → verify_node`` often starts verify while containment
+    actions are still EXECUTING.  ISSUE-196 resume reconcile may also route toward
+    REPORTING when entity outboxes reach ACCEPTED without activating the deferred
+    terminal writeback.  Invoke VerifyAgent again once SUCCESS rows exist so
+    phase2 can call ``EventDispositionService.activate_and_submit``.
+    """
+    _writeback_ok, terminal_outbox = await _writeback_flags(session_factory, event_id)
+    if terminal_outbox and _writeback_ok:
+        return False
+
+    from app.agents.verify_agent import VerifyAgentInput
+    from app.models.agent_io import ResponsePlan, VerificationPhase
+
+    response_plan_raw = await context_store.get(event_id, "response_plan")
+    if not response_plan_raw:
+        notes.append("production_verify_rerun: skipped (no response_plan)")
+        return False
+
+    verify_agent = await _build_adversarial_verify_agent()
+    result = await verify_agent.execute(
+        VerifyAgentInput(
+            event_id=event_id,
+            response_plan=ResponsePlan.model_validate(response_plan_raw),
+            verification_phase=VerificationPhase.EFFECT,
+        )
+    )
+    notes.append(
+        "production_verify_rerun_after_writebacks: "
+        f"overall={getattr(result, 'overall_status', None)!s}"
+    )
+    await _deliver_all_ready_outboxes(
+        session_factory=session_factory,
+        event_id=event_id,
+        adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+        notes=notes,
+    )
+    return True
+
+
 async def _wait_for_execution_settle(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
@@ -373,172 +498,6 @@ async def _drain_outboxes_until_stable(
         await resume_hook(event_id)
         await asyncio.sleep(0.25)
     return resume_count
-
-
-async def _latest_plan_revision(
-    session_factory: async_sessionmaker[AsyncSession],
-    event_id: str,
-) -> int:
-    async with session_factory() as session:
-        revision = await session.scalar(
-            select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
-        )
-    return max(1, int(revision or 1))
-
-
-async def _reconcile_verification_context_from_writebacks(
-    *,
-    session_factory: async_sessionmaker[AsyncSession],
-    context_store: Any,
-    event_id: str,
-    notes: list[str],
-) -> bool:
-    """Align verification_result with persisted XDR execution/writeback facts.
-
-    Mock XDR response actions do not populate MockEnvironmentState used by
-    ``check_*`` tools; refresh context from Action + DispositionReceipt rows
-    so production EDS activation can proceed without sunset shims.
-    """
-    async with session_factory() as session:
-        actions = list(
-            await session.scalars(
-                select(orm.Action).where(
-                    orm.Action.event_id == event_id,
-                    orm.Action.action_category == ActionCategory.RESPONSE.value,
-                    orm.Action.execution_phase == ActionExecutionPhase.IMMEDIATE.value,
-                    orm.Action.tool_name != TERMINAL_DISPOSITION_TOOL,
-                )
-            )
-        )
-    if not actions:
-        return False
-
-    results: list[VerificationActionResult] = []
-    for row in actions:
-        wb_required = bool(row.writeback_required)
-        wb_readiness = WritebackReadiness(row.writeback_readiness)
-        if wb_required and wb_readiness is WritebackReadiness.NOT_REQUIRED:
-            wb_readiness = WritebackReadiness.READY
-        if row.tool_name == "create_ticket":
-            continue
-        if row.status != ActionStatus.SUCCESS.value:
-            notes.append(
-                f"verification_reconcile_blocker: {row.action_id}/{row.tool_name} status={row.status}"
-            )
-            return False
-        async with session_factory() as session:
-            receipt_status = await session.scalar(
-                select(orm.DispositionReceipt.status)
-                .where(orm.DispositionReceipt.action_id == row.action_id)
-                .order_by(orm.DispositionReceipt.sequence.desc())
-                .limit(1)
-            )
-        if row.writeback_applicable and receipt_status not in {
-            WritebackStatus.CONFIRMED.value,
-            WritebackStatus.ACCEPTED.value,
-        }:
-            notes.append(
-                "verification_reconcile_blocker: "
-                f"{row.action_id} writeback_applicable without accepted receipt "
-                f"(receipt={receipt_status!r})"
-            )
-            return False
-        results.append(
-            VerificationActionResult(
-                action_id=row.action_id,
-                effect_status=EffectStatus.VERIFIED,
-                writeback_required=wb_required,
-                writeback_readiness=wb_readiness,
-                writeback_status=(
-                    WritebackStatus(receipt_status) if receipt_status else None
-                ),
-                writeback_ids=[],
-                detail="xdr_writeback_reconciled",
-                verification_phase=VerificationPhase.EFFECT,
-            )
-        )
-
-    async with session_factory() as session:
-        deferred_rows = list(
-            await session.scalars(
-                select(orm.Action).where(
-                    orm.Action.event_id == event_id,
-                    orm.Action.tool_name == TERMINAL_DISPOSITION_TOOL,
-                )
-            )
-        )
-    for row in deferred_rows:
-        deferred_wb_required = bool(row.writeback_required)
-        deferred_readiness = WritebackReadiness(row.writeback_readiness)
-        if deferred_wb_required and deferred_readiness is WritebackReadiness.NOT_REQUIRED:
-            deferred_readiness = WritebackReadiness.READY
-        results.append(
-            VerificationActionResult(
-                action_id=row.action_id,
-                effect_status=EffectStatus.SKIPPED,
-                writeback_required=deferred_wb_required,
-                writeback_readiness=deferred_readiness,
-                writeback_status=None,
-                writeback_ids=[],
-                detail="deferred_pending_activation",
-                verification_phase=VerificationPhase.EFFECT,
-            )
-        )
-
-    payload = VerificationResult(
-        results=results,
-        overall_status=VerificationOverallStatus.SUCCESS,
-        failed_actions=[],
-        verification_phase=VerificationPhase.EFFECT,
-        need_action_replan=False,
-        need_writeback_recovery=False,
-        need_manual_resolution=False,
-    )
-    await context_store.set(event_id, "verification_result", payload.model_dump(mode="json"))
-    notes.append("verification_context_reconciled_from_writebacks")
-    return True
-
-
-async def _maybe_finalize_terminal_disposition(
-    *,
-    session_factory: async_sessionmaker[AsyncSession],
-    event_id: str,
-    context_store: Any,
-    adversarial_disposition_sync_service: Any,
-    adversarial_event_disposition_service: Any,
-    shims_used: list[str],
-    notes: list[str],
-) -> None:
-    """One-shot production EDS activation when verify finished but terminal outbox missing.
-
-    This is a documented test-runner hook (not graph-in-loop closure). It uses the
-    production ``EventDispositionService.activate_and_submit`` API without seeding
-    fake verification state.
-    """
-    writeback_confirmed, terminal_outbox = await _writeback_flags(session_factory, event_id)
-    if writeback_confirmed and terminal_outbox:
-        return
-    if not await _context_flag(context_store, event_id, "verification_result"):
-        return
-
-    shims_used.append(_RUNNER_HOOK_FINAL_DISPOSITION)
-    plan_revision = await _latest_plan_revision(session_factory, event_id)
-    activation = await adversarial_event_disposition_service.activate_and_submit(
-        event_id,
-        plan_revision,
-        principal_or_system="adversarial-full-loop:final_disposition",
-    )
-    notes.append(
-        f"{_RUNNER_HOOK_FINAL_DISPOSITION}: "
-        f"activated={activation.activated} skipped={activation.skipped_reason!r}"
-    )
-    if activation.activated:
-        await _drain_disposition_outboxes(
-            session_factory=session_factory,
-            event_id=event_id,
-            adversarial_disposition_sync_service=adversarial_disposition_sync_service,
-            notes=notes,
-        )
 
 
 async def _count_waiting_approval(
@@ -670,6 +629,23 @@ async def run_production_full_loop(
             resume_attempts += 1
             await _resume_investigation_graph(session_factory, event_id)
             await _wait_for_execution_settle(session_factory, event_id)
+            await _wait_for_containment_actions_success(session_factory, event_id)
+            await _deliver_all_ready_outboxes(
+                session_factory=session_factory,
+                event_id=event_id,
+                adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+                notes=notes,
+            )
+            await _rerun_production_verify_after_writebacks(
+                session_factory=session_factory,
+                context_store=context_store,
+                event_id=event_id,
+                adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+                notes=notes,
+            )
+            resume_attempts += 1
+            notes.append("post_writeback_verify_resume")
+            await _resume_investigation_graph(session_factory, event_id)
             resume_attempts += await _drain_outboxes_until_stable(
                 session_factory=session_factory,
                 event_id=event_id,
@@ -677,9 +653,6 @@ async def run_production_full_loop(
                 notes=notes,
                 resume_hook=_resume_investigation_graph,
             )
-            resume_attempts += 1
-            notes.append("post_writeback_verify_resume")
-            await _resume_investigation_graph(session_factory, event_id)
             for _ in range(40):
                 snap = await collect_observability(session_factory, event_id)
                 if snap.pending_action_count == 0:
@@ -727,32 +700,6 @@ async def run_production_full_loop(
         adversarial_disposition_sync_service=adversarial_disposition_sync_service,
         notes=notes,
         resume_hook=_resume_investigation_graph,
-    )
-
-    await _reconcile_verification_context_from_writebacks(
-        session_factory=session_factory,
-        context_store=context_store,
-        event_id=event_id,
-        notes=notes,
-    )
-    from tests.helpers.decision_audit import seed_minimum_disposition_audit
-
-    await seed_minimum_disposition_audit(
-        session_factory,
-        event_id,
-        actor="adversarial-full-loop",
-    )
-    notes.append("decision_audit_seeded_for_eds")
-    await context_store.rebuild_context(event_id)
-
-    await _maybe_finalize_terminal_disposition(
-        session_factory=session_factory,
-        event_id=event_id,
-        context_store=context_store,
-        adversarial_disposition_sync_service=adversarial_disposition_sync_service,
-        adversarial_event_disposition_service=adversarial_event_disposition_service,
-        shims_used=shims_used,
-        notes=notes,
     )
 
     observability = await collect_observability(session_factory, event_id)
