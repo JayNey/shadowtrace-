@@ -455,6 +455,7 @@ def build_analysis_pipeline(
             trace_service=agent_trace_service,
             event_service=event_service,
             scenario_id=scenario_id,
+            degraded_flags=degraded_flags,
         )
         report = ReportAgent(
             llm_client=effective_llm,
@@ -571,6 +572,7 @@ def build_super_agent(
             trace_service=agent_trace_service,
             event_service=event_service,
             scenario_id=scenario_id,
+            degraded_flags=degraded_flags,
         )
         report = ReportAgent(
             llm_client=effective_llm,

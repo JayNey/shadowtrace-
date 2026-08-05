@@ -108,6 +108,28 @@ class _FakeEventService:
         self.verdicts.append(verdict)
 
 
+class _MockDegradedFlags:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def set_flag(
+        self,
+        event_id: str,
+        flag_name: str,
+        value: Any,
+        writer: str,
+    ) -> list[str]:
+        self.calls.append(
+            {
+                "event_id": event_id,
+                "flag_name": flag_name,
+                "value": value,
+                "writer": writer,
+            }
+        )
+        return [f"{flag_name}=true"]
+
+
 class _FailingLLM:
     async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
         raise RuntimeError("llm unavailable")
@@ -1129,3 +1151,62 @@ async def test_evidence_limited_high_source_blocks_auto_fp_close(
     assert output.severity_floor_applied is True
     assert agent.last_verdict is FinalVerdict.NONE
     assert FinalVerdict.FALSE_POSITIVE not in event_service.verdicts
+
+
+def _weak_other_triage() -> TriageResult:
+    return TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        decision_summary="No clear threat pattern detected.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_risk_agent_flags_triage_risk_inconsistency(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-inconsistency-{uuid4().hex[:8]}"
+    degraded_flags = _MockDegradedFlags()
+    agent = RiskAgent(
+        llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+        working_memory=wm,
+        event_service=event_service,
+        degraded_flags=degraded_flags,
+    )
+    output = await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_weak_other_triage(),
+            evidence_output=_main_evidence(event_id),
+        )
+    )
+    assert output.risk_score >= 70
+    assert agent.last_verdict is FinalVerdict.CONFIRMED_THREAT
+    assert degraded_flags.calls
+    assert degraded_flags.calls[-1]["flag_name"] == "triage_risk_inconsistency"
+    assert degraded_flags.calls[-1]["writer"] == "RiskAgent"
+
+
+@pytest.mark.asyncio
+async def test_risk_agent_skips_inconsistency_flag_for_aligned_triage(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-risk-aligned-{uuid4().hex[:8]}"
+    degraded_flags = _MockDegradedFlags()
+    agent = RiskAgent(
+        llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+        working_memory=wm,
+        event_service=event_service,
+        degraded_flags=degraded_flags,
+    )
+    await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_main_triage(),
+            evidence_output=_main_evidence(event_id),
+        )
+    )
+    assert degraded_flags.calls == []

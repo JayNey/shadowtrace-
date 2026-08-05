@@ -29,6 +29,10 @@ from app.agents.report_section_builder import (
     SOURCE_SUMMARY_LABEL,
     ReportSectionBuilder,
 )
+from app.agents.triage_risk_consistency import (
+    INCONSISTENCY_DISCLOSURE_HEADER,
+    should_flag_triage_risk_inconsistency,
+)
 from app.core.errors import LLMError
 from app.core.llm.scenario_context import resolve_llm_scenario_id
 from app.models.agent_io import ReportAgentInput, TriageResult
@@ -55,6 +59,7 @@ _OVERVIEW_MERGE_PREFIXES = (
     "human_escalation:",
     "triage_degraded:",
     "triage_degradation_reason:",
+    "triage_risk_inconsistency:",
     "entity_rejection_",
     "- title=",
     "- alert_type=",
@@ -64,6 +69,7 @@ _OVERVIEW_MERGE_PREFIXES = (
 )
 _OVERVIEW_MERGE_CONTAINS = (
     INVESTIGATION_LIMITATION_HEADER,
+    INCONSISTENCY_DISCLOSURE_HEADER,
     SOURCE_SUMMARY_LABEL,
     "evidence_gaps:",
     "gap:",
@@ -255,6 +261,12 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         now = datetime.now(UTC)
         warnings: list[str] = []
         error_detail: str | None = None
+        if triage is not None and should_flag_triage_risk_inconsistency(
+            triage=triage,
+            risk_score=input.risk_assessment.risk_score,
+            final_verdict=final_verdict,
+        ):
+            warnings.append("triage_risk_inconsistency")
         if llm_fallback is not None:
             error_code = str(llm_fallback["error_code"])
             warnings.append(f"report_llm_fallback:{error_code}")

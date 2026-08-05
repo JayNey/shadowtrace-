@@ -36,6 +36,8 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         # ISSUE-197 triage event_type fallback audit
         "event_type_from_heuristic",
         "event_type_from_llm_fallback",
+        # ISSUE-200 triage vs risk scoring inconsistency
+        "triage_risk_inconsistency",
     }
 )
 
@@ -58,6 +60,8 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "GraphResumeService",
         # ISSUE-197 — auditable event_type heuristic / LLM fallback
         "TriageAgent",
+        # ISSUE-200 — triage vs risk scoring inconsistency audit
+        "RiskAgent",
     }
 )
 

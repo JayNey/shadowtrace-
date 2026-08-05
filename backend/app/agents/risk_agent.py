@@ -17,6 +17,10 @@ from app.agents.risk_scoring_engine import (
     augment_factors_for_evidence_limited,
     severity_from_score,
 )
+from app.agents.triage_risk_consistency import (
+    TRIAGE_RISK_INCONSISTENCY_FLAG,
+    should_flag_triage_risk_inconsistency,
+)
 from app.agents.verdict_resolver import VerdictResolver
 from app.core.errors import LLMError
 from app.core.llm.scenario_context import resolve_llm_scenario_id
@@ -26,6 +30,7 @@ from app.models.agent_io import (
     RiskAssessment,
     RiskFactor,
     ScoringMode,
+    TriageResult,
 )
 from app.models.enums import FinalVerdict
 
@@ -56,6 +61,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         verdict_resolver: VerdictResolver | None = None,
         calibration_temperature: float = DEFAULT_TEMPERATURE,
         scenario_id: str | None = None,
+        degraded_flags: Any | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -72,6 +78,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         self.verdict_resolver = verdict_resolver or VerdictResolver()
         self.calibration_temperature = float(calibration_temperature)
         self.scenario_id = scenario_id
+        self.degraded_flags = degraded_flags
         self.last_verdict: FinalVerdict | None = None
         self.last_raw_confidence: float | None = None
 
@@ -186,6 +193,12 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             verdict = FinalVerdict.NONE
         self.last_verdict = verdict
         await self._persist_verdict(input.event_id, verdict, risk_score=assessment.risk_score)
+        await self._maybe_flag_triage_risk_inconsistency(
+            event_id=input.event_id,
+            triage=input.triage_result,
+            risk_score=assessment.risk_score,
+            final_verdict=verdict,
+        )
         return assessment
 
     async def _score_with_llm(
@@ -406,3 +419,34 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                 or risk_score >= 70
             ):
                 raise
+
+    async def _maybe_flag_triage_risk_inconsistency(
+        self,
+        *,
+        event_id: str,
+        triage: TriageResult,
+        risk_score: int,
+        final_verdict: FinalVerdict,
+    ) -> None:
+        if not should_flag_triage_risk_inconsistency(
+            triage=triage,
+            risk_score=risk_score,
+            final_verdict=final_verdict,
+        ):
+            return
+        if self.degraded_flags is None:
+            return
+        try:
+            await self.degraded_flags.set_flag(
+                event_id,
+                TRIAGE_RISK_INCONSISTENCY_FLAG,
+                True,
+                writer="RiskAgent",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to persist degraded flag %s for event=%s",
+                TRIAGE_RISK_INCONSISTENCY_FLAG,
+                event_id,
+                exc_info=True,
+            )

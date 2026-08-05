@@ -965,6 +965,100 @@ def test_builder_includes_degraded_triage_and_entity_rejection() -> None:
     assert "phrase_without_host_context=2" in overview.content
 
 
+def test_builder_discloses_triage_risk_inconsistency() -> None:
+    builder = ReportSectionBuilder()
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        decision_summary="No clear threat pattern detected.",
+    )
+    sections = builder.build(
+        event_id="evt-report-inconsistency",
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        risk_assessment=RiskAssessment(
+            risk_score=82,
+            severity=Severity.HIGH,
+            confidence=0.88,
+            risk_factors=[],
+            scoring_mode=ScoringMode.RULE_ONLY,
+        ),
+        triage_result=triage,
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+    )
+    overview = next(section for section in sections if section.key == "overview")
+    assert "triage_risk_inconsistency: true" in overview.content
+    assert "分类与评分不一致" in overview.content
+
+
+@pytest.mark.asyncio
+async def test_report_agent_emits_triage_risk_inconsistency_warning(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    event_id = f"evt-report-warning-{uuid4().hex[:8]}"
+    weak_triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        decision_summary="No clear threat pattern detected.",
+    )
+    await wm.write(event_id, "triage_result", weak_triage.model_dump(mode="json"))
+    event_service.final_verdicts[event_id] = FinalVerdict.CONFIRMED_THREAT
+    agent = ReportAgent(
+        llm_client=None,
+        working_memory=wm,
+        event_service=event_service,
+    )
+    report = await agent.execute(
+        ReportAgentInput(
+            event_id=event_id,
+            evidence_output=EvidenceOutput(
+                evidence_list=[],
+                overall_confidence=0.8,
+                collection_status=CollectionStatus.COMPLETED,
+            ),
+            risk_assessment=RiskAssessment(
+                risk_score=82,
+                severity=Severity.HIGH,
+                confidence=0.88,
+                risk_factors=[],
+                scoring_mode=ScoringMode.RULE_ONLY,
+            ),
+        )
+    )
+    assert "triage_risk_inconsistency" in report.warnings
+    overview = next(section for section in report.sections if section.key == "overview")
+    assert "triage_risk_inconsistency: true" in overview.content
+
+
+def test_builder_skips_inconsistency_for_aligned_triage() -> None:
+    builder = ReportSectionBuilder()
+    sections = builder.build(
+        event_id="evt-report-aligned",
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            overall_confidence=0.8,
+            collection_status=CollectionStatus.COMPLETED,
+        ),
+        risk_assessment=RiskAssessment(
+            risk_score=82,
+            severity=Severity.HIGH,
+            confidence=0.88,
+            risk_factors=[],
+            scoring_mode=ScoringMode.RULE_ONLY,
+        ),
+        triage_result=_main_triage(),
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+    )
+    overview = next(section for section in sections if section.key == "overview")
+    assert "triage_risk_inconsistency" not in overview.content
+
+
 def test_builder_evidence_chain_includes_evidence_id() -> None:
     builder = ReportSectionBuilder()
     event_id = "evt-report-evidence-id"

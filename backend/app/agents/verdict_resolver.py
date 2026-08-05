@@ -12,6 +12,9 @@ from app.models.workflow import FP_HIGH_THRESHOLD, FP_LOW_THRESHOLD
 FP_HIGH_SCORE = FP_HIGH_THRESHOLD
 FP_MEDIUM_SCORE = FP_LOW_THRESHOLD
 
+# Shared with ISSUE-200 triage/risk consistency checks and risk scoring paths.
+CONFIRMED_THREAT_RISK_THRESHOLD = 70
+
 
 class VerdictResolver:
     """Resolve ``FinalVerdict`` with fixed priority (must not be overridden).
@@ -49,7 +52,7 @@ class VerdictResolver:
 
         if fp_score >= FP_LOW_THRESHOLD:
             return FinalVerdict.POSSIBLE_FALSE_POSITIVE
-        if risk_score >= 70:
+        if risk_score >= CONFIRMED_THREAT_RISK_THRESHOLD:
             return FinalVerdict.CONFIRMED_THREAT
         return FinalVerdict.NONE
 
@@ -79,4 +82,9 @@ def _blocks_auto_fp_close(risk_assessment: RiskAssessment) -> bool:
     return bool(risk_assessment.evidence_limited and risk_assessment.high_source_evidence_limited)
 
 
-__all__ = ["FP_HIGH_SCORE", "FP_MEDIUM_SCORE", "VerdictResolver"]
+__all__ = [
+    "CONFIRMED_THREAT_RISK_THRESHOLD",
+    "FP_HIGH_SCORE",
+    "FP_MEDIUM_SCORE",
+    "VerdictResolver",
+]

@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from app.agents.triage_risk_consistency import (
+    INCONSISTENCY_DISCLOSURE_HEADER,
+    should_flag_triage_risk_inconsistency,
+)
 from app.models.action import Action, ImpactAssessment
 from app.models.agent_io import (
     EvidenceOutput,
@@ -428,6 +432,13 @@ class ReportSectionBuilder:
             )
         if reasoning:
             lines.append(f"triage_reasoning: {reasoning}")
+        if triage_result is not None and should_flag_triage_risk_inconsistency(
+            triage=triage_result,
+            risk_score=risk_assessment.risk_score,
+            final_verdict=final_verdict,
+        ):
+            lines.append("triage_risk_inconsistency: true")
+            lines.append(INCONSISTENCY_DISCLOSURE_HEADER)
         if not evidence_output.evidence_list:
             lines.append(INVESTIGATION_LIMITATION_HEADER)
             source_lines = _source_summary_lines(source_snapshot)

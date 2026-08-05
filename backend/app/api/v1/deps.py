@@ -851,6 +851,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         trace_service=trace_service,
         event_bus=event_bus,
         event_service=event_service,
+        degraded_flags=_get_degraded_flags(),
     )
     report = ReportAgent(
         llm_client=llm_client,
