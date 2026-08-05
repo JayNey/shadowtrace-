@@ -48,6 +48,7 @@ from app.core.config import get_settings
 from app.core.errors import (
     DependencyUnavailableError,
     InvestigationInProgressError,
+    InvestigationLeaseLostError,
     ValidationError,
 )
 from app.db import models as orm
@@ -903,6 +904,11 @@ async def investigate_event(
                     event_id,
                 )
                 await lease.release(event_id, owner_id)
+            except InvestigationLeaseLostError:
+                logger.info(
+                    "SuperAgent stopped — lease lost mid-run event=%s",
+                    event_id,
+                )
             except Exception as exc:
                 logger.error(
                     "Background SuperAgent failed for event=%s: %s",

@@ -1980,6 +1980,87 @@ async def test_investigate_releases_lease_when_super_agent_wiring_fails(
 
 
 @pytest.mark.asyncio
+async def test_investigate_background_lease_lost_does_not_mark_failed(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-189: background SuperAgent must not poison event on lease loss."""
+    from app.api.v1 import events as events_module
+    from app.core.errors import InvestigationLeaseLostError
+
+    event_id = await _create_test_event(event_service, title="Investigate lease lost bg")
+    completed = asyncio.Event()
+
+    class _LeaseLostAgent:
+        async def investigate(self, *_args: object, **_kwargs: object) -> None:
+            completed.set()
+            raise InvestigationLeaseLostError(
+                message="investigation lease lost during orchestration",
+                error_code="investigation_lease_lost",
+                details={"event_id": event_id},
+            )
+
+    async def _fake_super_agent() -> _LeaseLostAgent:
+        return _LeaseLostAgent()
+
+    monkeypatch.setattr(events_module, "get_super_agent", _fake_super_agent)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, resp.text
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not completed.is_set():
+        await asyncio.sleep(0.05)
+    assert completed.is_set(), "background investigate must run"
+
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert event.status is not EventStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_investigate_background_real_failure_still_marks_failed(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-189: uncaught investigate errors must still transition to FAILED."""
+    from app.api.v1 import events as events_module
+
+    event_id = await _create_test_event(event_service, title="Investigate real failure bg")
+    completed = asyncio.Event()
+
+    class _FailingAgent:
+        async def investigate(self, *_args: object, **_kwargs: object) -> None:
+            completed.set()
+            raise RuntimeError("planner wiring failed")
+
+    async def _fake_super_agent() -> _FailingAgent:
+        return _FailingAgent()
+
+    monkeypatch.setattr(events_module, "get_super_agent", _fake_super_agent)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, resp.text
+
+    deadline = time.time() + 5.0
+    while time.time() < deadline and not completed.is_set():
+        await asyncio.sleep(0.05)
+    assert completed.is_set(), "background investigate must run"
+
+    event = await event_service.get_event(event_id)
+    assert event is not None
+    assert event.status is EventStatus.FAILED
+
+
+@pytest.mark.asyncio
 async def test_investigate_reporting_status_rejected(
     client: TestClient,
     session_factory: async_sessionmaker[AsyncSession],
