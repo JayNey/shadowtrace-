@@ -639,7 +639,8 @@
     "ResponsePlanGeneratedBy": {
       "enum": [
         "llm",
-        "template"
+        "template",
+        "recovered"
       ],
       "title": "ResponsePlanGeneratedBy",
       "type": "string"

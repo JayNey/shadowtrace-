@@ -70,6 +70,27 @@ class LlmAdmissibility(StrEnum):
 class ResponsePlanGeneratedBy(StrEnum):
     LLM = "llm"
     TEMPLATE = "template"
+    # ISSUE-205: plan re-derived from persisted Action rows by the report
+    # input builder after the original plan payload was lost. Statuses are
+    # carried over verbatim from the Action table — never re-interpreted.
+    RECOVERED = "recovered"
+
+
+class ReportPhaseStatus(StrEnum):
+    """Execution state of the response/verification phases feeding ReportAgent.
+
+    ISSUE-205: report chapters must distinguish "phase never ran in this
+    investigation" (「本调查未执行…」) from "phase ran but no data is
+    quotable" (incomplete) and "backing data exists but could not be read"
+    (degraded/unavailable). Fail-closed default is NOT_EXECUTED; only the
+    unified builder (``app/services/report_input_builder.py``) may promote
+    the status based on evidence of execution.
+    """
+
+    NOT_EXECUTED = "not_executed"
+    EXECUTED = "executed"
+    INCOMPLETE = "incomplete"
+    UNAVAILABLE = "unavailable"
 
 
 class EffectStatus(StrEnum):
@@ -781,6 +802,12 @@ class ReportAgentInput(AgentInput):
     # ReportAgent must surface a mandatory human-escalation note in the report.
     escalated: bool = False
     replan_count: int = 0
+    # ISSUE-205: phase-execution signals set by the unified report input
+    # builder. Chapters must not silently render 「暂无…」 when a phase never
+    # ran, and must not claim data when the backfill read failed — both are
+    # explicit, distinguishable states (see ReportPhaseStatus).
+    response_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED
+    verification_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED
 
 
 class MemoryAgentInput(AgentInput):

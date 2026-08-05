@@ -903,6 +903,17 @@
       "title": "PlaybookRef",
       "type": "object"
     },
+    "ReportPhaseStatus": {
+      "description": "Execution state of the response/verification phases feeding ReportAgent.\n\nISSUE-205: report chapters must distinguish \"phase never ran in this\ninvestigation\" (「本调查未执行…」) from \"phase ran but no data is\nquotable\" (incomplete) and \"backing data exists but could not be read\"\n(degraded/unavailable). Fail-closed default is NOT_EXECUTED; only the\nunified builder (``app/services/report_input_builder.py``) may promote\nthe status based on evidence of execution.",
+      "enum": [
+        "not_executed",
+        "executed",
+        "incomplete",
+        "unavailable"
+      ],
+      "title": "ReportPhaseStatus",
+      "type": "string"
+    },
     "ResponsePlan": {
       "additionalProperties": false,
       "description": "Generated disposition plan.\n\n``actions`` is a generation-time snapshot only. Approval / execution /\nverification stages must re-load each Action by ``action_id``; they must\nnot rely on the embedded ``status`` field here.",
@@ -937,7 +948,8 @@
     "ResponsePlanGeneratedBy": {
       "enum": [
         "llm",
-        "template"
+        "template",
+        "recovered"
       ],
       "title": "ResponsePlanGeneratedBy",
       "type": "string"
@@ -1559,6 +1571,14 @@
       "default": 0,
       "title": "Replan Count",
       "type": "integer"
+    },
+    "response_phase_status": {
+      "$ref": "#/$defs/ReportPhaseStatus",
+      "default": "not_executed"
+    },
+    "verification_phase_status": {
+      "$ref": "#/$defs/ReportPhaseStatus",
+      "default": "not_executed"
     }
   },
   "required": [

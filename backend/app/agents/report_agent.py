@@ -192,6 +192,8 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             triage_result=triage,
             response_plan=input.response_plan,
             verification_result=input.verification_result,
+            response_phase_status=input.response_phase_status,
+            verification_phase_status=input.verification_phase_status,
             rag_output=rag,
             final_verdict=final_verdict,
             false_positive_match=fp_match,
@@ -546,6 +548,11 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             },
             "final_verdict": final_verdict.value,
             "evidence_sample": evidence_sample,
+            # ISSUE-205: make phase-execution state explicit to the LLM so it can
+            # neither invent disposition/verification content for phases that
+            # never ran nor claim an empty run when data is degraded.
+            "response_phase_status": input.response_phase_status.value,
+            "verification_phase_status": input.verification_phase_status.value,
             "response_actions": response_actions,
             "verification": (
                 input.verification_result.model_dump(mode="json")

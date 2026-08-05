@@ -23,6 +23,7 @@ from app.models.agent_io import (
     PlanBudget,
     PlanStep,
     ReportAgentInput,
+    ReportPhaseStatus,
     ResponsePlan,
     ResponsePlanGeneratedBy,
     RiskAssessment,
@@ -1820,6 +1821,93 @@ async def test_report_node_loads_verification_result_from_context() -> None:
         report_agent.calls[0].verification_result.overall_status
         is VerificationOverallStatus.SUCCESS
     )
+
+
+@pytest.mark.asyncio
+async def test_report_node_backfills_phase_statuses_via_builder() -> None:
+    """ISSUE-205: report_node builds input through the shared builder — the
+    state's response_plan and the store's verification_result are backfilled
+    and both phases are marked EXECUTED (never silent 「暂无…」 placeholders).
+    """
+    store = FakeContextStore()
+    report_agent = CapturingReportAgent()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+        wm_persisted=True,
+    )
+    event_id = "evt-report-builder-205"
+    await store.set(
+        event_id,
+        "verification_result",
+        verification.model_dump(mode="json"),
+    )
+
+    services = _services()
+    services["context_store"] = store
+    graph = build_investigation_graph(
+        _agents_with_verify_and_report(StubAgent(verification), report_agent),
+        services,
+    )
+    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+    risk = RiskAssessment(
+        risk_score=60,
+        severity=Severity.MEDIUM,
+        confidence=0.7,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    state = _base_state(
+        event_id=event_id,
+        event_status=EventStatus.VERIFYING.value,
+        evidence_output=evidence.model_dump(mode="json"),
+        risk_assessment=risk.model_dump(mode="json"),
+        response_plan=ResponsePlan(
+            plan_id="pln-report-builder-205",
+            actions=[],
+            strategy_summary="",
+            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        ).model_dump(mode="json"),
+    )
+    config = {"configurable": {"thread_id": event_id}}
+    final = await graph.ainvoke(state, config)
+    assert NODE_REPORT in final["node_trace"]
+    assert len(report_agent.calls) == 1
+    report_input = report_agent.calls[0]
+    assert report_input.response_plan is not None
+    assert report_input.response_plan.plan_id == "pln-report-builder-205"
+    assert report_input.verification_result is not None
+    assert report_input.response_phase_status is ReportPhaseStatus.EXECUTED
+    assert report_input.verification_phase_status is ReportPhaseStatus.EXECUTED
+
+
+@pytest.mark.asyncio
+async def test_report_node_marks_not_executed_when_response_phase_never_ran() -> None:
+    """ISSUE-205: a graph run that defers response execution reaches
+    report_node without any response/verify data — the builder must mark both
+    phases NOT_EXECUTED (「本调查未执行…」 wording) instead of the silent
+    「暂无…」 placeholders.
+    """
+    report_agent = CapturingReportAgent()
+    event_id = "evt-report-not-executed"
+    services = _services()
+    agents = _agents()
+    agents["report_agent"] = report_agent
+    graph = build_investigation_graph(agents, services)
+    state = _base_state(
+        event_id=event_id,
+        defer_response_execution=True,
+    )
+    config = {"configurable": {"thread_id": event_id}}
+    final = await graph.ainvoke(state, config)
+    assert NODE_REPORT in final["node_trace"]
+    assert NODE_RESPONSE not in final["node_trace"]
+    assert NODE_VERIFY not in final["node_trace"]
+    assert len(report_agent.calls) == 1
+    report_input = report_agent.calls[0]
+    assert report_input.response_plan is None
+    assert report_input.verification_result is None
+    assert report_input.response_phase_status is ReportPhaseStatus.NOT_EXECUTED
+    assert report_input.verification_phase_status is ReportPhaseStatus.NOT_EXECUTED
 
 
 @pytest.mark.asyncio

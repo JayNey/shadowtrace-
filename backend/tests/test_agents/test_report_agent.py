@@ -17,6 +17,8 @@ from app.agents.report_agent import (
 )
 from app.agents.report_llm_failure import llm_failure_metadata
 from app.agents.report_section_builder import (
+    NOT_EXECUTED_ACTIONS,
+    NOT_EXECUTED_VERIFICATION,
     PLACEHOLDER_LOW_RISK_NO_EVIDENCE,
     PLACEHOLDER_NO_ACTIONS,
     PLACEHOLDER_NO_VERIFICATION,
@@ -434,8 +436,12 @@ async def test_llm_failure_falls_back_to_template(
     assert "zhangsan" in blob
     assert "PC-FIN-023" in blob
     assert "203.0.113.88" in blob
-    assert PLACEHOLDER_NO_ACTIONS in blob
-    assert PLACEHOLDER_NO_VERIFICATION in blob
+    # ISSUE-205: phases that never ran must say 「本调查未执行…」, never the
+    # silent 「暂无…」 placeholders.
+    assert NOT_EXECUTED_ACTIONS in blob
+    assert NOT_EXECUTED_VERIFICATION in blob
+    assert PLACEHOLDER_NO_ACTIONS not in blob
+    assert PLACEHOLDER_NO_VERIFICATION not in blob
 
 
 @pytest.mark.asyncio
@@ -460,8 +466,12 @@ async def test_missing_actions_and_verification_use_placeholders(
         )
     )
     by_key = {s.key: s.content for s in report.sections}
-    assert by_key["executed_actions"] == PLACEHOLDER_NO_ACTIONS
-    assert by_key["verification_results"] == PLACEHOLDER_NO_VERIFICATION
+    # ISSUE-205: absent plan/verify default to NOT_EXECUTED (fail-closed), not
+    # the silent 「暂无…」 placeholders.
+    assert by_key["executed_actions"] == NOT_EXECUTED_ACTIONS
+    assert by_key["verification_results"] == NOT_EXECUTED_VERIFICATION
+    assert PLACEHOLDER_NO_ACTIONS not in by_key["executed_actions"]
+    assert PLACEHOLDER_NO_VERIFICATION not in by_key["verification_results"]
 
 
 @pytest.mark.asyncio
@@ -496,7 +506,9 @@ async def test_low_risk_empty_evidence_placeholder(
     )
     by_key = {s.key: s.content for s in report.sections}
     assert PLACEHOLDER_LOW_RISK_NO_EVIDENCE in by_key["evidence_chain"]
-    assert PLACEHOLDER_NO_ACTIONS in by_key["executed_actions"]
+    # ISSUE-205: fast-close never executes disposition — say so explicitly.
+    assert NOT_EXECUTED_ACTIONS in by_key["executed_actions"]
+    assert PLACEHOLDER_NO_ACTIONS not in by_key["executed_actions"]
 
 
 @pytest.mark.asyncio
@@ -555,6 +567,9 @@ async def test_response_actions_counted_by_category_not_tool_name(
     )
     executed = next(s for s in report.sections if s.key == "executed_actions")
     assert PLACEHOLDER_NO_ACTIONS not in executed.content
+    # ISSUE-205: with a real response_plan the chapter lists actions — it must
+    # not degrade to either placeholder wording.
+    assert NOT_EXECUTED_ACTIONS not in executed.content
     assert "act-block" in executed.content
     assert "block_ip" in executed.content
     assert executed.data["response_action_count"] == 1

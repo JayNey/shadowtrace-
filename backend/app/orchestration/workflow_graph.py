@@ -24,7 +24,6 @@ from app.models.agent_io import (
     GraphOutput,
     PlannerAgentInput,
     RAGOutput,
-    ReportAgentInput,
     ResponseAgentInput,
     ResponsePlan,
     ResponsePlanGeneratedBy,
@@ -70,6 +69,7 @@ from app.services.degraded_flag_service import DegradedFlagService, apply_flag_t
 from app.services.evidence_query_plan_service import extract_evidence_plan_inputs
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
+from app.services.report_input_builder import build_report_agent_input
 from app.services.state_machine_service import StateMachineService
 from app.services.tenant_resolution import resolve_tenant_id
 from app.services.working_memory import WorkingMemory
@@ -809,15 +809,20 @@ def build_investigation_graph(
                 possible_false_positive=True,
                 scoring_mode=ScoringMode.RULE_ONLY,
             )
-            report = await report_agent.execute(
-                ReportAgentInput(
-                    event_id=state["event_id"],
-                    evidence_output=evidence,
-                    risk_assessment=assessment,
-                    escalated=bool(state.get("escalated", False)),
-                    replan_count=int(state.get("replan_count", 0)),
-                )
+            # ISSUE-205: escalated events can reach close_node after the
+            # response/verify phases ran — backfill any existing plan and
+            # verification result through the shared builder instead of
+            # rendering silent placeholders.
+            report_input = await build_report_agent_input(
+                state["event_id"],
+                evidence_output=evidence,
+                risk_assessment=assessment,
+                escalated=bool(state.get("escalated", False)),
+                replan_count=int(state.get("replan_count", 0)),
+                state=state,
+                context_store=services.get("context_store"),
             )
+            report = await report_agent.execute(report_input)
             report_generated = report is not None
 
         # ISSUE-062 Blocker: escalated events arrive at close_node with
@@ -1603,23 +1608,19 @@ def build_investigation_graph(
         )
 
     async def report_node(state: InvestigationState) -> InvestigationState:
-        verification_result: VerificationResult | None = None
-        context_store = services.get("context_store")
-        if context_store is not None:
-            raw_verification = await context_store.get(state["event_id"], "verification_result")
-            if raw_verification is not None:
-                verification_result = VerificationResult.model_validate(raw_verification)
-
-        report = await report_agent.execute(
-            ReportAgentInput(
-                event_id=state["event_id"],
-                evidence_output=EvidenceOutput.model_validate(state["evidence_output"]),
-                risk_assessment=RiskAssessment.model_validate(state["risk_assessment"]),
-                escalated=bool(state.get("escalated", False)),
-                replan_count=int(state.get("replan_count", 0)),
-                verification_result=verification_result,
-            )
+        # ISSUE-205: single builder backfills response_plan + verification_result
+        # (state → context_store); the prior hand-written verify-only injection
+        # is retired so no parallel construction path remains.
+        report_input = await build_report_agent_input(
+            state["event_id"],
+            evidence_output=EvidenceOutput.model_validate(state["evidence_output"]),
+            risk_assessment=RiskAssessment.model_validate(state["risk_assessment"]),
+            escalated=bool(state.get("escalated", False)),
+            replan_count=int(state.get("replan_count", 0)),
+            state=state,
+            context_store=services.get("context_store"),
         )
+        report = await report_agent.execute(report_input)
         # ISSUE-062 B2: When the writeback recovery path routes to report_node,
         # the DB status may still be VERIFYING (verify_node stayed in VERIFYING
         # for writeback recovery; writeback_recovery_node does not transition).

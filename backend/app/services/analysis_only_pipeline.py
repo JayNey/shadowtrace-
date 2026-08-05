@@ -33,7 +33,6 @@ from app.models.agent_io import (
     GraphOutput,
     RAGAgentInput,
     RAGOutput,
-    ReportAgentInput,
     RiskAgentInput,
     RiskAssessment,
     ScoringMode,
@@ -48,6 +47,7 @@ from app.services.agent_task_coordinator import run_risk_score_with_ledger
 from app.services.event_service import EventService, StateMachinePort
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
+from app.services.report_input_builder import build_report_agent_input
 from app.services.tenant_resolution import resolve_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -618,10 +618,15 @@ class AnalysisOnlyPipeline:
         evidence_output: EvidenceOutput,
         risk_assessment: RiskAssessment,
     ) -> InvestigationReport | None:
-        report_input = ReportAgentInput(
-            event_id=event_id,
+        # ISSUE-205: the analysis-only path never executes response/verify;
+        # the shared builder backfills anything already persisted for this
+        # event and otherwise reports the phases as NOT_EXECUTED (never the
+        # silent 「暂无…」 placeholders).
+        report_input = await build_report_agent_input(
+            event_id,
             evidence_output=evidence_output,
             risk_assessment=risk_assessment,
+            context_store=self._context_store,
         )
         report = await self._report.execute(report_input)
         if report is not None and not isinstance(report, InvestigationReport):

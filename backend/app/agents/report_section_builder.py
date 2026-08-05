@@ -12,6 +12,7 @@ from app.agents.triage_risk_consistency import (
 from app.models.action import Action, ImpactAssessment
 from app.models.agent_io import (
     EvidenceOutput,
+    ReportPhaseStatus,
     ResponsePlan,
     RiskAssessment,
     TriageResult,
@@ -24,6 +25,20 @@ from app.models.report import ReportSection
 
 PLACEHOLDER_NO_ACTIONS = "暂无处置动作"
 PLACEHOLDER_NO_VERIFICATION = "暂无验证结果"
+# ISSUE-205: explicit chapter wording by phase-execution state. These replace
+# the silent PLACEHOLDER_NO_* fallbacks whenever the unified report input
+# builder (app/services/report_input_builder.py) supplies a phase status.
+NOT_EXECUTED_ACTIONS = "本调查未执行处置"
+NOT_EXECUTED_VERIFICATION = "本调查未执行验证"
+# Phase ran but no quotable data — aligned with ISSUE-212's
+# ``incomplete_placeholder`` contract: never masquerade as an empty result.
+INCOMPLETE_ACTIONS_PLACEHOLDER = "incomplete_placeholder：处置阶段已执行，但缺少可引用的处置记录"
+INCOMPLETE_VERIFICATION_PLACEHOLDER = (
+    "incomplete_placeholder：验证阶段已执行，但缺少可引用的验证记录"
+)
+# Backing data exists but the backfill read failed — chapter is degraded.
+UNAVAILABLE_ACTIONS = "处置数据不可用：读取已有处置记录失败，本章节标记 degraded"
+UNAVAILABLE_VERIFICATION = "验证数据不可用：读取已有验证记录失败，本章节标记 degraded"
 PLACEHOLDER_LOW_RISK_NO_EVIDENCE = "低危快结案：未执行证据采集"
 INVESTIGATION_LIMITATION_HEADER = (
     "调查限制：证据采集未完成或结果为空；以下内容引用来源摘要与缺口记录，非推断性攻击还原。"
@@ -124,6 +139,8 @@ class ReportSectionBuilder:
         triage_result: TriageResult | None = None,
         response_plan: ResponsePlan | None = None,
         verification_result: VerificationResult | None = None,
+        response_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED,
+        verification_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED,
         rag_output: dict[str, Any] | None = None,
         final_verdict: FinalVerdict = FinalVerdict.NONE,
         false_positive_match: dict[str, Any] | None = None,
@@ -185,8 +202,8 @@ class ReportSectionBuilder:
             rag_output,
             detection_context_snapshot=detection_context_snapshot,
         )
-        executed = self._executed_actions(response_actions)
-        verification = self._verification_results(verification_result)
+        executed = self._executed_actions(response_actions, response_phase_status)
+        verification = self._verification_results(verification_result, verification_phase_status)
         recommendations = self._recommendations(
             risk_assessment=risk_assessment,
             response_actions=response_actions,
@@ -238,12 +255,22 @@ class ReportSectionBuilder:
             "executed_actions": {
                 "response_action_count": len(response_actions),
                 "action_ids": [a.action_id for a in response_actions],
+                **(
+                    {"degraded": True}
+                    if response_phase_status is ReportPhaseStatus.UNAVAILABLE
+                    else {}
+                ),
             },
             "verification_results": {
                 "overall_status": (
                     verification_result.overall_status.value
                     if verification_result is not None
                     else None
+                ),
+                **(
+                    {"degraded": True}
+                    if verification_phase_status is ReportPhaseStatus.UNAVAILABLE
+                    else {}
                 ),
             },
             "appendix_index": {
@@ -685,36 +712,65 @@ class ReportSectionBuilder:
             if action.action_category is ActionCategory.RESPONSE
         ]
 
-    def _executed_actions(self, response_actions: list[Action]) -> str:
-        if not response_actions:
-            return PLACEHOLDER_NO_ACTIONS
-        lines: list[str] = []
-        for action in response_actions:
-            wb = action.writeback_status.value if action.writeback_status is not None else "null"
-            effect = action.effect_verification_status or "unset"
-            lines.append(
-                f"{action.action_id} | {action.action_name} | tool={action.tool_name} | "
-                f"status={action.status.value} | effect_verification={effect} | "
-                f"writeback_status={wb} | target={action.target or '-'}"
-            )
-        return "\n".join(lines)
+    def _executed_actions(
+        self,
+        response_actions: list[Action],
+        response_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED,
+    ) -> str:
+        if response_actions:
+            lines: list[str] = []
+            for action in response_actions:
+                wb = (
+                    action.writeback_status.value if action.writeback_status is not None else "null"
+                )
+                effect = action.effect_verification_status or "unset"
+                lines.append(
+                    f"{action.action_id} | {action.action_name} | tool={action.tool_name} | "
+                    f"status={action.status.value} | effect_verification={effect} | "
+                    f"writeback_status={wb} | target={action.target or '-'}"
+                )
+            return "\n".join(lines)
+        # ISSUE-205: no quotable RESPONSE actions — wording depends on whether
+        # the response phase ran at all. Never reuse 「暂无处置动作」, which
+        # would masquerade as an executed-but-empty result.
+        if response_phase_status is ReportPhaseStatus.UNAVAILABLE:
+            return UNAVAILABLE_ACTIONS
+        if response_phase_status in (
+            ReportPhaseStatus.EXECUTED,
+            ReportPhaseStatus.INCOMPLETE,
+        ):
+            return INCOMPLETE_ACTIONS_PLACEHOLDER
+        return NOT_EXECUTED_ACTIONS
 
-    def _verification_results(self, verification_result: VerificationResult | None) -> str:
-        if verification_result is None or not verification_result.results:
-            return PLACEHOLDER_NO_VERIFICATION
-        lines = [
-            f"overall_status={verification_result.overall_status.value}",
-            f"verification_phase={verification_result.verification_phase.value}",
-        ]
-        for item in verification_result.results:
-            wb = item.writeback_status.value if item.writeback_status is not None else "null"
-            receipt = ",".join(item.writeback_ids) if item.writeback_ids else "-"
-            lines.append(
-                f"{item.action_id} | effect={item.effect_status.value} | "
-                f"writeback_status={wb} | readiness={item.writeback_readiness.value} | "
-                f"receipt_refs={receipt} | detail={item.detail or '-'}"
-            )
-        return "\n".join(lines)
+    def _verification_results(
+        self,
+        verification_result: VerificationResult | None,
+        verification_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED,
+    ) -> str:
+        if verification_result is not None and verification_result.results:
+            lines = [
+                f"overall_status={verification_result.overall_status.value}",
+                f"verification_phase={verification_result.verification_phase.value}",
+            ]
+            for item in verification_result.results:
+                wb = item.writeback_status.value if item.writeback_status is not None else "null"
+                receipt = ",".join(item.writeback_ids) if item.writeback_ids else "-"
+                lines.append(
+                    f"{item.action_id} | effect={item.effect_status.value} | "
+                    f"writeback_status={wb} | readiness={item.writeback_readiness.value} | "
+                    f"receipt_refs={receipt} | detail={item.detail or '-'}"
+                )
+            return "\n".join(lines)
+        # ISSUE-205: distinguish "phase never ran" from degraded reads and
+        # incomplete data — see _executed_actions for the same contract.
+        if verification_phase_status is ReportPhaseStatus.UNAVAILABLE:
+            return UNAVAILABLE_VERIFICATION
+        if verification_phase_status in (
+            ReportPhaseStatus.EXECUTED,
+            ReportPhaseStatus.INCOMPLETE,
+        ):
+            return INCOMPLETE_VERIFICATION_PLACEHOLDER
+        return NOT_EXECUTED_VERIFICATION
 
     def _impact_assessment_hints(
         self,

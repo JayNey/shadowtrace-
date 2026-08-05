@@ -46,7 +46,6 @@ from app.models.agent_io import (
     MemoryAgentInput,
     PlanStep,
     RAGOutput,
-    ReportAgentInput,
     RiskAgentInput,
     RiskAssessment,
     ScoringMode,
@@ -75,6 +74,7 @@ from app.orchestration.workflow_graph import (
     rag_node,
 )
 from app.services.false_positive_matcher import build_fp_close_reason
+from app.services.report_input_builder import build_report_agent_input
 from app.services.working_memory import BoundWorkingMemory
 
 logger = logging.getLogger(__name__)
@@ -626,10 +626,15 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             possible_false_positive=True,
             scoring_mode=ScoringMode.RULE_ONLY,
         )
-        report_input = ReportAgentInput(
-            event_id=event_id,
+        # ISSUE-205: route through the shared builder so any already-persisted
+        # response plan / verification result is backfilled and a never-run
+        # phase is reported as 「本调查未执行…」 rather than a silent placeholder.
+        report_input = await build_report_agent_input(
+            event_id,
             evidence_output=placeholder_evidence,
             risk_assessment=placeholder_risk,
+            event_context=ec,
+            context_store=self.context_store,
         )
         report: InvestigationReport | None = await self._execute_with_agent_retries(
             event_id,
@@ -774,10 +779,15 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             )
         )
 
-        report_input = ReportAgentInput(
-            event_id=event_id,
+        # ISSUE-205: shared builder backfills response_plan / verification_result
+        # from EventContext (then context store) instead of leaving the
+        # disposition and verification chapters as silent placeholders.
+        report_input = await build_report_agent_input(
+            event_id,
             evidence_output=evidence_output,
             risk_assessment=risk_assessment,
+            event_context=ec,
+            context_store=self.context_store,
         )
 
         report: InvestigationReport | None = await self._execute_with_agent_retries(
