@@ -905,6 +905,8 @@ async def investigate_event(
                 )
                 await lease.release(event_id, owner_id)
             except InvestigationLeaseLostError:
+                # SuperAgent releases the HTTP-held lease in its own finally;
+                # do NOT transition to FAILED (ISSUE-182 / ISSUE-189).
                 logger.info(
                     "SuperAgent stopped — lease lost mid-run event=%s",
                     event_id,

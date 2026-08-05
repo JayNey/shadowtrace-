@@ -2019,7 +2019,7 @@ async def test_investigate_background_lease_lost_does_not_mark_failed(
 
     event = await event_service.get_event(event_id)
     assert event is not None
-    assert event.status is not EventStatus.FAILED
+    assert event.status is EventStatus.NEW
 
 
 @pytest.mark.asyncio
