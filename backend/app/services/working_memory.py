@@ -55,6 +55,7 @@ FIELD_OWNERSHIP: dict[str, str] = {
     # (ISSUE-204); WorkingMemory ownership label kept for journal identity.
     "report_generated": "WorkflowRuntimeService",
     "memory_output": "MemoryAgent",
+    "memory_output_early": "MemoryAgent",
     "disposition_commands": "DispositionSyncService",
     "disposition_receipts": "DispositionSyncService",
     "writeback_summary": "DispositionSyncService",
