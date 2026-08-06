@@ -314,6 +314,7 @@ describe("EventListPage", () => {
     await waitFor(() =>
       expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
         includeResponseExecution: false,
+        generateReport: false,
       }),
     );
     await waitFor(() => {
@@ -340,6 +341,7 @@ describe("EventListPage", () => {
     await waitFor(() =>
       expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
         includeResponseExecution: false,
+        generateReport: false,
       }),
     );
     // Warning hint should appear
@@ -463,6 +465,7 @@ describe("EventListPage", () => {
     await waitFor(() =>
       expect(mockTriggerInvestigation).toHaveBeenCalledWith("evt-1", {
         includeResponseExecution: true,
+        generateReport: false,
       }),
     );
   });

@@ -246,11 +246,19 @@ class _EventServiceLike(Protocol):
 
 
 def route_after_triage(state: InvestigationState) -> str:
-    """Mirror the locked TRIAGING gates without broadening them."""
+    """Mirror the locked TRIAGING gates without broadening them.
+
+    ISSUE-204: when ``generate_report`` is False, do not fast-path into
+    ``close_node`` (CLOSED still requires a report). Route to ``report_node``
+    so the skip path can persist ``report_generated=false`` and halt at
+    REPORTING.
+    """
     policy = DispositionPolicy(
         state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
     )
     if policy is DispositionPolicy.NOT_REQUIRED and state.get("need_investigation") is False:
+        if not state.get("generate_report", True):
+            return ROUTE_REPORT
         return ROUTE_CLOSE
     return ROUTE_INVESTIGATE
 
@@ -276,7 +284,14 @@ def route_after_risk(state: InvestigationState) -> str:
 
 
 def route_after_report(state: InvestigationState) -> str:
-    """End analysis at REPORTING for required policy; close when not required."""
+    """End analysis at REPORTING for required policy; close when not required.
+
+    ISSUE-204: REPORTING means the report phase is reachable, not that report
+    bytes exist. When ``generate_report`` is False, halt at REPORTING regardless
+    of disposition policy.
+    """
+    if not state.get("generate_report", True):
+        return ROUTE_HALT
     policy = DispositionPolicy(
         state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
     )
@@ -456,11 +471,13 @@ async def build_initial_investigation_state(
     *,
     context_store: EventContextStore,
     defer_response_execution: bool = True,
+    generate_report: bool = True,
 ) -> InvestigationState:
     """Build LangGraph initial state from persisted EventContext + event row."""
     context = await context_store.get_full_context(event_id)
     event = context.event
     policy = event.disposition_policy if event is not None else DispositionPolicy.NOT_REQUIRED
+    report_was_generated = context.report is not None or bool(context.report_generated)
     state: InvestigationState = {
         "event_id": event_id,
         "node_trace": [],
@@ -483,7 +500,8 @@ async def build_initial_investigation_state(
             if event is not None
             else WritebackReadiness.NOT_REQUIRED.value
         ),
-        "report_generated": context.report is not None,
+        "report_generated": report_was_generated,
+        "generate_report": generate_report,
         "needs_approval_wait": False,
         # ISSUE-566: initial HTTP investigate completes analysis at report;
         # response/approval/execute/verify resume via approval_engine hooks.
@@ -791,7 +809,8 @@ def build_investigation_graph(
             final_verdict = FinalVerdict.NONE.value
 
         report_generated = bool(state.get("report_generated"))
-        if not report_generated:
+        generate_report = bool(state.get("generate_report", True))
+        if not report_generated and generate_report:
             evidence = EvidenceOutput(
                 evidence_list=[],
                 conflicts=[],
@@ -825,6 +844,41 @@ def build_investigation_graph(
             )
             report = await report_agent.execute(report_input)
             report_generated = report is not None
+
+        # ISSUE-204: never attempt CLOSED without report bytes when the caller
+        # opted out of generation — halt at REPORTING instead of failing the gate.
+        if not report_generated and not generate_report:
+            store = services.get("context_store")
+            if store is not None:
+                try:
+                    await store.set(state["event_id"], "report_generated", False)
+                except Exception:
+                    logger.warning(
+                        "failed to persist report_generated=false event=%s",
+                        state["event_id"],
+                        exc_info=True,
+                    )
+            current_event_status = EventStatus(
+                state.get("event_status", EventStatus.TRIAGING.value)
+            )
+            if current_event_status is not EventStatus.REPORTING:
+                status = await _transition_status(
+                    services,
+                    state,
+                    EventStatus.REPORTING,
+                    reason="investigation:close_skipped_no_report",
+                )
+            else:
+                status = cast(InvestigationState, {})
+            return _patch_state(
+                _trace(NODE_CLOSE),
+                status,
+                {
+                    "report_generated": False,
+                    "halted": True,
+                    "final_verdict": final_verdict,
+                },
+            )
 
         # ISSUE-062 Blocker: escalated events arrive at close_node with
         # CONTAINED/FAILED status in the DB (set by ReplanHandler.escalate()).
@@ -1609,6 +1663,32 @@ def build_investigation_graph(
         )
 
     async def report_node(state: InvestigationState) -> InvestigationState:
+        if not state.get("generate_report", True):
+            store = services.get("context_store")
+            if store is not None:
+                try:
+                    await store.set(state["event_id"], "report_generated", False)
+                except Exception:
+                    logger.warning(
+                        "failed to persist report_generated=false event=%s",
+                        state["event_id"],
+                        exc_info=True,
+                    )
+            current = EventStatus(state.get("event_status", EventStatus.VERIFYING.value))
+            if current is not EventStatus.REPORTING:
+                status = await _transition_status(
+                    services,
+                    state,
+                    EventStatus.REPORTING,
+                    reason="investigation:report_skipped",
+                )
+            else:
+                status = cast(InvestigationState, {})
+            return _patch_state(
+                _trace(NODE_REPORT),
+                status,
+                {"report_generated": False},
+            )
         # ISSUE-205: single builder backfills response_plan + verification_result
         # (state → context_store); the prior hand-written verify-only injection
         # is retired so no parallel construction path remains.
@@ -1691,6 +1771,7 @@ def build_investigation_graph(
         route_after_triage,
         {
             ROUTE_CLOSE: NODE_CLOSE,
+            ROUTE_REPORT: NODE_REPORT,
             ROUTE_MANUAL_HOLD: NODE_MANUAL_HOLD,
             ROUTE_INVESTIGATE: NODE_PLANNER,
         },

@@ -1585,6 +1585,22 @@ async def test_investigate_returns_202(
     data = resp.json()
     assert data["task_id"] == event_id
     assert data["event_id"] == event_id
+    assert data.get("generate_report") is True
+
+
+@pytest.mark.asyncio
+async def test_investigate_echoes_generate_report_false(
+    client: TestClient,
+    event_service: EventService,
+) -> None:
+    event_id = await _create_test_event(event_service, title="Investigate generate_report false")
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+        json={"generate_report": False},
+    )
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["generate_report"] is False
 
 
 @pytest.mark.asyncio

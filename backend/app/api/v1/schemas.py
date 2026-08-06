@@ -90,6 +90,8 @@ class InvestigateRequest(_StrictRequest):
     # When true, continue past analysis into ResponseAgent / approval (ISSUE-077 e2e).
     # Default false keeps ISSUE-566 HTTP investigate analysis-complete at report.
     include_response_execution: bool = False
+    # ISSUE-204: API default True for backward compat; product UI/auto paths pass false.
+    generate_report: bool = True
 
 
 class ClassificationUpdateRequest(_StrictRequest):
@@ -226,6 +228,7 @@ class InvestigateResponse(BaseModel):
     task_id: str
     status: EventStatus
     include_response_execution: bool = False
+    generate_report: bool = True
     full_loop_available: bool = True
 
 

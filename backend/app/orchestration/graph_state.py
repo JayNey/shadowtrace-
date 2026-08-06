@@ -66,6 +66,8 @@ class InvestigationState(TypedDict, total=False):
     replan_count: int
     escalated: bool
     report_generated: bool
+    # ISSUE-204: when False, report_node skips ReportAgent and persists report_generated=false.
+    generate_report: bool
     needs_approval_wait: bool
     # ISSUE-566: initial HTTP investigate (via build_initial_investigation_state)
     # defers response/approval/execute/verify; analysis completes at report

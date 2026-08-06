@@ -118,6 +118,8 @@ def _base_state(**overrides: Any) -> InvestigationState:
         "disposition_only_intent": False,
         "report_generated": False,
         "needs_approval_wait": False,
+        "generate_report": True,
+        "defer_response_execution": False,
     }
     state.update(overrides)
     return state
@@ -595,6 +597,16 @@ class TestRouteAfterTriage:
     def test_not_required_no_investigation_closes(self) -> None:
         assert route_after_triage(_base_state(need_investigation=False)) == ROUTE_CLOSE
 
+    def test_not_required_no_investigation_routes_report_when_generate_report_false(
+        self,
+    ) -> None:
+        assert (
+            route_after_triage(
+                _base_state(need_investigation=False, generate_report=False)
+            )
+            == ROUTE_REPORT
+        )
+
     def test_pre_evidence_fp_does_not_close_at_triage(self) -> None:
         state = _base_state(
             false_positive_match={"recommendation": "close_as_fp", "phase": "pre_evidence"}
@@ -648,6 +660,7 @@ def test_remaining_route_truth_tables() -> None:
         == ROUTE_HALT
     )
     assert route_after_report(_base_state()) == ROUTE_CLOSE
+    assert route_after_report(_base_state(generate_report=False)) == ROUTE_HALT
     assert (
         route_after_approval(
             _base_state(execution_substate=ExecutionSubstate.WAITING_APPROVAL.value)

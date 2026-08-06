@@ -416,6 +416,7 @@ async def test_create_pending_intent_never_sets_include_response_execution(
         row = await session.get(orm.InvestigationIntent, intent_id)
         assert row is not None
         assert row.include_response_execution is False
+        assert row.generate_report is False
 
 
 @pytest.mark.asyncio
@@ -1587,6 +1588,7 @@ async def test_publish_forwards_include_response_execution_flag(
     assert published is True
     assert captured["kwargs"] == {
         "include_response_execution": True,
+        "generate_report": True,
         "intent_id": intent_id,
     }
 

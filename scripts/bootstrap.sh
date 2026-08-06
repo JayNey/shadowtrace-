@@ -205,7 +205,7 @@ for item in items:
     resp, _inv_data = api_call(
         "POST",
         f"/api/v1/events/{event_id}/investigate",
-        {},
+        {"generate_report": False},
     )
     if resp.status in (200, 202):
         print(f"  triggered investigation for {event_id} (type={item.get('event_type')})")

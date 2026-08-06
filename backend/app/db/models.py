@@ -1040,6 +1040,8 @@ class InvestigationIntent(Base):
     skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     include_response_execution: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # ISSUE-204: API default True for backward compat; auto/Celery intents set False.
+    generate_report: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         _TS, server_default=func.now(), onupdate=func.now(), nullable=False

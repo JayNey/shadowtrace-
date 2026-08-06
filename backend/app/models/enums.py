@@ -12,7 +12,13 @@ from enum import Enum, StrEnum
 
 
 class EventStatus(StrEnum):
-    """ShadowTrace internal investigation orchestration state (14 states)."""
+    """ShadowTrace internal investigation orchestration state (14 states).
+
+    ``REPORTING`` means the report phase is reachable (ISSUE-204 / ISSUE-036).
+    It does **not** imply report bytes already exist; when investigation skips
+    ReportAgent, callers must persist ``report_generated=false`` and guide
+    operators to ``POST /events/{id}/report`` before CLOSED.
+    """
 
     NEW = "new"
     TRIAGING = "triaging"

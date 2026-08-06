@@ -309,7 +309,7 @@ async def test_dispatch_investigation_omits_owner_id_when_none(
 
     task_id = await tasks.dispatch_investigation("evt-dispatch-no-owner")
     assert task_id
-    assert captured["kwargs"] == {"include_response_execution": False}
+    assert captured["kwargs"] == {"include_response_execution": False, "generate_report": True}
     assert "owner_id" not in captured["kwargs"]
     assert "lease_acquired" not in captured["kwargs"]
 
@@ -334,9 +334,35 @@ def test_publish_investigation_for_intent_forwards_include_response_flag(
     assert captured["args"] == ["evt-intent-include"]
     assert captured["kwargs"] == {
         "include_response_execution": True,
+        "generate_report": True,
         "intent_id": "iin-intent-include",
     }
     assert captured["task_id"] == "task-intent-include"
+
+
+def test_publish_investigation_for_intent_forwards_generate_report_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_apply_async(*_args: Any, **kwargs: Any) -> MagicMock:
+        captured.update(kwargs)
+        return MagicMock(id=kwargs["task_id"])
+
+    monkeypatch.setattr(tasks.run_investigation, "apply_async", _fake_apply_async)
+
+    tasks.publish_investigation_for_intent(
+        event_id="evt-intent-no-report",
+        task_id="task-intent-no-report",
+        intent_id="iin-intent-no-report",
+        include_response_execution=False,
+        generate_report=False,
+    )
+    assert captured["kwargs"] == {
+        "include_response_execution": False,
+        "generate_report": False,
+        "intent_id": "iin-intent-no-report",
+    }
 
 
 @pytest.mark.asyncio

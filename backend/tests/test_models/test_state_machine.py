@@ -293,10 +293,11 @@ def test_derive_case_label() -> None:
 
 
 def test_closed_gate_requires_report() -> None:
-    with pytest.raises(InvalidStateTransitionError, match="report"):
+    with pytest.raises(InvalidStateTransitionError, match="report") as exc:
         validate_closed_gate(
             _closed_ctx(report_exists=False, disposition_policy=DispositionPolicy.NOT_REQUIRED)
         )
+    assert exc.value.error_code == "closed_requires_report"
 
 
 def test_closed_gate_required_rejects_empty_applicable() -> None:

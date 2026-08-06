@@ -107,6 +107,7 @@ async def execute_investigation(
     event_id: str,
     *,
     include_response_execution: bool = False,
+    generate_report: bool = True,
     owner_id: str | None = None,
     lease_acquired: bool = False,
 ) -> dict[str, str]:
@@ -138,6 +139,7 @@ async def execute_investigation(
                 owner_id=owner_id,
                 lease_acquired=lease_acquired,
                 include_response_execution=include_response_execution,
+                generate_report=generate_report,
             )
         return {"status": "completed", "event_id": event_id}
     except InvestigationInProgressError:
@@ -166,6 +168,7 @@ async def dispatch_investigation(
     event_id: str,
     *,
     include_response_execution: bool = False,
+    generate_report: bool = True,
     owner_id: str | None = None,
     lease_acquired: bool = False,
 ) -> str:
@@ -179,6 +182,7 @@ async def dispatch_investigation(
     try:
         kwargs: dict[str, object] = {
             "include_response_execution": include_response_execution,
+            "generate_report": generate_report,
         }
         if owner_id is not None:
             kwargs["owner_id"] = owner_id
@@ -206,11 +210,15 @@ def publish_investigation_for_intent(
     task_id: str,
     intent_id: str,
     include_response_execution: bool = False,
+    generate_report: bool = True,
 ) -> None:
     """Publish a deterministic Celery task for a claimed investigation intent.
 
     ``include_response_execution`` is resolved by AutoResponsePolicyService at
     ENQUEUED commit time (#613); auto-investigate intent creation never sets it.
+
+    ``generate_report`` is stored on the intent row (ISSUE-204); auto paths
+    default False at intent creation.
 
     Raises broker connectivity errors to the caller; ingest paths must catch.
     """
@@ -218,6 +226,7 @@ def publish_investigation_for_intent(
         args=[event_id],
         kwargs={
             "include_response_execution": bool(include_response_execution),
+            "generate_report": bool(generate_report),
             "intent_id": intent_id,
         },
         task_id=task_id,
@@ -277,6 +286,7 @@ async def _run_investigation_body(
     event_id: str,
     *,
     include_response_execution: bool,
+    generate_report: bool = True,
     owner_id: str,
     redelivered: bool,
     lease_acquired: bool = False,
@@ -297,6 +307,7 @@ async def _run_investigation_body(
     return await execute_investigation(
         event_id,
         include_response_execution=include_response_execution,
+        generate_report=generate_report,
         owner_id=owner_id,
         lease_acquired=lease_acquired,
     )
@@ -315,6 +326,7 @@ def run_investigation(
     self: Any,
     event_id: str,
     include_response_execution: bool = False,
+    generate_report: bool = True,
     intent_id: str | None = None,
     owner_id: str | None = None,
     lease_acquired: bool = False,
@@ -357,6 +369,7 @@ def run_investigation(
                 _run_investigation_body(
                     event_id,
                     include_response_execution=bool(include_response_execution),
+                    generate_report=bool(generate_report),
                     owner_id=resolved_owner,
                     redelivered=redelivered,
                     lease_acquired=lease_acquired,

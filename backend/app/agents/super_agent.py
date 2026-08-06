@@ -331,6 +331,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         lease_acquired: bool = False,
         publish_lifecycle: bool = True,
         include_response_execution: bool = False,
+        generate_report: bool = True,
     ) -> None:
         """Run the full investigation graph for *event_id*.
 
@@ -346,6 +347,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         ``include_response_execution`` (ISSUE-077 / ISSUE-566): when False
         (default HTTP investigate), analysis completes at report and defers
         ResponseAgent. When True, continue into response / approval.
+
+        ``generate_report`` (ISSUE-204): when False, skip ReportAgent and persist
+        ``report_generated=false`` while still reaching REPORTING when applicable.
         """
         if self.planner_agent is None:
             raise RuntimeError("SuperAgent requires a PlannerAgent")
@@ -406,6 +410,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     event_id,
                     context_store=self.context_store,
                     defer_response_execution=not include_response_execution,
+                    generate_report=generate_report,
                 )
                 config = {"configurable": {"thread_id": event_id}}
                 await _run_orchestration_with_renewal_watch(

@@ -235,6 +235,7 @@ class AnalysisOnlyPipeline:
         *,
         raw_event_summary: str = "",
         hint_entities: Any | None = None,
+        generate_report: bool = True,
     ) -> AnalysisOnlyPipelineResult:
         """Execute the analysis-only pipeline for *event_id*.
 
@@ -250,6 +251,7 @@ class AnalysisOnlyPipeline:
                 event_id,
                 raw_event_summary=raw_event_summary,
                 hint_entities=hint_entities,
+                generate_report=generate_report,
             )
         finally:
             self._reset_convergence_guard(event_id)
@@ -278,6 +280,7 @@ class AnalysisOnlyPipeline:
         *,
         raw_event_summary: str = "",
         hint_entities: Any | None = None,
+        generate_report: bool = True,
     ) -> AnalysisOnlyPipelineResult:
         """Internal pipeline stages (``run()`` owns guard reset in ``finally``)."""
         assert_analysis_only_mode(self._settings)
@@ -338,7 +341,12 @@ class AnalysisOnlyPipeline:
             and self._state_machine is not None
             and hasattr(event, "title")
         ):
-            return await self._short_circuit_close(event_id, event, triage_result)
+            return await self._short_circuit_close(
+                event_id,
+                event,
+                triage_result,
+                generate_report=generate_report,
+            )
 
         await self._transition(
             event_id,
@@ -431,9 +439,33 @@ class AnalysisOnlyPipeline:
         await self._transition(
             event_id,
             EventStatus.REPORTING,
-            reason="analysis_pipeline:report_generate",
+            reason=(
+                "analysis_pipeline:report_generate"
+                if generate_report
+                else "analysis_pipeline:analysis_complete_no_report"
+            ),
         )
-        report = await self._run_report(event_id, evidence_output, risk_assessment)
+        report: InvestigationReport | None = None
+        if generate_report:
+            report = await self._run_report(event_id, evidence_output, risk_assessment)
+        else:
+            await self._persist_report_skipped(event_id)
+
+        if not generate_report:
+            await self._persist_analysis_only_complete(event_id)
+            return AnalysisOnlyPipelineResult(
+                event_id=event_id,
+                triage_result=triage_result,
+                evidence_output=evidence_output,
+                rag_output=rag_output,
+                rag_degraded=rag_degraded,
+                risk_assessment=risk_assessment,
+                report=None,
+                final_verdict=final_verdict,
+                analysis_only_complete=True,
+                status=EventStatus.REPORTING,
+                disposition_policy=disposition_policy.value,
+            )
 
         if self._state_machine is not None and self._event_service is not None:
             event = await self._event_service.get_event(event_id)
@@ -671,6 +703,18 @@ class AnalysisOnlyPipeline:
             return fp_match
         return None
 
+    async def _persist_report_skipped(self, event_id: str) -> None:
+        if self._context_store is None:
+            return
+        try:
+            await self._context_store.set(event_id, "report_generated", False)
+        except Exception:
+            logger.warning(
+                "Failed to persist report_generated=false for event=%s",
+                event_id,
+                exc_info=True,
+            )
+
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
         if self._context_store is not None:
             try:
@@ -701,11 +745,14 @@ class AnalysisOnlyPipeline:
         event_id: str,
         event: Any,
         triage_result: TriageResult,
+        *,
+        generate_report: bool = True,
     ) -> AnalysisOnlyPipelineResult:
         logger.info(
-            "AnalysisOnlyPipeline: short-circuit close event=%s severity=%s",
+            "AnalysisOnlyPipeline: short-circuit close event=%s severity=%s generate_report=%s",
             event_id,
             triage_result.severity.value,
+            generate_report,
         )
 
         placeholder_evidence = EvidenceOutput(
@@ -726,9 +773,40 @@ class AnalysisOnlyPipeline:
             scoring_mode=ScoringMode.RULE_ONLY,
         )
 
-        report = await self._run_report(event_id, placeholder_evidence, placeholder_risk)
-
         fp_match = await self._read_false_positive_match(event_id)
+
+        # ISSUE-204: optional report — skip ReportAgent and stay at REPORTING.
+        if not generate_report:
+            await self._persist_report_skipped(event_id)
+            await self._transition(
+                event_id,
+                EventStatus.REPORTING,
+                context=TransitionContext(
+                    need_investigation=False,
+                    recommendation="low_risk_no_investigation",
+                ),
+                reason=build_fp_close_reason(
+                    fp_match,
+                    default="analysis_pipeline:short_circuit_no_report",
+                ),
+            )
+            await self._persist_analysis_only_complete(event_id)
+            return AnalysisOnlyPipelineResult(
+                event_id=event_id,
+                triage_result=triage_result,
+                evidence_output=placeholder_evidence,
+                rag_output=None,
+                rag_degraded=False,
+                risk_assessment=placeholder_risk,
+                report=None,
+                final_verdict=FinalVerdict.NONE,
+                analysis_only_complete=True,
+                status=EventStatus.REPORTING,
+                disposition_policy="not_required",
+                short_circuit=True,
+            )
+
+        report = await self._run_report(event_id, placeholder_evidence, placeholder_risk)
 
         ctx = TransitionContext(
             need_investigation=False,

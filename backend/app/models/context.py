@@ -66,6 +66,8 @@ class EventContext(BaseModel):
     rollback_results: list[dict[str, Any]] = Field(default_factory=list)
     impact_assessments: list[ImpactAssessment] = Field(default_factory=list)
     report: InvestigationReport | None = None
+    # ISSUE-204: explicit when analysis completes without ReportAgent (optional report).
+    report_generated: bool = False
     memory_output: dict[str, Any] | None = None
 
     # --- external writeback family ---

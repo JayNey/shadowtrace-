@@ -600,6 +600,14 @@ def test_investigate_request_defaults_defer_response_execution() -> None:
     req = s.InvestigateRequest()
     assert req.force_replan is False
     assert req.include_response_execution is False
+    assert req.generate_report is True
+
+
+def test_investigate_request_can_opt_out_of_report_generation() -> None:
+    req = s.InvestigateRequest.model_validate(
+        {"force_replan": False, "include_response_execution": False, "generate_report": False}
+    )
+    assert req.generate_report is False
 
 
 def test_investigate_request_can_opt_into_response_execution() -> None:
@@ -631,9 +639,11 @@ def test_investigate_response_echoes_include_response_execution() -> None:
         task_id="evt-test",
         status=EventStatus.NEW,
         include_response_execution=True,
+        generate_report=False,
         full_loop_available=True,
     )
     assert resp.include_response_execution is True
+    assert resp.generate_report is False
     assert resp.full_loop_available is True
 
 

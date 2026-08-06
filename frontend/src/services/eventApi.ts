@@ -80,17 +80,19 @@ export function getEventEvidence(eventId: string) {
 
 export function triggerInvestigation(
   eventId: string,
-  options?: { includeResponseExecution?: boolean },
+  options?: { includeResponseExecution?: boolean; generateReport?: boolean },
 ) {
   return apiClient.post<{
     event_id: string;
     status: string;
     include_response_execution?: boolean;
+    generate_report?: boolean;
     full_loop_available?: boolean;
   }>(
     `/events/${eventId}/investigate`,
     {
       include_response_execution: options?.includeResponseExecution ?? false,
+      generate_report: options?.generateReport ?? false,
     },
     { skipGlobalErrorToast: true },
   );

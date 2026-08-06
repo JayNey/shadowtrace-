@@ -69,6 +69,14 @@ def _analysis_only_complete_from_snapshot(snapshot: dict[str, Any] | None) -> bo
     return bool(snapshot.get("analysis_only_complete"))
 
 
+def _report_generated_from_snapshot(snapshot: dict[str, Any] | None) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("report") is not None:
+        return True
+    return bool(snapshot.get("report_generated"))
+
+
 def derive_investigation_guidance(
     *,
     status: EventStatus,
@@ -78,6 +86,7 @@ def derive_investigation_guidance(
 ) -> InvestigationGuidance:
     """Derive operator-facing phase hints from authoritative event + context."""
     analysis_only_complete = _analysis_only_complete_from_snapshot(context_snapshot)
+    report_generated = _report_generated_from_snapshot(context_snapshot)
     execution_substate = _execution_substate_from_snapshot(context_snapshot)
     loop_available = full_loop_available(orchestration_mode)
 
@@ -97,6 +106,33 @@ def derive_investigation_guidance(
             response_phase_state=ResponsePhaseState.ANALYSIS_IN_PROGRESS,
             next_recommended_action=NextRecommendedAction.NONE,
             full_loop_available=loop_available,
+        )
+
+    if status is EventStatus.REPORTING and not report_generated:
+        # ISSUE-204: surface skipped report even when analysis_only_complete is set.
+        next_action = (
+            NextRecommendedAction.CLOSE
+            if analysis_only_complete
+            and disposition_policy is DispositionPolicy.NOT_REQUIRED
+            else NextRecommendedAction.NONE
+        )
+        if analysis_only_complete:
+            message = (
+                "分析完成·报告未生成。"
+                "本事件已完成仅分析，无法从 REPORTING 补发处置方案。"
+                "对新事件请在发起调查前选择「分析并生成处置方案」。"
+            )
+            if not loop_available:
+                message += "（当前部署 ORCHESTRATION_MODE=analysis_only，完整处置链路不可用。）"
+        else:
+            message = "分析完成·报告未生成"
+        return InvestigationGuidance(
+            analysis_only_complete=analysis_only_complete,
+            execution_substate=execution_substate,
+            response_phase_state=ResponsePhaseState.ANALYSIS_COMPLETE_DEFERRED,
+            next_recommended_action=next_action,
+            full_loop_available=loop_available,
+            phase_message=message,
         )
 
     if status is EventStatus.REPORTING and analysis_only_complete:

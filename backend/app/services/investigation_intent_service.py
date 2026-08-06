@@ -95,6 +95,7 @@ class _EnqueuedPublishTarget(NamedTuple):
     task_id: str
     intent_id: str
     include_response_execution: bool
+    generate_report: bool
 
 
 class InvestigationIntentService:
@@ -163,6 +164,7 @@ class InvestigationIntentService:
             revision=1,
             attempt=0,
             include_response_execution=False,
+            generate_report=False,
         )
         session.add(row)
         session.add(
@@ -624,6 +626,7 @@ class InvestigationIntentService:
                     task_id,
                     row.intent_id,
                     include_response,
+                    bool(row.generate_report),
                 )
 
     async def _revert_enqueued_after_publish_failure(
@@ -680,6 +683,7 @@ class InvestigationIntentService:
                 task_id=target.task_id,
                 intent_id=target.intent_id,
                 include_response_execution=target.include_response_execution,
+                generate_report=target.generate_report,
             )
         except DependencyUnavailableError as exc:
             await delete_task_metadata(target.task_id)

@@ -6689,6 +6689,11 @@
             "type": "boolean",
             "title": "Include Response Execution",
             "default": false
+          },
+          "generate_report": {
+            "type": "boolean",
+            "title": "Generate Report",
+            "default": true
           }
         },
         "additionalProperties": false,
@@ -6712,6 +6717,11 @@
             "type": "boolean",
             "title": "Include Response Execution",
             "default": false
+          },
+          "generate_report": {
+            "type": "boolean",
+            "title": "Generate Report",
+            "default": true
           },
           "full_loop_available": {
             "type": "boolean",

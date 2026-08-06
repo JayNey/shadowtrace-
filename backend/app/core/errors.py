@@ -77,6 +77,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "internal_error": ErrorCategory.SYSTEM,
     # State machine
     "invalid_state_transition": ErrorCategory.PERMANENT,
+    "closed_requires_report": ErrorCategory.PERMANENT,
     "invalid_verdict_status_combination": ErrorCategory.PERMANENT,
     # Tools / LLM / budget / guardrail
     "tool_timeout": ErrorCategory.TOOL,

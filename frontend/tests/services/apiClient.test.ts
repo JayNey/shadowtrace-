@@ -110,7 +110,7 @@ describe("eventApi", () => {
     await eventApi.triggerInvestigation("evt-1", { includeResponseExecution: true });
     expect(mockPost).toHaveBeenCalledWith(
       "/events/evt-1/investigate",
-      { include_response_execution: true },
+      { include_response_execution: true, generate_report: false },
       { skipGlobalErrorToast: true },
     );
   });

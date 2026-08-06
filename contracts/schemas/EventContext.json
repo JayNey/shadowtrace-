@@ -2036,6 +2036,11 @@
       ],
       "default": null
     },
+    "report_generated": {
+      "default": false,
+      "title": "Report Generated",
+      "type": "boolean"
+    },
     "memory_output": {
       "anyOf": [
         {

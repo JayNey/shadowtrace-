@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Card,
+  Checkbox,
   Col,
   Form,
   Modal,
@@ -95,6 +96,7 @@ export default function EventListPage() {
     null,
   );
   const [includeResponseExecution, setIncludeResponseExecution] = useState(false);
+  const [generateReport, setGenerateReport] = useState(false);
 
   // Keep latest items in a ref so the socket handler (registered once) can
   // mutate without stale-closure issues.
@@ -254,11 +256,12 @@ export default function EventListPage() {
   }, []);
 
   const runInvestigation = useCallback(
-    async (eventId: string, withResponse: boolean) => {
+    async (eventId: string, withResponse: boolean, withReport: boolean) => {
       setTriggeringIds((prev) => new Set(prev).add(eventId));
       try {
         const res = await triggerInvestigation(eventId, {
           includeResponseExecution: withResponse,
+          generateReport: withReport,
         });
         const newStatus = (res.data?.status as EventStatus) ?? "triaging";
         setItems((prev) =>
@@ -305,6 +308,7 @@ export default function EventListPage() {
     (eventId: string) => {
       setPendingInvestigateEventId(eventId);
       setIncludeResponseExecution(false);
+      setGenerateReport(false);
       setInvestigateModalOpen(true);
     },
     [],
@@ -315,8 +319,8 @@ export default function EventListPage() {
     if (!eventId) return;
     setInvestigateModalOpen(false);
     setPendingInvestigateEventId(null);
-    await runInvestigation(eventId, includeResponseExecution);
-  }, [pendingInvestigateEventId, includeResponseExecution, runInvestigation]);
+    await runInvestigation(eventId, includeResponseExecution, generateReport);
+  }, [pendingInvestigateEventId, includeResponseExecution, generateReport, runInvestigation]);
 
   const handleRowClick = useCallback(
     (eventId: string) => {
@@ -426,7 +430,7 @@ export default function EventListPage() {
         data-testid="investigate-mode-modal"
       >
         <Typography.Paragraph type="secondary">
-          默认「仅分析」会生成报告并在 REPORTING 停止；「分析并生成处置方案」会继续进入
+          默认「仅分析」不自动生成报告（可在下方勾选）；「分析并生成处置方案」会继续进入
           ResponseAgent 与审批流程。
         </Typography.Paragraph>
         <Radio.Group
@@ -447,6 +451,14 @@ export default function EventListPage() {
             </Radio>
           </Space>
         </Radio.Group>
+        <Checkbox
+          checked={generateReport}
+          onChange={(e) => setGenerateReport(e.target.checked)}
+          style={{ marginTop: 12 }}
+          data-testid="investigate-generate-report"
+        >
+          同时生成分析报告
+        </Checkbox>
         {investigationHealth?.approval_policy_version ? (
           <Typography.Paragraph
             type="secondary"

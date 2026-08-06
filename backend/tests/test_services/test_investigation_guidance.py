@@ -35,6 +35,35 @@ def test_workflow_path_from_request() -> None:
     assert workflow_path_from_request(include_response_execution=True) == "full_loop"
 
 
+def test_reporting_without_report_shows_analysis_complete_message() -> None:
+    guidance = derive_investigation_guidance(
+        status=EventStatus.REPORTING,
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+        context_snapshot={"report_generated": False},
+        orchestration_mode="graph",
+    )
+    assert guidance.phase_message == "分析完成·报告未生成"
+    assert guidance.response_phase_state is ResponsePhaseState.ANALYSIS_COMPLETE_DEFERRED
+
+
+def test_reporting_analysis_only_skipped_report_includes_未生成() -> None:
+    """ISSUE-204: analysis_only_complete must not hide the skipped-report message."""
+    guidance = derive_investigation_guidance(
+        status=EventStatus.REPORTING,
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+        context_snapshot={
+            "report_generated": False,
+            "analysis_only_complete": True,
+        },
+        orchestration_mode="analysis_only",
+    )
+    assert guidance.phase_message is not None
+    assert "分析完成·报告未生成" in guidance.phase_message
+    assert "生成中" not in guidance.phase_message
+    assert guidance.analysis_only_complete is True
+    assert guidance.next_recommended_action is NextRecommendedAction.CLOSE
+
+
 def test_reporting_analysis_only_deferred_no_start_response_cta() -> None:
     guidance = derive_investigation_guidance(
         status=EventStatus.REPORTING,

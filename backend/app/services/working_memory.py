@@ -51,6 +51,9 @@ FIELD_OWNERSHIP: dict[str, str] = {
     "rollback_results": "RollbackService",
     "impact_assessments": "ImpactAssessmentService",
     "report": "ReportAgent",
+    # Written via EventContextStore by report_node / AnalysisOnlyPipeline skip paths
+    # (ISSUE-204); WorkingMemory ownership label kept for journal identity.
+    "report_generated": "WorkflowRuntimeService",
     "memory_output": "MemoryAgent",
     "disposition_commands": "DispositionSyncService",
     "disposition_receipts": "DispositionSyncService",

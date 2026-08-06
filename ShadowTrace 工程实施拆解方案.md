@@ -1887,6 +1887,8 @@ P0
 目标：
 实现报告 Agent：从 EventContext 汇总全部研判数据生成 15 章节 Markdown 报告与结构化 JSON，LLM 生成为主、Jinja2 模板降级，持久化到 report 表。
 
+语义补丁（ISSUE-204）：`EventStatus.REPORTING` 表示报告阶段可达，不蕴含报告字节已存在；跳过 ReportAgent 时须持久化 `report_generated=false`，guidance 显示「分析完成·报告未生成」（禁止「报告生成中」）。
+
 前置依赖：
 ISSUE-018、ISSUE-027、ISSUE-028、ISSUE-035
 

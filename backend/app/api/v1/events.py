@@ -144,6 +144,7 @@ async def _sync_report_context_and_bus(
 
     try:
         await _get_context_store().set(event_id, "report", report.model_dump(mode="json"))
+        await _get_context_store().set(event_id, "report_generated", True)
     except Exception:
         logger.warning(
             "Failed to write report to EventContext for event=%s",
@@ -773,6 +774,7 @@ async def _schedule_investigation(
     background: BackgroundTasks,
     state_machine: StateMachineService,
     include_response: bool = False,
+    generate_report: bool = True,
 ) -> str:
     """Acquire lease and schedule analysis (shared by investigate + reinvestigate)."""
     settings = get_settings()
@@ -818,7 +820,7 @@ async def _schedule_investigation(
                 pipeline = await get_pipeline()
                 projection = EvidenceProjection(_get_session_factory())
                 with bind_evidence_projection(projection):
-                    await pipeline.run(event_id)
+                    await pipeline.run(event_id, generate_report=generate_report)
                 await _record_workflow_path()
             except (InvestigationInProgressError, InvalidStateTransitionError) as exc:
                 logger.warning(
@@ -856,6 +858,7 @@ async def _schedule_investigation(
             return await dispatch_investigation(
                 event_id,
                 include_response_execution=include_response,
+                generate_report=generate_report,
                 owner_id=owner_id,
                 lease_acquired=True,
             )
@@ -882,6 +885,7 @@ async def _schedule_investigation(
                     owner_id=owner_id,
                     lease_acquired=True,
                     include_response_execution=include_response,
+                    generate_report=generate_report,
                 )
             await _record_workflow_path()
         except InvestigationInProgressError:
@@ -985,6 +989,7 @@ async def update_event_classification(
                 background=background,
                 state_machine=state_machine,
                 include_response=False,
+                generate_report=False,
             )
             reinvestigate_started = True
             side_effects.extend(
@@ -1037,6 +1042,7 @@ async def investigate_event(
 
     settings = get_settings()
     include_response = bool(body.include_response_execution) if body else False
+    generate_report = body.generate_report if body is not None else True
 
     if event.status is not EventStatus.NEW:
         raise InvalidStateTransitionError(
@@ -1051,6 +1057,7 @@ async def investigate_event(
         background=background,
         state_machine=state_machine,
         include_response=include_response,
+        generate_report=generate_report,
     )
 
     return s.InvestigateResponse(
@@ -1058,6 +1065,7 @@ async def investigate_event(
         task_id=task_id,
         status=event.status,
         include_response_execution=include_response,
+        generate_report=generate_report,
         full_loop_available=full_loop_available(settings.orchestration_mode),
     )
 
