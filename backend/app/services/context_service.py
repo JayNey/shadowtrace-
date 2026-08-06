@@ -32,7 +32,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.security_event import SecurityEvent
-from app.services.classification import derive_classification_source
+from app.services.classification_source import derive_classification_source
 
 logger = logging.getLogger(__name__)
 

@@ -46,6 +46,7 @@ from app.models.report import InvestigationReport, ReportSection
 # so EventContext.event can be typed without the models layer depending on the
 # API layer; re-exported here for backward-compatible ``from
 # app.api.v1.schemas import EventSummary`` call sites.
+# ``classification_source`` on list/detail is a derived GET field (ISSUE-209/211).
 from app.models.security_event import EventListItem as EventListItem
 from app.models.security_event import EventSummary as EventSummary
 from app.models.security_event import SecurityEvent

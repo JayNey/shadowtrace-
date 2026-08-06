@@ -494,6 +494,52 @@ class TestTriageAgentBasic:
         assert "event_type_from_heuristic" not in (stored.get("degradation_reasons") or [])
 
     @pytest.mark.asyncio
+    async def test_human_override_falls_back_to_orm_snapshot_when_wm_missing(self):
+        """ISSUE-211: WM miss must not drop durable human PATCH (snapshot fallback)."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from app.services.classification_source import OrmEventTypeRewriteOutcome
+
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        # No classification_override in WM — simulates failed context write after PATCH.
+        event_service = AsyncMock()
+        event_service.get_event = AsyncMock(
+            return_value=SimpleNamespace(
+                event_id="evt-211-human-snap",
+                event_type=EventType.INSIDER_THREAT,
+                event_context_snapshot={
+                    "classification_override": {
+                        "source": "human",
+                        "event_type": "insider_threat",
+                        "reason": "analyst override",
+                        "operator": "analyst-1",
+                    }
+                },
+            )
+        )
+        event_service.rewrite_event_type_from_triage = AsyncMock(
+            return_value=OrmEventTypeRewriteOutcome.NOOP
+        )
+        agent = TriageAgent(working_memory=wm, event_service=event_service)
+        result = await agent._run(
+            _make_input(
+                "evt-211-human-snap",
+                raw_event_summary=(
+                    "User zhangsan uploaded confidential data to 203.0.113.88 (evil.example.com)"
+                ),
+            )
+        )
+        assert result.event_type == EventType.INSIDER_THREAT
+        assert "human classification override" in (result.decision_summary or "")
+        event_service.get_event.assert_awaited()
+        event_service.rewrite_event_type_from_triage.assert_awaited_once()
+        assert (
+            event_service.rewrite_event_type_from_triage.await_args.kwargs["event_type"]
+            is EventType.INSIDER_THREAT
+        )
+
+    @pytest.mark.asyncio
     async def test_single_login_failure_is_low(self):
         """Single login failure → account_anomaly → low severity."""
         wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
@@ -727,6 +773,82 @@ class TestTriageAgentLLM:
             "data_exfiltration",
             "TriageAgent",
         ) in degraded_flags.calls
+
+    @pytest.mark.asyncio
+    async def test_triage_calls_orm_rewrite_after_successful_write(self, monkeypatch):
+        """ISSUE-211: after durable triage_result, rewrite ORM list event_type."""
+        from unittest.mock import AsyncMock
+
+        from app.core.config import get_settings
+
+        monkeypatch.setenv("TRIAGE_LLM_EVENT_TYPE_FALLBACK", "true")
+        get_settings.cache_clear()
+
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+        from app.services.classification_source import OrmEventTypeRewriteOutcome
+
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.DATA_EXFILTRATION,
+                entities=EntitySet(
+                    accounts=[AccountEntity(entity_id="acct-1", username="alice")],
+                ),
+                decision_summary="LLM classified exfil",
+            ),
+            model_name="mock",
+        )
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        await wm.write(
+            "evt-211-rewrite",
+            "source_snapshot",
+            {"alert_type": "other"},
+        )
+        event_service = AsyncMock()
+        event_service.rewrite_event_type_from_triage = AsyncMock(
+            return_value=OrmEventTypeRewriteOutcome.APPLIED
+        )
+        agent = TriageAgent(
+            llm_client=_MockLLMClient(response=llm_response),
+            working_memory=wm,
+            degraded_flags=_MockDegradedFlags(),
+            event_service=event_service,
+        )
+        result = await agent._run(
+            _make_input(
+                "evt-211-rewrite",
+                raw_event_summary="ambiguous correlated alerts during maintenance window",
+            )
+        )
+        assert result.event_type is EventType.DATA_EXFILTRATION
+        assert "triage_result" in wm._store
+        event_service.rewrite_event_type_from_triage.assert_awaited_once()
+        call_kwargs = event_service.rewrite_event_type_from_triage.await_args
+        assert call_kwargs.args[0] == "evt-211-rewrite"
+        assert call_kwargs.kwargs["event_type"] is EventType.DATA_EXFILTRATION
+        assert call_kwargs.kwargs["operator"] == "TriageAgent"
+        get_settings.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_triage_skips_orm_rewrite_when_context_write_fails(self):
+        """ISSUE-211: do not rewrite ORM if triage_result was not durably written."""
+        from unittest.mock import AsyncMock
+
+        wm = _FailingWriteMockWM(
+            writer_name="TriageAgent",
+            fail_key="triage_result",
+            fail_error=DependencyUnavailableError("Redis down"),
+        )
+        event_service = AsyncMock()
+        event_service.rewrite_event_type_from_triage = AsyncMock()
+        agent = TriageAgent(
+            working_memory=wm,
+            event_service=event_service,
+        )
+        result = await agent._run(_make_input("evt-211-no-rewrite"))
+        assert result.degraded is True
+        event_service.rewrite_event_type_from_triage.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_llm_event_type_fallback_disabled_by_default(self, monkeypatch):

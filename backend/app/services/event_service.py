@@ -67,7 +67,17 @@ from app.services.classification import (
     TRIAGE_RESULT_KEY,
     apply_event_type_to_triage_payload,
     build_human_classification_override,
+)
+from app.services.classification_source import (
+    CLASSIFICATION_LOCKED_STATUSES,
+    EVENT_TYPE_ORM_REWRITE_FAILED_FLAG,
+    EVENT_TYPE_ORM_REWRITE_SKIPPED_FLAG,
+    ORM_REWRITE_SKIP_HINT,
+    ORM_REWRITE_SKIP_HUMAN_HINT,
+    OrmEventTypeRewriteOutcome,
     derive_classification_source,
+    should_skip_orm_event_type_rewrite,
+    snapshot_has_human_classification_override,
 )
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.entity_validator import validate_entity_set
@@ -87,13 +97,8 @@ LINK_ROLE_PROVISIONAL = "provisional"
 PROMOTION_NONE = "none"
 PROMOTION_PROMOTED = "promoted"
 
-# ISSUE-209: classification PATCH is locked during active response/verify.
-_CLASSIFICATION_LOCKED_STATUSES: frozenset[EventStatus] = frozenset(
-    {
-        EventStatus.EXECUTING_RESPONSE,
-        EventStatus.VERIFYING,
-    }
-)
+# ISSUE-209/211: classification PATCH locked; machine ORM rewrite skips same set.
+_CLASSIFICATION_LOCKED_STATUSES = CLASSIFICATION_LOCKED_STATUSES
 
 _SOCKET_VERDICT: dict[FinalVerdict, str] = {
     FinalVerdict.NONE: "inconclusive",
@@ -1192,6 +1197,199 @@ class EventService:
                 },
             )
         return result
+
+    async def rewrite_event_type_from_triage(
+        self,
+        event_id: str,
+        *,
+        event_type: EventType | str,
+        operator: str = "TriageAgent",
+    ) -> OrmEventTypeRewriteOutcome:
+        """Rewrite ORM ``event_type`` to match triage_result (ISSUE-211).
+
+        Called after triage successfully persists ``triage_result``. Never raises
+        to the investigation main path: lock / gate / missing / I/O failures
+        return an outcome and record audit + degraded when appropriate.
+        """
+        settings = get_settings()
+        if not bool(settings.triage_rewrite_event_type):
+            return OrmEventTypeRewriteOutcome.SKIPPED_GATE
+
+        if isinstance(event_type, EventType):
+            new_type = event_type.value
+        else:
+            try:
+                new_type = EventType(str(event_type)).value
+            except ValueError:
+                logger.warning(
+                    "triage ORM rewrite skipped: illegal event_type=%r event_id=%s",
+                    event_type,
+                    event_id,
+                )
+                return OrmEventTypeRewriteOutcome.FAILED
+
+        try:
+            previous_type: str | None = None
+            current_status: EventStatus | None = None
+            result: SecurityEvent | None = None
+            summary: EventSummary | None = None
+            applied = False
+            skipped_human = False
+
+            async with self._session_factory() as session:
+                async with session.begin():
+                    row = await session.get(
+                        orm.SecurityEvent,
+                        event_id,
+                        with_for_update=True,
+                    )
+                    if row is None:
+                        return OrmEventTypeRewriteOutcome.SKIPPED_MISSING
+
+                    current_status = EventStatus(row.status)
+                    previous_type = str(row.event_type)
+                    snapshot = (
+                        dict(row.event_context_snapshot)
+                        if isinstance(row.event_context_snapshot, dict)
+                        else None
+                    )
+
+                    if should_skip_orm_event_type_rewrite(current_status):
+                        session.add(
+                            orm.EventAuditLog(
+                                event_id=event_id,
+                                from_status=row.status,
+                                to_status=row.status,
+                                operator=operator,
+                                reason=(
+                                    f"event_type_orm_rewrite_skipped:"
+                                    f"{previous_type}->{new_type}: {ORM_REWRITE_SKIP_HINT}"
+                                ),
+                            )
+                        )
+                        await session.flush()
+                    elif (
+                        snapshot_has_human_classification_override(snapshot)
+                        and previous_type != new_type
+                    ):
+                        # Never clobber ISSUE-209 human PATCH on the list column.
+                        skipped_human = True
+                        session.add(
+                            orm.EventAuditLog(
+                                event_id=event_id,
+                                from_status=row.status,
+                                to_status=row.status,
+                                operator=operator,
+                                reason=(
+                                    f"event_type_orm_rewrite_skipped_human:"
+                                    f"{previous_type}->{new_type}: "
+                                    f"{ORM_REWRITE_SKIP_HUMAN_HINT}"
+                                ),
+                            )
+                        )
+                        await session.flush()
+                    elif previous_type == new_type:
+                        return OrmEventTypeRewriteOutcome.NOOP
+                    else:
+                        row.event_type = new_type
+                        row.row_version = int(row.row_version or 1) + 1
+                        session.add(
+                            orm.EventAuditLog(
+                                event_id=event_id,
+                                from_status=row.status,
+                                to_status=row.status,
+                                operator=operator,
+                                reason=(
+                                    f"event_type_orm_rewrite:{previous_type}->{new_type}"
+                                ),
+                            )
+                        )
+                        await session.flush()
+                        await session.refresh(row)
+                        result = _security_event_from_row(row)
+                        summary = event_summary_from_security_event(row)
+                        applied = True
+
+            if current_status is not None and should_skip_orm_event_type_rewrite(
+                current_status
+            ):
+                try:
+                    await self._degraded.set_flag(
+                        event_id,
+                        EVENT_TYPE_ORM_REWRITE_SKIPPED_FLAG,
+                        ORM_REWRITE_SKIP_HINT,
+                        writer="EventService",
+                    )
+                except Exception:
+                    logger.warning(
+                        "failed to set %s for event_id=%s",
+                        EVENT_TYPE_ORM_REWRITE_SKIPPED_FLAG,
+                        event_id,
+                        exc_info=True,
+                    )
+                return OrmEventTypeRewriteOutcome.SKIPPED_LOCKED
+
+            if skipped_human:
+                return OrmEventTypeRewriteOutcome.SKIPPED_HUMAN
+
+            if applied and result is not None and summary is not None:
+                await self._sync_event_summary_after_mutation(
+                    event_id,
+                    committed_version=result.row_version,
+                    summary=summary,
+                )
+                if self._bus is not None:
+                    await self._bus.publish_event(
+                        event_id,
+                        "event_type_rewritten",
+                        {
+                            "event_type": new_type,
+                            "previous_event_type": previous_type,
+                            "operator": operator,
+                        },
+                    )
+                return OrmEventTypeRewriteOutcome.APPLIED
+
+            return OrmEventTypeRewriteOutcome.NOOP
+        except Exception:
+            logger.warning(
+                "triage ORM event_type rewrite failed event_id=%s",
+                event_id,
+                exc_info=True,
+            )
+            try:
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        session.add(
+                            orm.EventAuditLog(
+                                event_id=event_id,
+                                from_status=None,
+                                to_status=None,
+                                operator=operator,
+                                reason=f"event_type_orm_rewrite_failed:{new_type}",
+                            )
+                        )
+            except Exception:
+                logger.warning(
+                    "audit write for ORM rewrite failure also failed event_id=%s",
+                    event_id,
+                    exc_info=True,
+                )
+            try:
+                await self._degraded.set_flag(
+                    event_id,
+                    EVENT_TYPE_ORM_REWRITE_FAILED_FLAG,
+                    True,
+                    writer="EventService",
+                )
+            except Exception:
+                logger.warning(
+                    "failed to set %s for event_id=%s",
+                    EVENT_TYPE_ORM_REWRITE_FAILED_FLAG,
+                    event_id,
+                    exc_info=True,
+                )
+            return OrmEventTypeRewriteOutcome.FAILED
 
     async def upsert_report(self, report: InvestigationReport) -> InvestigationReport:
         """Idempotent upsert of InvestigationReport by stable ``report_id`` (ISSUE-036)."""

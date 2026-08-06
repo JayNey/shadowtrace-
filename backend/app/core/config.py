@@ -81,6 +81,15 @@ class Settings(BaseSettings):
             "both resolve to OTHER (ISSUE-197)."
         ),
     )
+    triage_rewrite_event_type: bool = Field(
+        default=True,
+        alias="TRIAGE_REWRITE_EVENT_TYPE",
+        description=(
+            "When true, after triage persists triage_result, rewrite "
+            "SecurityEvent.event_type so list/detail match (ISSUE-211). "
+            "Skipped during EXECUTING_RESPONSE/VERIFYING without 409."
+        ),
+    )
     llm_audit_window_minutes: int = Field(default=60, alias="LLM_AUDIT_WINDOW_MINUTES")
     event_chat_enabled: bool = Field(default=True, alias="EVENT_CHAT_ENABLED")
 

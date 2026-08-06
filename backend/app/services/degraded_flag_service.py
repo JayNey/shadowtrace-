@@ -36,6 +36,9 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         # ISSUE-197 triage event_type fallback audit
         "event_type_from_heuristic",
         "event_type_from_llm_fallback",
+        # ISSUE-211 triage list ORM rewrite observability
+        "event_type_orm_rewrite_skipped",
+        "event_type_orm_rewrite_failed",
         # ISSUE-200 triage vs risk scoring inconsistency
         "triage_risk_inconsistency",
     }

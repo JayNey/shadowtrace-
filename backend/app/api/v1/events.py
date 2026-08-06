@@ -67,7 +67,7 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.workflow import TransitionContext
-from app.services.classification import derive_classification_source
+from app.services.classification_source import derive_classification_source
 from app.services.decision_trace_service import DecisionTraceService
 from app.services.investigation_guidance import (
     derive_investigation_guidance,
