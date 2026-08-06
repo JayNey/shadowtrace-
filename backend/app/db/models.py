@@ -460,6 +460,10 @@ class Report(Base):
     severity: Mapped[str] = mapped_column(String, default="low", nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     generated_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    # ISSUE-212: complete | degraded_template | quick_close | incomplete_placeholder
+    report_quality: Mapped[str] = mapped_column(
+        String, default="complete", server_default="complete", nullable=False
+    )
     generated_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         _TS, server_default=func.now(), onupdate=func.now(), nullable=False

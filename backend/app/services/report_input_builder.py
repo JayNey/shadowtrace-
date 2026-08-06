@@ -1,7 +1,7 @@
 """Unified ReportAgentInput construction with response/verification backfill (ISSUE-205).
 
 Every ReportAgent call site (graph ``report_node`` / ``close_node``,
-``AnalysisOnlyPipeline``, SuperAgent, and the future ``POST /report``) must
+``AnalysisOnlyPipeline``, SuperAgent, and ``POST /events/{id}/report``) must
 build its input through :func:`build_report_agent_input` so existing response
 plans and verification results are backfilled instead of silently degrading
 to 「暂无处置动作」/「暂无验证结果」 placeholders.

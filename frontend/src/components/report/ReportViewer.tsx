@@ -8,7 +8,7 @@ use CHAPTER_KEYS for stable ordering / dedup.
 import { useRef, useEffect } from "react";
 import { Alert, Spin, Typography, Divider } from "antd";
 import { FileTextOutlined } from "@ant-design/icons";
-import type { InvestigationReport } from "../../types/report";
+import type { InvestigationReport, ReportQuality } from "../../types/report";
 import ReportToc from "./ReportToc";
 import ReportExportButtons from "./ReportExportButtons";
 import ReportSectionContent from "./ReportSectionContent";
@@ -32,6 +32,38 @@ interface ReportViewerProps {
   eventStatus?: string;
 }
 
+function qualityAlert(report: InvestigationReport): {
+  message: string;
+  type: "warning" | "info" | "error";
+} | null {
+  const quality = (report.report_quality ||
+    (report.generated_by === "template"
+      ? "degraded_template"
+      : "complete")) as ReportQuality;
+  if (quality === "complete" && !report.degraded) {
+    return null;
+  }
+  if (quality === "degraded_template" || report.generated_by === "template") {
+    return { message: "模板生成（LLM 降级）— 非完整合格报告", type: "warning" };
+  }
+  if (quality === "quick_close") {
+    return {
+      message: "快速结案报告 — 逃生舱薄报告，非完整调查交付",
+      type: "info",
+    };
+  }
+  if (quality === "incomplete_placeholder") {
+    return {
+      message: "报告质量不完整 — 已执行阶段仍含占位章节，不可视为合格完整报告",
+      type: "error",
+    };
+  }
+  if (report.degraded) {
+    return { message: `报告已降级（${quality}）`, type: "warning" };
+  }
+  return null;
+}
+
 export default function ReportViewer({ report, loading, eventStatus }: ReportViewerProps) {
   const printStyleRef = useRef<HTMLStyleElement | null>(null);
 
@@ -49,7 +81,6 @@ export default function ReportViewer({ report, loading, eventStatus }: ReportVie
     };
   }, []);
 
-  // Loading state — page loading, not report generation
   if (loading) {
     return (
       <div style={{ textAlign: "center", padding: 48 }}>
@@ -61,7 +92,6 @@ export default function ReportViewer({ report, loading, eventStatus }: ReportVie
     );
   }
 
-  // Not yet generated
   if (!report || report.sections.length === 0) {
     const isReporting = eventStatus === "reporting";
     return (
@@ -74,7 +104,7 @@ export default function ReportViewer({ report, loading, eventStatus }: ReportVie
     );
   }
 
-  const isTemplate = report.generated_by === "template";
+  const alert = qualityAlert(report);
 
   return (
     <div data-testid="report-viewer" style={{ display: "flex", gap: 24 }}>
@@ -83,12 +113,13 @@ export default function ReportViewer({ report, loading, eventStatus }: ReportVie
       </div>
 
       <div className="shadowtrace-report-viewer" style={{ flex: 1, maxWidth: 800 }}>
-        {isTemplate && (
+        {alert && (
           <Alert
-            message="模板生成（LLM 降级）"
-            type="warning"
+            message={alert.message}
+            type={alert.type}
             showIcon
             style={{ marginBottom: 16 }}
+            data-testid="report-quality-alert"
           />
         )}
 
@@ -101,7 +132,9 @@ export default function ReportViewer({ report, loading, eventStatus }: ReportVie
           {report.title}
         </Title>
         <Text type="secondary">
-          判定：{report.final_verdict} | 风险分：{report.risk_score} | 严重程度：{report.severity}
+          判定：{report.final_verdict} | 风险分：{report.risk_score} | 严重程度：
+          {report.severity}
+          {report.report_quality ? ` | 质量：${report.report_quality}` : ""}
         </Text>
 
         <Divider />

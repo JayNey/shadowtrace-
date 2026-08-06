@@ -10,9 +10,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
-from app.models.enums import FinalVerdict, Severity
+from app.models.enums import FinalVerdict, ReportQuality, Severity
 
 
 class ReportSection(BaseModel):
@@ -43,6 +43,14 @@ class InvestigationReport(BaseModel):
     updated_at: datetime | None = None
     warnings: list[str] = Field(default_factory=list)
     error_detail: str | None = None
+    # ISSUE-212: persisted quality grade (also stored on ORM report.report_quality).
+    report_quality: ReportQuality = ReportQuality.COMPLETE
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def degraded(self) -> bool:
+        """True when ``report_quality`` is anything other than ``complete``."""
+        return self.report_quality is not ReportQuality.COMPLETE
 
 
 _APPENDIX_OBSERVABILITY_WARNINGS_KEY = "report_warnings"

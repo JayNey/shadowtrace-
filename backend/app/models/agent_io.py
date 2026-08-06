@@ -808,6 +808,9 @@ class ReportAgentInput(AgentInput):
     # explicit, distinguishable states (see ReportPhaseStatus).
     response_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED
     verification_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED
+    # ISSUE-212: POST quality gate builds the report without writing until the
+    # gate accepts (or force=true). Graph / agent paths keep the default True.
+    persist_report: bool = True
 
 
 class MemoryAgentInput(AgentInput):

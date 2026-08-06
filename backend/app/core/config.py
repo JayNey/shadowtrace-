@@ -90,6 +90,14 @@ class Settings(BaseSettings):
             "Skipped during EXECUTING_RESPONSE/VERIFYING without 409."
         ),
     )
+    report_quality_gate_enforced: bool = Field(
+        default=True,
+        alias="REPORT_QUALITY_GATE_ENFORCED",
+        description=(
+            "When true, POST /events/{id}/report rejects incomplete_placeholder "
+            "reports unless force=true (ISSUE-212). When false, warn only."
+        ),
+    )
     llm_audit_window_minutes: int = Field(default=60, alias="LLM_AUDIT_WINDOW_MINUTES")
     event_chat_enabled: bool = Field(default=True, alias="EVENT_CHAT_ENABLED")
 

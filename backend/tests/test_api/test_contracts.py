@@ -47,6 +47,7 @@ CORE_ENDPOINTS = {
     ("post", "/api/v1/events/{event_id}/investigate"),
     ("post", "/api/v1/events/{event_id}/close"),
     ("get", "/api/v1/events/{event_id}/report"),
+    ("post", "/api/v1/events/{event_id}/report"),
     ("get", "/api/v1/events/{event_id}/traces"),
     ("get", "/api/v1/events/{event_id}/audit-logs"),
     ("get", "/api/v1/events/{event_id}/tool-calls"),

@@ -49,6 +49,7 @@ from app.core.errors import (
     DependencyUnavailableError,
     InvestigationInProgressError,
     InvestigationLeaseLostError,
+    ReportQualityConflictError,
     ValidationError,
 )
 from app.db import models as orm
@@ -302,6 +303,9 @@ async def _generate_quick_close_report(
         generated_at=now,
         updated_at=now,
     )
+    from app.services.report_quality import with_assessed_quality
+
+    report = with_assessed_quality(report)
     await event_service.upsert_report(report)
     await _sync_report_context_and_bus(event_id, report, event_service)
 
@@ -1457,6 +1461,7 @@ async def _query_tool_call_items(
 
 # --------------------------------------------------------------------------- #
 # GET /events/{event_id}/report
+# POST /events/{event_id}/report  (ISSUE-212 quality gate; generation for 204/212)
 # --------------------------------------------------------------------------- #
 
 
@@ -1477,6 +1482,149 @@ async def get_report(
             details={"event_id": event_id},
         )
     return s.ReportResponse(report=report)
+
+
+@router.post("/events/{event_id}/report", response_model=s.ReportResponse)
+async def generate_report(
+    event_id: str,
+    principal: Annotated[Principal, require_roles(ROLE_ANALYST)],
+    force: bool = Query(False, description="Allow persisting incomplete_placeholder"),
+    confirm_downgrade: bool = Query(
+        False,
+        description="Allow overwriting an existing complete report with a degraded grade",
+    ),
+    body: s.GenerateReportRequest | None = None,
+    event_service: EventService = Depends(get_event_service),
+) -> s.ReportResponse:
+    """Generate (or regenerate) a formal investigation report with quality gate.
+
+    ISSUE-212: ``incomplete_placeholder`` is rejected with 422 unless
+    ``force=true``. Overwriting an existing ``complete`` report with any
+    degraded grade requires ``confirm_downgrade=true`` (409 otherwise).
+    Template fallbacks return 200 with ``report_quality=degraded_template``.
+    """
+    from app.api.v1.deps import _get_investigation_stack
+    from app.models.agent_io import EvidenceOutput, RiskAssessment
+    from app.models.enums import ReportQuality
+    from app.services.report_input_builder import build_report_agent_input
+    from app.services.report_quality import (
+        ReportPhaseFlags,
+        is_degraded_quality,
+        with_assessed_quality,
+    )
+
+    event = await event_service.get_event(event_id)
+    if event is None:
+        raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
+
+    force_flag = bool(force or (body.force if body is not None else False))
+    confirm_flag = bool(
+        confirm_downgrade or (body.confirm_downgrade if body is not None else False)
+    )
+    settings = get_settings()
+    gate_enforced = bool(settings.report_quality_gate_enforced)
+
+    store = _get_context_store()
+    evidence_raw = await store.get(event_id, "evidence_output")
+    risk_raw = await store.get(event_id, "risk_assessment")
+    if evidence_raw is None or risk_raw is None:
+        raise ValidationError(
+            "cannot generate report: evidence_output and risk_assessment are required "
+            "in event context (run investigation analysis first)",
+            error_code="report_prerequisites_missing",
+            details={
+                "event_id": event_id,
+                "has_evidence_output": evidence_raw is not None,
+                "has_risk_assessment": risk_raw is not None,
+            },
+        )
+    try:
+        evidence_output = (
+            evidence_raw
+            if isinstance(evidence_raw, EvidenceOutput)
+            else EvidenceOutput.model_validate(evidence_raw)
+        )
+        risk_assessment = (
+            risk_raw
+            if isinstance(risk_raw, RiskAssessment)
+            else RiskAssessment.model_validate(risk_raw)
+        )
+    except Exception as exc:
+        raise ValidationError(
+            "cannot generate report: stored evidence/risk payloads are invalid",
+            error_code="report_prerequisites_invalid",
+            details={"event_id": event_id},
+        ) from exc
+
+    stack = await _get_investigation_stack()
+    report_agent = stack["report"]
+    session_factory = stack.get("session_factory") or _get_session_factory()
+    report_input = await build_report_agent_input(
+        event_id,
+        evidence_output=evidence_output,
+        risk_assessment=risk_assessment,
+        context_store=store,
+        session_factory=session_factory,
+    )
+    # Build without persisting so the quality gate can refuse incomplete writes.
+    report_input = report_input.model_copy(update={"persist_report": False})
+    report = await report_agent.execute(report_input)
+    report = with_assessed_quality(
+        report,
+        ReportPhaseFlags(
+            response_phase_status=report_input.response_phase_status,
+            verification_phase_status=report_input.verification_phase_status,
+        ),
+    )
+
+    existing = await event_service.get_report(event_id=event_id)
+    if (
+        report.report_quality is ReportQuality.INCOMPLETE_PLACEHOLDER
+        and not force_flag
+    ):
+        if gate_enforced:
+            raise ValidationError(
+                "report quality incomplete: executed phases still contain placeholders; "
+                "pass force=true to archive as incomplete_placeholder",
+                error_code="report_quality_incomplete",
+                details={
+                    "event_id": event_id,
+                    "report_quality": report.report_quality.value,
+                    "force": False,
+                },
+            )
+        logger.warning(
+            "REPORT_QUALITY_GATE_ENFORCED=false; accepting incomplete report event=%s",
+            event_id,
+        )
+
+    if (
+        existing is not None
+        and existing.report_quality is ReportQuality.COMPLETE
+        and is_degraded_quality(report.report_quality)
+        and not confirm_flag
+    ):
+        raise ReportQualityConflictError(
+            "refusing to overwrite a complete report with a degraded quality grade; "
+            "pass confirm_downgrade=true to proceed",
+            details={
+                "event_id": event_id,
+                "existing_quality": existing.report_quality.value,
+                "incoming_quality": report.report_quality.value,
+            },
+        )
+
+    persisted = await event_service.upsert_report(report)
+    await _sync_report_context_and_bus(event_id, persisted, event_service)
+    try:
+        await event_service.upsert_generate_report_action(event_id, plan_revision=1)
+    except IntegrityError:
+        logger.warning(
+            "generate_report action already exists for POST report event=%s",
+            event_id,
+            exc_info=True,
+        )
+    return s.ReportResponse(report=persisted)
 
 
 # --------------------------------------------------------------------------- #

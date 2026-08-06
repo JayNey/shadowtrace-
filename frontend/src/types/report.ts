@@ -1,5 +1,11 @@
 /** Report models — matching backend app/models/report.py + openapi.json */
 
+export type ReportQuality =
+  | "complete"
+  | "degraded_template"
+  | "quick_close"
+  | "incomplete_placeholder";
+
 export interface ReportSection {
   key: string;
   title: string;
@@ -22,10 +28,24 @@ export interface InvestigationReport {
   updated_at: string | null;
   warnings?: string[];
   error_detail?: string | null;
+  report_quality?: ReportQuality;
+  degraded?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function coerceReportQuality(value: unknown): ReportQuality | undefined {
+  if (
+    value === "complete" ||
+    value === "degraded_template" ||
+    value === "quick_close" ||
+    value === "incomplete_placeholder"
+  ) {
+    return value;
+  }
+  return undefined;
 }
 
 /** Narrow EventContext.report into InvestigationReport when structurally valid. */
@@ -46,6 +66,13 @@ export function coerceInvestigationReport(value: unknown): InvestigationReport |
     );
   });
   if (sections.length === 0) return null;
+  const report_quality = coerceReportQuality(value.report_quality);
+  const degraded =
+    typeof value.degraded === "boolean"
+      ? value.degraded
+      : report_quality !== undefined
+        ? report_quality !== "complete"
+        : undefined;
   return {
     report_id: value.report_id,
     event_id: value.event_id,
@@ -68,5 +95,7 @@ export function coerceInvestigationReport(value: unknown): InvestigationReport |
       ? value.warnings.filter((item): item is string => typeof item === "string")
       : [],
     error_detail: typeof value.error_detail === "string" ? value.error_detail : null,
+    report_quality,
+    degraded,
   };
 }

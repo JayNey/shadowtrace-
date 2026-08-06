@@ -1579,6 +1579,11 @@
     "verification_phase_status": {
       "$ref": "#/$defs/ReportPhaseStatus",
       "default": "not_executed"
+    },
+    "persist_report": {
+      "default": true,
+      "title": "Persist Report",
+      "type": "boolean"
     }
   },
   "required": [
