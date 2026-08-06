@@ -52,7 +52,11 @@ from app.models.entities import (
     ProcessEntity,
 )
 from app.models.enums import EventType, Severity
-from app.services.classification import human_override_event_type
+from app.services.classification import (
+    classification_override_from_snapshot,
+    human_override_event_type,
+)
+from app.services.classification_source import OrmEventTypeRewriteOutcome
 from app.services.entity_merge import EntityMergeResult, merge_entity_sets
 from app.services.working_memory import BoundWorkingMemory
 
@@ -435,6 +439,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         fp_matcher: Any | None = None,
         scenario_id: str | None = None,
         degraded_flags: Any | None = None,
+        event_service: Any | None = None,
     ) -> None:
         super().__init__(
             llm_client=llm_client,
@@ -448,6 +453,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         )
         self.scenario_id = scenario_id
         self.degraded_flags = degraded_flags
+        self.event_service = event_service
 
         # Convenience aliases matching the Issue-032 naming convention.
         self.pre_triage_hooks = self.pre_hooks
@@ -602,7 +608,10 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         )
 
         # 7. Persist to EventContext.
-        await self._write_triage_result(input, result)
+        wrote = await self._write_triage_result(input, result)
+        # 8. ISSUE-211: rewrite ORM list type after durable triage_result write.
+        if wrote:
+            await self._rewrite_event_type_after_triage(input.event_id, result.event_type)
 
         return result
 
@@ -831,8 +840,11 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
     # Persistence
     # ------------------------------------------------------------------ #
 
-    async def _write_triage_result(self, input: TriageAgentInput, result: TriageResult) -> None:
+    async def _write_triage_result(self, input: TriageAgentInput, result: TriageResult) -> bool:
         """Persist ``triage_result`` to ``EventContext``.
+
+        Returns ``True`` when the write succeeded (caller may then rewrite ORM
+        ``event_type`` per ISSUE-211).
 
         GuardrailViolationError (FIELD_OWNERSHIP mismatch) is always
         propagated — it indicates a code defect that must be fixed.
@@ -844,13 +856,14 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         """
         wm = self.working_memory
         if wm is None:
-            return
+            return False
         try:
             await wm.write(
                 input.event_id,
                 "triage_result",
                 result.model_dump(mode="json"),
             )
+            return True
         except GuardrailViolationError:
             # FIELD_OWNERSHIP violation is a code defect — must propagate.
             logger.exception(
@@ -873,6 +886,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             # Best-effort persistence of the degraded flag so recovery /
             # downstream agents can detect the gap.
             await self._try_persist_degraded_flag(input.event_id)
+            return False
         except ShadowTraceError as exc:
             if exc.retryable:
                 logger.warning(
@@ -886,8 +900,35 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                     f"triage_result persistence failed: {exc.error_code}"
                 )
                 await self._try_persist_degraded_flag(input.event_id)
+                return False
             else:
                 raise
+
+    async def _rewrite_event_type_after_triage(
+        self,
+        event_id: str,
+        event_type: EventType,
+    ) -> None:
+        """Best-effort ORM list rewrite after durable triage_result (ISSUE-211)."""
+        if self.event_service is None:
+            return
+        try:
+            outcome = await self.event_service.rewrite_event_type_from_triage(
+                event_id,
+                event_type=event_type,
+                operator="TriageAgent",
+            )
+            if outcome is OrmEventTypeRewriteOutcome.FAILED:
+                logger.warning(
+                    "ORM event_type rewrite reported failure for event=%s",
+                    event_id,
+                )
+        except Exception:
+            logger.warning(
+                "ORM event_type rewrite raised for event=%s; continuing triage",
+                event_id,
+                exc_info=True,
+            )
 
     async def _persist_event_type_audit_flag(
         self,
@@ -951,28 +992,54 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
     # ------------------------------------------------------------------ #
 
     async def _read_human_override_event_type(self, event_id: str) -> str | None:
-        """Read durable ISSUE-209 human classification override, if present."""
+        """Read durable ISSUE-209 human classification override, if present.
+
+        Prefer WorkingMemory; fall back to ORM ``event_context_snapshot`` so a
+        failed context-store write during PATCH cannot be clobbered by triage
+        ORM rewrite (ISSUE-211).
+        """
         wm = self.working_memory
-        if wm is None:
+        if wm is not None:
+            try:
+                value = await wm.read(event_id, "classification_override")
+            except GuardrailViolationError:
+                logger.exception(
+                    "GuardrailViolationError reading classification_override for event=%s",
+                    event_id,
+                )
+                raise
+            except (DependencyUnavailableError, ConnectionError, TimeoutError):
+                value = None
+            except Exception:
+                logger.warning(
+                    "classification_override read failed event=%s",
+                    event_id,
+                    exc_info=True,
+                )
+                value = None
+            found = human_override_event_type(
+                value if isinstance(value, dict) else None
+            )
+            if found is not None:
+                return found
+
+        if self.event_service is None:
             return None
         try:
-            value = await wm.read(event_id, "classification_override")
-        except GuardrailViolationError:
-            logger.exception(
-                "GuardrailViolationError reading classification_override for event=%s",
-                event_id,
-            )
-            raise
-        except (DependencyUnavailableError, ConnectionError, TimeoutError):
-            return None
+            event = await self.event_service.get_event(event_id)
         except Exception:
             logger.warning(
-                "classification_override read failed event=%s",
+                "classification_override ORM snapshot fallback failed event=%s",
                 event_id,
                 exc_info=True,
             )
             return None
-        return human_override_event_type(value if isinstance(value, dict) else None)
+        if event is None:
+            return None
+        found = human_override_event_type(
+            classification_override_from_snapshot(event.event_context_snapshot)
+        )
+        return found
 
     async def _read_source_snapshot(self, event_id: str) -> dict[str, Any] | None:
         """Read the ``source_snapshot`` field from working memory.
