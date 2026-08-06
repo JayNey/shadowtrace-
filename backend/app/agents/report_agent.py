@@ -290,11 +290,19 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             warnings=warnings,
             error_detail=error_detail,
         )
+        from app.services.report_quality import with_assessed_quality
 
-        await self._persist_report(report)
-        await self._write_context(input.event_id, report)
-        await self._record_generate_report_action(input)
-        await self._publish_report_generated(report)
+        report = with_assessed_quality(
+            report,
+            response_phase_status=input.response_phase_status,
+            verification_phase_status=input.verification_phase_status,
+        )
+
+        if input.persist_report:
+            await self._persist_report(report)
+            await self._write_context(input.event_id, report)
+            await self._record_generate_report_action(input)
+            await self._publish_report_generated(report)
         return report
 
     async def _generate_with_llm(

@@ -131,6 +131,11 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "memory_governance_bypass_blocked": ErrorCategory.USER_INPUT,
     # ISSUE-209 — classification override conflicts with active response/verify
     "classification_conflict_active_investigation": ErrorCategory.PERMANENT,
+    # ISSUE-212 — report quality gate
+    "report_quality_incomplete": ErrorCategory.USER_INPUT,
+    "report_quality_conflict": ErrorCategory.PERMANENT,
+    "report_prerequisites_missing": ErrorCategory.USER_INPUT,
+    "report_prerequisites_invalid": ErrorCategory.USER_INPUT,
     # Generic dependency / domain defaults used by subclasses
     "dependency_unavailable": ErrorCategory.TRANSIENT,
     "task_unavailable": ErrorCategory.TRANSIENT,
@@ -499,6 +504,15 @@ class ClassificationConflictError(ShadowTraceError):
 
     status_code = 409
     default_error_code = "classification_conflict_active_investigation"
+    default_category = ErrorCategory.PERMANENT
+    default_retryable = False
+
+
+class ReportQualityConflictError(ShadowTraceError):
+    """Refusing to overwrite a complete report with a degraded quality grade (ISSUE-212)."""
+
+    status_code = 409
+    default_error_code = "report_quality_conflict"
     default_category = ErrorCategory.PERMANENT
     default_retryable = False
 

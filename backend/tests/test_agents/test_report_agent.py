@@ -431,6 +431,8 @@ async def test_llm_failure_falls_back_to_template(
         )
     )
     assert report.generated_by == GENERATED_BY_TEMPLATE
+    assert report.report_quality.value == "degraded_template"
+    assert report.degraded is True
     assert len(report.sections) == 15
     blob = "\n".join(s.content for s in report.sections)
     assert "zhangsan" in blob

@@ -1,5 +1,11 @@
 /** Report models — matching backend app/models/report.py + openapi.json */
 
+export type ReportQuality =
+  | "complete"
+  | "degraded_template"
+  | "quick_close"
+  | "incomplete_placeholder";
+
 export interface ReportSection {
   key: string;
   title: string;
@@ -22,10 +28,48 @@ export interface InvestigationReport {
   updated_at: string | null;
   warnings?: string[];
   error_detail?: string | null;
+  report_quality?: ReportQuality;
+  degraded?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function coerceReportQuality(value: unknown): ReportQuality | undefined {
+  if (
+    value === "complete" ||
+    value === "degraded_template" ||
+    value === "quick_close" ||
+    value === "incomplete_placeholder"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+/** Narrow EventContext.report / GET payloads into InvestigationReport. */
+
+export function resolveReportQuality(report: {
+  report_quality?: ReportQuality | null;
+  generated_by?: string | null;
+  degraded?: boolean;
+}): ReportQuality {
+  const explicit = coerceReportQuality(report.report_quality);
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  if (report.generated_by === "template") {
+    return "degraded_template";
+  }
+  if (report.generated_by === "quick_close") {
+    return "quick_close";
+  }
+  // Conservative: degraded without a grade is treated as incomplete, not complete.
+  if (report.degraded === true) {
+    return "incomplete_placeholder";
+  }
+  return "complete";
 }
 
 /** Narrow EventContext.report into InvestigationReport when structurally valid. */
@@ -46,6 +90,14 @@ export function coerceInvestigationReport(value: unknown): InvestigationReport |
     );
   });
   if (sections.length === 0) return null;
+  const generated_by = typeof value.generated_by === "string" ? value.generated_by : null;
+  const report_quality = resolveReportQuality({
+    report_quality: coerceReportQuality(value.report_quality),
+    generated_by,
+    degraded: typeof value.degraded === "boolean" ? value.degraded : undefined,
+  });
+  const degraded =
+    typeof value.degraded === "boolean" ? value.degraded : report_quality !== "complete";
   return {
     report_id: value.report_id,
     event_id: value.event_id,
@@ -61,12 +113,14 @@ export function coerceInvestigationReport(value: unknown): InvestigationReport |
     risk_score: typeof value.risk_score === "number" ? value.risk_score : 0,
     severity: typeof value.severity === "string" ? value.severity : "low",
     version: typeof value.version === "number" ? value.version : 1,
-    generated_by: typeof value.generated_by === "string" ? value.generated_by : null,
+    generated_by,
     generated_at: typeof value.generated_at === "string" ? value.generated_at : null,
     updated_at: typeof value.updated_at === "string" ? value.updated_at : null,
     warnings: Array.isArray(value.warnings)
       ? value.warnings.filter((item): item is string => typeof item === "string")
       : [],
     error_detail: typeof value.error_detail === "string" ? value.error_detail : null,
+    report_quality,
+    degraded,
   };
 }

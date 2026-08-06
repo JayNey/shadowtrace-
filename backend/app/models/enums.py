@@ -178,6 +178,19 @@ class ClassificationSource(StrEnum):
     HUMAN = "human"
 
 
+class ReportQuality(StrEnum):
+    """Persisted report quality grade (ISSUE-212 / #750).
+
+    Distinguishes a complete formal report from template / quick-close /
+    incomplete-placeholder escapes. Never inferred only on the frontend.
+    """
+
+    COMPLETE = "complete"
+    DEGRADED_TEMPLATE = "degraded_template"
+    QUICK_CLOSE = "quick_close"
+    INCOMPLETE_PLACEHOLDER = "incomplete_placeholder"
+
+
 class SourceObjectKind(StrEnum):
     """Canonical source object kind used for the internal discriminated union."""
 

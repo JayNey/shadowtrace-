@@ -258,6 +258,13 @@ class ReportResponse(BaseModel):
     report: InvestigationReport
 
 
+class GenerateReportRequest(_StrictRequest):
+    """POST /events/{id}/report body (ISSUE-212 quality gate)."""
+
+    force: bool = False
+    confirm_downgrade: bool = False
+
+
 class TraceItem(BaseModel):
     trace_id: str
     agent_name: str

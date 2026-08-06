@@ -537,6 +537,88 @@
             }
           }
         }
+      },
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Generate Report",
+        "description": "Generate (or regenerate) a formal investigation report with quality gate.\n\nISSUE-212: ``incomplete_placeholder`` is rejected with 422 unless\n``force=true``. Overwriting an existing ``complete`` report with any\ndegraded grade requires ``confirm_downgrade=true`` (409 otherwise).\nTemplate fallbacks return 200 with ``report_quality=degraded_template``.",
+        "operationId": "generate_report_api_v1_events__event_id__report_post",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Event Id"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Allow persisting incomplete_placeholder",
+              "default": false,
+              "title": "Force"
+            },
+            "description": "Allow persisting incomplete_placeholder"
+          },
+          {
+            "name": "confirm_downgrade",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Allow overwriting an existing complete report with a degraded grade",
+              "default": false,
+              "title": "Confirm Downgrade"
+            },
+            "description": "Allow overwriting an existing complete report with a degraded grade"
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/GenerateReportRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/v1/events/{event_id}/traces": {
@@ -6022,6 +6104,24 @@
         "title": "FinalVerdict",
         "description": "Verdict label, independent from EventStatus."
       },
+      "GenerateReportRequest": {
+        "properties": {
+          "force": {
+            "type": "boolean",
+            "title": "Force",
+            "default": false
+          },
+          "confirm_downgrade": {
+            "type": "boolean",
+            "title": "Confirm Downgrade",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "GenerateReportRequest",
+        "description": "POST /events/{id}/report body (ISSUE-212 quality gate)."
+      },
       "GraphEdge": {
         "properties": {
           "edge_id": {
@@ -6743,6 +6843,16 @@
               }
             ],
             "title": "Error Detail"
+          },
+          "report_quality": {
+            "$ref": "#/components/schemas/ReportQuality",
+            "default": "complete"
+          },
+          "degraded": {
+            "type": "boolean",
+            "title": "Degraded",
+            "description": "True when ``report_quality`` is anything other than ``complete``.",
+            "readOnly": true
           }
         },
         "additionalProperties": false,
@@ -6750,7 +6860,8 @@
         "required": [
           "report_id",
           "event_id",
-          "title"
+          "title",
+          "degraded"
         ],
         "title": "InvestigationReport"
       },
@@ -7267,6 +7378,17 @@
         "type": "object",
         "title": "RecordExecutionResultParams",
         "description": "Params for EXECUTION_RESULT_RECORD (DIRECT_TOOL result sync)."
+      },
+      "ReportQuality": {
+        "type": "string",
+        "enum": [
+          "complete",
+          "degraded_template",
+          "quick_close",
+          "incomplete_placeholder"
+        ],
+        "title": "ReportQuality",
+        "description": "Persisted report quality grade (ISSUE-212 / #750).\n\nDistinguishes a complete formal report from template / quick-close /\nincomplete-placeholder escapes. Never inferred only on the frontend."
       },
       "ReportResponse": {
         "properties": {

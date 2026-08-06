@@ -11,6 +11,17 @@
       "title": "FinalVerdict",
       "type": "string"
     },
+    "ReportQuality": {
+      "description": "Persisted report quality grade (ISSUE-212 / #750).\n\nDistinguishes a complete formal report from template / quick-close /\nincomplete-placeholder escapes. Never inferred only on the frontend.",
+      "enum": [
+        "complete",
+        "degraded_template",
+        "quick_close",
+        "incomplete_placeholder"
+      ],
+      "title": "ReportQuality",
+      "type": "string"
+    },
     "ReportSection": {
       "additionalProperties": false,
       "description": "One chapter of the structured report.",
@@ -154,6 +165,10 @@
       ],
       "default": null,
       "title": "Error Detail"
+    },
+    "report_quality": {
+      "$ref": "#/$defs/ReportQuality",
+      "default": "complete"
     }
   },
   "required": [

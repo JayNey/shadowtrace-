@@ -57,11 +57,6 @@ from app.models.security_event import SecurityEvent
 from app.models.source import SourceReference
 from app.models.tool_meta import TERMINAL_DISPOSITION_TOOL
 from app.models.workflow import TransitionContext, validate_verdict_status
-from app.services.context_service import (
-    EventContextStore,
-    append_context_journal_in_session,
-    event_summary_from_security_event,
-)
 from app.services.classification import (
     CLASSIFICATION_OVERRIDE_KEY,
     TRIAGE_RESULT_KEY,
@@ -78,6 +73,11 @@ from app.services.classification_source import (
     derive_classification_source,
     should_skip_orm_event_type_rewrite,
     snapshot_has_human_classification_override,
+)
+from app.services.context_service import (
+    EventContextStore,
+    append_context_journal_in_session,
+    event_summary_from_security_event,
 )
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.entity_validator import validate_entity_set
@@ -1391,8 +1391,18 @@ class EventService:
                 )
             return OrmEventTypeRewriteOutcome.FAILED
 
-    async def upsert_report(self, report: InvestigationReport) -> InvestigationReport:
-        """Idempotent upsert of InvestigationReport by stable ``report_id`` (ISSUE-036)."""
+    async def upsert_report(
+        self,
+        report: InvestigationReport,
+    ) -> InvestigationReport:
+        """Idempotent upsert of InvestigationReport by stable ``report_id`` (ISSUE-036).
+
+        ISSUE-212: persists ``report_quality`` as stamped by the caller. Complete→
+        degraded refusal (HTTP 409) is enforced only on ``POST /report``, not here,
+        so ReportAgent / graph regeneration can honestly rewrite quality grades.
+        """
+        from app.services.report_quality import report_quality_from_row
+
         now = datetime.now(UTC)
         stamped_sections = stamp_report_observability_in_sections(
             report.sections,
@@ -1400,6 +1410,11 @@ class EventService:
             error_detail=report.error_detail,
         )
         sections_payload = [section.model_dump(mode="json") for section in stamped_sections]
+        quality_value = (
+            report.report_quality.value
+            if hasattr(report.report_quality, "value")
+            else str(report.report_quality or "complete")
+        )
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(
@@ -1419,6 +1434,7 @@ class EventService:
                         severity=report.severity.value,
                         version=1,
                         generated_by=report.generated_by,
+                        report_quality=quality_value,
                         generated_at=report.generated_at or now,
                         updated_at=now,
                     )
@@ -1441,6 +1457,7 @@ class EventService:
                     row.severity = report.severity.value
                     row.version = int(row.version or 1) + 1
                     row.generated_by = report.generated_by
+                    row.report_quality = quality_value
                     if report.generated_at is not None:
                         row.generated_at = report.generated_at
                     row.updated_at = now
@@ -1461,6 +1478,9 @@ class EventService:
                     updated_at=row.updated_at,
                     warnings=list(report.warnings),
                     error_detail=report.error_detail,
+                    report_quality=report_quality_from_row(
+                        getattr(row, "report_quality", None)
+                    ),
                 )
 
     async def get_report(
@@ -1486,6 +1506,7 @@ class EventService:
             if row is None:
                 return None
             from app.models.report import ReportSection
+            from app.services.report_quality import report_quality_from_row
 
             sections = [ReportSection.model_validate(item) for item in (row.sections or [])]
             warnings, error_detail = observability_from_sections(sections)
@@ -1504,6 +1525,9 @@ class EventService:
                 updated_at=row.updated_at,
                 warnings=warnings,
                 error_detail=error_detail,
+                report_quality=report_quality_from_row(
+                    getattr(row, "report_quality", None)
+                ),
             )
 
     async def upsert_generate_report_action(
