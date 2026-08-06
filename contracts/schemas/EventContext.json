@@ -602,7 +602,7 @@
       "type": "object"
     },
     "EventStatus": {
-      "description": "ShadowTrace internal investigation orchestration state (14 states).",
+      "description": "ShadowTrace internal investigation orchestration state (14 states).\n\n``REPORTING`` means the report phase is reachable (ISSUE-204 / ISSUE-036).\nIt does **not** imply report bytes already exist; when investigation skips\nReportAgent, callers must persist ``report_generated=false`` and guide\noperators to ``POST /events/{id}/report`` before CLOSED.",
       "enum": [
         "new",
         "triaging",

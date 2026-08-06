@@ -909,6 +909,27 @@ async def test_evidence_node_passes_execution_plan_required_tools() -> None:
 
 
 @pytest.mark.asyncio
+async def test_defer_path_skips_report_agent_when_generate_report_false() -> None:
+    """ISSUE-204: defer investigate with generate_report=false must not call ReportAgent."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    agents = _agents()
+    report_agent = agents["report_agent"]
+    final = await build_investigation_graph(agents, services).ainvoke(
+        _base_state(
+            defer_response_execution=True,
+            generate_report=False,
+        ),
+        {"configurable": {"thread_id": "evt-defer-no-report"}},
+    )
+    assert NODE_REPORT in final["node_trace"]
+    assert report_agent.calls == []
+    assert final["report_generated"] is False
+    assert final["halted"] is True
+    assert machine.status is EventStatus.REPORTING
+
+
+@pytest.mark.asyncio
 async def test_deferred_response_not_required_reaches_closed() -> None:
     """ISSUE-566: HTTP investigate defers response execution and closes."""
     machine = FakeStateMachine()

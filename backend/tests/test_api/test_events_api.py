@@ -344,6 +344,52 @@ async def _seed_report_with_event(
             await session.flush()
 
 
+async def _seed_reporting_not_required_without_report(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    title: str = "Reporting without report",
+) -> str:
+    """Insert a NOT_REQUIRED REPORTING event with no report row (ISSUE-204)."""
+    import hashlib
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="other",
+                    title=title,
+                    description="ISSUE-204 close gate fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.LOW.value,
+                    final_verdict=FinalVerdict.NONE.value,
+                    risk_score=10,
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "incident",
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "t1",
+                        "connector_id": f"conn-{sfx}",
+                        "source_object_id": f"INC-{sfx}",
+                        "raw_payload_hash": hashlib.sha256(b"no-report").hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            await session.flush()
+    return event_id
+
+
 async def _seed_investigation_report(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
@@ -1601,6 +1647,26 @@ async def test_investigate_echoes_generate_report_false(
     )
     assert resp.status_code == 202, resp.text
     assert resp.json()["generate_report"] is False
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_without_report_returns_closed_requires_report(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-204: CLOSED gate surfaces closed_requires_report at HTTP layer."""
+    event_id = await _seed_reporting_not_required_without_report(session_factory)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "attempt close without report"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 400, resp.text
+    body = resp.json()
+    assert body["error_code"] == "closed_requires_report"
+    assert body["details"]["report_exists"] is False
+    assert "POST /api/v1/events/{event_id}/report" in body["error_message"]
 
 
 @pytest.mark.asyncio

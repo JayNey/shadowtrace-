@@ -1238,10 +1238,11 @@ async def test_closed_gate_blocks_missing_report(
     )
     await _walk_to_reporting(state_machine, event_id)
 
-    with pytest.raises(InvalidStateTransitionError, match="report"):
+    with pytest.raises(InvalidStateTransitionError, match="report") as exc:
         await state_machine.transition(
             event_id, EventStatus.CLOSED, operator="SuperAgent", reason="premature close"
         )
+    assert exc.value.error_code == "closed_requires_report"
 
 
 @pytest.mark.asyncio

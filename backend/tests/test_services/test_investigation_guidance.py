@@ -61,7 +61,7 @@ def test_reporting_analysis_only_skipped_report_includes_未生成() -> None:
     assert "分析完成·报告未生成" in guidance.phase_message
     assert "生成中" not in guidance.phase_message
     assert guidance.analysis_only_complete is True
-    assert guidance.next_recommended_action is NextRecommendedAction.CLOSE
+    assert guidance.next_recommended_action is NextRecommendedAction.NONE
 
 
 def test_reporting_analysis_only_deferred_no_start_response_cta() -> None:
@@ -83,7 +83,10 @@ def test_reporting_not_required_suggests_close() -> None:
     guidance = derive_investigation_guidance(
         status=EventStatus.REPORTING,
         disposition_policy=DispositionPolicy.NOT_REQUIRED,
-        context_snapshot={"analysis_only_complete": True},
+        context_snapshot={
+            "analysis_only_complete": True,
+            "report": {"report_id": "rpt-test"},
+        },
         orchestration_mode="graph",
     )
     assert guidance.next_recommended_action is NextRecommendedAction.CLOSE

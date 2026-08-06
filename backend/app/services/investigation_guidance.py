@@ -109,13 +109,7 @@ def derive_investigation_guidance(
         )
 
     if status is EventStatus.REPORTING and not report_generated:
-        # ISSUE-204: surface skipped report even when analysis_only_complete is set.
-        next_action = (
-            NextRecommendedAction.CLOSE
-            if analysis_only_complete
-            and disposition_policy is DispositionPolicy.NOT_REQUIRED
-            else NextRecommendedAction.NONE
-        )
+        # ISSUE-204: no report bytes yet — guide POST /report, never suggest CLOSE.
         if analysis_only_complete:
             message = (
                 "分析完成·报告未生成。"
@@ -130,7 +124,7 @@ def derive_investigation_guidance(
             analysis_only_complete=analysis_only_complete,
             execution_substate=execution_substate,
             response_phase_state=ResponsePhaseState.ANALYSIS_COMPLETE_DEFERRED,
-            next_recommended_action=next_action,
+            next_recommended_action=NextRecommendedAction.NONE,
             full_loop_available=loop_available,
             phase_message=message,
         )

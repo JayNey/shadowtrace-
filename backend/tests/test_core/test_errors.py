@@ -41,6 +41,7 @@ _REQUIRED_DOCUMENTED_CODES: frozenset[str] = frozenset(
     {
         "event_not_found",
         "invalid_state_transition",
+        "closed_requires_report",
         "invalid_verdict_status_combination",
         "tool_timeout",
         "llm_invalid_json",
