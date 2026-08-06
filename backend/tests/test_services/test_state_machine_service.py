@@ -427,6 +427,7 @@ async def _seed_terminal_writeback_fixture(
     approved: SourceDisposition = SourceDisposition.CONTAINED,
     target_disposition: SourceDisposition = SourceDisposition.CONTAINED,
     command_payload: dict[str, object] | None = None,
+    receipt_simulated: bool | None = None,
 ) -> str:
     action_id = f"act-term-{_sfx()}"
     writeback_id = f"wbk-{_sfx()}"
@@ -492,6 +493,18 @@ async def _seed_terminal_writeback_fixture(
                     latest_writeback_status=WritebackStatus.CONFIRMED.value,
                 )
             )
+            if receipt_simulated is not None:
+                session.add(
+                    orm.DispositionReceipt(
+                        writeback_id=writeback_id,
+                        sequence=1,
+                        disposition_id=disposition_id,
+                        action_id=action_id,
+                        source_record_id=source_record_id,
+                        status=WritebackStatus.CONFIRMED.value,
+                        simulated=receipt_simulated,
+                    )
+                )
     return action_id
 
 
@@ -1369,6 +1382,73 @@ async def test_build_terminal_writeback_view_reads_nested_target_disposition(
     assert view.approved_disposition is SourceDisposition.CONTAINED
     assert view.actual_disposition is SourceDisposition.CONTAINED
     assert view.receipt_status is WritebackStatus.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_build_terminal_writeback_view_projects_simulated_from_receipt(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    """ISSUE-227: simulated flag on TerminalEventWritebackView comes from receipt."""
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+    )
+    await _seed_terminal_writeback_fixture(
+        session_factory,
+        event_id,
+        approved=SourceDisposition.CONTAINED,
+        target_disposition=SourceDisposition.CONTAINED,
+        receipt_simulated=True,
+    )
+
+    async with session_factory() as session:
+        view = await _build_terminal_writeback_view(session, event_id, 1)
+
+    assert view is not None
+    assert view.simulated is True
+
+
+@pytest.mark.asyncio
+async def test_close_rejected_when_non_mock_and_simulated_terminal_receipt(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-227: live disposition mode must block CLOSED on simulated terminal."""
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("DISPOSITION_MODE", "live_xdr")
+    get_settings.cache_clear()
+
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        severity=Severity.LOW.value,
+    )
+    await _walk_to_reporting(state_machine, event_id)
+    await _add_report(session_factory, event_id)
+    await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+    await _seed_terminal_writeback_fixture(
+        session_factory,
+        event_id,
+        approved=SourceDisposition.CONTAINED,
+        target_disposition=SourceDisposition.CONTAINED,
+        receipt_simulated=True,
+    )
+
+    with pytest.raises(InvalidStateTransitionError, match="non-simulated terminal receipt") as exc:
+        await state_machine.transition(
+            event_id,
+            EventStatus.CLOSED,
+            operator="SuperAgent",
+            reason="simulated terminal in live mode",
+        )
+    assert exc.value.error_code == "closed_simulated_receipt_rejected"
+    get_settings.cache_clear()
 
 
 @pytest.mark.asyncio

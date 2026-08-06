@@ -377,14 +377,15 @@ def test_closed_gate_mock_accepts_simulated_terminal() -> None:
 def test_closed_gate_non_mock_rejects_simulated_terminal() -> None:
     """Non-mock disposition must refuse a simulated terminal receipt."""
     with pytest.raises(
-        InvalidStateTransitionError, match="simulated terminal receipt rejected"
-    ):
+        InvalidStateTransitionError, match="non-simulated terminal receipt"
+    ) as exc_info:
         validate_closed_gate(
             _closed_ctx(
                 disposition_is_mock=False,
                 terminal_event_writeback=_terminal_ok(simulated=True),
             )
         )
+    assert exc_info.value.error_code == "closed_simulated_receipt_rejected"
 
 
 def test_closed_gate_non_mock_accepts_unsimulated_terminal() -> None:
@@ -398,15 +399,18 @@ def test_closed_gate_non_mock_accepts_unsimulated_terminal() -> None:
     )
 
 
-def test_closed_gate_non_mock_accepts_unknown_simulated_terminal() -> None:
-    """Non-mock disposition accepts terminal receipt when simulated is None
-    (no receipt record yet — gate falls through to other guards)."""
-    validate_closed_gate(
-        _closed_ctx(
-            disposition_is_mock=False,
-            terminal_event_writeback=_terminal_ok(simulated=None),
+def test_closed_gate_non_mock_rejects_unknown_simulated_terminal() -> None:
+    """Non-mock disposition rejects CONFIRMED terminal when simulated is unknown."""
+    with pytest.raises(
+        InvalidStateTransitionError, match="non-simulated terminal receipt"
+    ) as exc_info:
+        validate_closed_gate(
+            _closed_ctx(
+                disposition_is_mock=False,
+                terminal_event_writeback=_terminal_ok(simulated=None),
+            )
         )
-    )
+    assert exc_info.value.error_code == "closed_simulated_receipt_rejected"
 
 
 def test_actual_disposition_from_command_payload_reads_nested_operation_params() -> None:

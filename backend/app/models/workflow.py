@@ -557,7 +557,7 @@ class TransitionContext(BaseModel):
     escalated: bool = False
     # Whether the active disposition adapter is mock (ISSUE-227 CLOSED gate).
     # Default True preserves existing Mock behaviour; StateMachineService sets
-    # this from app_env / disposition_mode at transition time.
+    # this from disposition_mode at transition time.
     disposition_is_mock: bool = True
 
 
@@ -967,22 +967,21 @@ def validate_closed_gate(ctx: TransitionContext) -> None:
             details={"receipt_status": terminal.receipt_status.value},
         )
 
-    # ISSUE-227: When disposition is NOT mock, a simulated CONFIRMED receipt
-    # must not pass as "real writeback".  Mock receipts are always
-    # simulated=True and the gate accepts them unconditionally (P0 demo).
-    # In staging / hybrid deployments where disposition_is_mock=False, a
-    # simulated terminal writeback is evidence that the writeback was a
-    # mock-side-effect — not a genuine XDR confirmation — and CLOSED must
-    # be refused.
-    if not ctx.disposition_is_mock and terminal.simulated is True:
+    # ISSUE-227: When disposition is NOT mock, a CONFIRMED terminal receipt must
+    # be explicitly non-simulated.  Mock receipts are always simulated=True and
+    # the gate accepts them unconditionally (P0 demo).  In staging / hybrid
+    # deployments where disposition_is_mock=False, simulated=True or an unknown
+    # simulated flag (None — no receipt row) must not pass as real writeback.
+    if not ctx.disposition_is_mock and terminal.simulated is not False:
         raise InvalidStateTransitionError(
-            "required CLOSED gate: simulated terminal receipt rejected "
-            "in non-mock disposition mode",
+            "required CLOSED gate: non-mock disposition requires a verified "
+            "non-simulated terminal receipt",
             target=EventStatus.CLOSED,
             details={
-                "simulated": True,
+                "simulated": terminal.simulated,
                 "disposition_is_mock": False,
             },
+            error_code="closed_simulated_receipt_rejected",
         )
 
 
