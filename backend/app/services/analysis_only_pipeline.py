@@ -463,6 +463,7 @@ class AnalysisOnlyPipeline:
 
         if not generate_report:
             await self._persist_analysis_only_complete(event_id)
+            self._schedule_memory_after_analysis(event_id)
             return AnalysisOnlyPipelineResult(
                 event_id=event_id,
                 triage_result=triage_result,
@@ -779,11 +780,7 @@ class AnalysisOnlyPipeline:
         event_id: str,
         expected_status: EventStatus,
     ) -> asyncio.Task[Any] | None:
-        if (
-            self._memory_agent is None
-            or self._context_store is None
-            or self._settings is None
-        ):
+        if self._memory_agent is None or self._context_store is None or self._settings is None:
             return None
         # ISSUE-208 rollback: flag=false disables only the early (REPORTING)
         # enqueue; CLOSED consolidation always stays on (matches SuperAgent).
@@ -899,6 +896,7 @@ class AnalysisOnlyPipeline:
                 ),
             )
             await self._persist_analysis_only_complete(event_id)
+            self._schedule_memory_after_analysis(event_id)
             return AnalysisOnlyPipelineResult(
                 event_id=event_id,
                 triage_result=triage_result,

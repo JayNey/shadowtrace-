@@ -359,8 +359,8 @@ class Settings(BaseSettings):
         alias="MEMORY_ENQUEUE_AFTER_ANALYSIS",
         description=(
             "When true, MemoryAgent may enqueue profile candidates after "
-            "analysis-only completion (REPORTING + analysis_only_complete / "
-            "report_generated). fp_rule / history_case candidates still require "
+            "analysis-only completion (REPORTING + analysis_only_complete or "
+            "generated report). fp_rule / history_case candidates still require "
             "CLOSED. Set false to fall back to CLOSED-only scheduling (ISSUE-208)."
         ),
     )

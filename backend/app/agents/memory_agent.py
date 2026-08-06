@@ -111,7 +111,7 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
         # ISSUE-208: early enqueue requires an analysis-complete snapshot. This
         # also guards the CLOSED path when a REPORTING snapshot races a close.
         is_early_analysis = not is_closed and (
-            context.analysis_only_complete or context.report is not None
+            context.analysis_only_complete or context.report is not None or context.report_generated
         )
         if not is_closed and not is_early_analysis:
             raise ValueError(

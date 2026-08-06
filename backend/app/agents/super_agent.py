@@ -1569,7 +1569,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         stage: str = "consolidation",
     ) -> None:
         logger.warning(
-            "SuperAgent: MemoryAgent %s failed after close event=%s",
+            "SuperAgent: MemoryAgent failed during %s event=%s",
             stage,
             event_id,
             exc_info=(type(exc), exc, exc.__traceback__),
