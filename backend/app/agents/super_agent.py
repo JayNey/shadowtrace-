@@ -1568,24 +1568,56 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         *,
         stage: str = "consolidation",
     ) -> None:
+        phase = "after analysis" if stage == "after_analysis" else "after close"
         logger.warning(
-            "SuperAgent: MemoryAgent failed during %s event=%s",
+            "SuperAgent: MemoryAgent %s failed %s event=%s",
             stage,
+            phase,
             event_id,
             exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        audit_status = (
+            EventStatus.REPORTING.value
+            if stage == "after_analysis"
+            else EventStatus.CLOSED.value
         )
         if self.audit_service is not None:
             try:
                 await self.audit_service.log_transition(
                     event_id,
-                    EventStatus.CLOSED.value,
-                    EventStatus.CLOSED.value,
+                    audit_status,
+                    audit_status,
                     "MemoryAgent",
                     f"memory_agent_failed:{stage}:{type(exc).__name__}:{exc}",
                 )
             except Exception:
                 logger.warning(
                     "SuperAgent: failed to audit MemoryAgent error event=%s",
+                    event_id,
+                    exc_info=True,
+                )
+        degraded_flags = (
+            getattr(self.memory_agent, "degraded_flags", None)
+            if self.memory_agent is not None
+            else None
+        )
+        if degraded_flags is not None:
+            flag_name = (
+                "memory_after_analysis_failed"
+                if stage == "after_analysis"
+                else "memory_after_close_failed"
+            )
+            try:
+                await degraded_flags.set_flag(
+                    event_id,
+                    flag_name,
+                    type(exc).__name__,
+                    writer="SuperAgent",
+                )
+            except Exception:
+                logger.warning(
+                    "SuperAgent: failed to record degraded flag=%s event=%s",
+                    flag_name,
                     event_id,
                     exc_info=True,
                 )

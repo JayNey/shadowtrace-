@@ -27,6 +27,9 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         # ISSUE-081 memory governance degradation
         "memory_review_enqueue_failed",
         "memory_governance_maintenance_failed",
+        # ISSUE-208 memory consolidation scheduling failures
+        "memory_after_analysis_failed",
+        "memory_after_close_failed",
         # ISSUE-131 decision audit degradation
         "decision_audit_degraded",
         "auto_investigate_dispatch_unavailable",
@@ -52,6 +55,7 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "StateMachineService",
         "DegradedFlagService",
         "AnalysisOnlyPipeline",
+        "SuperAgent",
         "InvestigationGraph",
         "MemoryAgent",
         "AgentTraceService",

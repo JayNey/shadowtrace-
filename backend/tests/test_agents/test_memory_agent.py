@@ -845,6 +845,49 @@ async def test_schedule_memory_after_analysis_skipped_when_early_enqueue_off() -
 
 
 @pytest.mark.asyncio
+async def test_super_agent_memory_after_analysis_failure_records_degraded() -> None:
+    """ISSUE-208: early scheduling failures must audit + degrade without blocking."""
+    from unittest.mock import AsyncMock
+
+    context = _context(
+        FinalVerdict.CONFIRMED_THREAT,
+        status=EventStatus.REPORTING,
+        analysis_only_complete=True,
+    )
+    context_store = _ContextStore(context)
+    degraded = AsyncMock()
+    degraded.set_flag = AsyncMock(return_value=[])
+
+    class _FailingMemoryAgent(_SuccessfulMemoryAgent):
+        degraded_flags = degraded
+
+        async def execute(self, input: MemoryAgentInput) -> None:
+            raise RuntimeError("enqueue failed")
+
+    memory_agent = _FailingMemoryAgent()
+    audit = AsyncMock()
+    super_agent = SuperAgent(
+        memory_agent=memory_agent,
+        context_store=context_store,
+        audit_service=audit,
+    )
+
+    task = await super_agent._schedule_memory_after_analysis(EVENT_ID, context)
+    assert task is not None
+    await task
+
+    audit.log_transition.assert_awaited_once()
+    audit_args = audit.log_transition.await_args.args
+    assert audit_args[1] == EventStatus.REPORTING.value
+    assert audit_args[2] == EventStatus.REPORTING.value
+    degraded.set_flag.assert_awaited_once()
+    flag_call = degraded.set_flag.await_args
+    assert flag_call.args[0] == EVENT_ID
+    assert flag_call.args[1] == "memory_after_analysis_failed"
+    assert flag_call.kwargs["writer"] == "SuperAgent"
+
+
+@pytest.mark.asyncio
 async def test_early_enqueue_does_not_short_circuit_closed_consolidation() -> None:
     """ISSUE-208 regression: the early (REPORTING) pass must not block the later
     CLOSED pass from enqueueing closure-semantics candidates."""

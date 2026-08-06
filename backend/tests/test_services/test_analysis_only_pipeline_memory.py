@@ -180,6 +180,19 @@ async def test_run_memory_after_analysis_failure_records_degraded_flag() -> None
     assert args[1] == "memory_after_analysis_failed"
 
 
+def test_memory_failure_degraded_flags_are_allowlisted() -> None:
+    """ISSUE-208: pipeline/SuperAgent failure flags must persist via DegradedFlagService."""
+    from app.services.degraded_flag_service import (
+        DEGRADED_FLAG_ALLOWLIST,
+        DEGRADED_FLAG_TRUSTED_CALLERS,
+    )
+
+    assert "memory_after_analysis_failed" in DEGRADED_FLAG_ALLOWLIST
+    assert "memory_after_close_failed" in DEGRADED_FLAG_ALLOWLIST
+    assert "SuperAgent" in DEGRADED_FLAG_TRUSTED_CALLERS
+    assert "AnalysisOnlyPipeline" in DEGRADED_FLAG_TRUSTED_CALLERS
+
+
 @pytest.mark.asyncio
 async def test_schedule_memory_after_close_fires_full_consolidation() -> None:
     """CLOSED events (analysis-only auto/short-circuit close) schedule the full

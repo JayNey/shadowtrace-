@@ -189,3 +189,36 @@ def test_reject_requires_non_whitespace_reason(client: TestClient) -> None:
 
     assert response.status_code == 422
     assert response.json()["error_code"] == "validation_error"
+
+
+def test_analysis_only_complete_lists_profile_pending_only() -> None:
+    """ISSUE-208: after analysis-only completion, reviews expose profile pending only."""
+
+    class _ProfileOnlyGovernance(_Governance):
+        async def list_pending(self, kb_name: str | None = None) -> list[MemoryReview]:
+            self.filters.append(kb_name)
+            return [
+                MemoryReview(
+                    review_id="rev-profile-208",
+                    kb_name="entity_profile_kb",
+                    candidate_type="profile",
+                    payload={"entity_type": "host", "entity_value": "pc-fin-023"},
+                    status="pending",
+                    confidence=0.82,
+                    created_at=datetime(2026, 8, 6, tzinfo=UTC),
+                )
+            ]
+
+    governance = _ProfileOnlyGovernance()
+    app.dependency_overrides[get_memory_governance] = lambda: governance
+    try:
+        client = TestClient(app)
+        response = client.get("/api/v1/knowledge/reviews", headers=_hdr("analyst-token"))
+        assert response.status_code == 200, response.text
+        items = response.json()["items"]
+        candidate_types = [item["candidate_type"] for item in items]
+        assert candidate_types == ["profile"]
+        assert "fp_rule" not in candidate_types
+        assert "history_case" not in candidate_types
+    finally:
+        app.dependency_overrides.clear()
