@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.agents.response_agent import compute_template_hash, derive_disposition_idempotency_key
@@ -54,6 +55,7 @@ class DispositionActivationResult(BaseModel):
             "not_approved",
             "capability_blocked",
             "terminal_not_in_approved_set",
+            "concurrent_head_conflict",
         ]
         | None
     ) = None
@@ -245,133 +247,165 @@ class EventDispositionService:
                 derived_disposition=resolve.disposition,
             )
 
-        async with self._session_factory() as session:
-            async with session.begin():
-                row = await session.get(
-                    orm.Action,
-                    deferred.action_id,
-                    with_for_update=True,
-                )
-                if row is None:
-                    raise ValidationError(
-                        "deferred action missing at activation",
-                        details={"action_id": deferred.action_id},
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    row = await session.get(
+                        orm.Action,
+                        deferred.action_id,
+                        with_for_update=True,
                     )
-                action = _action_from_row(row)
-                closure_cycle = int(action.plan_revision)
+                    if row is None:
+                        raise ValidationError(
+                            "deferred action missing at activation",
+                            details={"action_id": deferred.action_id},
+                        )
+                    action = _action_from_row(row)
+                    closure_cycle = int(action.plan_revision)
 
-                existing = await _find_active_terminal_outbox(
-                    session,
-                    action_id=action.action_id,
-                    closure_cycle=closure_cycle,
-                )
-                if existing is not None:
-                    return DispositionActivationResult(
+                    existing = await _find_active_terminal_outbox(
+                        session,
                         action_id=action.action_id,
-                        activated=False,
-                        skipped_reason="already_submitted",
-                        derived_disposition=resolve.disposition,
-                        disposition_id=existing.disposition_id,
-                        writeback_id=existing.writeback_id,
+                        closure_cycle=closure_cycle,
+                    )
+                    if existing is not None:
+                        return DispositionActivationResult(
+                            action_id=action.action_id,
+                            activated=False,
+                            skipped_reason="already_submitted",
+                            derived_disposition=resolve.disposition,
+                            disposition_id=existing.disposition_id,
+                            writeback_id=existing.writeback_id,
+                        )
+
+                    status = ActionStatus(action.status)
+                    if status is not ActionStatus.APPROVED:
+                        return DispositionActivationResult(
+                            action_id=action.action_id,
+                            activated=False,
+                            skipped_reason="not_approved",
+                            derived_disposition=resolve.disposition,
+                        )
+                    if not action.writeback_applicable:
+                        return DispositionActivationResult(
+                            action_id=action.action_id,
+                            activated=False,
+                            skipped_reason="not_required",
+                            derived_disposition=resolve.disposition,
+                        )
+                    readiness = WritebackReadiness(action.writeback_readiness)
+                    if readiness is not WritebackReadiness.READY:
+                        if readiness in {
+                            WritebackReadiness.CAPABILITY_UNSUPPORTED,
+                            WritebackReadiness.CAPABILITY_UNKNOWN,
+                            WritebackReadiness.NOT_CONFIGURED,
+                        }:
+                            return DispositionActivationResult(
+                                action_id=action.action_id,
+                                activated=False,
+                                skipped_reason="capability_blocked",
+                                derived_disposition=resolve.disposition,
+                            )
+                        return DispositionActivationResult(
+                            action_id=action.action_id,
+                            activated=False,
+                            skipped_reason="effect_not_ready",
+                            derived_disposition=resolve.disposition,
+                        )
+
+                    if self._decision_records is not None:
+                        await self._decision_records.assert_auto_disposition_allowed(
+                            event_id,
+                            session=session,
+                        )
+
+                    template_unchanged = _template_unchanged(action)
+                    validate_action_status_transition(
+                        ActionCategory(action.action_category),
+                        status,
+                        ActionStatus.EXECUTING,
+                        execution_phase=ActionExecutionPhase.POST_VERIFY,
+                        after_effect_resolution=True,
+                        template_unchanged=template_unchanged,
+                        has_job_or_outbox=False,
                     )
 
-                status = ActionStatus(action.status)
-                if status is not ActionStatus.APPROVED:
-                    return DispositionActivationResult(
-                        action_id=action.action_id,
-                        activated=False,
-                        skipped_reason="not_approved",
-                        derived_disposition=resolve.disposition,
+                    locator, source_record_id = await self._resolve_source(session, action)
+                    token_row = await session.get(orm.SourceObject, source_record_id)
+                    token = token_row.current_concurrency_token if token_row else None
+                    disposition_id = new_disposition_id()
+                    command = self._factory.build_event_status_update(
+                        action,
+                        source_locator=locator,
+                        source_concurrency_token=token,
+                        operator_id=operator,
+                        disposition_id=disposition_id,
+                        closure_cycle=closure_cycle,
+                        target_disposition=resolve.disposition,
                     )
-                if not action.writeback_applicable:
-                    return DispositionActivationResult(
-                        action_id=action.action_id,
-                        activated=False,
-                        skipped_reason="not_required",
-                        derived_disposition=resolve.disposition,
-                    )
-                readiness = WritebackReadiness(action.writeback_readiness)
-                if readiness is not WritebackReadiness.READY:
-                    if readiness in {
-                        WritebackReadiness.CAPABILITY_UNSUPPORTED,
-                        WritebackReadiness.CAPABILITY_UNKNOWN,
-                        WritebackReadiness.NOT_CONFIGURED,
-                    }:
+                    try:
+                        await self._sync.enqueue_command(
+                            session,
+                            command=command,
+                            event_id=event_id,
+                            source_record_id=source_record_id,
+                            logical_slot=_LOGICAL_SLOT,
+                            guard_context={"approved_action_ids": [action.action_id]},
+                        )
+                    except GuardrailViolationError:
                         return DispositionActivationResult(
                             action_id=action.action_id,
                             activated=False,
                             skipped_reason="capability_blocked",
                             derived_disposition=resolve.disposition,
                         )
-                    return DispositionActivationResult(
-                        action_id=action.action_id,
-                        activated=False,
-                        skipped_reason="effect_not_ready",
-                        derived_disposition=resolve.disposition,
-                    )
-
-                if self._decision_records is not None:
-                    await self._decision_records.assert_auto_disposition_allowed(
-                        event_id,
-                        session=session,
-                    )
-
-                template_unchanged = _template_unchanged(action)
-                validate_action_status_transition(
-                    ActionCategory(action.action_category),
-                    status,
-                    ActionStatus.EXECUTING,
-                    execution_phase=ActionExecutionPhase.POST_VERIFY,
-                    after_effect_resolution=True,
-                    template_unchanged=template_unchanged,
-                    has_job_or_outbox=False,
-                )
-
-                locator, source_record_id = await self._resolve_source(session, action)
-                token_row = await session.get(orm.SourceObject, source_record_id)
-                token = token_row.current_concurrency_token if token_row else None
-                disposition_id = new_disposition_id()
-                command = self._factory.build_event_status_update(
-                    action,
-                    source_locator=locator,
-                    source_concurrency_token=token,
-                    operator_id=operator,
-                    disposition_id=disposition_id,
-                    closure_cycle=closure_cycle,
-                    target_disposition=resolve.disposition,
-                )
-                try:
-                    await self._sync.enqueue_command(
+                    row.status = ActionStatus.EXECUTING.value
+                    outbox = await _find_active_terminal_outbox(
                         session,
-                        command=command,
-                        event_id=event_id,
-                        source_record_id=source_record_id,
-                        logical_slot=_LOGICAL_SLOT,
-                        guard_context={"approved_action_ids": [action.action_id]},
-                    )
-                except GuardrailViolationError:
-                    return DispositionActivationResult(
                         action_id=action.action_id,
-                        activated=False,
-                        skipped_reason="capability_blocked",
-                        derived_disposition=resolve.disposition,
+                        closure_cycle=closure_cycle,
                     )
-
-                row.status = ActionStatus.EXECUTING.value
-                outbox = await _find_active_terminal_outbox(
-                    session,
-                    action_id=action.action_id,
-                    closure_cycle=closure_cycle,
+                    if outbox is None:
+                        raise ValidationError(
+                            "outbox missing after enqueue",
+                            details={"action_id": action.action_id},
+                        )
+                    result_disposition_id = outbox.disposition_id
+                    result_writeback_id = outbox.writeback_id
+                    result_action_id = action.action_id
+                    result_outbox_id: str = outbox.outbox_id
+        except IntegrityError as exc:
+            # ISSUE-219: a concurrent activation of the same
+            # (event_id, closure_cycle, logical_slot) won the active-head race;
+            # the partial unique index rejected this insert and the transaction
+            # has already been rolled back by the begin() context.  The winner's
+            # head stays active — treat this activation as an idempotent no-op
+            # carrying the winner's lineage (disposition_id/writeback_id).
+            if "uq_disposition_outbox_event_status_active_head" in str(exc.orig):
+                async with self._session_factory() as conflict_session:
+                    winner = await conflict_session.scalar(
+                        select(orm.DispositionOutbox)
+                        .where(
+                            orm.DispositionOutbox.event_id == event_id,
+                            orm.DispositionOutbox.closure_cycle
+                            == int(deferred.plan_revision),
+                            orm.DispositionOutbox.intent_kind
+                            == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                            orm.DispositionOutbox.logical_slot == _LOGICAL_SLOT,
+                            orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                        )
+                        .limit(1)
+                    )
+                return DispositionActivationResult(
+                    action_id=deferred.action_id,
+                    activated=False,
+                    skipped_reason="concurrent_head_conflict",
+                    derived_disposition=resolve.disposition,
+                    disposition_id=winner.disposition_id if winner is not None else None,
+                    writeback_id=winner.writeback_id if winner is not None else None,
                 )
-                if outbox is None:
-                    raise ValidationError(
-                        "outbox missing after enqueue",
-                        details={"action_id": action.action_id},
-                    )
-                result_disposition_id = outbox.disposition_id
-                result_writeback_id = outbox.writeback_id
-                result_action_id = action.action_id
-                result_outbox_id: str = outbox.outbox_id
+            raise
+
 
         # B1 fix (ISSUE-064): Synchronously deliver the outbox so the
         # adapter produces a receipt.  Without this the outbox row sits

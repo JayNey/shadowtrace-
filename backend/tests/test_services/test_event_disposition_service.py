@@ -1079,3 +1079,59 @@ async def test_immediate_pending_fp_blocks_even_if_verification_success_forged(
             .where(orm.DispositionOutbox.event_id == event_id)
         )
         assert int(count or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_activate_and_submit_keeps_single_active_head(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    disposition_service: EventDispositionService,
+    disposition_sync: DispositionSyncService,
+    cleanup: None,
+) -> None:
+    """ISSUE-219: concurrent activations of the same (event_id, closure_cycle)
+    never raise — the loser is an idempotent no-op (concurrent_head_conflict
+    or already_submitted) and exactly one active head remains, with the
+    winner's lineage intact."""
+    import asyncio
+
+    await _seed_connector_and_source(session_factory, mock_xdr_client=mock_xdr_client)
+    event_id = await _create_event(session_factory, store)
+    deferred_a = _deferred_action(event_id=event_id)
+    deferred_b = _deferred_action(event_id=event_id)
+    await _insert_action(session_factory, event_id, deferred_a)
+    await _insert_action(session_factory, event_id, deferred_b)
+    await _seed_effect_verification(store, event_id, action_id=deferred_a.action_id)
+    await _seed_effect_verification(store, event_id, action_id=deferred_b.action_id)
+
+    results = await asyncio.gather(
+        disposition_service.activate_and_submit(event_id, 1, "op-a"),
+        disposition_service.activate_and_submit(event_id, 1, "op-b"),
+        return_exceptions=True,
+    )
+    assert not any(isinstance(r, BaseException) for r in results), results
+
+    activated = [r for r in results if getattr(r, "activated", False)]
+    assert len(activated) >= 1, results
+    for r in results:
+        if not r.activated:
+            assert r.skipped_reason in (
+                "concurrent_head_conflict",
+                "already_submitted",
+            ), r
+
+    async with session_factory() as session:
+        active = (
+            await session.execute(
+                select(orm.DispositionOutbox).where(
+                    orm.DispositionOutbox.event_id == event_id,
+                    orm.DispositionOutbox.closure_cycle == 1,
+                    orm.DispositionOutbox.intent_kind
+                    == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    orm.DispositionOutbox.logical_slot == "terminal",
+                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                )
+            )
+        ).scalars().all()
+    assert len(active) == 1, f"expected exactly one active head, got {len(active)}"

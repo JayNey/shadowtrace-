@@ -671,3 +671,318 @@ def test_0023_retention_upgrade_idempotent_when_column_from_0022(migrated: None)
             await engine.dispose()
 
     asyncio.run(_assert_retention_column_not_nullable())
+
+
+async def test_enqueue_supersedes_prior_head_and_keeps_single_active(
+    session: AsyncSession,
+) -> None:
+    """ISSUE-219: enqueueing a second active EVENT_STATUS_UPDATE head for the
+    same (event_id, closure_cycle, logical_slot) atomically marks the prior
+    head ``superseded_by_disposition_id`` (business lineage, not test fixture)
+    and leaves exactly one active head."""
+    from unittest.mock import AsyncMock
+
+    from app.models.disposition import (
+        DispositionCommand,
+        SetEventDispositionParams,
+        SourceDisposition,
+        SourceObjectLocator,
+    )
+    from app.models.enums import DispositionIntentKind, ExecutionOwner, SourceObjectKind
+    from app.services.disposition_sync_service import DispositionSyncService
+
+    sfx = _sfx()
+    event_id = await _seed_event(session, sfx)
+    _, source_record_id = await _seed_connector_source(session, sfx)
+    action_id = await _seed_action(session, event_id, sfx, f"fp-{sfx}")
+
+    def _command(disposition_id: str, idem: str) -> DispositionCommand:
+        return DispositionCommand(
+            disposition_id=disposition_id,
+            action_id=action_id,
+            closure_cycle=1,
+            intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE,
+            source_locator=SourceObjectLocator(
+                source_product="mock_xdr",
+                source_tenant_id="t1",
+                connector_id=f"conn-{sfx}",
+                source_kind=SourceObjectKind.INCIDENT,
+                source_object_type="incident",
+                source_object_id=f"INC-{sfx}",
+            ),
+            operation_code="set_event_disposition",
+            operation_params=SetEventDispositionParams(
+                target_disposition=SourceDisposition.CONTAINED
+            ),
+            target_results=[],
+            operator_id="test-operator",
+            idempotency_key=idem,
+            source_concurrency_token=None,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            parent_disposition_id=None,
+            supersedes_disposition_id=None,
+        )
+
+    service = DispositionSyncService(
+        session_factory=AsyncMock(),  # type: ignore[arg-type]
+        context_store=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=AsyncMock(),  # type: ignore[arg-type]
+    )
+
+    first = await service.enqueue_command(
+        session,
+        command=_command(f"disp-first-{sfx}", f"idem-first-{sfx}"),
+        event_id=event_id,
+        source_record_id=source_record_id,
+        logical_slot="terminal",
+    )
+    # Same cycle, second head: must supersede the first, not violate the index.
+    second = await service.enqueue_command(
+        session,
+        command=_command(f"disp-second-{sfx}", f"idem-second-{sfx}"),
+        event_id=event_id,
+        source_record_id=source_record_id,
+        logical_slot="terminal",
+    )
+    await session.flush()
+
+    first_row = await session.get(m.DispositionOutbox, first.outbox_id)
+    assert first_row is not None
+    assert first_row.superseded_by_disposition_id == second.disposition_id
+    second_row = await session.get(m.DispositionOutbox, second.outbox_id)
+    assert second_row is not None
+    assert second_row.supersedes_disposition_id == first.disposition_id
+    assert second_row.superseded_by_disposition_id is None
+
+    # Invariant: exactly one active (non-superseded) head for the lineage.
+    active = (
+        await session.execute(
+            select(m.DispositionOutbox).where(
+                m.DispositionOutbox.event_id == event_id,
+                m.DispositionOutbox.closure_cycle == 1,
+                m.DispositionOutbox.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                m.DispositionOutbox.logical_slot == "terminal",
+                m.DispositionOutbox.superseded_by_disposition_id.is_(None),
+            )
+        )
+    ).scalars().all()
+    assert len(active) == 1
+    assert active[0].disposition_id == second.disposition_id
+
+    # Same cycle re-enqueue after supersede keeps exactly one active head
+    # (third head supersedes the second — chain lineage).
+    third = await service.enqueue_command(
+        session,
+        command=_command(f"disp-third-{sfx}", f"idem-third-{sfx}"),
+        event_id=event_id,
+        source_record_id=source_record_id,
+        logical_slot="terminal",
+    )
+    await session.flush()
+    second_row = await session.get(m.DispositionOutbox, second.outbox_id)
+    assert second_row.superseded_by_disposition_id == third.disposition_id
+    active = (
+        await session.execute(
+            select(m.DispositionOutbox).where(
+                m.DispositionOutbox.event_id == event_id,
+                m.DispositionOutbox.closure_cycle == 1,
+                m.DispositionOutbox.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                m.DispositionOutbox.logical_slot == "terminal",
+                m.DispositionOutbox.superseded_by_disposition_id.is_(None),
+            )
+        )
+    ).scalars().all()
+    assert len(active) == 1
+    assert active[0].disposition_id == third.disposition_id
+
+    await session.rollback()
+
+
+async def test_enqueue_does_not_supersede_across_closure_cycles(
+    session: AsyncSession,
+) -> None:
+    """ISSUE-219: a new head never supersedes history heads of earlier cycles."""
+    from unittest.mock import AsyncMock
+
+    from app.models.disposition import (
+        DispositionCommand,
+        SetEventDispositionParams,
+        SourceDisposition,
+        SourceObjectLocator,
+    )
+    from app.models.enums import DispositionIntentKind, ExecutionOwner, SourceObjectKind
+    from app.services.disposition_sync_service import DispositionSyncService
+
+    sfx = _sfx()
+    event_id = await _seed_event(session, sfx)
+    _, source_record_id = await _seed_connector_source(session, sfx)
+    action_id = await _seed_action(session, event_id, sfx, f"fp-{sfx}")
+
+    def _command(disposition_id: str, idem: str, cycle: int) -> DispositionCommand:
+        return DispositionCommand(
+            disposition_id=disposition_id,
+            action_id=action_id,
+            closure_cycle=cycle,
+            intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE,
+            source_locator=SourceObjectLocator(
+                source_product="mock_xdr",
+                source_tenant_id="t1",
+                connector_id=f"conn-{sfx}",
+                source_kind=SourceObjectKind.INCIDENT,
+                source_object_type="incident",
+                source_object_id=f"INC-{sfx}",
+            ),
+            operation_code="set_event_disposition",
+            operation_params=SetEventDispositionParams(
+                target_disposition=SourceDisposition.CONTAINED
+            ),
+            target_results=[],
+            operator_id="test-operator",
+            idempotency_key=idem,
+            source_concurrency_token=None,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            parent_disposition_id=None,
+            supersedes_disposition_id=None,
+        )
+
+    service = DispositionSyncService(
+        session_factory=AsyncMock(),  # type: ignore[arg-type]
+        context_store=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=AsyncMock(),  # type: ignore[arg-type]
+    )
+
+    cycle1 = await service.enqueue_command(
+        session,
+        command=_command(f"disp-c1-{sfx}", f"idem-c1-{sfx}", cycle=1),
+        event_id=event_id,
+        source_record_id=source_record_id,
+        logical_slot="terminal",
+    )
+    # Later cycle: an active head may exist per cycle; the cycle-1 head must
+    # NOT be superseded by a cycle-2 head (history stays intact).
+    cycle2 = await service.enqueue_command(
+        session,
+        command=_command(f"disp-c2-{sfx}", f"idem-c2-{sfx}", cycle=2),
+        event_id=event_id,
+        source_record_id=source_record_id,
+        logical_slot="terminal",
+    )
+    await session.flush()
+
+    c1_row = await session.get(m.DispositionOutbox, cycle1.outbox_id)
+    assert c1_row.superseded_by_disposition_id is None
+    c2_row = await session.get(m.DispositionOutbox, cycle2.outbox_id)
+    assert c2_row.superseded_by_disposition_id is None
+    assert c2_row.supersedes_disposition_id is None
+
+    # Both cycles each hold one active head (index key includes closure_cycle).
+    active = (
+        await session.execute(
+            select(m.DispositionOutbox).where(
+                m.DispositionOutbox.event_id == event_id,
+                m.DispositionOutbox.superseded_by_disposition_id.is_(None),
+            )
+        )
+    ).scalars().all()
+    assert {r.closure_cycle for r in active} == {1, 2}
+
+    await session.rollback()
+
+
+async def test_concurrent_enqueue_same_lineage_keeps_single_active_head() -> None:
+    """ISSUE-219: two concurrent activations of the same lineage can never
+    leave two active heads — the partial unique index is the final invariant
+    and the racing loser either supersedes (serialized after the winner) or
+    surfaces an IntegrityError (handled by the caller)."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.models.disposition import (
+        DispositionCommand,
+        SetEventDispositionParams,
+        SourceDisposition,
+        SourceObjectLocator,
+    )
+    from app.models.enums import DispositionIntentKind, ExecutionOwner, SourceObjectKind
+    from app.services.disposition_sync_service import DispositionSyncService
+
+    sfx = _sfx()
+    engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+    factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    try:
+        async with factory() as seed_session:
+            event_id = await _seed_event(seed_session, sfx)
+            _, source_record_id = await _seed_connector_source(seed_session, sfx)
+            action_id = await _seed_action(seed_session, event_id, sfx, f"fp-{sfx}")
+            await seed_session.commit()
+
+        def _command(disposition_id: str, idem: str) -> DispositionCommand:
+            return DispositionCommand(
+                disposition_id=disposition_id,
+                action_id=action_id,
+                closure_cycle=1,
+                intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE,
+                source_locator=SourceObjectLocator(
+                    source_product="mock_xdr",
+                    source_tenant_id="t1",
+                    connector_id=f"conn-{sfx}",
+                    source_kind=SourceObjectKind.INCIDENT,
+                    source_object_type="incident",
+                    source_object_id=f"INC-{sfx}",
+                ),
+                operation_code="set_event_disposition",
+                operation_params=SetEventDispositionParams(
+                    target_disposition=SourceDisposition.CONTAINED
+                ),
+                target_results=[],
+                operator_id="test-operator",
+                idempotency_key=idem,
+                source_concurrency_token=None,
+                execution_owner=ExecutionOwner.XDR_MANAGED,
+                parent_disposition_id=None,
+                supersedes_disposition_id=None,
+            )
+
+        async def _enqueue(disposition_id: str, idem: str) -> str:
+            async with factory() as sess:
+                async with sess.begin():
+                    service = DispositionSyncService(
+                        session_factory=AsyncMock(),  # type: ignore[arg-type]
+                        context_store=AsyncMock(),  # type: ignore[arg-type]
+                        adapter_registry=AsyncMock(),  # type: ignore[arg-type]
+                    )
+                    record = await service.enqueue_command(
+                        sess,
+                        command=_command(disposition_id, idem),
+                        event_id=event_id,
+                        source_record_id=source_record_id,
+                        logical_slot="terminal",
+                    )
+                    return record.outbox_id
+
+        results = await asyncio.gather(
+            _enqueue(f"disp-ca-{sfx}", f"idem-ca-{sfx}"),
+            _enqueue(f"disp-cb-{sfx}", f"idem-cb-{sfx}"),
+            return_exceptions=True,
+        )
+
+        # At least one enqueue must succeed; the loser may have superseded the
+        # winner (serialized) or failed with IntegrityError — never two heads.
+        assert any(not isinstance(r, Exception) for r in results), results
+
+        async with factory() as check_session:
+            active = (
+                await check_session.execute(
+                    select(m.DispositionOutbox).where(
+                        m.DispositionOutbox.event_id == event_id,
+                        m.DispositionOutbox.closure_cycle == 1,
+                        m.DispositionOutbox.intent_kind
+                        == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                        m.DispositionOutbox.logical_slot == "terminal",
+                        m.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                    )
+                )
+            ).scalars().all()
+        assert len(active) == 1, f"expected exactly one active head, got {len(active)}"
+    finally:
+        await engine.dispose()

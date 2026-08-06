@@ -938,9 +938,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 # Idempotent re-verify: a prior pass already enqueued the
                 # terminal outbox — evaluate the existing receipt instead of
                 # treating already_submitted as a hard activation failure.
+                # concurrent_head_conflict (ISSUE-219) is the same idempotent
+                # outcome: a concurrent activation won the active-head race and
+                # the winner's head is active with lineage populated.
                 terminal_verify_ready = terminal_activated or (
                     not terminal_activated
-                    and activate_result.skipped_reason == "already_submitted"
+                    and activate_result.skipped_reason
+                    in ("already_submitted", "concurrent_head_conflict")
                     and activate_result.writeback_id is not None
                 )
                 if not terminal_verify_ready:

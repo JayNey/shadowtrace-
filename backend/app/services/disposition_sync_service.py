@@ -149,6 +149,36 @@ class DispositionSyncService:
         source_sequence = int(source_row.next_outbox_sequence)
         await session.flush()
 
+        # ISSUE-219: supersede the existing active EVENT_STATUS_UPDATE head for
+        # the same (event_id, closure_cycle, logical_slot) inside this same
+        # transaction, before inserting the new head.  FOR UPDATE serializes
+        # concurrent prior-head reads; the partial unique index
+        # (superseded_by_disposition_id IS NULL) remains the final invariant,
+        # so a racing loser surfaces as an IntegrityError for the caller to
+        # handle rather than a silent second active head.  Only heads of the
+        # same closure_cycle are touched — history heads from earlier cycles
+        # are never superseded.
+        prior_head: orm.DispositionOutbox | None = None
+        if command.intent_kind is DispositionIntentKind.EVENT_STATUS_UPDATE:
+            prior_head = await session.scalar(
+                select(orm.DispositionOutbox)
+                .where(
+                    orm.DispositionOutbox.event_id == event_id,
+                    orm.DispositionOutbox.closure_cycle == command.closure_cycle,
+                    orm.DispositionOutbox.intent_kind == command.intent_kind.value,
+                    orm.DispositionOutbox.logical_slot == logical_slot,
+                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                )
+                .with_for_update()
+                .limit(1)
+            )
+            if prior_head is not None:
+                # Propagate lineage onto the wire payload so the adapter / Mock
+                # XDR can honor its supersede contract (old head deactivated).
+                command = command.model_copy(
+                    update={"supersedes_disposition_id": prior_head.disposition_id}
+                )
+
         payload = command.model_dump(mode="json")
         outbox = orm.DispositionOutbox(
             outbox_id=_new_outbox_id(),
@@ -162,11 +192,15 @@ class DispositionSyncService:
             source_sequence=source_sequence,
             intent_kind=command.intent_kind.value,
             logical_slot=logical_slot,
+            supersedes_disposition_id=command.supersedes_disposition_id,
             idempotency_key=command.idempotency_key,
             command_payload=payload,
             command_payload_sha256=_payload_sha256(payload),
             delivery_status=OutboxDeliveryStatus.READY.value,
         )
+        if prior_head is not None:
+            # Atomic lineage: the old head is superseded by the new head.
+            prior_head.superseded_by_disposition_id = command.disposition_id
         session.add(outbox)
         await session.flush()
         await append_list_context_journal_in_session(
@@ -188,6 +222,8 @@ class DispositionSyncService:
                 "source_sequence": outbox.source_sequence,
                 "intent_kind": outbox.intent_kind,
                 "logical_slot": outbox.logical_slot,
+                "supersedes_disposition_id": outbox.supersedes_disposition_id,
+                "superseded_by_disposition_id": outbox.superseded_by_disposition_id,
                 "idempotency_key": outbox.idempotency_key,
                 "command_payload": outbox.command_payload,
                 "command_payload_sha256": outbox.command_payload_sha256,
@@ -535,6 +571,8 @@ class DispositionSyncService:
                 "source_sequence": outbox.source_sequence,
                 "intent_kind": outbox.intent_kind,
                 "logical_slot": outbox.logical_slot,
+                "supersedes_disposition_id": outbox.supersedes_disposition_id,
+                "superseded_by_disposition_id": outbox.superseded_by_disposition_id,
                 "idempotency_key": outbox.idempotency_key,
                 "command_payload": outbox.command_payload,
                 "command_payload_sha256": outbox.command_payload_sha256,
