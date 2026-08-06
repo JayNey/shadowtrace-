@@ -986,3 +986,111 @@ async def test_concurrent_enqueue_same_lineage_keeps_single_active_head() -> Non
         assert len(active) == 1, f"expected exactly one active head, got {len(active)}"
     finally:
         await engine.dispose()
+
+
+async def test_action_execution_job_idempotency_key_unique(
+    session: AsyncSession,
+) -> None:
+    """ISSUE-220: the DB rejects a second action_execution_job with the same
+    idempotency_key (one authoritative job per key — reclaim can no longer
+    insert a duplicate that re-invokes the Provider)."""
+    sfx = _sfx()
+    event_id = await _seed_event(session, sfx)
+    await _seed_connector_source(session, sfx)
+    action_id = await _seed_action(session, event_id, sfx, f"fp-{sfx}")
+
+    def _job(job_id: str) -> m.ActionExecutionJob:
+        return m.ActionExecutionJob(
+            job_id=job_id,
+            event_id=event_id,
+            action_id=action_id,
+            provider_name="mock_tool_provider",
+            idempotency_key=f"idem-uq-{sfx}",
+            status="running",
+            claimed_by="worker",
+            lease_expires_at=None,
+            attempt=1,
+        )
+
+    session.add(_job(f"job-a-{sfx}"))
+    await session.flush()
+    session.add(_job(f"job-b-{sfx}"))
+    with pytest.raises(IntegrityError, match="uq_action_execution_job_idempotency_key"):
+        await session.flush()
+    await session.rollback()
+
+
+async def test_duplicate_job_dedup_repoints_action_execution_job_id(
+    session: AsyncSession,
+) -> None:
+    """ISSUE-220: migration dedup SQL repoints action.execution_job_id to the
+    keeper row before duplicate jobs are deleted."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import text
+
+    sfx = _sfx()
+    event_id = await _seed_event(session, sfx)
+    action_id = await _seed_action(session, event_id, sfx, f"fp-{sfx}")
+    idem = f"idem-dedup-{sfx}"
+    old_job_id = f"job-old-{sfx}"
+    new_job_id = f"job-new-{sfx}"
+    t_old = datetime(2026, 1, 1, tzinfo=UTC)
+    t_new = datetime(2026, 1, 2, tzinfo=UTC)
+
+    session.add(
+        m.ActionExecutionJob(
+            job_id=old_job_id,
+            event_id=event_id,
+            action_id=action_id,
+            provider_name="mock_tool_provider",
+            idempotency_key=idem,
+            status="queued",
+            claimed_by=None,
+            lease_expires_at=None,
+            attempt=1,
+            created_at=t_old,
+            updated_at=t_old,
+        )
+    )
+    session.add(
+        m.ActionExecutionJob(
+            job_id=new_job_id,
+            event_id=event_id,
+            action_id=action_id,
+            provider_name="mock_tool_provider",
+            idempotency_key=idem,
+            status="running",
+            claimed_by="worker",
+            lease_expires_at=t_new + timedelta(hours=1),
+            attempt=2,
+            created_at=t_new,
+            updated_at=t_new,
+        )
+    )
+    await session.execute(
+        text("UPDATE action SET execution_job_id = :job_id WHERE action_id = :action_id"),
+        {"job_id": old_job_id, "action_id": action_id},
+    )
+    await session.flush()
+
+    await session.execute(
+        text(
+            """
+            UPDATE action a
+            SET execution_job_id = kept.job_id
+            FROM action_execution_job doomed
+            JOIN action_execution_job kept
+              ON kept.idempotency_key = doomed.idempotency_key
+             AND (kept.created_at, kept.job_id) > (doomed.created_at, doomed.job_id)
+            WHERE a.execution_job_id = doomed.job_id
+            """
+        )
+    )
+    await session.flush()
+
+    row = await session.get(m.Action, action_id)
+    assert row is not None
+    assert row.execution_job_id == new_job_id
+
+    await session.rollback()

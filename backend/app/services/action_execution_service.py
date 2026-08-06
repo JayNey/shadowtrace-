@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import get_settings
@@ -346,6 +347,70 @@ class ActionExecutionService:
             assert row is not None
             return _action_from_row(row)
 
+    async def _attach_existing_job(
+        self,
+        session: AsyncSession,
+        action: Action,
+        job_row: orm.ActionExecutionJob,
+        *,
+        now: datetime,
+        operator: str = _EXECUTION_OPERATOR,
+    ) -> None:
+        """ISSUE-220: a job already exists for this idempotency_key — attach it
+        instead of creating a duplicate job or re-invoking the Provider.
+
+        Terminal jobs drive the action to the mapped status.  Non-terminal
+        (QUEUED/RUNNING, e.g. after lease reclaim) jobs cannot prove whether
+        the Provider already produced a side-effect, so the action is moved to
+        UNKNOWN for human confirmation instead of blindly re-executing.
+        """
+        action_row = await session.get(orm.Action, action.action_id, with_for_update=True)
+        assert action_row is not None
+        action_row.execution_job_id = job_row.job_id
+        current = ActionStatus(action_row.status)
+        job_status = ExecutionJobStatus(job_row.status)
+        if job_status is ExecutionJobStatus.UNKNOWN or job_status not in {
+            ExecutionJobStatus.QUEUED,
+            ExecutionJobStatus.RUNNING,
+        }:
+            target = _map_job_to_action_status(job_status)
+            if target is not current:
+                validate_action_status_transition(
+                    ActionCategory(action_row.action_category),
+                    current,
+                    target,
+                )
+                action_row.status = target.value
+                action_row.executed_at = now
+                action_row.updated_at = now
+                session.add(
+                    orm.EventAuditLog(
+                        event_id=action_row.event_id,
+                        from_status=current.value,
+                        to_status=target.value,
+                        operator=operator,
+                        reason="duplicate_idempotency_key_reclaim:attached_terminal_job",
+                    )
+                )
+            return
+        # QUEUED / RUNNING: cannot safely re-execute — require human resolution.
+        validate_action_status_transition(
+            ActionCategory(action_row.action_category),
+            current,
+            ActionStatus.UNKNOWN,
+        )
+        action_row.status = ActionStatus.UNKNOWN.value
+        action_row.updated_at = now
+        session.add(
+            orm.EventAuditLog(
+                event_id=action_row.event_id,
+                from_status=current.value,
+                to_status=ActionStatus.UNKNOWN.value,
+                operator=operator,
+                reason="duplicate_idempotency_key_reclaim:attached_existing_job",
+            )
+        )
+
     async def _execute_xdr_managed(self, action: Action, *, operator: str) -> None:
         job_id = new_job_id()
         settings = get_settings()
@@ -365,8 +430,26 @@ class ActionExecutionService:
         idempotency_key = action.idempotency_key or f"{action.action_id}:xdr"
         async with self._session_factory() as session:
             async with session.begin():
-                session.add(
-                    orm.ActionExecutionJob(
+                existing_job = await session.scalar(
+                    select(orm.ActionExecutionJob).where(
+                        orm.ActionExecutionJob.idempotency_key == idempotency_key
+                    )
+                )
+                if existing_job is not None:
+                    # ISSUE-220: one authoritative job per idempotency_key —
+                    # attach the existing job instead of enqueuing a duplicate
+                    # command / invoking the Provider a second time.
+                    await self._attach_existing_job(
+                        session, action, existing_job, now=now, operator=operator
+                    )
+                    return
+                # ISSUE-220: a concurrent activation of a *different* action
+                # sharing this idempotency_key may insert first; ON CONFLICT
+                # makes the loser re-attach instead of surfacing an
+                # IntegrityError / FAILED action.
+                stmt = (
+                    pg_insert(orm.ActionExecutionJob)
+                    .values(
                         job_id=job_id,
                         event_id=action.event_id,
                         action_id=action.action_id,
@@ -378,7 +461,21 @@ class ActionExecutionService:
                         attempt=1,
                         started_at=now,
                     )
+                    .on_conflict_do_nothing(index_elements=["idempotency_key"])
+                    .returning(orm.ActionExecutionJob.job_id)
                 )
+                inserted_job_id = (await session.execute(stmt)).scalar_one_or_none()
+                if inserted_job_id is None:
+                    existing = await session.scalar(
+                        select(orm.ActionExecutionJob).where(
+                            orm.ActionExecutionJob.idempotency_key == idempotency_key
+                        )
+                    )
+                    assert existing is not None
+                    await self._attach_existing_job(
+                        session, action, existing, now=now, operator=operator
+                    )
+                    return
                 action_row = await session.get(orm.Action, action.action_id, with_for_update=True)
                 assert action_row is not None
                 action_row.execution_job_id = job_id
@@ -403,8 +500,24 @@ class ActionExecutionService:
         now = datetime.now(UTC)
         async with self._session_factory() as session:
             async with session.begin():
-                session.add(
-                    orm.ActionExecutionJob(
+                existing_job = await session.scalar(
+                    select(orm.ActionExecutionJob).where(
+                        orm.ActionExecutionJob.idempotency_key == idempotency_key
+                    )
+                )
+                if existing_job is not None:
+                    # ISSUE-220: one authoritative job per idempotency_key —
+                    # attach the existing job and never re-invoke the Provider
+                    # (the Provider may already have produced a side-effect).
+                    await self._attach_existing_job(
+                        session, action, existing_job, now=now, operator=operator
+                    )
+                    return
+                # ISSUE-220: concurrent loser (different action, same key)
+                # re-attaches instead of hitting an IntegrityError / FAILED.
+                stmt = (
+                    pg_insert(orm.ActionExecutionJob)
+                    .values(
                         job_id=job_id,
                         event_id=action.event_id,
                         action_id=action.action_id,
@@ -416,7 +529,21 @@ class ActionExecutionService:
                         attempt=1,
                         started_at=now,
                     )
+                    .on_conflict_do_nothing(index_elements=["idempotency_key"])
+                    .returning(orm.ActionExecutionJob.job_id)
                 )
+                inserted_job_id = (await session.execute(stmt)).scalar_one_or_none()
+                if inserted_job_id is None:
+                    existing = await session.scalar(
+                        select(orm.ActionExecutionJob).where(
+                            orm.ActionExecutionJob.idempotency_key == idempotency_key
+                        )
+                    )
+                    assert existing is not None
+                    await self._attach_existing_job(
+                        session, action, existing, now=now, operator=operator
+                    )
+                    return
                 action_row = await session.get(orm.Action, action.action_id, with_for_update=True)
                 assert action_row is not None
                 action_row.execution_job_id = job_id

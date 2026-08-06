@@ -293,7 +293,11 @@ class ActionExecutionJob(Base):
     __tablename__ = "action_execution_job"
     __table_args__ = (
         Index("ix_action_execution_job_status", "status"),
-        Index("ix_action_execution_job_idempotency_key", "idempotency_key"),
+        # ISSUE-220: one authoritative job per idempotency_key — lease reclaim
+        # must never re-insert a duplicate job for the same key (duplicate
+        # side-effects).  Migration 0034 deduplicates legacy rows before
+        # creating this constraint.
+        UniqueConstraint("idempotency_key", name="uq_action_execution_job_idempotency_key"),
         Index("ix_action_execution_job_lease_expires_at", "lease_expires_at"),
     )
 

@@ -20,7 +20,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from httpx import ASGITransport
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -902,19 +902,110 @@ async def test_reclaimed_action_can_be_executed_again(
     await execution_service.reconcile_stale_executions(limit=10)
 
     async with session_factory() as session:
+        outbox_count_before = await session.scalar(
+            select(func.count()).select_from(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.event_id == event_id
+            )
+        )
+
+    async with session_factory() as session:
         row = await session.get(orm.Action, action_id)
         assert row is not None
         assert row.status == ActionStatus.APPROVED.value
 
-    result = await execution_service.execute_action(action_id)
-    assert result.status is ActionStatus.EXECUTING
+    # ISSUE-220: re-executing after reclaim must attach the existing job (same
+    # idempotency_key) instead of inserting a duplicate job / re-enqueuing a
+    # command.  The reclaimed job is non-terminal, so the action moves to
+    # UNKNOWN for human confirmation — never a blind second side-effect.
+    await execution_service.execute_action(action_id)
     await execution_service._sync.process_ready_outboxes(limit=5)
     async with session_factory() as session:
         row = await session.get(orm.Action, action_id)
         assert row is not None
-        assert row.status in {ActionStatus.SUCCESS.value, ActionStatus.EXECUTING.value}
-        assert row.execution_job_id is not None
-        assert row.execution_job_id != _job_id
+        assert row.status == ActionStatus.UNKNOWN.value
+        assert row.execution_job_id == _job_id
+        jobs = (
+            await session.scalars(
+                select(orm.ActionExecutionJob).where(
+                    orm.ActionExecutionJob.action_id == action_id
+                )
+            )
+        ).all()
+        assert len(jobs) == 1
+        assert jobs[0].job_id == _job_id
+        outbox_count_after = await session.scalar(
+            select(func.count()).select_from(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.event_id == event_id
+            )
+        )
+        assert int(outbox_count_after or 0) == int(outbox_count_before or 0)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_execute_same_idempotency_key_single_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-220: concurrent claim+insert for the same idempotency_key leaves
+    one authoritative job and at most one Provider invocation."""
+    from types import SimpleNamespace
+
+    shared_idem = f"idem-shared-{_sfx()}"
+    event_id = await _create_event(session_factory, store, object_id=f"INC-{_sfx()}")
+    action_a = _action_model(
+        event_id=event_id,
+        action_id=f"act-a-{_sfx()}",
+        action_fingerprint=f"fp-a-{_sfx()}",
+        execution_owner=ExecutionOwner.DIRECT_TOOL,
+        writeback_required=False,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+        disposition_source_ref=None,
+        idempotency_key=shared_idem,
+    )
+    action_b = _action_model(
+        event_id=event_id,
+        action_id=f"act-b-{_sfx()}",
+        action_fingerprint=f"fp-b-{_sfx()}",
+        execution_owner=ExecutionOwner.DIRECT_TOOL,
+        writeback_required=False,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+        disposition_source_ref=None,
+        idempotency_key=shared_idem,
+    )
+    await _insert_action(session_factory, event_id, action_a)
+    await _insert_action(session_factory, event_id, action_b)
+
+    provider_calls = {"n": 0}
+
+    class _CountingExecutor:
+        async def call(self, *args: object, **kwargs: object) -> SimpleNamespace:
+            provider_calls["n"] += 1
+            return SimpleNamespace(status="success")
+
+    monkeypatch.setattr(execution_service, "_executor", _CountingExecutor())
+
+    results = await asyncio.gather(
+        execution_service.execute_action(action_a.action_id),
+        execution_service.execute_action(action_b.action_id),
+        return_exceptions=True,
+    )
+    assert not any(isinstance(r, BaseException) for r in results), results
+    assert provider_calls["n"] == 1
+
+    async with session_factory() as session:
+        jobs = (
+            await session.scalars(
+                select(orm.ActionExecutionJob).where(
+                    orm.ActionExecutionJob.idempotency_key == shared_idem
+                )
+            )
+        ).all()
+        assert len(jobs) == 1
 
 
 @pytest.mark.asyncio
@@ -1079,3 +1170,61 @@ async def test_xdr_executing_with_active_outbox_not_reclaimed(
         row = await session.get(orm.Action, action_id)
         assert row is not None
         assert row.status == ActionStatus.EXECUTING.value
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_reclaimed_reuses_job_without_reinvoking_provider(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-220: after reclaim, re-executing a DIRECT_TOOL action with the
+    same idempotency_key must attach the existing job and never invoke the
+    Provider a second time (countable side-effect)."""
+    from types import SimpleNamespace
+
+    event_id = await _create_event(session_factory, store, object_id=f"INC-{_sfx()}")
+    expired = datetime.now(UTC) - timedelta(seconds=30)
+    action_id, job_id = await _insert_stale_executing_with_job(
+        session_factory,
+        event_id=event_id,
+        lease_expires_at=expired,
+        attempt=1,
+    )
+    await execution_service.reconcile_stale_executions(limit=10)
+
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action_id)
+        assert row is not None
+        assert row.status == ActionStatus.APPROVED.value
+
+    provider_calls = {"n": 0}
+
+    class _CountingExecutor:
+        async def call(self, *args: object, **kwargs: object) -> SimpleNamespace:
+            provider_calls["n"] += 1
+            return SimpleNamespace(status="success")
+
+    monkeypatch.setattr(execution_service, "_executor", _CountingExecutor())
+
+    await execution_service.execute_action(action_id)
+
+    # The Provider must not be re-invoked; the original job is attached and
+    # the action requires human resolution (non-terminal reclaimed job).
+    assert provider_calls["n"] == 0
+    async with session_factory() as session:
+        jobs = (
+            await session.scalars(
+                select(orm.ActionExecutionJob).where(
+                    orm.ActionExecutionJob.idempotency_key == f"idem-{action_id}"
+                )
+            )
+        ).all()
+        assert len(jobs) == 1
+        assert jobs[0].job_id == job_id
+        row = await session.get(orm.Action, action_id)
+        assert row is not None
+        assert row.execution_job_id == job_id
+        assert row.status == ActionStatus.UNKNOWN.value
