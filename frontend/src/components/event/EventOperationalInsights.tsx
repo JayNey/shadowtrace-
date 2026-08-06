@@ -6,7 +6,7 @@ import type { EventWriteback } from "../../hooks/useEventDetail";
 
 const NEXT_ACTION_LABELS: Record<string, string> = {
   none: "无",
-  approve_actions: "待审批处置",
+  approve_actions: "审批待处理",
   close: "可结案",
 };
 

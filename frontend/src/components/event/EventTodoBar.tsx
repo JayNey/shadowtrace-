@@ -53,6 +53,17 @@ function todoColor(kind: EventTodoItem["kind"]): "success" | "warning" | "info" 
   }
 }
 
+function externalLinkLabel(kind: EventTodoItem["kind"]): string {
+  switch (kind) {
+    case "approval_pending":
+      return "前往审批中心";
+    case "memory_review":
+      return "前往知识审核";
+    default:
+      return "外部跳转";
+  }
+}
+
 export default function EventTodoBar({
   detail,
   actions,
@@ -192,7 +203,7 @@ export default function EventTodoBar({
                       </Button>
                     ) : null}
                     {item.externalHref ? (
-                      <Link to={item.externalHref}>外部跳转</Link>
+                      <Link to={item.externalHref}>{externalLinkLabel(item.kind)}</Link>
                     ) : null}
                   </Space>
                 </Space>

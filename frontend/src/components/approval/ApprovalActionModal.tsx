@@ -1,4 +1,4 @@
-/** ApprovalActionModal — approve / reject dialog (ISSUE-073). */
+/** ApprovalActionModal — approve / reject dialog (ISSUE-073 / ISSUE-207). */
 
 import { Modal, Form, Input } from "antd";
 import {
@@ -14,7 +14,7 @@ interface ApprovalActionModalProps {
   actionId: string | null;
   mode: "approve" | "reject";
   loading: boolean;
-  onConfirm: (actionId: string, body: ApprovalDecisionBody) => void;
+  onConfirm: (actionId: string, body: ApprovalDecisionBody) => void | Promise<void>;
   onCancel: () => void;
 }
 
@@ -37,13 +37,14 @@ export default function ApprovalActionModal({
     try {
       const values = await form.validateFields();
       const comment = values.comment?.trim();
-      onConfirm(actionId, {
+      // Await the caller so a failed API leave the reject reason intact (ISSUE-207).
+      await onConfirm(actionId, {
         decision_id: newDecisionId(),
         comment: comment || undefined,
       });
       form.resetFields();
     } catch {
-      // validation failed — keep modal open
+      // Validation failed or onConfirm rejected — keep modal + form values.
     }
   };
 

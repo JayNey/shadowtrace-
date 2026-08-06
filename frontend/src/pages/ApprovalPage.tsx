@@ -1,6 +1,7 @@
 /** ApprovalCenterPage — approval queue with cards and real-time updates (ISSUE-073). */
 
 import { useEffect, useMemo, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { Typography, Space, Empty, Spin, Alert, message } from "antd";
 import { CheckCircleOutlined } from "@ant-design/icons";
 import {
@@ -13,6 +14,9 @@ import {
 } from "../stores/approvalStore";
 import ApprovalCard from "../components/approval/ApprovalCard";
 import ApprovalActionModal from "../components/approval/ApprovalActionModal";
+import { ApiError } from "../services/apiClient";
+import { isApprovalUiDisabled } from "../config/auth";
+import { showResumeFeedback } from "../utils/approvalFeedback";
 import type { Action } from "../types/action";
 
 const { Title, Text } = Typography;
@@ -26,10 +30,15 @@ interface ModalState {
 export default function ApprovalPage() {
   const {
     pendingApprovals,
+    eventPendingApprovals,
     loading,
     error,
+    eventLoading,
+    eventError,
     approvalDeadlines,
     loadPendingApprovals,
+    loadPendingApprovalsForEvent,
+    clearEventScope,
     refreshEventIds,
     approve,
     reject,
@@ -40,34 +49,62 @@ export default function ApprovalPage() {
   const [revisionProgress, setRevisionProgress] = useState<Map<string, RevisionProgress>>(
     new Map(),
   );
+  const [searchParams] = useSearchParams();
+  const eventFilter = searchParams.get("event_id");
+  const approvalDisabled = isApprovalUiDisabled();
 
   useEffect(() => {
-    void refreshEventIds().then((ids) => loadPendingApprovals(ids));
-  }, [loadPendingApprovals, refreshEventIds]);
+    // Deep link: query the target event directly (it may be beyond the first
+    // 200 events of the global board) into the isolated scoped state. The
+    // global queue / polling keeps its own _eventIds and is never narrowed.
+    if (eventFilter) {
+      void loadPendingApprovalsForEvent(eventFilter);
+    } else {
+      void refreshEventIds().then((ids) => loadPendingApprovals(ids));
+    }
+    return () => clearEventScope();
+  }, [
+    clearEventScope,
+    eventFilter,
+    loadPendingApprovals,
+    loadPendingApprovalsForEvent,
+    refreshEventIds,
+  ]);
+
+  // ?event_id= deep link from the event-detail todo bar CTA (ISSUE-207):
+  // scoped state for the deep link, global queue otherwise.
+  const visibleApprovals = useMemo(() => {
+    if (!eventFilter) return pendingApprovals;
+    return eventPendingApprovals;
+  }, [eventFilter, eventPendingApprovals, pendingApprovals]);
+
+  // Scoped loading/error are isolated from the global poll's (ISSUE-207 review).
+  const activeLoading = eventFilter ? eventLoading : loading;
+  const activeError = eventFilter ? eventError : error;
 
   useEffect(() => {
-    if (pendingApprovals.length === 0) {
+    if (visibleApprovals.length === 0) {
       setRevisionProgress(new Map());
       return;
     }
     let cancelled = false;
-    void loadRevisionProgress(pendingApprovals).then((map) => {
+    void loadRevisionProgress(visibleApprovals).then((map) => {
       if (!cancelled) setRevisionProgress(map);
     });
     return () => {
       cancelled = true;
     };
-  }, [pendingApprovals]);
+  }, [visibleApprovals]);
 
   const groupedByEvent = useMemo(() => {
     const groups = new Map<string, Action[]>();
-    for (const action of pendingApprovals) {
+    for (const action of visibleApprovals) {
       const list = groups.get(action.event_id) ?? [];
       list.push(action);
       groups.set(action.event_id, list);
     }
     return [...groups.entries()].map(([eventId, actions]) => ({ eventId, actions }));
-  }, [pendingApprovals]);
+  }, [visibleApprovals]);
 
   const handleApprove = (actionId: string) => {
     setModal({ open: true, actionId, mode: "approve" });
@@ -78,28 +115,57 @@ export default function ApprovalPage() {
   };
 
   const handleConfirm = async (actionId: string, body: ApprovalDecisionBody) => {
-    const action = pendingApprovals.find((a) => a.action_id === actionId);
+    const mode = modal.mode;
+    const action = visibleApprovals.find((a) => a.action_id === actionId);
     const eventId = action?.event_id;
     const remainingBefore = eventId
-      ? pendingApprovals.filter((a) => a.event_id === eventId).length
+      ? visibleApprovals.filter((a) => a.event_id === eventId).length
       : 0;
     setSubmitting(true);
     try {
-      if (modal.mode === "approve") {
-        await approve(actionId, body);
+      let result;
+      if (mode === "approve") {
+        result = await approve(actionId, body);
       } else {
         if (!body.comment?.trim()) {
           message.error("拒绝必须填写原因");
-          return;
+          throw new Error("reject comment required");
         }
-        await reject(actionId, body);
+        result = await reject(actionId, body);
       }
       setModal({ open: false, actionId: null, mode: "approve" });
+      showResumeFeedback(actionId, mode, result);
       if (eventId && remainingBefore > 1) {
         message.info("本事件仍有待审批动作，计划尚未全部决出。");
       }
-    } catch {
-      // API error toast already shown by apiClient interceptor
+    } catch (err: unknown) {
+      // approve/reject skip the apiClient interceptor toast; surface errors here.
+      if (err instanceof ApiError && err.error_code === "approval_decision_conflict") {
+        // Another approver decided first — reload the queue instead of leaving
+        // the stale card for the operator to retry into 409s. In deep-link mode
+        // refresh the scoped event directly; otherwise the global queue.
+        setModal({ open: false, actionId: null, mode: "approve" });
+        const refreshed = eventFilter
+          ? await loadPendingApprovalsForEvent(eventFilter)
+          : await refreshEventIds().then((ids) => loadPendingApprovals(ids));
+        const messageText =
+          refreshed === "ok"
+            ? "该审批已由其他审批者处理，已刷新最新状态。"
+            : refreshed === "partial"
+              ? "该审批已由其他审批者处理，部分事件刷新失败，请手动刷新查看最新状态。"
+              : "该审批已由其他审批者处理，但刷新失败，请手动刷新查看最新状态。";
+        message.warning(messageText);
+        return;
+      }
+      if (err instanceof ApiError && err.error_code === "forbidden") {
+        message.error("无审批权限（403）：需要 approver 角色，请联系管理员授权。");
+      } else if (err instanceof ApiError) {
+        message.error(err.message || err.error_code || "审批操作失败");
+      } else if (!(err instanceof Error && err.message === "reject comment required")) {
+        message.error("审批操作失败");
+      }
+      // Re-throw so ApprovalActionModal keeps the reject reason / comment (ISSUE-207).
+      throw err;
     } finally {
       setSubmitting(false);
     }
@@ -118,18 +184,59 @@ export default function ApprovalPage() {
 
       <Text type="secondary">
         需审批的处置动作。同一事件的审批计划需全部决出后方可进入执行。
-        {pendingApprovals.length > 0 && (
-          <span style={{ marginLeft: 16 }}>共 {pendingApprovals.length} 个待审批动作</span>
+        {visibleApprovals.length > 0 && (
+          <span style={{ marginLeft: 16 }}>共 {visibleApprovals.length} 个待审批动作</span>
         )}
       </Text>
 
-      {error && (
-        <Alert message={error} type="error" showIcon style={{ marginBottom: 16 }} closable />
+      {eventFilter && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`仅显示事件 ${eventFilter} 的待审批动作`}
+          action={<Link to="/approvals">查看全部</Link>}
+          data-testid="approval-event-filter-hint"
+        />
       )}
 
-      <Spin spinning={loading}>
-        {pendingApprovals.length === 0 && !loading ? (
-          <Empty description="暂无待审批动作" style={{ marginTop: 48 }} />
+      {activeError && (
+        <Alert message={activeError} type="error" showIcon style={{ marginBottom: 16 }} closable />
+      )}
+
+      {visibleApprovals.length > 0 && approvalDisabled && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="当前角色无审批权限"
+          description="批准/拒绝需要 approver 或 admin 角色，操作已禁用；请使用具备审批角色的账号操作。"
+          data-testid="approval-role-hint"
+        />
+      )}
+
+      <Spin spinning={activeLoading}>
+        {visibleApprovals.length === 0 && !activeLoading ? (
+          <Empty
+            description={eventFilter ? "该事件暂无待审批动作" : "暂无待审批动作"}
+            style={{ marginTop: 48 }}
+          >
+            <div style={{ maxWidth: 460, textAlign: "left", marginTop: 8 }}>
+              <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+                待审批动作的产生条件：对事件发起「分析并生成处置方案」调查，且计划中包含
+                L2+（或策略要求审批）的处置动作。仅「分析」调查不会产生待审批动作。
+              </Typography.Paragraph>
+              {!eventFilter && (
+                <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+                  全局队列会分页拉取事件列表（每页最多 200 条）；若事件总量超过约 1
+                  万条，更早的事件可能未纳入扫描，可从事件详情页进入审批。
+                </Typography.Paragraph>
+              )}
+              <Link to="/events" data-testid="approval-empty-goto-events">
+                前往事件看板发起调查
+              </Link>
+            </div>
+          </Empty>
         ) : (
           <Space direction="vertical" size="large" style={{ width: "100%", marginTop: 16 }}>
             {groupedByEvent.map(({ eventId, actions }) => {
@@ -159,6 +266,7 @@ export default function ApprovalPage() {
                       )}
                       onApprove={handleApprove}
                       onReject={handleReject}
+                      approvalDisabled={approvalDisabled}
                     />
                   ))}
                 </Space>
