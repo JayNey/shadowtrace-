@@ -14,7 +14,7 @@ path).
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from app.models.enums import ClassificationSource, EventStatus
@@ -40,7 +40,7 @@ CLASSIFICATION_LOCKED_STATUSES: frozenset[EventStatus] = frozenset(
 )
 
 
-class OrmEventTypeRewriteOutcome(str, Enum):
+class OrmEventTypeRewriteOutcome(StrEnum):
     """Result of ``EventService.rewrite_event_type_from_triage``."""
 
     APPLIED = "applied"

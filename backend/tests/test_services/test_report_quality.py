@@ -15,6 +15,7 @@ from app.agents.report_section_builder import (
     SECTION_KEYS,
 )
 from app.models.agent_io import ReportPhaseStatus
+from app.models.context import EventContext
 from app.models.enums import FinalVerdict, ReportQuality, Severity
 from app.models.report import InvestigationReport, ReportSection
 from app.services.report_quality import (
@@ -67,6 +68,18 @@ def test_analysis_only_not_executed_chapters_are_complete() -> None:
     stamped = with_assessed_quality(report)
     assert stamped.report_quality is ReportQuality.COMPLETE
     assert stamped.degraded is False
+
+
+def test_event_context_accepts_report_dump_with_computed_degraded() -> None:
+    """Context store round-trip must not 422 on computed ``degraded`` (CI regression)."""
+    report = with_assessed_quality(_report(generated_by="template"))
+    assert report.degraded is True
+    payload = report.model_dump(mode="json")
+    assert payload.get("degraded") is True
+    ctx = EventContext.model_validate({"report": payload})
+    assert ctx.report is not None
+    assert ctx.report.report_quality is ReportQuality.DEGRADED_TEMPLATE
+    assert ctx.report.degraded is True
 
 
 def test_legacy_placeholder_no_actions_is_incomplete_even_when_not_executed() -> None:
@@ -213,7 +226,7 @@ async def test_upsert_persists_report_quality_on_orm_row(
     saved = await service.upsert_report(report)
     assert saved.report_quality is ReportQuality.QUICK_CLOSE
     row = captured["row"]
-    assert getattr(row, "report_quality") == "quick_close"
+    assert row.report_quality == "quick_close"
 
     # Simulate get_report reading the same row.
     session.get = AsyncMock(return_value=row)

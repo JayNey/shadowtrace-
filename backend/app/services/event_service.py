@@ -57,11 +57,6 @@ from app.models.security_event import SecurityEvent
 from app.models.source import SourceReference
 from app.models.tool_meta import TERMINAL_DISPOSITION_TOOL
 from app.models.workflow import TransitionContext, validate_verdict_status
-from app.services.context_service import (
-    EventContextStore,
-    append_context_journal_in_session,
-    event_summary_from_security_event,
-)
 from app.services.classification import (
     CLASSIFICATION_OVERRIDE_KEY,
     TRIAGE_RESULT_KEY,
@@ -78,6 +73,11 @@ from app.services.classification_source import (
     derive_classification_source,
     should_skip_orm_event_type_rewrite,
     snapshot_has_human_classification_override,
+)
+from app.services.context_service import (
+    EventContextStore,
+    append_context_journal_in_session,
+    event_summary_from_security_event,
 )
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.entity_validator import validate_entity_set

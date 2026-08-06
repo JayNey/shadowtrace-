@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from app.models.enums import FinalVerdict, ReportQuality, Severity
 
@@ -45,6 +45,15 @@ class InvestigationReport(BaseModel):
     error_detail: str | None = None
     # ISSUE-212: persisted quality grade (also stored on ORM report.report_quality).
     report_quality: ReportQuality = ReportQuality.COMPLETE
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_computed_degraded(cls, data: Any) -> Any:
+        """``degraded`` is dump-only; strip so EventContext round-trips with extra=forbid."""
+        if isinstance(data, dict) and "degraded" in data:
+            data = dict(data)
+            data.pop("degraded", None)
+        return data
 
     @computed_field  # type: ignore[prop-decorator]
     @property
