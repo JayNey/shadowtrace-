@@ -59,10 +59,7 @@ class AuthorizationError(Exception):
 
 
 def _is_production() -> bool:
-    # Strip surrounding whitespace exactly like config.Settings.production_fail_closed_violations
-    # (ISSUE-217): APP_ENV=" production " must be treated as production so the dev-token
-    # path stays closed instead of diverging from the fail-closed configuration gate.
-    return get_settings().app_env.strip().lower() == "production"
+    return get_settings().is_production()
 
 
 def _dev_token_registry() -> dict[str, Principal]:

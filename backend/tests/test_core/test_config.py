@@ -190,6 +190,7 @@ def test_production_rejects_dev_auth_tokens(monkeypatch: pytest.MonkeyPatch) -> 
         Settings(**_base_kwargs())
     violations = exc_info.value.details["violations"]
     assert any("DEV_AUTH_TOKENS" in v for v in violations)
+    assert "unsafe runtime configuration" in str(exc_info.value)
 
 
 def test_production_accepts_blank_dev_auth_tokens() -> None:
@@ -207,3 +208,21 @@ def test_production_with_whitespace_app_env_rejects_dev_auth_tokens(
         Settings(**_base_kwargs(APP_ENV=" production "))
     violations = exc_info.value.details["violations"]
     assert any("DEV_AUTH_TOKENS" in v for v in violations)
+
+
+@pytest.mark.parametrize(
+    "app_env,expected",
+    [
+        ("production", True),
+        (" production", True),
+        ("production ", True),
+        ("  production  ", True),
+        ("Production", True),
+        ("development", False),
+        ("staging", False),
+    ],
+)
+def test_is_production_strips_and_normalizes_app_env(app_env: str, expected: bool) -> None:
+    """ISSUE-217: Settings.is_production() is the single source of truth."""
+    settings = Settings(**_base_kwargs(APP_ENV=app_env))
+    assert settings.is_production() is expected

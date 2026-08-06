@@ -392,7 +392,7 @@ class Settings(BaseSettings):
         violations = self.production_fail_closed_violations()
         if violations:
             raise ConfigurationError(
-                "app_env=production forbids mock/simulation runtime modes: "
+                "app_env=production forbids unsafe runtime configuration: "
                 + ", ".join(violations),
                 error_code="configuration_error",
                 details={"app_env": self.app_env, "violations": violations},
@@ -429,6 +429,14 @@ class Settings(BaseSettings):
             )
         return violations
 
+    def is_production(self) -> bool:
+        """Whether ``APP_ENV`` denotes production (strip + case-insensitive).
+
+        Shared by auth, CORS, and fail-closed gates so padded values like
+        ``" production"`` cannot diverge across subsystems (ISSUE-217).
+        """
+        return self.app_env.strip().lower() == "production"
+
     def production_fail_closed_violations(self) -> list[str]:
         """Runtime modes that must never be active when ``app_env=production``.
 
@@ -436,7 +444,7 @@ class Settings(BaseSettings):
         running mock sources/tools/disposition or simulation mode is a
         security incident, not a warning — construction must raise.
         """
-        if self.app_env.strip().lower() != "production":
+        if not self.is_production():
             return []
         violations: list[str] = []
         if os.environ.get("DEV_AUTH_TOKENS", "").strip():
@@ -486,7 +494,7 @@ class Settings(BaseSettings):
 
     def trusted_proxy_fail_closed_violations(self) -> list[str]:
         """Unsafe trusted-proxy settings when ``app_env=production`` (ISSUE-180)."""
-        if self.app_env.strip().lower() != "production":
+        if not self.is_production():
             return []
         if not self.trusted_auth_proxy_enabled:
             return []
