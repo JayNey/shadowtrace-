@@ -65,6 +65,28 @@ interface ApprovalState {
 
 const APPROVAL_STATUSES = new Set(["waiting_approval", "approved", "rejected"]);
 
+/** Backend EventService.list_events caps page_size at 200 — page through all. */
+const EVENT_LIST_PAGE_SIZE = 200;
+/** Safety cap: 200 × 50 = 10_000 event ids (ISSUE-207 review). */
+const EVENT_LIST_MAX_PAGES = 50;
+
+async function fetchAllEventIds(): Promise<string[]> {
+  const ids: string[] = [];
+  let page = 1;
+  let total = Number.POSITIVE_INFINITY;
+  while (ids.length < total && page <= EVENT_LIST_MAX_PAGES) {
+    const res = await listEvents({ page, page_size: EVENT_LIST_PAGE_SIZE });
+    total = Number(res.data.total ?? 0);
+    const items = res.data.items ?? [];
+    for (const event of items) {
+      ids.push(event.event_id);
+    }
+    if (items.length === 0) break;
+    page += 1;
+  }
+  return ids;
+}
+
 async function fetchWaitingApprovals(
   eventIds: string[],
 ): Promise<{
@@ -112,8 +134,7 @@ export const useApprovalStore = create<ApprovalState>((set, get) => ({
 
   async refreshEventIds() {
     try {
-      const res = await listEvents({ page_size: 200 });
-      const ids = res.data.items.map((e) => e.event_id);
+      const ids = await fetchAllEventIds();
       set({ _eventIds: ids });
       return ids;
     } catch {

@@ -507,6 +507,28 @@ describe("approvalStore", () => {
     expect(useApprovalStore.getState().pendingApprovals).toHaveLength(0);
   });
 
+  it("refreshEventIds pages through listEvents until all ids are collected", async () => {
+    const page1 = Array.from({ length: 200 }, (_, i) => ({ event_id: `evt-${i + 1}` }));
+    const page2 = Array.from({ length: 50 }, (_, i) => ({ event_id: `evt-${i + 201}` }));
+    vi.mocked(listEvents)
+      .mockResolvedValueOnce({
+        data: { total: 250, page: 1, page_size: 200, items: page1 },
+      } as never)
+      .mockResolvedValueOnce({
+        data: { total: 250, page: 2, page_size: 200, items: page2 },
+      } as never);
+
+    const ids = await useApprovalStore.getState().refreshEventIds();
+
+    expect(listEvents).toHaveBeenCalledTimes(2);
+    expect(listEvents).toHaveBeenNthCalledWith(1, { page: 1, page_size: 200 });
+    expect(listEvents).toHaveBeenNthCalledWith(2, { page: 2, page_size: 200 });
+    expect(ids).toHaveLength(250);
+    expect(ids[0]).toBe("evt-1");
+    expect(ids[249]).toBe("evt-250");
+    expect(useApprovalStore.getState()._eventIds).toHaveLength(250);
+  });
+
   it("initGlobalListener registers socket handler once", () => {
     useApprovalStore.getState().initGlobalListener();
     useApprovalStore.getState().initGlobalListener();

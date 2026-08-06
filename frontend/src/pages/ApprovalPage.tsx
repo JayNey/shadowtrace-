@@ -129,7 +129,7 @@ export default function ApprovalPage() {
       } else {
         if (!body.comment?.trim()) {
           message.error("拒绝必须填写原因");
-          return;
+          throw new Error("reject comment required");
         }
         result = await reject(actionId, body);
       }
@@ -155,13 +155,17 @@ export default function ApprovalPage() {
               ? "该审批已由其他审批者处理，部分事件刷新失败，请手动刷新查看最新状态。"
               : "该审批已由其他审批者处理，但刷新失败，请手动刷新查看最新状态。";
         message.warning(messageText);
-      } else if (err instanceof ApiError && err.error_code === "forbidden") {
+        return;
+      }
+      if (err instanceof ApiError && err.error_code === "forbidden") {
         message.error("无审批权限（403）：需要 approver 角色，请联系管理员授权。");
       } else if (err instanceof ApiError) {
         message.error(err.message || err.error_code || "审批操作失败");
-      } else {
+      } else if (!(err instanceof Error && err.message === "reject comment required")) {
         message.error("审批操作失败");
       }
+      // Re-throw so ApprovalActionModal keeps the reject reason / comment (ISSUE-207).
+      throw err;
     } finally {
       setSubmitting(false);
     }
@@ -222,6 +226,12 @@ export default function ApprovalPage() {
                 待审批动作的产生条件：对事件发起「分析并生成处置方案」调查，且计划中包含
                 L2+（或策略要求审批）的处置动作。仅「分析」调查不会产生待审批动作。
               </Typography.Paragraph>
+              {!eventFilter && (
+                <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
+                  全局队列会分页拉取事件列表（每页最多 200 条）；若事件总量超过约 1
+                  万条，更早的事件可能未纳入扫描，可从事件详情页进入审批。
+                </Typography.Paragraph>
+              )}
               <Link to="/events" data-testid="approval-empty-goto-events">
                 前往事件看板发起调查
               </Link>

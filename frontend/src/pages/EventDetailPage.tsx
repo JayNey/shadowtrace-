@@ -575,13 +575,17 @@ export default function EventDetailPage() {
             ? "该审批已由其他审批者处理，已刷新最新状态。"
             : "该审批已由其他审批者处理，但页面刷新未完成，请手动刷新查看最新状态。",
         );
-      } else if (err instanceof ApiError && err.error_code === "forbidden") {
+        return;
+      }
+      if (err instanceof ApiError && err.error_code === "forbidden") {
         message.error("无审批权限（403）：需要 approver 角色，请联系管理员授权。");
       } else if (err instanceof ApiError) {
         message.error(err.message || err.error_code || "审批操作失败");
       } else {
         message.error("审批操作失败");
       }
+      // Re-throw so ApprovalActionModal keeps the reject reason / comment (ISSUE-207).
+      throw err;
     } finally {
       setApprovalSubmitting(false);
     }

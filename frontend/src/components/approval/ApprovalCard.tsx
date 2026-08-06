@@ -1,7 +1,7 @@
 /** ApprovalCard — single pending-approval action (ISSUE-073). */
 
 import { memo, useEffect, useState } from "react";
-import { Card, Tag, Typography, Space, theme } from "antd";
+import { Button, Card, Tag, Typography, Space, theme } from "antd";
 import { ClockCircleOutlined, WarningOutlined } from "@ant-design/icons";
 import type { Action } from "../../types/action";
 import { formatDispositionPreview, APPROVAL_TIMEOUT_FALLBACK_MS } from "../../stores/approvalStore";
@@ -108,10 +108,23 @@ function ApprovalCard({
             </Text>
           ) : (
             <Space>
-              <a onClick={() => onApprove(action.action_id)}>批准</a>
-              <a style={{ color: token.colorError }} onClick={() => onReject(action.action_id)}>
+              <Button
+                type="link"
+                size="small"
+                data-testid={`approval-card-approve-${action.action_id}`}
+                onClick={() => onApprove(action.action_id)}
+              >
+                批准
+              </Button>
+              <Button
+                type="link"
+                size="small"
+                danger
+                data-testid={`approval-card-reject-${action.action_id}`}
+                onClick={() => onReject(action.action_id)}
+              >
                 拒绝
-              </a>
+              </Button>
             </Space>
           )
         ) : (

@@ -197,7 +197,7 @@ test.describe("ISSUE-207 · inline approval in event detail", () => {
     await expect(page.getByTestId(`reject-action-${ACTION_ID}`)).toBeVisible();
 
     // Todo bar surfaces the approval CTA before deciding.
-    await expect(page.getByText("待审批处置")).toBeVisible();
+    await expect(page.getByText("审批待处理")).toBeVisible();
 
     await approveButton.click();
     const dialog = page.getByRole("dialog", { name: "批准动作" });
@@ -218,6 +218,6 @@ test.describe("ISSUE-207 · inline approval in event detail", () => {
     await expect(page.getByTestId(`approve-action-${ACTION_ID}`)).toHaveCount(0);
 
     // Todo bar recomputed: approval CTA gone after the event left waiting_approval.
-    await expect(page.getByText("待审批处置")).toHaveCount(0);
+    await expect(page.getByText("审批待处理")).toHaveCount(0);
   });
 });

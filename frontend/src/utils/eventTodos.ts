@@ -107,7 +107,7 @@ export function buildEventTodos(input: BuildEventTodosInput): EventTodoItem[] {
     todos.push({
       id: "approval-pending",
       kind: "approval_pending",
-      label: "待审批处置",
+      label: "审批待处理",
       description: "存在 waiting_approval 动作，请前往审批中心或动作表处理。",
       tabKey: "actions",
       externalHref: `/approvals?event_id=${encodeURIComponent(detail.event.event_id)}`,
