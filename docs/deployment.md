@@ -124,6 +124,8 @@ DISPOSITION_BASE_URL=http://mock-xdr:8100
 
 **注意**：`analysis_only` + `celery` 从 ISSUE-225 开始支持；之前 `analysis_only` 忽略 `TASK_MODE` 始终走 BackgroundTasks。
 
+Auto-investigate / scheduler 触发的调查仍走 Celery → SuperAgent（LangGraph），不受 `ORCHESTRATION_MODE=analysis_only` 影响；仅 HTTP `POST …/investigate` 受上表约束。
+
 验证：
 
 ```bash

@@ -1815,6 +1815,110 @@ async def test_investigate_celery_dispatch_failure_releases_lease(
 
 
 @pytest.mark.asyncio
+async def test_analysis_only_celery_dispatches_dedicated_task(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-225: analysis_only + celery routes to dispatch_analysis_only_investigation."""
+    from app.api.v1 import events as events_module
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+
+    event_id = await _create_test_event(event_service, title="Analysis-only celery dispatch")
+    captured: dict[str, object] = {}
+
+    class _TrackingLease:
+        async def acquire(self, _event_id: str, owner_id: str, ttl_s: int = 600) -> bool:
+            captured["owner_id"] = owner_id
+            return True
+
+        async def release(self, ev_id: str, owner_id: str) -> bool:
+            captured["released"] = (ev_id, owner_id)
+            return True
+
+    async def _dispatch(
+        ev_id: str,
+        *,
+        generate_report: bool = True,
+        owner_id: str | None = None,
+        lease_acquired: bool = False,
+    ) -> str:
+        captured["event_id"] = ev_id
+        captured["generate_report"] = generate_report
+        captured["dispatch_owner_id"] = owner_id
+        captured["lease_acquired"] = lease_acquired
+        return "task-analysis-only-001"
+
+    monkeypatch.setattr(events_module, "get_event_lease", lambda: _TrackingLease())
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.dispatch_analysis_only_investigation",
+        _dispatch,
+    )
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 202, resp.text
+    assert captured["event_id"] == event_id
+    assert captured["lease_acquired"] is True
+    assert captured["dispatch_owner_id"] == captured["owner_id"]
+    assert "released" not in captured
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_celery_dispatch_failure_releases_lease(
+    client: TestClient,
+    event_service: EventService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-225: analysis_only celery dispatch failure must release the HTTP-held lease."""
+    from app.api.v1 import events as events_module
+    from app.core.config import get_settings
+    from app.core.errors import DependencyUnavailableError
+
+    monkeypatch.setenv("ORCHESTRATION_MODE", "analysis_only")
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+
+    event_id = await _create_test_event(event_service, title="Analysis-only celery fail release")
+    released: list[tuple[str, str]] = []
+
+    class _TrackingLease:
+        async def acquire(self, _event_id: str, _owner_id: str, ttl_s: int = 600) -> bool:
+            return True
+
+        async def release(self, ev_id: str, owner_id: str) -> bool:
+            released.append((ev_id, owner_id))
+            return True
+
+    async def _fail_dispatch(*_args: object, **_kwargs: object) -> str:
+        raise DependencyUnavailableError(
+            message="broker down",
+            error_code="task_unavailable",
+            details={"dependency": "celery"},
+        )
+
+    monkeypatch.setattr(events_module, "get_event_lease", lambda: _TrackingLease())
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.dispatch_analysis_only_investigation",
+        _fail_dispatch,
+    )
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/investigate",
+        headers=_hdr(),
+    )
+    assert resp.status_code == 503, resp.text
+    assert len(released) == 1
+    assert released[0][0] == event_id
+
+
+@pytest.mark.asyncio
 async def test_analysis_only_concurrent_investigate_second_request_returns_409(
     client: TestClient,
     event_service: EventService,

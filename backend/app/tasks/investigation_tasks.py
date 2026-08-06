@@ -455,6 +455,35 @@ ANALYSIS_ONLY_TASK_NAME = "shadowtrace.run_analysis_only_investigation"
 ANALYSIS_ONLY_TASK_QUEUE = "investigation"
 
 
+async def _run_analysis_only_body(
+    event_id: str,
+    *,
+    generate_report: bool,
+    owner_id: str,
+    redelivered: bool,
+    lease_acquired: bool = False,
+) -> dict[str, str]:
+    if redelivered:
+        skip, skip_reason = await evaluate_redelivered_investigation_skip(event_id)
+        if skip:
+            logger.info(
+                "run_analysis_only redelivery skipped event=%s reason=%s",
+                event_id,
+                skip_reason,
+            )
+            return {
+                "status": "skipped",
+                "event_id": event_id,
+                "reason": skip_reason or "lookup_degraded",
+            }
+    return await execute_analysis_only_investigation(
+        event_id,
+        generate_report=generate_report,
+        owner_id=owner_id,
+        lease_acquired=lease_acquired,
+    )
+
+
 async def execute_analysis_only_investigation(
     event_id: str,
     *,
@@ -474,11 +503,19 @@ async def execute_analysis_only_investigation(
     raised, matching the SuperAgent behaviour.
     """
     from app.agents.super_agent import _run_orchestration_with_renewal_watch
-    from app.api.v1.deps import _get_session_factory, get_event_lease, get_pipeline
+    from app.api.v1.deps import (
+        _get_session_factory,
+        get_event_lease,
+        get_pipeline,
+        get_state_machine,
+    )
     from app.core.errors import (
+        InvalidStateTransitionError,
         InvestigationInProgressError,
         InvestigationLeaseLostError,
     )
+    from app.models.enums import EventStatus
+    from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
     from app.services.investigation_guidance import record_investigation_workflow_path
 
     lease = get_event_lease()
@@ -504,12 +541,14 @@ async def execute_analysis_only_investigation(
         )
 
     pipeline = await get_pipeline()
+    projection = EvidenceProjection(_get_session_factory())
     try:
-        await _run_orchestration_with_renewal_watch(
-            pipeline.run(event_id, generate_report=generate_report),
-            renewal_failed,
-            event_id=event_id,
-        )
+        with bind_evidence_projection(projection):
+            await _run_orchestration_with_renewal_watch(
+                pipeline.run(event_id, generate_report=generate_report),
+                renewal_failed,
+                event_id=event_id,
+            )
         # Record workflow path for investigation guidance (ISSUE-225).
         await record_investigation_workflow_path(
             _get_session_factory(),
@@ -518,15 +557,16 @@ async def execute_analysis_only_investigation(
             include_response_execution=False,
         )
         return {"status": "completed", "event_id": event_id}
-    except InvestigationInProgressError:
-        logger.info(
-            "run_analysis_only skipped for event=%s — lease already held",
+    except InvalidStateTransitionError as exc:
+        logger.warning(
+            "AnalysisOnlyPipeline skipped for event=%s (stale transition): %s",
             event_id,
+            exc,
         )
         return {
             "status": "skipped",
             "event_id": event_id,
-            "reason": "investigation_in_progress",
+            "reason": "invalid_state_transition",
         }
     except InvestigationLeaseLostError:
         logger.info(
@@ -538,6 +578,23 @@ async def execute_analysis_only_investigation(
             "event_id": event_id,
             "reason": "investigation_lease_lost",
         }
+    except Exception as exc:
+        logger.error(
+            "AnalysisOnlyPipeline failed for event=%s: %s",
+            event_id,
+            exc,
+        )
+        try:
+            state_machine = await get_state_machine()
+            await state_machine.transition(
+                event_id,
+                EventStatus.FAILED,
+                operator="AnalysisOnlyPipeline",
+                reason=f"pipeline_failed: {exc}",
+            )
+        except Exception:
+            logger.exception("Failed to mark event as FAILED: %s", event_id)
+        raise
     finally:
         if renewal_task is not None:
             renewal_task.cancel()
@@ -613,25 +670,14 @@ def run_analysis_only_investigation(
             self.request.id,
             resolved_owner,
         )
-        skip, skip_reason = asyncio.run(evaluate_redelivered_investigation_skip(event_id))
-        if skip:
-            logger.info(
-                "run_analysis_only redelivery skipped event=%s reason=%s",
-                event_id,
-                skip_reason,
-            )
-            return {
-                "status": "skipped",
-                "event_id": event_id,
-                "reason": skip_reason or "lookup_degraded",
-            }
     try:
         try:
             result = asyncio.run(
-                execute_analysis_only_investigation(
+                _run_analysis_only_body(
                     event_id,
                     generate_report=bool(generate_report),
                     owner_id=resolved_owner,
+                    redelivered=redelivered,
                     lease_acquired=lease_acquired,
                 )
             )
