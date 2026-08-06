@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { App as AntApp } from "antd";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { EventDetailResponse } from "../../src/types/event";
+import { ApiError } from "../../src/services/apiClient";
 import { useAgentStatusStore } from "../../src/stores/agentStatusStore";
 import { ApiError } from "../../src/services/apiClient";
 
@@ -26,6 +27,7 @@ const mockResolveWriteback = vi.fn();
 const mockListMemoryReviews = vi.fn();
 const mockApproveAction = vi.fn();
 const mockRejectAction = vi.fn();
+const mockGenerateReport = vi.fn();
 
 vi.mock("../../src/services/eventApi", () => ({
   getEvent: (...args: unknown[]) => mockGetEvent(...args),
@@ -43,6 +45,7 @@ vi.mock("../../src/services/eventApi", () => ({
   resolveWriteback: (...args: unknown[]) => mockResolveWriteback(...args),
   approveAction: (...args: unknown[]) => mockApproveAction(...args),
   rejectAction: (...args: unknown[]) => mockRejectAction(...args),
+  generateReport: (...args: unknown[]) => mockGenerateReport(...args),
 }));
 
 vi.mock("../../src/services/knowledgeApi", () => ({
@@ -363,6 +366,7 @@ describe("EventDetailPage", () => {
     mockGetWriteback.mockResolvedValue({ data: {} });
     mockCloseEvent.mockResolvedValue({ data: { event_id: "evt-70", status: "closed" } });
     mockResolveUnknownAction.mockResolvedValue({ data: {} });
+    mockGenerateReport.mockResolvedValue({ data: { report: {} } });
     mockResolveWriteback.mockResolvedValue({ data: {} });
     mockApproveAction.mockResolvedValue({
       data: {
@@ -1186,5 +1190,68 @@ describe("EventDetailPage", () => {
     expect(screen.getByTestId("approval-decided-act-70")).toBeInTheDocument();
     expect(screen.queryByTestId("approve-action-act-70")).not.toBeInTheDocument();
     expect(screen.queryByTestId("reject-action-act-70")).not.toBeInTheDocument();
+  });
+
+  // ---- ISSUE-206: on-demand report generation ---------------------------------
+
+  it("generates a report from the empty-state CTA and refreshes", async () => {
+    const user = userEvent.setup();
+    renderPage("/events/evt-70#report");
+    expect(await screen.findByText("报告尚未生成")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("report-generate-button"));
+
+    await waitFor(() => expect(mockGenerateReport).toHaveBeenCalledWith("evt-70", undefined));
+    expect(await screen.findByText("报告已生成")).toBeInTheDocument();
+    // Event snapshot is refreshed so the report tab updates without a reload.
+    expect(mockGetEvent.mock.calls.length).toBeGreaterThan(1);
+  });
+
+  it("offers force-generate on 422 report_quality_incomplete", async () => {
+    const user = userEvent.setup();
+    mockGenerateReport.mockRejectedValueOnce(
+      new ApiError({
+        error_code: "report_quality_incomplete",
+        error_message: "incomplete placeholder present",
+      }),
+    );
+    renderPage("/events/evt-70#report");
+    await screen.findByTestId("report-generate-button");
+
+    await user.click(screen.getByTestId("report-generate-button"));
+    expect(
+      await screen.findByText("报告质量不完整：存在占位章节。可强制生成以存档降级件。"),
+    ).toBeInTheDocument();
+
+    const modal = await screen.findByTestId("report-quality-confirm-modal");
+    await user.click(within(modal).getByRole("button", { name: /强制生成/ }));
+    await waitFor(() =>
+      expect(mockGenerateReport).toHaveBeenLastCalledWith("evt-70", { force: true }),
+    );
+  });
+
+  it("confirms downgrade overwrite on 409 report_quality_conflict", async () => {
+    const user = userEvent.setup();
+    mockGenerateReport.mockRejectedValueOnce(
+      new ApiError({
+        error_code: "report_quality_conflict",
+        error_message: "complete report exists",
+      }),
+    );
+    renderPage("/events/evt-70#report");
+    await screen.findByTestId("report-generate-button");
+
+    await user.click(screen.getByTestId("report-generate-button"));
+    expect(
+      await screen.findByText("已有完整报告：覆盖为降级报告需确认降级。"),
+    ).toBeInTheDocument();
+
+    const modal = await screen.findByTestId("report-quality-confirm-modal");
+    await user.click(within(modal).getByRole("button", { name: /确认覆盖/ }));
+    await waitFor(() =>
+      expect(mockGenerateReport).toHaveBeenLastCalledWith("evt-70", {
+        confirm_downgrade: true,
+      }),
+    );
   });
 });
