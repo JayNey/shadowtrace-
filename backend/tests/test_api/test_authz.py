@@ -233,6 +233,71 @@ def test_dev_token_rejected_in_production(
     monkeypatch.setenv("EMBEDDING_MODE", "remote")
     monkeypatch.setenv("SIMULATION_ENABLED", "false")
     monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
+    # ISSUE-217: a non-empty DEV_AUTH_TOKENS is itself a production
+    # fail-closed violation, so clear it to exercise the auth-layer gate here.
+    monkeypatch.setenv("DEV_AUTH_TOKENS", "")
     get_settings.cache_clear()
     resp = client.get("/api/v1/events", headers=_hdr("admin"))
     assert resp.status_code == 401
+
+
+def test_dev_token_rejected_when_app_env_has_surrounding_whitespace(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """APP_ENV with leading/trailing whitespace must still be treated as production.
+
+    ISSUE-217: auth._is_production must apply the same strip() semantics as
+    Settings.production_fail_closed_violations, so a padded APP_ENV cannot
+    silently re-enable the DEV_AUTH_TOKENS path.
+    """
+    monkeypatch.setenv("APP_ENV", "  production  ")
+    monkeypatch.setenv("SOURCE_MODE", "live_edr")
+    monkeypatch.setenv("TOOL_MODE", "live")
+    monkeypatch.setenv("DISPOSITION_MODE", "live_xdr")
+    monkeypatch.setenv("DISPOSITION_ADAPTER_KIND", "http")
+    monkeypatch.setenv("LLM_MODE", "openai_compatible")
+    monkeypatch.setenv("EMBEDDING_MODE", "remote")
+    monkeypatch.setenv("SIMULATION_ENABLED", "false")
+    monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
+    monkeypatch.setenv("DEV_AUTH_TOKENS", "")
+    get_settings.cache_clear()
+    resp = client.get("/api/v1/events", headers=_hdr("admin"))
+    assert resp.status_code == 401
+
+
+def test_is_production_strips_surrounding_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-217: _is_production must share the config gate's strip() semantics.
+
+    This is the direct regression guard for the bug: before the fix,
+    ``APP_ENV=" production"`` made _is_production() return False while
+    production_fail_closed_violations treated it as production.
+    """
+    from app.core import auth
+
+    monkeypatch.setenv("SOURCE_MODE", "live_edr")
+    monkeypatch.setenv("TOOL_MODE", "live")
+    monkeypatch.setenv("DISPOSITION_MODE", "live_xdr")
+    monkeypatch.setenv("DISPOSITION_ADAPTER_KIND", "http")
+    monkeypatch.setenv("LLM_MODE", "openai_compatible")
+    monkeypatch.setenv("EMBEDDING_MODE", "remote")
+    monkeypatch.setenv("SIMULATION_ENABLED", "false")
+    monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
+    # The autouse _dev_auth fixture sets DEV_AUTH_TOKENS, which is itself a
+    # production fail-closed violation; clear it to reach the production cases.
+    monkeypatch.setenv("DEV_AUTH_TOKENS", "")
+
+    for env, expected in (
+        ("production", True),
+        (" production", True),
+        ("production ", True),
+        ("  production  ", True),
+        ("Production", True),
+        ("development", False),
+        ("staging", False),
+    ):
+        monkeypatch.setenv("APP_ENV", env)
+        get_settings.cache_clear()
+        assert auth._is_production() is expected
+    get_settings.cache_clear()

@@ -108,7 +108,9 @@ app = FastAPI(title="ShadowTrace", version="0.1.0", lifespan=_lifespan)
 register_exception_handlers(app)
 
 # Compose / local dev serves the Vite frontend on a different origin than the API.
-if get_settings().app_env != "production":
+# Strip + lowercase like Settings.production_fail_closed_violations (ISSUE-217)
+# so a whitespace-padded APP_ENV cannot widen the CORS policy in production.
+if get_settings().app_env.strip().lower() != "production":
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

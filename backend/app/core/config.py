@@ -1,5 +1,6 @@
 """Application settings (pydantic-settings)."""
 
+import os
 from functools import lru_cache
 
 from pydantic import Field, field_validator
@@ -438,6 +439,11 @@ class Settings(BaseSettings):
         if self.app_env.strip().lower() != "production":
             return []
         violations: list[str] = []
+        if os.environ.get("DEV_AUTH_TOKENS", "").strip():
+            # ISSUE-217: dev-token auth is a debugging backdoor that must never
+            # survive into a real production deployment. Fail closed at startup
+            # instead of letting _principal_from_dev_token authorize requests.
+            violations.append("DEV_AUTH_TOKENS set: dev-token auth forbidden in production")
         if self.simulation_enabled:
             violations.append("simulation_enabled=true")
         if _looks_mock(self.source_mode):

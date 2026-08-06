@@ -14,6 +14,17 @@ from app.core.config import Settings
 from app.core.errors import ConfigurationError
 
 
+@pytest.fixture(autouse=True)
+def _no_dev_auth_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep DEV_AUTH_TOKENS out of the environment for deterministic tests.
+
+    ISSUE-217: a non-empty DEV_AUTH_TOKENS is a production fail-closed
+    violation, so acceptance tests must not accidentally inherit one from the
+    host environment.
+    """
+    monkeypatch.delenv("DEV_AUTH_TOKENS", raising=False)
+
+
 def _base_kwargs(**overrides: object) -> dict[str, object]:
     kwargs: dict[str, object] = {
         "APP_ENV": "production",
@@ -170,3 +181,29 @@ def test_production_accepts_trusted_proxy_with_explicit_allowlist() -> None:
         )
     )
     assert settings.trusted_proxy_fail_closed_violations() == []
+
+
+def test_production_rejects_dev_auth_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ISSUE-217: DEV_AUTH_TOKENS is a fail-closed violation in production."""
+    monkeypatch.setenv("DEV_AUTH_TOKENS", '{"dev-token": {"subject": "dev", "roles": ["admin"]}}')
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(**_base_kwargs())
+    violations = exc_info.value.details["violations"]
+    assert any("DEV_AUTH_TOKENS" in v for v in violations)
+
+
+def test_production_accepts_blank_dev_auth_tokens() -> None:
+    """ISSUE-217: an unset/blank DEV_AUTH_TOKENS stays a valid production config."""
+    settings = Settings(**_base_kwargs())
+    assert settings.production_fail_closed_violations() == []
+
+
+def test_production_with_whitespace_app_env_rejects_dev_auth_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-217: whitespace-padded APP_ENV matches the strip() semantics of the gate."""
+    monkeypatch.setenv("DEV_AUTH_TOKENS", '{"dev-token": {"subject": "dev", "roles": ["admin"]}}')
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(**_base_kwargs(APP_ENV=" production "))
+    violations = exc_info.value.details["violations"]
+    assert any("DEV_AUTH_TOKENS" in v for v in violations)
