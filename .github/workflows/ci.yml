@@ -38,6 +38,10 @@ jobs:
         working-directory: backend
         run: uv run --frozen python ../scripts/check_contract_drift.py
 
+      - name: Alembic revision length gate (ISSUE-214)
+        working-directory: backend
+        run: uv run --frozen python ../scripts/check_migration_revisions.py
+
       - name: Deterministic export smoke (ISSUE-112)
         working-directory: backend
         run: uv run --frozen pytest tests/test_contracts/test_drift.py -q

@@ -25,6 +25,7 @@ from sqlalchemy.pool import NullPool
 
 from app.core.config import get_settings
 from app.db import models as m
+from tests.test_db.test_migration_revisions import _load_revision_width
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 
@@ -180,6 +181,76 @@ async def test_all_core_tables_exist(session: AsyncSession) -> None:
     present = {r[0] for r in rows}
     assert CORE_TABLES <= present, {"missing": CORE_TABLES - present}
     assert present == CORE_TABLES, {"unexpected": present - CORE_TABLES}
+
+
+def test_alembic_version_num_column_width(migrated: None) -> None:
+    """ISSUE-214: version_num must fit long head revision ids."""
+    min_width = _load_revision_width()
+
+    async def _assert_width() -> None:
+        engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                row = await conn.execute(
+                    text(
+                        "SELECT character_maximum_length FROM information_schema.columns "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name = 'alembic_version' "
+                        "AND column_name = 'version_num'"
+                    )
+                )
+                result = row.one()
+                assert result[0] >= min_width, (
+                    f"expected width >= {min_width}, got {result[0]}"
+                )
+                stamped = await conn.scalar(text("SELECT version_num FROM alembic_version"))
+                assert stamped == "0032_investigation_intent_generate_report"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_assert_width())
+
+
+def test_upgrade_head_when_generate_report_column_preexists() -> None:
+    """ISSUE-214: half-applied ISSUE-204 envs can upgrade without DuplicateColumn."""
+    cfg = _alembic_config()
+    command.downgrade(cfg, "0031_report_quality")
+
+    async def _seed_half_applied_column() -> None:
+        engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(
+                    text(
+                        "ALTER TABLE investigation_intent "
+                        "ADD COLUMN IF NOT EXISTS generate_report BOOLEAN NOT NULL DEFAULT TRUE"
+                    )
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_seed_half_applied_column())
+    command.upgrade(cfg, "head")
+
+    async def _assert_head() -> None:
+        engine = create_async_engine(get_settings().database_url, poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                stamped = await conn.scalar(text("SELECT version_num FROM alembic_version"))
+                assert stamped == "0032_investigation_intent_generate_report"
+                has_col = await conn.scalar(
+                    text(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_schema = 'public' "
+                        "AND table_name = 'investigation_intent' "
+                        "AND column_name = 'generate_report'"
+                    )
+                )
+                assert has_col == 1
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_assert_head())
 
 
 async def test_llm_call_log_supports_prompt_status_and_failure_audit(

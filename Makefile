@@ -57,7 +57,7 @@ CI_BUILD_PROJECT_PREFIX ?= $(COMPOSE_PROJECT_NAME)-ci-build
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -462,6 +462,9 @@ update-contracts:
 check-contract-drift:
 	cd backend && $(UV) run --frozen python ../scripts/check_contract_drift.py
 
+check-migration-revisions:
+	cd backend && $(UV) run --frozen python ../scripts/check_migration_revisions.py
+
 # --- ISSUE-105 evaluation pipeline (artifact-only; mock-only replay) ---------- #
 evaluation-run:
 	@set -eu; \
@@ -591,6 +594,7 @@ detection-production-comparison-run:
 # --- ISSUE-009 local / CI parity gates ------------------------------------ #
 ci-lint:
 	cd backend && $(UV) sync --frozen --extra dev
+	$(MAKE) check-migration-revisions
 	cd backend && $(UV) run --frozen ruff check app tests
 	cd backend && $(UV) run --frozen ruff format --check app tests
 	cd backend && $(UV) run --frozen mypy app
