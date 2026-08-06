@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -39,7 +40,7 @@ from app.models.agent_io import (
 from app.models.enums import DispositionPolicy, EventStatus, EventType, Severity
 from app.models.evidence import Evidence
 from app.models.report import InvestigationReport
-from app.orchestration.lease import generate_owner_id
+from app.orchestration.lease import EventLease, generate_owner_id
 
 # --------------------------------------------------------------------------- #
 # In-memory EventLease for deterministic testing
@@ -134,6 +135,42 @@ class _RenewalFailLease(_InMemoryEventLease):
                 on_renewal_failed.set()
 
         return asyncio.create_task(_renew_loop())
+
+
+class _RenewalExceptionLease(_InMemoryEventLease):
+    """ISSUE-226: ``renew()`` raises until consecutive errors exceed threshold."""
+
+    def __init__(self, *, max_renew_failures: int = 0) -> None:
+        super().__init__()
+        self._max_renew_failures = max_renew_failures
+        self._event_lease = EventLease(None)
+
+    async def start_renewal(
+        self,
+        event_id: str,
+        owner_id: str,
+        *,
+        on_renewal_failed: asyncio.Event | None = None,
+        max_renew_failures: int = 3,
+    ) -> asyncio.Task[None]:
+        del max_renew_failures
+
+        class _ErrorRedis:
+            async def get(self, key: str) -> bytes:
+                del key
+                return owner_id.encode("utf-8")
+
+            async def expire(self, key: str, ttl: int) -> bool:
+                del key, ttl
+                raise ConnectionError("redis unavailable")
+
+        self._event_lease._redis = _ErrorRedis()  # type: ignore[assignment]
+        return await self._event_lease.start_renewal(
+            event_id,
+            owner_id,
+            on_renewal_failed=on_renewal_failed,
+            max_renew_failures=self._max_renew_failures,
+        )
 
 
 class _BlockingTriageAgent:
@@ -696,6 +733,31 @@ class TestRenewalFailure:
             event_id=_EVENT_ID,
         )
         assert result == 42
+
+    async def test_renewal_exception_aborts_without_marking_failed(self) -> None:
+        """ISSUE-226: consecutive renew exceptions stop orchestration like stolen lease."""
+        lease = _RenewalExceptionLease(max_renew_failures=0)
+        triage_started = asyncio.Event()
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        agent = _build_super_agent(
+            lease=lease,
+            event_service=_MockEventService(events),
+        )
+        agent.triage_agent = _BlockingTriageAgent(started=triage_started)  # type: ignore[assignment]
+
+        async def _instant_sleep(_seconds: float) -> None:
+            del _seconds
+
+        with patch("app.orchestration.lease.asyncio.sleep", _instant_sleep):
+            with pytest.raises(InvestigationLeaseLostError) as exc:
+                await agent.investigate(_EVENT_ID)
+
+        assert exc.value.error_code == "investigation_lease_lost"
+        assert triage_started.is_set()
+        assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
+        assert events[_EVENT_ID]["status"] is not EventStatus.REPORTING
 
 
 class TestReactEnabled:

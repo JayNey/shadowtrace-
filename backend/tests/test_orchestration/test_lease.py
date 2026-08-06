@@ -3,25 +3,34 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.orchestration.lease import EventLease
 
+_OWNER = "worker-test"
+
 
 class _FakeRedis:
     """Minimal fake that lets us control ``renew()`` behaviour per-test."""
 
-    def __init__(self, renew_side_effect: object = None) -> None:
+    def __init__(
+        self,
+        *,
+        owner_id: str = _OWNER,
+        renew_side_effect: object = None,
+    ) -> None:
+        self._owner_id = owner_id
         self._renew_side_effect = renew_side_effect
         self.get_calls: list[str] = []
         self.expire_calls: list[tuple[str, int]] = []
 
     async def get(self, key: str) -> bytes | None:
         self.get_calls.append(key)
-        # Return the owner_id so the owner check passes.
-        return b"worker-test"
+        return self._owner_id.encode("utf-8")
 
     async def expire(self, key: str, ttl: int) -> bool:
         self.expire_calls.append((key, ttl))
@@ -41,37 +50,62 @@ class _FakeRedis:
         return _release
 
 
-# --------------------------------------------------------------------------- #
-# Tests
-# --------------------------------------------------------------------------- #
+_real_asyncio_sleep = asyncio.sleep
+
+
+async def _instant_sleep(_seconds: float) -> None:
+    """Fast-forward renew interval while yielding to the event loop."""
+    del _seconds
+    await _real_asyncio_sleep(0)
+
+
+@asynccontextmanager
+async def _fast_renew_loop() -> AsyncIterator[None]:
+    """Keep asyncio.sleep patched for the full renew-loop lifetime."""
+    with patch("app.orchestration.lease.asyncio.sleep", _instant_sleep):
+        yield
+
+
+async def _wait_until(condition: Callable[[], bool], *, timeout: float = 2.0) -> None:
+    """Poll until *condition* returns True."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() >= deadline:
+            raise TimeoutError("condition not met before timeout")
+        await asyncio.sleep(0)
+
+
+async def _cancel_renew_task(task: asyncio.Task[None]) -> None:
+    """Cancel a renew loop task, tolerating normal completion."""
+    if not task.done():
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        await task
 
 
 @pytest.mark.asyncio
 async def test_renew_exception_triggers_on_renewal_failed_after_threshold() -> None:
     """After max_renew_failures+1 consecutive exceptions, on_renewal_failed is set."""
-    redis_error = ConnectionError("redis down")
-    fake_redis = _FakeRedis(renew_side_effect=redis_error)
+    fake_redis = _FakeRedis(renew_side_effect=ConnectionError("redis down"))
     lease = EventLease(None)
-    # Inject the fake redis client without going through RedisClient.
     lease._redis = fake_redis  # type: ignore[assignment]
 
     renewal_failed = asyncio.Event()
-    # Use a short threshold so the test doesn't sleep for minutes.
-    task = await lease.start_renewal(
-        "evt-test",
-        "worker-test",
-        on_renewal_failed=renewal_failed,
-        max_renew_failures=2,
-    )
-
-    try:
-        # Wait for renewal_failed to be set (or timeout).
-        await asyncio.wait_for(renewal_failed.wait(), timeout=5.0)
-        assert renewal_failed.is_set()
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+    async with _fast_renew_loop():
+        task = await lease.start_renewal(
+            "evt-test",
+            _OWNER,
+            on_renewal_failed=renewal_failed,
+            max_renew_failures=2,
+        )
+        try:
+            await asyncio.wait_for(renewal_failed.wait(), timeout=2.0)
+            assert renewal_failed.is_set()
+        finally:
+            await _cancel_renew_task(task)
 
 
 @pytest.mark.asyncio
@@ -79,7 +113,7 @@ async def test_renew_exception_resets_after_successful_renew() -> None:
     """A single exception followed by a success resets the counter."""
     call_count = 0
 
-    async def _flaky_renew(_key: str) -> bool:
+    async def _flaky_renew(_key: str, _ttl: int) -> bool:
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -87,127 +121,84 @@ async def test_renew_exception_resets_after_successful_renew() -> None:
         return True
 
     fake_redis = _FakeRedis()
-    fake_redis._renew_side_effect = None
-    # Override expire to use the flaky function that raises once then succeeds.
     fake_redis.expire = _flaky_renew  # type: ignore[method-assign]
 
     lease = EventLease(None)
     lease._redis = fake_redis  # type: ignore[assignment]
 
     renewal_failed = asyncio.Event()
-    # RENEW_INTERVAL_S is 60s — we need to fast-forward.  Monkey-patch the
-    # sleep inside _renew_loop so the test runs instantly.
-    sleep_count = 0
-
-    async def _fast_sleep(_seconds: float) -> None:
-        nonlocal sleep_count
-        sleep_count += 1
-        if sleep_count > 5:
-            # Safety valve — should not need more than 2 iterations.
-            raise TimeoutError("test took too many renew iterations")
-
-    with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
+    async with _fast_renew_loop():
         task = await lease.start_renewal(
             "evt-test",
-            "worker-test",
+            _OWNER,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
-
-    try:
-        # The loop should survive the first exception (counter=1) and succeed
-        # on the second iteration (counter reset to 0).  renewal_failed must
-        # NOT be set.
-        await asyncio.sleep(0.2)  # give the loop a moment
-        assert not renewal_failed.is_set(), (
-            "renewal_failed was set even though the exception count reset"
-        )
-        assert call_count >= 2
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            await _wait_until(lambda: call_count >= 2)
+            assert not renewal_failed.is_set(), (
+                "renewal_failed was set even though the exception count reset"
+            )
+        finally:
+            await _cancel_renew_task(task)
 
 
 @pytest.mark.asyncio
 async def test_renew_owner_mismatch_still_triggers_immediately() -> None:
     """Stolen lease (renew returns False) still sets on_renewal_failed instantly."""
     fake_redis = _FakeRedis()
-    # Override get to return a different owner — this makes renew() return False.
     fake_redis.get = AsyncMock(return_value=b"worker-thief")  # type: ignore[method-assign]
 
     lease = EventLease(None)
     lease._redis = fake_redis  # type: ignore[assignment]
 
     renewal_failed = asyncio.Event()
-
-    async def _fast_sleep(_seconds: float) -> None:
-        pass  # instant
-
-    with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
+    async with _fast_renew_loop():
         task = await lease.start_renewal(
             "evt-test",
-            "worker-test",
+            _OWNER,
             on_renewal_failed=renewal_failed,
         )
-
-    try:
-        await asyncio.wait_for(renewal_failed.wait(), timeout=2.0)
-        assert renewal_failed.is_set()
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            await asyncio.wait_for(renewal_failed.wait(), timeout=2.0)
+            assert renewal_failed.is_set()
+        finally:
+            await _cancel_renew_task(task)
 
 
 @pytest.mark.asyncio
 async def test_renew_single_exception_below_threshold_does_not_trigger() -> None:
-    """One exception below threshold should NOT set on_renewal_failed."""
+    """Two errors then success must NOT set on_renewal_failed when threshold is 2."""
     error_count = 0
 
-    async def _error_then_stop(_key: str) -> bool:
+    async def _error_then_succeed(_key: str, _ttl: int) -> bool:
         nonlocal error_count
         error_count += 1
         if error_count <= 2:
             raise ConnectionError("transient")
-        # Third call: succeed — loop continues normally
         return True
 
     fake_redis = _FakeRedis()
-    fake_redis.expire = _error_then_stop  # type: ignore[method-assign]
+    fake_redis.expire = _error_then_succeed  # type: ignore[method-assign]
 
     lease = EventLease(None)
     lease._redis = fake_redis  # type: ignore[assignment]
 
     renewal_failed = asyncio.Event()
-    iteration = 0
-
-    async def _fast_sleep(_seconds: float) -> None:
-        nonlocal iteration
-        iteration += 1
-        if iteration > 4:
-            raise TimeoutError("too many loops")
-
-    with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
+    async with _fast_renew_loop():
         task = await lease.start_renewal(
             "evt-test",
-            "worker-test",
+            _OWNER,
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
-
-    try:
-        await asyncio.sleep(0.2)
-        assert not renewal_failed.is_set(), (
-            "renewal_failed was set even though errors were below threshold"
-        )
-        # Both errors fired (counter reached 2, threshold is 2) then third
-        # call succeeded.  There should have been at least 3 expire calls.
-        assert error_count >= 3
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            await _wait_until(lambda: error_count >= 3)
+            assert not renewal_failed.is_set(), (
+                "renewal_failed was set even though errors were below threshold"
+            )
+        finally:
+            await _cancel_renew_task(task)
 
 
 @pytest.mark.asyncio
@@ -215,7 +206,7 @@ async def test_renew_exception_default_threshold() -> None:
     """Default max_renew_failures=3 triggers on the 4th consecutive error."""
     call_count = 0
 
-    async def _always_error(_key: str) -> bool:
+    async def _always_error(_key: str, _ttl: int) -> bool:
         nonlocal call_count
         call_count += 1
         raise ConnectionError(f"error {call_count}")
@@ -227,31 +218,18 @@ async def test_renew_exception_default_threshold() -> None:
     lease._redis = fake_redis  # type: ignore[assignment]
 
     renewal_failed = asyncio.Event()
-    iteration = 0
-
-    async def _fast_sleep(_seconds: float) -> None:
-        nonlocal iteration
-        iteration += 1
-        if iteration > 6:
-            raise TimeoutError("too many loops")
-
-    with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
+    async with _fast_renew_loop():
         task = await lease.start_renewal(
             "evt-test",
-            "worker-test",
+            _OWNER,
             on_renewal_failed=renewal_failed,
         )
-
-    try:
-        await asyncio.wait_for(renewal_failed.wait(), timeout=3.0)
-        assert renewal_failed.is_set()
-        # Default threshold is 3, so trigger happens on the 4th error
-        # (consecutive_errors > max_renew_failures, i.e. 4 > 3).
-        assert call_count == 4
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            await asyncio.wait_for(renewal_failed.wait(), timeout=2.0)
+            assert renewal_failed.is_set()
+            assert call_count == 4
+        finally:
+            await _cancel_renew_task(task)
 
 
 @pytest.mark.asyncio
@@ -262,25 +240,18 @@ async def test_renew_loop_exits_on_first_exception_with_threshold_zero() -> None
     lease._redis = fake_redis  # type: ignore[assignment]
 
     renewal_failed = asyncio.Event()
-
-    async def _fast_sleep(_seconds: float) -> None:
-        pass
-
-    with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
+    async with _fast_renew_loop():
         task = await lease.start_renewal(
             "evt-test",
-            "worker-test",
+            _OWNER,
             on_renewal_failed=renewal_failed,
             max_renew_failures=0,
         )
-
-    try:
-        await asyncio.wait_for(renewal_failed.wait(), timeout=2.0)
-        assert renewal_failed.is_set()
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            await asyncio.wait_for(renewal_failed.wait(), timeout=2.0)
+            assert renewal_failed.is_set()
+        finally:
+            await _cancel_renew_task(task)
 
 
 @pytest.mark.asyncio
@@ -291,26 +262,14 @@ async def test_renew_success_does_not_trigger() -> None:
     lease._redis = fake_redis  # type: ignore[assignment]
 
     renewal_failed = asyncio.Event()
-    iteration = 0
-
-    async def _fast_sleep(_seconds: float) -> None:
-        nonlocal iteration
-        iteration += 1
-        if iteration > 2:
-            raise TimeoutError("enough iterations")
-
-    with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
+    async with _fast_renew_loop():
         task = await lease.start_renewal(
             "evt-test",
-            "worker-test",
+            _OWNER,
             on_renewal_failed=renewal_failed,
         )
-
-    try:
-        await asyncio.sleep(0.2)
-        assert not renewal_failed.is_set()
-        assert fake_redis.expire_calls  # renew was called
-    finally:
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        try:
+            await _wait_until(lambda: len(fake_redis.expire_calls) >= 1)
+            assert not renewal_failed.is_set()
+        finally:
+            await _cancel_renew_task(task)

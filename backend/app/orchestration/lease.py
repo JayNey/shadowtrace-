@@ -208,7 +208,7 @@ class EventLease:
 
         * an owner mismatch (lease stolen), or
         * *max_renew_failures* consecutive Redis/network exceptions
-          (ISSUE-226).
+          (ISSUE-226).  Fatal on the *(max_renew_failures + 1)*-th error.
 
         The caller **must** cancel the returned task when the orchestration
         finishes (or fails) to stop the renewal loop.
