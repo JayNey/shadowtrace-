@@ -58,7 +58,8 @@ async def test_renew_exception_triggers_on_renewal_failed_after_threshold() -> N
     renewal_failed = asyncio.Event()
     # Use a short threshold so the test doesn't sleep for minutes.
     task = await lease.start_renewal(
-        "evt-test", "worker-test",
+        "evt-test",
+        "worker-test",
         on_renewal_failed=renewal_failed,
         max_renew_failures=2,
     )
@@ -107,7 +108,8 @@ async def test_renew_exception_resets_after_successful_renew() -> None:
 
     with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
         task = await lease.start_renewal(
-            "evt-test", "worker-test",
+            "evt-test",
+            "worker-test",
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -144,7 +146,8 @@ async def test_renew_owner_mismatch_still_triggers_immediately() -> None:
 
     with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
         task = await lease.start_renewal(
-            "evt-test", "worker-test",
+            "evt-test",
+            "worker-test",
             on_renewal_failed=renewal_failed,
         )
 
@@ -187,7 +190,8 @@ async def test_renew_single_exception_below_threshold_does_not_trigger() -> None
 
     with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
         task = await lease.start_renewal(
-            "evt-test", "worker-test",
+            "evt-test",
+            "worker-test",
             on_renewal_failed=renewal_failed,
             max_renew_failures=2,
         )
@@ -233,7 +237,8 @@ async def test_renew_exception_default_threshold() -> None:
 
     with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
         task = await lease.start_renewal(
-            "evt-test", "worker-test",
+            "evt-test",
+            "worker-test",
             on_renewal_failed=renewal_failed,
         )
 
@@ -263,7 +268,8 @@ async def test_renew_loop_exits_on_first_exception_with_threshold_zero() -> None
 
     with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
         task = await lease.start_renewal(
-            "evt-test", "worker-test",
+            "evt-test",
+            "worker-test",
             on_renewal_failed=renewal_failed,
             max_renew_failures=0,
         )
@@ -295,7 +301,8 @@ async def test_renew_success_does_not_trigger() -> None:
 
     with patch("app.orchestration.lease.asyncio.sleep", _fast_sleep):
         task = await lease.start_renewal(
-            "evt-test", "worker-test",
+            "evt-test",
+            "worker-test",
             on_renewal_failed=renewal_failed,
         )
 
