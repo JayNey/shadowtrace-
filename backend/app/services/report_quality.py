@@ -193,3 +193,36 @@ def report_quality_from_row(value: Any) -> ReportQuality:
         return ReportQuality(str(value))
     except ValueError:
         return ReportQuality.COMPLETE
+
+
+def should_reject_incomplete_without_force(
+    quality: ReportQuality | str | None,
+    *,
+    force: bool,
+    gate_enforced: bool = True,
+) -> bool:
+    """True when POST must 422 (incomplete + force=false + gate on)."""
+    parsed = report_quality_from_row(quality)
+    return (
+        parsed is ReportQuality.INCOMPLETE_PLACEHOLDER
+        and not bool(force)
+        and bool(gate_enforced)
+    )
+
+
+def should_reject_complete_downgrade(
+    existing_quality: ReportQuality | str | None,
+    incoming_quality: ReportQuality | str | None,
+    *,
+    confirm_downgrade: bool,
+) -> bool:
+    """True when overwriting ``complete`` with a degraded grade must 409."""
+    if existing_quality is None:
+        return False
+    existing = report_quality_from_row(existing_quality)
+    incoming = report_quality_from_row(incoming_quality)
+    return (
+        existing is ReportQuality.COMPLETE
+        and is_degraded_quality(incoming)
+        and not bool(confirm_downgrade)
+    )

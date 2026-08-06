@@ -1509,7 +1509,8 @@ async def generate_report(
     from app.services.report_input_builder import build_report_agent_input
     from app.services.report_quality import (
         ReportPhaseFlags,
-        is_degraded_quality,
+        should_reject_complete_downgrade,
+        should_reject_incomplete_without_force,
         with_assessed_quality,
     )
 
@@ -1578,43 +1579,55 @@ async def generate_report(
     )
 
     existing = await event_service.get_report(event_id=event_id)
+    if should_reject_incomplete_without_force(
+        report.report_quality,
+        force=force_flag,
+        gate_enforced=gate_enforced,
+    ):
+        raise ValidationError(
+            "report quality incomplete: executed phases still contain placeholders; "
+            "pass force=true to archive as incomplete_placeholder",
+            error_code="report_quality_incomplete",
+            details={
+                "event_id": event_id,
+                "report_quality": report.report_quality.value,
+                "force": False,
+            },
+        )
     if (
         report.report_quality is ReportQuality.INCOMPLETE_PLACEHOLDER
         and not force_flag
+        and not gate_enforced
     ):
-        if gate_enforced:
-            raise ValidationError(
-                "report quality incomplete: executed phases still contain placeholders; "
-                "pass force=true to archive as incomplete_placeholder",
-                error_code="report_quality_incomplete",
-                details={
-                    "event_id": event_id,
-                    "report_quality": report.report_quality.value,
-                    "force": False,
-                },
-            )
         logger.warning(
             "REPORT_QUALITY_GATE_ENFORCED=false; accepting incomplete report event=%s",
             event_id,
         )
 
-    if (
-        existing is not None
-        and existing.report_quality is ReportQuality.COMPLETE
-        and is_degraded_quality(report.report_quality)
-        and not confirm_flag
+    existing_quality = existing.report_quality if existing is not None else None
+    if should_reject_complete_downgrade(
+        existing_quality,
+        report.report_quality,
+        confirm_downgrade=confirm_flag,
     ):
         raise ReportQualityConflictError(
             "refusing to overwrite a complete report with a degraded quality grade; "
             "pass confirm_downgrade=true to proceed",
             details={
                 "event_id": event_id,
-                "existing_quality": existing.report_quality.value,
+                "existing_quality": (
+                    existing_quality.value
+                    if hasattr(existing_quality, "value")
+                    else str(existing_quality)
+                ),
                 "incoming_quality": report.report_quality.value,
             },
         )
 
-    persisted = await event_service.upsert_report(report)
+    persisted = await event_service.upsert_report(
+        report,
+        confirm_downgrade=confirm_flag,
+    )
     await _sync_report_context_and_bus(event_id, persisted, event_service)
     try:
         await event_service.upsert_generate_report_action(event_id, plan_revision=1)

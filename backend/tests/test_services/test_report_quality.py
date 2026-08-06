@@ -243,3 +243,148 @@ async def test_upsert_persists_report_quality_on_orm_row(
     assert loaded is not None
     assert loaded.report_quality is ReportQuality.QUICK_CLOSE
     assert loaded.degraded is True
+
+
+def test_should_reject_incomplete_without_force() -> None:
+    from app.services.report_quality import should_reject_incomplete_without_force
+
+    assert (
+        should_reject_incomplete_without_force(
+            ReportQuality.INCOMPLETE_PLACEHOLDER,
+            force=False,
+            gate_enforced=True,
+        )
+        is True
+    )
+    assert (
+        should_reject_incomplete_without_force(
+            ReportQuality.INCOMPLETE_PLACEHOLDER,
+            force=True,
+            gate_enforced=True,
+        )
+        is False
+    )
+    assert (
+        should_reject_incomplete_without_force(
+            ReportQuality.INCOMPLETE_PLACEHOLDER,
+            force=False,
+            gate_enforced=False,
+        )
+        is False
+    )
+    assert (
+        should_reject_incomplete_without_force(
+            ReportQuality.DEGRADED_TEMPLATE,
+            force=False,
+            gate_enforced=True,
+        )
+        is False
+    )
+
+
+def test_should_reject_complete_downgrade() -> None:
+    from app.services.report_quality import should_reject_complete_downgrade
+
+    assert (
+        should_reject_complete_downgrade(
+            ReportQuality.COMPLETE,
+            ReportQuality.DEGRADED_TEMPLATE,
+            confirm_downgrade=False,
+        )
+        is True
+    )
+    assert (
+        should_reject_complete_downgrade(
+            ReportQuality.COMPLETE,
+            ReportQuality.QUICK_CLOSE,
+            confirm_downgrade=True,
+        )
+        is False
+    )
+    assert (
+        should_reject_complete_downgrade(
+            ReportQuality.COMPLETE,
+            ReportQuality.COMPLETE,
+            confirm_downgrade=False,
+        )
+        is False
+    )
+    assert (
+        should_reject_complete_downgrade(
+            None,
+            ReportQuality.INCOMPLETE_PLACEHOLDER,
+            confirm_downgrade=False,
+        )
+        is False
+    )
+    assert (
+        should_reject_complete_downgrade(
+            ReportQuality.QUICK_CLOSE,
+            ReportQuality.INCOMPLETE_PLACEHOLDER,
+            confirm_downgrade=False,
+        )
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_upsert_report_refuses_silent_downgrade_from_complete() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.core.errors import ReportQualityConflictError
+    from app.services.event_service import EventService
+
+    complete = with_assessed_quality(_report(generated_by="llm"))
+    assert complete.report_quality is ReportQuality.COMPLETE
+    degraded = with_assessed_quality(_report(generated_by="template"))
+    assert degraded.report_quality is ReportQuality.DEGRADED_TEMPLATE
+
+    existing_row = SimpleNamespace(
+        report_id=complete.report_id,
+        event_id=complete.event_id,
+        report_quality="complete",
+        version=1,
+        title=complete.title,
+        summary=complete.summary,
+        sections=[],
+        final_verdict=complete.final_verdict.value,
+        risk_score=complete.risk_score,
+        severity=complete.severity.value,
+        generated_by="llm",
+        generated_at=complete.generated_at,
+        updated_at=complete.updated_at,
+    )
+
+    class _AsyncCM:
+        def __init__(self, value: object | None = None) -> None:
+            self._value = value if value is not None else self
+
+        async def __aenter__(self) -> object:
+            return self._value
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=existing_row)
+    session.add = MagicMock()
+    session.begin = MagicMock(return_value=_AsyncCM())
+    session_factory = MagicMock(return_value=_AsyncCM(session))
+
+    service = EventService(
+        session_factory=session_factory,
+        store=AsyncMock(),
+        degraded_flags=AsyncMock(),
+    )
+    with pytest.raises(ReportQualityConflictError) as exc_info:
+        await service.upsert_report(degraded, confirm_downgrade=False)
+    assert exc_info.value.error_code == "report_quality_conflict"
+    assert not session.add.called
+
+    session.flush = AsyncMock()
+    session.refresh = AsyncMock()
+    session.get = AsyncMock(return_value=existing_row)
+    allowed = await service.upsert_report(degraded, confirm_downgrade=True)
+    assert allowed.report_quality is ReportQuality.DEGRADED_TEMPLATE
+    assert existing_row.report_quality == "degraded_template"

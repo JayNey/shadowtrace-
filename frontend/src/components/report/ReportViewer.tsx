@@ -9,6 +9,7 @@ import { useRef, useEffect } from "react";
 import { Alert, Spin, Typography, Divider } from "antd";
 import { FileTextOutlined } from "@ant-design/icons";
 import type { InvestigationReport, ReportQuality } from "../../types/report";
+import { resolveReportQuality } from "../../types/report";
 import ReportToc from "./ReportToc";
 import ReportExportButtons from "./ReportExportButtons";
 import ReportSectionContent from "./ReportSectionContent";
@@ -36,14 +37,11 @@ function qualityAlert(report: InvestigationReport): {
   message: string;
   type: "warning" | "info" | "error";
 } | null {
-  const quality = (report.report_quality ||
-    (report.generated_by === "template"
-      ? "degraded_template"
-      : "complete")) as ReportQuality;
+  const quality: ReportQuality = resolveReportQuality(report);
   if (quality === "complete" && !report.degraded) {
     return null;
   }
-  if (quality === "degraded_template" || report.generated_by === "template") {
+  if (quality === "degraded_template") {
     return { message: "模板生成（LLM 降级）— 非完整合格报告", type: "warning" };
   }
   if (quality === "quick_close") {

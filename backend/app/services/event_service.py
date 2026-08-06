@@ -25,6 +25,7 @@ from app.core.errors import (
     ClassificationConflictError,
     DependencyUnavailableError,
     EventNotFoundError,
+    ReportQualityConflictError,
     ValidationError,
 )
 from app.core.event_bus import EventBus
@@ -1391,8 +1392,23 @@ class EventService:
                 )
             return OrmEventTypeRewriteOutcome.FAILED
 
-    async def upsert_report(self, report: InvestigationReport) -> InvestigationReport:
-        """Idempotent upsert of InvestigationReport by stable ``report_id`` (ISSUE-036)."""
+    async def upsert_report(
+        self,
+        report: InvestigationReport,
+        *,
+        confirm_downgrade: bool = False,
+    ) -> InvestigationReport:
+        """Idempotent upsert of InvestigationReport by stable ``report_id`` (ISSUE-036).
+
+        ISSUE-212: refuses to overwrite an existing ``complete`` row with a
+        degraded ``report_quality`` unless ``confirm_downgrade=True`` (same
+        semantics as POST /report 409).
+        """
+        from app.services.report_quality import (
+            report_quality_from_row,
+            should_reject_complete_downgrade,
+        )
+
         now = datetime.now(UTC)
         stamped_sections = stamp_report_observability_in_sections(
             report.sections,
@@ -1439,6 +1455,27 @@ class EventService:
                                 "incoming_event_id": report.event_id,
                             },
                         )
+                    existing_quality = report_quality_from_row(
+                        getattr(row, "report_quality", None)
+                    )
+                    if should_reject_complete_downgrade(
+                        existing_quality,
+                        quality_value,
+                        confirm_downgrade=confirm_downgrade,
+                    ):
+                        raise ReportQualityConflictError(
+                            "refusing to overwrite a complete report with a "
+                            "degraded quality grade; pass confirm_downgrade=true "
+                            "to proceed",
+                            details={
+                                "event_id": report.event_id,
+                                "report_id": report.report_id,
+                                "existing_quality": existing_quality.value,
+                                "incoming_quality": report_quality_from_row(
+                                    quality_value
+                                ).value,
+                            },
+                        )
                     row.title = report.title
                     row.summary = report.summary
                     row.sections = sections_payload
@@ -1453,8 +1490,6 @@ class EventService:
                     row.updated_at = now
                 await session.flush()
                 await session.refresh(row)
-                from app.services.report_quality import report_quality_from_row
-
                 return InvestigationReport(
                     report_id=row.report_id,
                     event_id=row.event_id,

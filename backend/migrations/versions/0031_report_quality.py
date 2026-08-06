@@ -21,6 +21,20 @@ def upgrade() -> None:
             server_default="complete",
         ),
     )
+    # Backfill escape-hatch rows so migration default ``complete`` does not
+    # mislabel existing quick-close / template reports as formal complete.
+    op.execute(
+        sa.text(
+            "UPDATE report SET report_quality = 'quick_close' "
+            "WHERE generated_by = 'quick_close'"
+        )
+    )
+    op.execute(
+        sa.text(
+            "UPDATE report SET report_quality = 'degraded_template' "
+            "WHERE generated_by = 'template'"
+        )
+    )
 
 
 def downgrade() -> None:

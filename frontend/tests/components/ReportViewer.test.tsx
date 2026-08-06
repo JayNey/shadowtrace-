@@ -93,7 +93,37 @@ describe("ReportViewer", () => {
         loading={false}
       />,
     );
-    expect(screen.getByText("模板生成（LLM 降级）")).toBeDefined();
+    expect(screen.getByTestId("report-quality-alert").textContent).toContain(
+      "模板生成（LLM 降级）",
+    );
+  });
+
+  it("shows quick_close warning when generated_by=quick_close without report_quality", () => {
+    render(
+      <ReportViewer
+        report={{ ...mockReport, generated_by: "quick_close", report_quality: undefined }}
+        loading={false}
+      />,
+    );
+    expect(screen.getByTestId("report-quality-alert").textContent).toContain(
+      "快速结案报告",
+    );
+  });
+
+  it("shows incomplete alert for incomplete_placeholder quality", () => {
+    render(
+      <ReportViewer
+        report={{
+          ...mockReport,
+          report_quality: "incomplete_placeholder",
+          degraded: true,
+        }}
+        loading={false}
+      />,
+    );
+    expect(screen.getByTestId("report-quality-alert").textContent).toContain(
+      "报告质量不完整",
+    );
   });
 
   it("renders markdown emphasis in section content", () => {

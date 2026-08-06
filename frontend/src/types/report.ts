@@ -48,6 +48,30 @@ function coerceReportQuality(value: unknown): ReportQuality | undefined {
   return undefined;
 }
 
+/** Narrow EventContext.report / GET payloads into InvestigationReport. */
+
+export function resolveReportQuality(report: {
+  report_quality?: ReportQuality | null;
+  generated_by?: string | null;
+  degraded?: boolean;
+}): ReportQuality {
+  const explicit = coerceReportQuality(report.report_quality);
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  if (report.generated_by === "template") {
+    return "degraded_template";
+  }
+  if (report.generated_by === "quick_close") {
+    return "quick_close";
+  }
+  // Conservative: degraded without a grade is treated as incomplete, not complete.
+  if (report.degraded === true) {
+    return "incomplete_placeholder";
+  }
+  return "complete";
+}
+
 /** Narrow EventContext.report into InvestigationReport when structurally valid. */
 export function coerceInvestigationReport(value: unknown): InvestigationReport | null {
   if (!isRecord(value)) return null;
@@ -66,13 +90,14 @@ export function coerceInvestigationReport(value: unknown): InvestigationReport |
     );
   });
   if (sections.length === 0) return null;
-  const report_quality = coerceReportQuality(value.report_quality);
+  const generated_by = typeof value.generated_by === "string" ? value.generated_by : null;
+  const report_quality = resolveReportQuality({
+    report_quality: coerceReportQuality(value.report_quality),
+    generated_by,
+    degraded: typeof value.degraded === "boolean" ? value.degraded : undefined,
+  });
   const degraded =
-    typeof value.degraded === "boolean"
-      ? value.degraded
-      : report_quality !== undefined
-        ? report_quality !== "complete"
-        : undefined;
+    typeof value.degraded === "boolean" ? value.degraded : report_quality !== "complete";
   return {
     report_id: value.report_id,
     event_id: value.event_id,
@@ -88,7 +113,7 @@ export function coerceInvestigationReport(value: unknown): InvestigationReport |
     risk_score: typeof value.risk_score === "number" ? value.risk_score : 0,
     severity: typeof value.severity === "string" ? value.severity : "low",
     version: typeof value.version === "number" ? value.version : 1,
-    generated_by: typeof value.generated_by === "string" ? value.generated_by : null,
+    generated_by,
     generated_at: typeof value.generated_at === "string" ? value.generated_at : null,
     updated_at: typeof value.updated_at === "string" ? value.updated_at : null,
     warnings: Array.isArray(value.warnings)
