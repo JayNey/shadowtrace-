@@ -2228,6 +2228,7 @@ async def test_execute_stub_fails_closed_without_action_execution() -> None:
     assert final["halted"] is True
     assert final["event_status"] == EventStatus.FAILED.value
     assert final["node_trace"][-1] == NODE_HALT
+    assert NODE_VERIFY not in final["node_trace"]
     assert NODE_REPORT not in final["node_trace"]
     assert NODE_CLOSE not in final["node_trace"]
     assert any("action_execution_miswired" in f for f in final.get("degraded_flags", []))

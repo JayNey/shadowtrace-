@@ -154,6 +154,7 @@ ROUTE_EVIDENCE = "evidence"
 ROUTE_CONTINUE = "continue"
 ROUTE_EXECUTE = "execute"
 ROUTE_TO_APPROVAL = "approval"
+ROUTE_TO_VERIFY = "verify"
 ROUTE_WAIT = "wait"
 ROUTE_REPORT = "report"
 ROUTE_REPLAN = "replan"
@@ -338,6 +339,12 @@ def route_after_replan(state: InvestigationState) -> str:
 
 def _route_after_response(state: InvestigationState) -> str:
     return ROUTE_HALT if state.get("halted") else ROUTE_TO_APPROVAL
+
+
+def _route_after_execute(state: InvestigationState) -> str:
+    # ISSUE-218: execute_node fail-closed sets halted — skip verify_node so
+    # the trace does not imply verification ran after a miswire failure.
+    return ROUTE_HALT if state.get("halted") else ROUTE_TO_VERIFY
 
 
 def _trace(node_name: str) -> InvestigationState:
@@ -1891,7 +1898,14 @@ def build_investigation_graph(
         },
     )
     graph.add_edge(NODE_APPROVAL_WAIT, END)
-    graph.add_edge(NODE_EXECUTE, NODE_VERIFY)
+    graph.add_conditional_edges(
+        NODE_EXECUTE,
+        _route_after_execute,
+        {
+            ROUTE_HALT: NODE_HALT,
+            ROUTE_TO_VERIFY: NODE_VERIFY,
+        },
+    )
     graph.add_conditional_edges(
         NODE_VERIFY,
         route_after_verify,
