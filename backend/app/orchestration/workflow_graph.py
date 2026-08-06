@@ -301,6 +301,10 @@ def route_after_report(state: InvestigationState) -> str:
 
 
 def route_after_approval(state: InvestigationState) -> str:
+    # ISSUE-218: a halted approval (e.g. approval_engine missing → FAILED)
+    # must stop the graph instead of continuing to execute.
+    if state.get("halted"):
+        return ROUTE_HALT
     if state.get("execution_substate") == ExecutionSubstate.WAITING_APPROVAL.value:
         return ROUTE_WAIT
     event_status = EventStatus(state.get("event_status", EventStatus.WAITING_APPROVAL.value))
@@ -1228,19 +1232,38 @@ def build_investigation_graph(
                 result = await _execute_response()
             response_update["response_plan"] = result.model_dump(mode="json")
         verdict_raw = state.get("final_verdict")
+        transition_context = TransitionContext(
+            disposition_only_intent=bool(state.get("disposition_only_intent")),
+            final_verdict=FinalVerdict(verdict_raw) if verdict_raw else None,
+        )
+        if response_agent is None:
+            # ISSUE-218: DI missing — fail closed instead of advancing to
+            # WAITING_APPROVAL on a stub.  Persist a degraded flag, transition
+            # to FAILED (legal edge) and halt the graph.
+            flags = await _persist_degraded_flag(
+                state,
+                "response_agent_miswired",
+                event_id=state["event_id"],
+                degraded_flags=degraded_flags,
+            )
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.FAILED,
+                context=transition_context,
+                reason="investigation:response_stub_miswired",
+            )
+            return _patch_state(
+                _trace(NODE_RESPONSE),
+                status,
+                {"halted": True, "degraded_flags": flags, **response_update},
+            )
         status = await _transition_status(
             services,
             state,
             EventStatus.WAITING_APPROVAL,
-            context=TransitionContext(
-                disposition_only_intent=bool(state.get("disposition_only_intent")),
-                final_verdict=FinalVerdict(verdict_raw) if verdict_raw else None,
-            ),
-            reason=(
-                "investigation:response_plan"
-                if response_agent is not None
-                else "investigation:response_stub"
-            ),
+            context=transition_context,
+            reason="investigation:response_plan",
         )
         return _patch_state(_trace(NODE_RESPONSE), status, response_update)
 
@@ -1293,6 +1316,31 @@ def build_investigation_graph(
                     )
                     update.update(status)
                 return _patch_state(_trace(NODE_APPROVAL), update)
+        else:
+            # ISSUE-218: approval_engine missing — fail closed instead of
+            # faking an approval decision.  Persist a degraded flag, transition
+            # to FAILED (legal edge) and halt the graph.
+            flags = await _persist_degraded_flag(
+                state,
+                "approval_engine_miswired",
+                event_id=state["event_id"],
+                degraded_flags=degraded_flags,
+            )
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.FAILED,
+                reason="investigation:approval_stub_miswired",
+            )
+            return _patch_state(
+                _trace(NODE_APPROVAL),
+                status,
+                {
+                    "halted": True,
+                    "degraded_flags": flags,
+                    "execution_substate": ExecutionSubstate.NONE.value,
+                },
+            )
         if state.get("needs_approval_wait"):
             await runtime.set_execution_substate(
                 state["event_id"],
@@ -1312,7 +1360,7 @@ def build_investigation_graph(
             services,
             state,
             EventStatus.EXECUTING_RESPONSE,
-            reason="investigation:approval_stub",
+            reason="investigation:approval_cleared",
         )
         return _patch_state(
             _trace(NODE_APPROVAL),
@@ -1343,33 +1391,49 @@ def build_investigation_graph(
 
     async def execute_node(state: InvestigationState) -> InvestigationState:
         action_execution = services.get("action_execution")
+        if action_execution is None:
+            # ISSUE-218: DI missing — fail closed instead of advancing to
+            # VERIFYING on a stub.  Persist a degraded flag, transition to
+            # FAILED (legal edge) and halt the graph.
+            flags = await _persist_degraded_flag(
+                state,
+                "action_execution_miswired",
+                event_id=state["event_id"],
+                degraded_flags=degraded_flags,
+            )
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.FAILED,
+                reason="investigation:execute_stub_miswired",
+            )
+            return _patch_state(
+                _trace(NODE_EXECUTE),
+                status,
+                {"halted": True, "degraded_flags": flags},
+            )
+        plan_revision = _plan_revision_from_state(state)
         execution_ok = True
-        if action_execution is not None:
-            plan_revision = _plan_revision_from_state(state)
-            try:
-                summary = await action_execution.execute_plan(
-                    state["event_id"],
-                    plan_revision=plan_revision,
-                )
-                # Track whether any IMMEDIATE actions were executed.
-                execution_ok = summary is not None
-            except Exception:
-                logger.exception(
-                    "execute_plan failed for event=%s revision=%d",
-                    state["event_id"],
-                    plan_revision,
-                )
-                execution_ok = False
+        try:
+            summary = await action_execution.execute_plan(
+                state["event_id"],
+                plan_revision=plan_revision,
+            )
+            # Track whether any IMMEDIATE actions were executed.
+            execution_ok = summary is not None
+        except Exception:
+            logger.exception(
+                "execute_plan failed for event=%s revision=%d",
+                state["event_id"],
+                plan_revision,
+            )
+            execution_ok = False
 
         status = await _transition_status(
             services,
             state,
             EventStatus.VERIFYING,
-            reason=(
-                "investigation:execute_plan"
-                if action_execution is not None
-                else "investigation:execute_stub"
-            ),
+            reason="investigation:execute_plan",
         )
         return _patch_state(
             _trace(NODE_EXECUTE),
@@ -1378,6 +1442,11 @@ def build_investigation_graph(
         )
 
     async def verify_node(state: InvestigationState) -> InvestigationState:
+        if state.get("halted"):
+            # ISSUE-218: a previous node halted (e.g. execute_node failed
+            # closed on a missing action_execution) — do not run verification
+            # or advance state past FAILED; route_after_verify sends us to HALT.
+            return _patch_state(_trace(NODE_VERIFY), {"halted": True})
         verify_agent = cast(_AgentLike | None, agents.get("verify_agent"))
         disposition_sync = services.get("disposition_sync")
         event_disposition = services.get("event_disposition")
@@ -1818,6 +1887,7 @@ def build_investigation_graph(
             ROUTE_EXECUTE: NODE_EXECUTE,
             ROUTE_WAIT: NODE_APPROVAL_WAIT,
             ROUTE_REPORT: NODE_REPORT,
+            ROUTE_HALT: NODE_HALT,
         },
     )
     graph.add_edge(NODE_APPROVAL_WAIT, END)

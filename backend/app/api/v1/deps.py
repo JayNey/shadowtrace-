@@ -510,6 +510,26 @@ async def _build_production_investigation_graph(
         "agent_artifact_service": _get_agent_artifact_service(),
         "content_projection_service": _get_content_projection_service(),
     }
+    # ISSUE-218: fail fast on production miswiring — if a key service/agent
+    # is missing the graph would previously "succeed" through stub nodes
+    # (fake progress).  A production deployment must fail explicitly instead.
+    missing_di = [
+        name
+        for name, dep in (
+            ("response_agent", response_agent),
+            ("verify_agent", verify_agent),
+            ("approval_engine", services["approval_engine"]),
+            ("action_execution", services["action_execution"]),
+            ("disposition_sync", services["disposition_sync"]),
+            ("event_disposition", services["event_disposition"]),
+        )
+        if dep is None
+    ]
+    if missing_di:
+        raise RuntimeError(
+            "production investigation graph miswired — missing dependencies: "
+            + ", ".join(missing_di)
+        )
     checkpointer = await build_checkpointer(_get_redis())
     return build_investigation_graph(agents, services, checkpointer=checkpointer)
 

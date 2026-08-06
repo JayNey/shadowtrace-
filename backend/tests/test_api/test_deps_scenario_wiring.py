@@ -20,6 +20,62 @@ def test_deps_module_has_no_hardcoded_insider_scenario_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_production_graph_fails_fast_on_missing_di(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-218: production graph build must fail fast when key DI is missing.
+
+    A missing approval_engine/action_execution/agent previously produced a
+    "successful" run through stub nodes (fake progress); now the production
+    assembly raises RuntimeError instead.
+    """
+    fake_stack = {
+        "wm": MagicMock(for_writer=MagicMock(return_value=MagicMock())),
+        "llm_client": MagicMock(),
+        "budget_service": MagicMock(),
+        "output_guard": MagicMock(),
+        "trace_service": MagicMock(),
+        "event_service": MagicMock(),
+        "session_factory": MagicMock(),
+        "tool_executor": MagicMock(),
+        "playbook_kb_service": MagicMock(),
+        "playbook_release_service": MagicMock(),
+        "triage": MagicMock(),
+        "evidence": MagicMock(),
+        "risk": MagicMock(),
+        "report": MagicMock(),
+        "rag": MagicMock(),
+        "graph_agent": MagicMock(),
+        "state_machine": MagicMock(),
+        "context_store": MagicMock(),
+        "degraded_flags": MagicMock(),
+    }
+    monkeypatch.setattr(deps, "_get_investigation_stack", AsyncMock(return_value=fake_stack))
+    monkeypatch.setattr(deps, "_get_event_bus", lambda: MagicMock())
+    monkeypatch.setattr(deps, "get_event_disposition_service", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(deps, "get_disposition_sync", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(deps, "get_approval_engine", AsyncMock(return_value=None))
+    monkeypatch.setattr(deps, "get_action_execution", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(deps, "_get_workflow_runtime", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(deps, "_get_redis", lambda: MagicMock())
+    monkeypatch.setattr(deps, "_get_agent_task_service", lambda: MagicMock())
+    monkeypatch.setattr(deps, "_get_agent_artifact_service", lambda: MagicMock())
+    monkeypatch.setattr(deps, "_get_content_projection_service", lambda: MagicMock())
+    monkeypatch.setattr(
+        "app.orchestration.checkpointer.build_checkpointer",
+        AsyncMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr("app.agents.response_agent.ResponseAgent", lambda **_k: MagicMock())
+    monkeypatch.setattr("app.agents.verify_agent.VerifyAgent", lambda **_k: MagicMock())
+
+    with pytest.raises(RuntimeError, match="miswired"):
+        await deps._build_production_investigation_graph(
+            planner_agent=MagicMock(),
+            convergence_guard=MagicMock(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_production_graph_response_agent_default_scenario_id_to_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

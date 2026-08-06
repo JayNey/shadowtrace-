@@ -449,7 +449,24 @@ def _agents(*, triage: TriageResult | None = None) -> dict[str, Any]:
                 verification_phase=VerificationPhase.EFFECT,
             )
         ),
+        # ISSUE-218: default to a fully wired DI so golden-path tests exercise
+        # the real closed loop instead of the (now fail-closed) stub nodes.
+        "response_agent": StubAgent(
+            ResponsePlan(
+                plan_id="plan-default",
+                actions=[],
+                strategy_summary="stub",
+                generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+            )
+        ),
     }
+
+
+def _agents_without_response_agent(*, triage: TriageResult | None = None) -> dict[str, Any]:
+    """Full agent set minus response_agent — for ISSUE-218 fail-closed tests."""
+    agents = _agents(triage=triage)
+    agents.pop("response_agent", None)
+    return agents
 
 
 def _services(
@@ -463,6 +480,10 @@ def _services(
         "workflow_runtime": runtime or FakeRuntime(),
         "degraded_flags": FakeDegradedFlags(),
         "context_store": FakeContextStore(),
+        # ISSUE-218: default to a fully wired DI so golden-path tests exercise
+        # the real closed loop instead of the (now fail-closed) stub nodes.
+        "approval_engine": FakeApprovalEngine(needs_wait=False, evaluated_count=0),
+        "action_execution": FakeActionExecution(),
     }
 
 
@@ -979,19 +1000,18 @@ async def test_deferred_response_required_stays_reporting() -> None:
 
 @pytest.mark.asyncio
 async def test_required_threat_never_enters_disposition_only() -> None:
-    """REQUIRED non-FP threat does not take the disposition-only shortcut.
+    """REQUIRED non-FP threat without a response_agent fails closed.
 
-    With ISSUE-062 Should-Fix #2, the verify_node for required policy
-    without a response_plan escalates to MANUAL_RESOLUTION instead of
-    silently proceeding with a placeholder plan.  The graph reaches
-    manual_hold_node with verify_need_manual_resolution=True and halts.
-    We assert the disposition-only path was not taken and the event is
-    routed to manual hold.
+    ISSUE-218: a missing response agent must not fabricate progress.  A
+    required-policy event without a response_agent previously advanced to
+    WAITING_APPROVAL (and later escalated at verify_node); now it halts
+    immediately at response_node with FAILED + a response_agent_miswired
+    degraded flag.  The disposition-only shortcut is never taken.
     """
     runtime = FakeRuntime(WritebackReadiness.READY)
     services = _services(runtime=runtime)
     final = await build_investigation_graph(
-        _agents(),
+        _agents_without_response_agent(),
         services,
     ).ainvoke(
         _base_state(
@@ -1002,25 +1022,24 @@ async def test_required_threat_never_enters_disposition_only() -> None:
     )
     assert runtime.begun == []
     assert final["halted"] is True
-    assert final["verify_need_manual_resolution"] is True
-    assert any(
-        "missing_response_plan_for_required_policy" in f for f in final.get("degraded_flags", [])
-    )
+    assert final["event_status"] == EventStatus.FAILED.value
+    assert final["node_trace"][-1] == NODE_HALT
+    assert any("response_agent_miswired" in f for f in final.get("degraded_flags", []))
     degraded = services["degraded_flags"]
     assert any(call[3] == "InvestigationGraph" for call in getattr(degraded, "calls", []))
 
 
 @pytest.mark.asyncio
 async def test_required_golden_path_order_halts_at_verify() -> None:
-    """P0 main-chain order through verify, then MANUAL_RESOLUTION (ISSUE-062).
+    """P0 main-chain order through response, then fail-closed on missing agent.
 
-    With ISSUE-062 Should-Fix #2, when disposition_policy=REQUIRED and no
-    response_plan exists, verify_node escalates to MANUAL_RESOLUTION rather
-    than constructing a placeholder and proceeding to REPORTING.  The graph
-    ends at manual_hold_node with halted=True.
+    ISSUE-218: without a response_agent the graph must not silently advance
+    past response.  It transitions to FAILED and halts (previously it
+    continued to WAITING_APPROVAL and verify_node escalated to
+    MANUAL_RESOLUTION only because no response_plan existed).
     """
     final = await build_investigation_graph(
-        _agents(),
+        _agents_without_response_agent(),
         _services(runtime=FakeRuntime(WritebackReadiness.READY)),
     ).ainvoke(
         _base_state(
@@ -1030,7 +1049,9 @@ async def test_required_golden_path_order_halts_at_verify() -> None:
         {"configurable": {"thread_id": "evt-required-golden"}},
     )
     assert final["halted"] is True
-    assert final["verify_need_manual_resolution"] is True
+    assert final["event_status"] == EventStatus.FAILED.value
+    assert final["node_trace"][-1] == NODE_HALT
+    assert any("response_agent_miswired" in f for f in final.get("degraded_flags", []))
 
 
 @pytest.mark.asyncio
@@ -1250,6 +1271,21 @@ class FakeApprovalEngine:
         )
 
 
+class FakeActionExecution:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int | None]] = []
+
+    async def execute_plan(
+        self,
+        event_id: str,
+        *,
+        plan_revision: int | None = None,
+        operator: str | None = None,
+    ) -> Any:
+        self.calls.append((event_id, plan_revision))
+        return SimpleNamespace(execution_id="exec-fake")
+
+
 @pytest.mark.asyncio
 async def test_approval_engine_wiring_halts_when_plan_needs_wait() -> None:
     services = _services()
@@ -1288,10 +1324,9 @@ async def test_approval_wait_node_halts_and_resumes() -> None:
     report→close.
 
     Uses interrupt_before=[NODE_APPROVAL] to pause the graph right
-    before the approval gate.  On resume without an approval_engine,
-    the stub path transitions to EXECUTING_RESPONSE and the graph
-    continues to completion — simulating the external API having
-    already approved the plan.
+    before the approval gate.  On resume the approval_engine evaluates
+    the plan (external approval simulated by a needs_wait=False engine)
+    and the graph continues to completion.
     """
     redis = FakeRedisClient()
     saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
@@ -1317,16 +1352,14 @@ async def test_approval_wait_node_halts_and_resumes() -> None:
         "Graph should be interrupted before approval_node"
     )
 
-    # Phase 2: simulate external approval — create a new graph WITHOUT
-    # approval_engine.  When resumed, approval_node runs in stub mode:
-    # it transitions to EXECUTING_RESPONSE, sets execution_substate=NONE,
-    # and route_after_approval routes to EXECUTE (not WAIT).
+    # Phase 2: simulate external approval — resume with a fully wired DI
+    # whose approval_engine evaluates the plan as cleared (needs_wait=False,
+    # evaluated_count=0): approval_node routes to EXECUTE (not WAIT).
     machine2 = FakeStateMachine(
         status=EventStatus.PLANNING_RESPONSE,
         statuses={"evt-approval-resume": EventStatus.PLANNING_RESPONSE},
     )
     services2 = _services(machine2)
-    # No approval_engine → approval_node stub path → EXECUTING_RESPONSE
     graph2 = build_investigation_graph(
         _agents(),
         services2,
@@ -1346,6 +1379,50 @@ async def test_approval_wait_node_halts_and_resumes() -> None:
     assert NODE_REPORT in final2["node_trace"]
     assert NODE_CLOSE in final2["node_trace"]
     assert final2["halted"] is False
+
+
+@pytest.mark.asyncio
+async def test_resume_without_approval_engine_fails_closed() -> None:
+    """ISSUE-218: resuming with approval_engine missing must fail closed.
+
+    Previously the stub approval path advanced to EXECUTING_RESPONSE and
+    continued to CLOSED; now it transitions to FAILED and halts instead of
+    fabricating an approval decision.
+    """
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    event_id = "evt-approval-resume-miswire"
+
+    # Phase 1: interrupt right before approval_node (checkpoint saved there),
+    # so Phase 2 resume actually re-executes approval_node.
+    services1 = _services()
+    services1["approval_engine"] = FakeApprovalEngine(needs_wait=True, evaluated_count=2)
+    graph1 = build_investigation_graph(
+        _agents(),
+        services1,
+        checkpointer=saver,
+        interrupt_before=[NODE_APPROVAL],
+    )
+    config = {"configurable": {"thread_id": event_id}}
+    halted = await graph1.ainvoke(_base_state(event_id=event_id), config)
+    assert NODE_APPROVAL not in halted["node_trace"]
+
+    # Phase 2: resume WITHOUT approval_engine — must fail closed.
+    machine2 = FakeStateMachine(
+        status=EventStatus.WAITING_APPROVAL,
+        statuses={event_id: EventStatus.WAITING_APPROVAL},
+    )
+    services2 = _services(machine2)
+    services2["approval_engine"] = None
+    graph2 = build_investigation_graph(_agents(), services2, checkpointer=saver)
+
+    final2 = await graph2.ainvoke(None, config)
+    assert final2["halted"] is True
+    assert final2["event_status"] == EventStatus.FAILED.value
+    assert final2["node_trace"][-1] == NODE_HALT
+    assert NODE_EXECUTE not in final2["node_trace"]
+    assert NODE_VERIFY not in final2["node_trace"]
+    assert any("approval_engine_miswired" in f for f in final2.get("degraded_flags", []))
 
 
 @pytest.mark.asyncio
@@ -1892,10 +1969,7 @@ async def test_report_node_backfills_phase_statuses_via_builder() -> None:
 
     services = _services()
     services["context_store"] = store
-    graph = build_investigation_graph(
-        _agents_with_verify_and_report(StubAgent(verification), report_agent),
-        services,
-    )
+    agents = _agents_with_verify_and_report(StubAgent(verification), report_agent)
     evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
     risk = RiskAssessment(
         risk_score=60,
@@ -1916,20 +1990,26 @@ async def test_report_node_backfills_phase_statuses_via_builder() -> None:
         execution_owner=ExecutionOwner.XDR_MANAGED,
         target="198.51.100.44",
     )
+    response_plan = ResponsePlan(
+        plan_id="pln-report-builder-205",
+        actions=[response_action],
+        strategy_summary="contain exfiltration",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
     state = _base_state(
         event_id=event_id,
         event_status=EventStatus.VERIFYING.value,
         evidence_output=evidence.model_dump(mode="json"),
         risk_assessment=risk.model_dump(mode="json"),
-        response_plan=ResponsePlan(
-            plan_id="pln-report-builder-205",
-            actions=[response_action],
-            strategy_summary="contain exfiltration",
-            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
-        ).model_dump(mode="json"),
+        response_plan=response_plan.model_dump(mode="json"),
     )
     config = {"configurable": {"thread_id": event_id}}
-    final = await graph.ainvoke(state, config)
+    # ISSUE-218: the graph re-runs response_node from START, and the default
+    # response_agent would regenerate a different plan; pin it to the same
+    # response_plan so report_node backfills exactly this plan.
+    agents = _agents_with_verify_and_report(StubAgent(verification), report_agent)
+    agents["response_agent"] = StubAgent(response_plan)
+    final = await build_investigation_graph(agents, services).ainvoke(state, config)
     assert NODE_REPORT in final["node_trace"]
     assert len(report_agent.calls) == 1
     report_input = report_agent.calls[0]
@@ -2007,8 +2087,8 @@ async def test_approval_gate_is_reentrant() -> None:
     assert NODE_APPROVAL not in final1["node_trace"]
     assert NODE_RESPONSE in final1["node_trace"]
 
-    # Phase 2: resume without approval_engine → stub approval path →
-    # EXECUTING_RESPONSE → executes → completes to CLOSED.
+    # Phase 2: resume with the default fully wired DI — the approval_engine
+    # clears the plan → EXECUTING_RESPONSE → executes → completes to CLOSED.
     machine2 = FakeStateMachine(
         status=EventStatus.PLANNING_RESPONSE,
         statuses={"evt-reentrant": EventStatus.PLANNING_RESPONSE},
@@ -2084,3 +2164,74 @@ async def test_response_node_fail_closed_when_ledger_wired_without_tenant() -> N
             _base_state(source_snapshot={}),
             {"configurable": {"thread_id": "evt-response-no-tenant"}},
         )
+
+
+# ── ISSUE-218: DI missing must fail closed, never fake progress ──────────────
+
+
+@pytest.mark.asyncio
+async def test_response_stub_fails_closed_without_response_agent() -> None:
+    """ISSUE-218: missing response_agent → FAILED + halted, never WAITING_APPROVAL."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    final = await build_investigation_graph(
+        _agents_without_response_agent(),
+        services,
+    ).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-response-miswire"}},
+    )
+    assert final["halted"] is True
+    assert final["event_status"] == EventStatus.FAILED.value
+    assert final["node_trace"][-1] == NODE_HALT
+    assert NODE_APPROVAL not in final["node_trace"]
+    assert NODE_EXECUTE not in final["node_trace"]
+    assert any("response_agent_miswired" in f for f in final.get("degraded_flags", []))
+    assert any(
+        reason is not None and "response_stub_miswired" in reason
+        for (_, _, reason) in machine.transitions
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_stub_fails_closed_without_approval_engine() -> None:
+    """ISSUE-218: missing approval_engine → FAILED + halted, never EXECUTING_RESPONSE."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    services["approval_engine"] = None
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-approval-miswire"}},
+    )
+    assert final["halted"] is True
+    assert final["event_status"] == EventStatus.FAILED.value
+    assert final["node_trace"][-1] == NODE_HALT
+    assert NODE_EXECUTE not in final["node_trace"]
+    assert NODE_VERIFY not in final["node_trace"]
+    assert any("approval_engine_miswired" in f for f in final.get("degraded_flags", []))
+    assert any(
+        reason is not None and "approval_stub_miswired" in reason
+        for (_, _, reason) in machine.transitions
+    )
+
+
+@pytest.mark.asyncio
+async def test_execute_stub_fails_closed_without_action_execution() -> None:
+    """ISSUE-218: missing action_execution → FAILED + halted, never VERIFYING/REPORT."""
+    machine = FakeStateMachine()
+    services = _services(machine)
+    services["action_execution"] = None
+    final = await build_investigation_graph(_agents(), services).ainvoke(
+        _base_state(),
+        {"configurable": {"thread_id": "evt-execute-miswire"}},
+    )
+    assert final["halted"] is True
+    assert final["event_status"] == EventStatus.FAILED.value
+    assert final["node_trace"][-1] == NODE_HALT
+    assert NODE_REPORT not in final["node_trace"]
+    assert NODE_CLOSE not in final["node_trace"]
+    assert any("action_execution_miswired" in f for f in final.get("degraded_flags", []))
+    assert any(
+        reason is not None and "execute_stub_miswired" in reason
+        for (_, _, reason) in machine.transitions
+    )
