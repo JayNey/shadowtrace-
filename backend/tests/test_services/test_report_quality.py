@@ -328,11 +328,11 @@ def test_should_reject_complete_downgrade() -> None:
 
 
 @pytest.mark.asyncio
-async def test_upsert_report_refuses_silent_downgrade_from_complete() -> None:
+async def test_upsert_report_allows_agent_downgrade_from_complete() -> None:
+    """Graph/ReportAgent must be able to honestly rewrite complete→degraded."""
     from types import SimpleNamespace
     from unittest.mock import AsyncMock, MagicMock
 
-    from app.core.errors import ReportQualityConflictError
     from app.services.event_service import EventService
 
     complete = with_assessed_quality(_report(generated_by="llm"))
@@ -370,6 +370,8 @@ async def test_upsert_report_refuses_silent_downgrade_from_complete() -> None:
     session.get = AsyncMock(return_value=existing_row)
     session.add = MagicMock()
     session.begin = MagicMock(return_value=_AsyncCM())
+    session.flush = AsyncMock()
+    session.refresh = AsyncMock()
     session_factory = MagicMock(return_value=_AsyncCM(session))
 
     service = EventService(
@@ -377,14 +379,8 @@ async def test_upsert_report_refuses_silent_downgrade_from_complete() -> None:
         store=AsyncMock(),
         degraded_flags=AsyncMock(),
     )
-    with pytest.raises(ReportQualityConflictError) as exc_info:
-        await service.upsert_report(degraded, confirm_downgrade=False)
-    assert exc_info.value.error_code == "report_quality_conflict"
-    assert not session.add.called
-
-    session.flush = AsyncMock()
-    session.refresh = AsyncMock()
-    session.get = AsyncMock(return_value=existing_row)
-    allowed = await service.upsert_report(degraded, confirm_downgrade=True)
+    allowed = await service.upsert_report(degraded)
     assert allowed.report_quality is ReportQuality.DEGRADED_TEMPLATE
     assert existing_row.report_quality == "degraded_template"
+    assert existing_row.generated_by == "template"
+    assert existing_row.version == 2

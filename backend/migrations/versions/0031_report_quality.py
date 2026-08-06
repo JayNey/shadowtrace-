@@ -35,6 +35,19 @@ def upgrade() -> None:
             "WHERE generated_by = 'template'"
         )
     )
+    # Legacy llm rows that still embed PLACEHOLDER 「暂无」 / incomplete markers
+    # must not remain labeled complete after the column is added.
+    op.execute(
+        sa.text(
+            "UPDATE report SET report_quality = 'incomplete_placeholder' "
+            "WHERE report_quality = 'complete' "
+            "AND ("
+            "  sections::text LIKE '%暂无处置动作%' "
+            "  OR sections::text LIKE '%暂无验证结果%' "
+            "  OR sections::text LIKE '%incomplete_placeholder%'"
+            ")"
+        )
+    )
 
 
 def downgrade() -> None:

@@ -336,3 +336,52 @@ async def test_post_report_downgrade_complete_requires_confirm() -> None:
     assert resp.status_code == 409
     assert resp.json()["error_code"] == "report_quality_conflict"
     event_service.upsert_report.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_report_incomplete_assessed_without_mocking_quality() -> None:
+    """POST gate must use real with_assessed_quality (not a stubbed quality)."""
+    # Agent returns llm report with EXECUTED-phase placeholder content but a
+    # misleading report_quality=complete stamp — assess must rewrite it.
+    raw = _report(
+        generated_by="llm",
+        report_quality=ReportQuality.COMPLETE,
+        sections=_sections(executed_actions=INCOMPLETE_ACTIONS_PLACEHOLDER),
+    )
+    event_service = AsyncMock()
+    event_service.get_event = AsyncMock(
+        return_value=SimpleNamespace(event_id=raw.event_id)
+    )
+    event_service.get_report = AsyncMock(return_value=None)
+    event_service.upsert_report = AsyncMock()
+    event_service.upsert_generate_report_action = AsyncMock()
+
+    store, stack, report_input = _patch_generate_stack(
+        report=raw,
+        response_phase=ReportPhaseStatus.EXECUTED,
+    )
+    client = _client_with_event_service(event_service)
+
+    with (
+        patch("app.api.v1.events._get_context_store", return_value=store),
+        patch(
+            "app.api.v1.deps._get_investigation_stack",
+            new=AsyncMock(return_value=stack),
+        ),
+        patch(
+            "app.services.report_input_builder.build_report_agent_input",
+            new=AsyncMock(return_value=report_input),
+        ),
+        patch("app.api.v1.events._get_session_factory", return_value=MagicMock()),
+    ):
+        resp = client.post(
+            f"/api/v1/events/{raw.event_id}/report",
+            headers=_hdr(),
+            json={"force": False},
+        )
+
+    assert resp.status_code == 422
+    body = resp.json()
+    assert body["error_code"] == "report_quality_incomplete"
+    assert body["details"]["report_quality"] == "incomplete_placeholder"
+    event_service.upsert_report.assert_not_awaited()

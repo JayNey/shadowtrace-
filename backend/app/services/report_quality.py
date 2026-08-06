@@ -1,8 +1,13 @@
 """Report quality assessment + POST gate helpers (ISSUE-212).
 
 ``report_quality`` is computed at generation time from ``generated_by`` and
-phase-aware chapter content, then persisted on the ORM ``report`` row. Formal
-POST generation may refuse ``incomplete_placeholder`` unless ``force=true``.
+phase-aware chapter content, then persisted on the ORM ``report`` row.
+
+HTTP quality gate is **POST /report only**:
+- ``incomplete_placeholder`` → 422 unless ``force=true`` (when enforced)
+- complete→degraded overwrite → 409 unless ``confirm_downgrade=true``
+
+Graph / ReportAgent upserts stamp honest grades and are not HTTP-gated.
 """
 
 from __future__ import annotations
@@ -95,8 +100,9 @@ def _actions_chapter_incomplete(
     if "incomplete_placeholder" in content.lower():
         return True
     if phase is ReportPhaseStatus.NOT_EXECUTED:
-        # Honest "not executed" is allowed; legacy 「暂无」 is not.
-        return PLACEHOLDER_NO_ACTIONS in content
+        # Bad markers (incl. 「暂无处置动作」) already rejected above; honest
+        # NOT_EXECUTED_ACTIONS text is allowed.
+        return False
     # EXECUTED / INCOMPLETE / UNAVAILABLE must not pretend the phase never ran,
     # and must not leave an empty chapter.
     if NOT_EXECUTED_ACTIONS in content:
@@ -114,7 +120,8 @@ def _verification_chapter_incomplete(
     if "incomplete_placeholder" in content.lower():
         return True
     if phase is ReportPhaseStatus.NOT_EXECUTED:
-        return PLACEHOLDER_NO_VERIFICATION in content
+        # Bad markers (incl. 「暂无验证结果」) already rejected above.
+        return False
     if NOT_EXECUTED_VERIFICATION in content:
         return True
     return not content.strip()
@@ -216,7 +223,11 @@ def should_reject_complete_downgrade(
     *,
     confirm_downgrade: bool,
 ) -> bool:
-    """True when overwriting ``complete`` with a degraded grade must 409."""
+    """True when POST must 409 (complete→degraded without confirm_downgrade).
+
+    Not used by ``EventService.upsert_report`` — system regeneration may
+    honestly rewrite quality grades without this HTTP gate.
+    """
     if existing_quality is None:
         return False
     existing = report_quality_from_row(existing_quality)

@@ -1624,10 +1624,8 @@ async def generate_report(
             },
         )
 
-    persisted = await event_service.upsert_report(
-        report,
-        confirm_downgrade=confirm_flag,
-    )
+    # Downgrade gate already enforced above; upsert must not re-block agent-style writes.
+    persisted = await event_service.upsert_report(report)
     await _sync_report_context_and_bus(event_id, persisted, event_service)
     try:
         await event_service.upsert_generate_report_action(event_id, plan_revision=1)
