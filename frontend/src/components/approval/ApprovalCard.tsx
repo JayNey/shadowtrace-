@@ -15,6 +15,8 @@ interface ApprovalCardProps {
   timedOut: boolean;
   onApprove: (actionId: string) => void;
   onReject: (actionId: string) => void;
+  /** Disable card actions when the operator lacks approver/admin (ISSUE-207). */
+  approvalDisabled?: boolean;
 }
 
 function formatCountdown(deadline: string): string {
@@ -40,6 +42,7 @@ function ApprovalCard({
   timedOut,
   onApprove,
   onReject,
+  approvalDisabled = false,
 }: ApprovalCardProps) {
   const { token } = useToken();
   const resolvedDeadline = effectiveDeadline(action, deadline);
@@ -99,12 +102,18 @@ function ApprovalCard({
       }
       extra={
         !timedOut ? (
-          <Space>
-            <a onClick={() => onApprove(action.action_id)}>批准</a>
-            <a style={{ color: token.colorError }} onClick={() => onReject(action.action_id)}>
-              拒绝
-            </a>
-          </Space>
+          approvalDisabled ? (
+            <Text type="secondary" data-testid={`approval-card-disabled-${action.action_id}`}>
+              无审批权限
+            </Text>
+          ) : (
+            <Space>
+              <a onClick={() => onApprove(action.action_id)}>批准</a>
+              <a style={{ color: token.colorError }} onClick={() => onReject(action.action_id)}>
+                拒绝
+              </a>
+            </Space>
+          )
         ) : (
           <Text type="secondary">超时（以后端判定为准）</Text>
         )

@@ -75,4 +75,25 @@ describe("config/auth", () => {
     const { hasKnownAuthRoles } = await import("../../src/config/auth");
     expect(hasKnownAuthRoles()).toBe(false);
   });
+
+  it("canApproveActions: approver or admin", async () => {
+    vi.stubEnv("VITE_AUTH_ROLES", "analyst,approver");
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "");
+    const { canApproveActions } = await import("../../src/config/auth");
+    expect(canApproveActions()).toBe(true);
+  });
+
+  it("isApprovalUiDisabled: known token without approver role", async () => {
+    vi.stubEnv("VITE_AUTH_ROLES", "analyst");
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "e2e-token");
+    const { isApprovalUiDisabled } = await import("../../src/config/auth");
+    expect(isApprovalUiDisabled()).toBe(true);
+  });
+
+  it("isApprovalUiDisabled: false when roles unknown (production)", async () => {
+    vi.stubEnv("VITE_AUTH_ROLES", "analyst");
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "");
+    const { isApprovalUiDisabled } = await import("../../src/config/auth");
+    expect(isApprovalUiDisabled()).toBe(false);
+  });
 });

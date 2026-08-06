@@ -982,6 +982,35 @@ describe("EventDetailPage", () => {
     ).toBeInTheDocument();
   });
 
+  it("includes backend message detail when resume failed", async () => {
+    vi.stubEnv("VITE_AUTH_ROLES", "analyst,approver");
+    const user = userEvent.setup();
+    mockListActions.mockResolvedValue(waitingApprovalActionsFixture());
+    mockGetEvent.mockResolvedValue({ data: makeDetail({ status: "waiting_approval" }) });
+    mockApproveAction.mockResolvedValueOnce({
+      data: {
+        action_id: "act-70",
+        status: "approved",
+        message: "graph resume timeout",
+        resume_status: "failed",
+        degraded: false,
+      },
+    });
+
+    renderPage("/events/evt-70#actions");
+    await user.click(await screen.findByRole("tab", { name: /安全处置/ }));
+    await screen.findByTestId("approve-action-act-70");
+    await user.click(screen.getByTestId("approve-action-act-70"));
+    const dialog = await screen.findByRole("dialog", { name: "批准动作" });
+    await user.click(within(dialog).getByRole("button", { name: /批\s*准/ }));
+
+    expect(
+      await screen.findByText(
+        "动作 act-70 已批准，但调查流程继续失败，请查看事件状态：graph resume timeout",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("rejects a waiting_approval action inline", async () => {
     vi.stubEnv("VITE_AUTH_ROLES", "analyst,approver");
     const user = userEvent.setup();

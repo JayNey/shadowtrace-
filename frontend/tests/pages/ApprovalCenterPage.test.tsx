@@ -1,6 +1,6 @@
 /** ApprovalCenterPage tests (ISSUE-073 / ISSUE-207). */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -56,6 +56,10 @@ function renderPage(initialPath = "/approvals") {
 }
 
 describe("ApprovalPage", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsActionTimedOut.mockReturnValue(false);
@@ -348,5 +352,102 @@ describe("ApprovalPage", () => {
     expect(
       await screen.findByText("无审批权限（403）：需要 approver 角色，请联系管理员授权。"),
     ).toBeDefined();
+  });
+
+  it("surfaces resume_status feedback after approve in the approval center", async () => {
+    const user = userEvent.setup();
+    setStore({
+      pendingApprovals: [
+        {
+          action_id: "act-resume",
+          event_id: "evt-test",
+          action_name: "block_ip",
+          tool_name: "block_ip",
+          action_level: "l4",
+          execution_phase: "immediate",
+          status: "waiting_approval",
+          plan_revision: 1,
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+    mockStore.approve.mockResolvedValueOnce({
+      action_id: "act-resume",
+      status: "approved",
+      message: "approved",
+      resume_status: "ok",
+      degraded: false,
+    });
+
+    renderPage();
+    await user.click(screen.getByText("批准", { exact: true }));
+    const dialog = await screen.findByRole("dialog", { name: "批准动作" });
+    await user.click(within(dialog).getByRole("button", { name: /批\s*准/ }));
+
+    expect(
+      await screen.findByText("动作 act-resume 已批准，调查流程已继续"),
+    ).toBeDefined();
+  });
+
+  it("surfaces failed resume with backend message detail", async () => {
+    const user = userEvent.setup();
+    setStore({
+      pendingApprovals: [
+        {
+          action_id: "act-fail",
+          event_id: "evt-test",
+          action_name: "block_ip",
+          tool_name: "block_ip",
+          action_level: "l4",
+          execution_phase: "immediate",
+          status: "waiting_approval",
+          plan_revision: 1,
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+    mockStore.approve.mockResolvedValueOnce({
+      action_id: "act-fail",
+      status: "approved",
+      message: "graph resume timeout",
+      resume_status: "failed",
+      degraded: false,
+    });
+
+    renderPage();
+    await user.click(screen.getByText("批准", { exact: true }));
+    const dialog = await screen.findByRole("dialog", { name: "批准动作" });
+    await user.click(within(dialog).getByRole("button", { name: /批\s*准/ }));
+
+    expect(
+      await screen.findByText(
+        "动作 act-fail 已批准，但调查流程继续失败，请查看事件状态：graph resume timeout",
+      ),
+    ).toBeDefined();
+  });
+
+  it("disables approval card actions and shows role hint without approver", async () => {
+    vi.stubEnv("VITE_AUTH_ROLES", "analyst");
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "e2e-token");
+    setStore({
+      pendingApprovals: [
+        {
+          action_id: "act-role",
+          event_id: "evt-test",
+          action_name: "block_ip",
+          tool_name: "block_ip",
+          action_level: "l4",
+          execution_phase: "immediate",
+          status: "waiting_approval",
+          plan_revision: 1,
+          updated_at: new Date().toISOString(),
+        },
+      ],
+    });
+
+    renderPage();
+    expect(screen.getByTestId("approval-role-hint")).toHaveTextContent("当前角色无审批权限");
+    expect(screen.getByTestId("approval-card-disabled-act-role")).toHaveTextContent("无审批权限");
+    expect(screen.queryByText("批准", { exact: true })).toBeNull();
   });
 });

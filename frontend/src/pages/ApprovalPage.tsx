@@ -15,6 +15,8 @@ import {
 import ApprovalCard from "../components/approval/ApprovalCard";
 import ApprovalActionModal from "../components/approval/ApprovalActionModal";
 import { ApiError } from "../services/apiClient";
+import { isApprovalUiDisabled } from "../config/auth";
+import { showResumeFeedback } from "../utils/approvalFeedback";
 import type { Action } from "../types/action";
 
 const { Title, Text } = Typography;
@@ -49,6 +51,7 @@ export default function ApprovalPage() {
   );
   const [searchParams] = useSearchParams();
   const eventFilter = searchParams.get("event_id");
+  const approvalDisabled = isApprovalUiDisabled();
 
   useEffect(() => {
     // Deep link: query the target event directly (it may be beyond the first
@@ -112,6 +115,7 @@ export default function ApprovalPage() {
   };
 
   const handleConfirm = async (actionId: string, body: ApprovalDecisionBody) => {
+    const mode = modal.mode;
     const action = visibleApprovals.find((a) => a.action_id === actionId);
     const eventId = action?.event_id;
     const remainingBefore = eventId
@@ -119,16 +123,18 @@ export default function ApprovalPage() {
       : 0;
     setSubmitting(true);
     try {
-      if (modal.mode === "approve") {
-        await approve(actionId, body);
+      let result;
+      if (mode === "approve") {
+        result = await approve(actionId, body);
       } else {
         if (!body.comment?.trim()) {
           message.error("拒绝必须填写原因");
           return;
         }
-        await reject(actionId, body);
+        result = await reject(actionId, body);
       }
       setModal({ open: false, actionId: null, mode: "approve" });
+      showResumeFeedback(actionId, mode, result);
       if (eventId && remainingBefore > 1) {
         message.info("本事件仍有待审批动作，计划尚未全部决出。");
       }
@@ -194,6 +200,17 @@ export default function ApprovalPage() {
         <Alert message={activeError} type="error" showIcon style={{ marginBottom: 16 }} closable />
       )}
 
+      {visibleApprovals.length > 0 && approvalDisabled && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="当前角色无审批权限"
+          description="批准/拒绝需要 approver 或 admin 角色，操作已禁用；请使用具备审批角色的账号操作。"
+          data-testid="approval-role-hint"
+        />
+      )}
+
       <Spin spinning={activeLoading}>
         {visibleApprovals.length === 0 && !activeLoading ? (
           <Empty
@@ -239,6 +256,7 @@ export default function ApprovalPage() {
                       )}
                       onApprove={handleApprove}
                       onReject={handleReject}
+                      approvalDisabled={approvalDisabled}
                     />
                   ))}
                 </Space>

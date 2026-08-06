@@ -36,7 +36,7 @@ import { isEventChatEnabled } from "../config/features";
 import { listMemoryReviews } from "../services/knowledgeApi";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useEventDetail, type EventWriteback } from "../hooks/useEventDetail";
-import type { Action, ActionOperationResponse } from "../types/action";
+import type { Action } from "../types/action";
 import type {
   ConnectorPublic,
   DispositionResponse,
@@ -49,7 +49,8 @@ import {
   useApprovalStore,
   type ApprovalDecisionBody,
 } from "../stores/approvalStore";
-import { currentAuthRoles, hasKnownAuthRoles } from "../config/auth";
+import { isApprovalUiDisabled } from "../config/auth";
+import { showResumeFeedback } from "../utils/approvalFeedback";
 import { ApiError } from "../services/apiClient";
 
 const BASE_TAB_KEYS = [
@@ -143,38 +144,6 @@ function isDeferredPostVerifyAction(action: Action): boolean {
 const ACTION_NAME_LABELS: Record<string, string> = {
   generate_report: "自动生成分析报告",
 };
-
-/**
- * Surface resume_status / degraded to the operator after approve/reject (ISSUE-207).
- * resume "failed" must not pretend the investigation continued.
- */
-function showResumeFeedback(
-  actionId: string,
-  mode: "approve" | "reject",
-  result?: ActionOperationResponse,
-): void {
-  const verb = mode === "approve" ? "已批准" : "已拒绝";
-  if (!result) {
-    message.success(`动作 ${actionId} ${verb}`);
-    return;
-  }
-  const degradedSuffix = result.degraded ? "（降级模式运行）" : "";
-  switch (result.resume_status) {
-    case "ok":
-      message.success(`动作 ${actionId} ${verb}，调查流程已继续${degradedSuffix}`);
-      break;
-    case "skipped":
-      message.info(`动作 ${actionId} ${verb}（当前无待继续的调查流程）${degradedSuffix}`);
-      break;
-    case "failed":
-      message.error(
-        `动作 ${actionId} ${verb}，但调查流程继续失败，请查看事件状态${degradedSuffix}`,
-      );
-      break;
-    default:
-      message.success(`动作 ${actionId} ${verb}${degradedSuffix}`);
-  }
-}
 
 function actionDisplayName(action: Action): string {
   return ACTION_NAME_LABELS[action.action_name] ?? action.action_name;
@@ -558,14 +527,7 @@ export default function EventDetailPage() {
   // blocks a duplicate submit if the follow-up refresh fails (ISSUE-207 review).
   const [decidedActionIds, setDecidedActionIds] = useState<Record<string, boolean>>({});
 
-  const roles = currentAuthRoles();
-  const rolesKnown = hasKnownAuthRoles();
-  // Backend /actions/{id}/approve|reject: require_roles(ROLE_APPROVER); admin bypasses.
-  // Hard-disable only when the frontend truly knows the roles (mock/compose stage);
-  // otherwise keep enabled and let the backend answer 200/403 for the real
-  // trusted-proxy principal (ISSUE-207 review blocker fix).
-  const canApproveRole = roles.includes("approver") || roles.includes("admin");
-  const approvalDisabled = rolesKnown && !canApproveRole;
+  const approvalDisabled = isApprovalUiDisabled();
 
   const openApprovalModal = (actionId: string, mode: "approve" | "reject") => {
     setApprovalModal({ open: true, actionId, mode });

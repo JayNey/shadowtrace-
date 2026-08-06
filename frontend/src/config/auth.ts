@@ -62,6 +62,17 @@ export function hasKnownAuthRoles(): boolean {
   return Boolean(token && KNOWN_DEV_TOKEN_ROLES[token]);
 }
 
+/** Backend /actions/{id}/approve|reject: require_roles(ROLE_APPROVER); admin bypasses. */
+export function canApproveActions(): boolean {
+  const roles = currentAuthRoles();
+  return roles.includes(APPROVER_ROLE) || roles.includes("admin");
+}
+
+/** Hard-disable approval UI only when roles are known (mock/compose single-token). */
+export function isApprovalUiDisabled(): boolean {
+  return hasKnownAuthRoles() && !canApproveActions();
+}
+
 export function canPromoteKnowledgeReviews(): boolean {
   return currentAuthRoles().includes(APPROVER_ROLE);
 }
