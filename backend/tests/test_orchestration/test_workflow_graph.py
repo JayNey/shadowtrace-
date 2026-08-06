@@ -10,6 +10,7 @@ import pytest
 
 from app.agents.planner_agent import PlannerAgent
 from app.core.errors import InvalidStateTransitionError, ValidationError
+from app.models.action import Action
 from app.models.agent_io import (
     CollectionStatus,
     EffectStatus,
@@ -36,10 +37,14 @@ from app.models.agent_io import (
 )
 from app.models.context import EventContext
 from app.models.enums import (
+    ActionCategory,
+    ActionLevel,
+    ActionStatus,
     DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
     EventType,
+    ExecutionOwner,
     ExecutionSubstate,
     FinalVerdict,
     Severity,
@@ -1835,6 +1840,14 @@ async def test_report_node_backfills_phase_statuses_via_builder() -> None:
         overall_status=VerificationOverallStatus.SUCCESS,
         verification_phase=VerificationPhase.EFFECT,
         wm_persisted=True,
+        results=[
+            VerificationActionResult(
+                action_id="act-report-builder-205",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            )
+        ],
     )
     event_id = "evt-report-builder-205"
     await store.set(
@@ -1856,6 +1869,19 @@ async def test_report_node_backfills_phase_statuses_via_builder() -> None:
         confidence=0.7,
         scoring_mode=ScoringMode.RULE_ONLY,
     )
+    response_action = Action(
+        action_id="act-report-builder-205",
+        event_id=event_id,
+        plan_revision=1,
+        action_fingerprint="fp-report-builder-205",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L3,
+        status=ActionStatus.SUCCESS,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        target="198.51.100.44",
+    )
     state = _base_state(
         event_id=event_id,
         event_status=EventStatus.VERIFYING.value,
@@ -1863,8 +1889,8 @@ async def test_report_node_backfills_phase_statuses_via_builder() -> None:
         risk_assessment=risk.model_dump(mode="json"),
         response_plan=ResponsePlan(
             plan_id="pln-report-builder-205",
-            actions=[],
-            strategy_summary="",
+            actions=[response_action],
+            strategy_summary="contain exfiltration",
             generated_by=ResponsePlanGeneratedBy.TEMPLATE,
         ).model_dump(mode="json"),
     )
@@ -1875,9 +1901,16 @@ async def test_report_node_backfills_phase_statuses_via_builder() -> None:
     report_input = report_agent.calls[0]
     assert report_input.response_plan is not None
     assert report_input.response_plan.plan_id == "pln-report-builder-205"
+    assert report_input.response_plan.actions[0].action_id == "act-report-builder-205"
     assert report_input.verification_result is not None
     assert report_input.response_phase_status is ReportPhaseStatus.EXECUTED
     assert report_input.verification_phase_status is ReportPhaseStatus.EXECUTED
+    # Non-empty RESPONSE plan must reach ReportAgent with real actions (not
+    # empty-plan incomplete wording).
+    assert any(
+        action.action_category is ActionCategory.RESPONSE
+        for action in report_input.response_plan.actions
+    )
 
 
 @pytest.mark.asyncio

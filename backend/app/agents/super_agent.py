@@ -280,6 +280,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         react_llm_client: Any | None = None,
         event_service: Any | None = None,
         context_store: Any | None = None,
+        session_factory: Any | None = None,
         lease: EventLease | None = None,
         working_memory: BoundWorkingMemory | None = None,
         convergence_guard: Any | None = None,
@@ -309,6 +310,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         self.react_llm_client = react_llm_client
         self.event_service = event_service
         self.context_store = context_store
+        self.session_factory = session_factory
         self.lease = lease
         self.convergence_guard = convergence_guard
         self.react_enabled = react_enabled
@@ -635,6 +637,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             risk_assessment=placeholder_risk,
             event_context=ec,
             context_store=self.context_store,
+            session_factory=self.session_factory,
         )
         report: InvestigationReport | None = await self._execute_with_agent_retries(
             event_id,
@@ -788,6 +791,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             risk_assessment=risk_assessment,
             event_context=ec,
             context_store=self.context_store,
+            session_factory=self.session_factory,
         )
 
         report: InvestigationReport | None = await self._execute_with_agent_retries(

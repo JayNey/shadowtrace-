@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping
+from contextlib import AsyncExitStack
 from typing import Any, Protocol
 
 from pydantic import ValidationError
@@ -48,6 +49,12 @@ JOURNAL_FIELD_VERIFICATION_RESULT = "verification_result"
 
 class _ContextStoreLike(Protocol):
     async def get(self, event_id: str, key: str) -> Any: ...
+
+
+class _SessionFactoryLike(Protocol):
+    """Callable returning an async session context manager (SQLAlchemy factory)."""
+
+    def __call__(self) -> Any: ...
 
 
 def _coerce_response_plan(raw: Any) -> ResponsePlan | None:
@@ -245,6 +252,7 @@ async def build_report_agent_input(
     event_context: EventContext | None = None,
     context_store: _ContextStoreLike | None = None,
     session: Any | None = None,
+    session_factory: _SessionFactoryLike | None = None,
 ) -> ReportAgentInput:
     """Build the sole authoritative ``ReportAgentInput`` for ``event_id``.
 
@@ -254,32 +262,39 @@ async def build_report_agent_input(
     failures never fall back silently — they surface as
     ``ReportPhaseStatus.UNAVAILABLE`` so the report chapter is degraded with
     an explicit 「数据不可用」 note.
+
+    Pass ``session`` or ``session_factory`` so Action-table / journal recovery
+    is reachable in production (store miss alone must not imply NOT_EXECUTED).
     """
-    response_plan, response_phase_status = await _resolve_response_plan(
-        event_id,
-        state=state,
-        event_context=event_context,
-        context_store=context_store,
-        session=session,
-    )
-    verification_result, verification_phase_status = await _resolve_verification_result(
-        event_id,
-        state=state,
-        event_context=event_context,
-        context_store=context_store,
-        session=session,
-    )
-    return ReportAgentInput(
-        event_id=event_id,
-        evidence_output=evidence_output,
-        risk_assessment=risk_assessment,
-        response_plan=response_plan,
-        verification_result=verification_result,
-        escalated=escalated,
-        replan_count=replan_count,
-        response_phase_status=response_phase_status,
-        verification_phase_status=verification_phase_status,
-    )
+    async with AsyncExitStack() as stack:
+        active_session = session
+        if active_session is None and session_factory is not None:
+            active_session = await stack.enter_async_context(session_factory())
+        response_plan, response_phase_status = await _resolve_response_plan(
+            event_id,
+            state=state,
+            event_context=event_context,
+            context_store=context_store,
+            session=active_session,
+        )
+        verification_result, verification_phase_status = await _resolve_verification_result(
+            event_id,
+            state=state,
+            event_context=event_context,
+            context_store=context_store,
+            session=active_session,
+        )
+        return ReportAgentInput(
+            event_id=event_id,
+            evidence_output=evidence_output,
+            risk_assessment=risk_assessment,
+            response_plan=response_plan,
+            verification_result=verification_result,
+            escalated=escalated,
+            replan_count=replan_count,
+            response_phase_status=response_phase_status,
+            verification_phase_status=verification_phase_status,
+        )
 
 
 __all__ = [

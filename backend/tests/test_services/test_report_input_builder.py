@@ -376,6 +376,43 @@ async def test_session_action_table_fallback_derives_plan_without_fabrication() 
 
 
 @pytest.mark.asyncio
+async def test_session_factory_opens_session_for_action_recovery() -> None:
+    """Production call sites pass session_factory; builder must open it for ORM."""
+    session = _FakeSession(
+        [
+            _JournalResult(None),
+            _ActionsResult([_orm_action_row(action_id="act-factory-001", plan_revision=1)]),
+            _JournalResult(None),
+        ]
+    )
+
+    class _Factory:
+        def __init__(self) -> None:
+            self.entered = 0
+
+        def __call__(self) -> Any:
+            factory = self
+
+            class _Ctx:
+                async def __aenter__(self) -> _FakeSession:
+                    factory.entered += 1
+                    return session
+
+                async def __aexit__(self, *_args: Any) -> None:
+                    return None
+
+            return _Ctx()
+
+    factory = _Factory()
+    result = await _build(session_factory=factory)
+    assert factory.entered == 1
+    assert result.response_plan is not None
+    assert result.response_plan.actions[0].action_id == "act-factory-001"
+    assert result.response_phase_status is ReportPhaseStatus.EXECUTED
+    assert result.response_plan.generated_by is ResponsePlanGeneratedBy.RECOVERED
+
+
+@pytest.mark.asyncio
 async def test_session_failure_marks_unavailable() -> None:
     session = _FakeSession([], error=RuntimeError("db unavailable"))
     result = await _build(session=session)

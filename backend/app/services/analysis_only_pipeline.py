@@ -192,6 +192,7 @@ class AnalysisOnlyPipeline:
         event_service: EventService | Any | None = None,
         state_machine: StateMachinePort | None = None,
         context_store: Any | None = None,
+        session_factory: Any | None = None,
         working_memory: Any | None = None,
         degraded_flags: Any | None = None,
         settings: Settings | None = None,
@@ -209,6 +210,7 @@ class AnalysisOnlyPipeline:
         self._event_service = event_service
         self._state_machine = state_machine
         self._context_store = context_store
+        self._session_factory = session_factory
         self._working_memory = working_memory
         self._degraded_flags = degraded_flags
         self._settings = settings
@@ -627,6 +629,7 @@ class AnalysisOnlyPipeline:
             evidence_output=evidence_output,
             risk_assessment=risk_assessment,
             context_store=self._context_store,
+            session_factory=self._session_factory,
         )
         report = await self._report.execute(report_input)
         if report is not None and not isinstance(report, InvestigationReport):

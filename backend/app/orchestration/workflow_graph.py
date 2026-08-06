@@ -821,6 +821,7 @@ def build_investigation_graph(
                 replan_count=int(state.get("replan_count", 0)),
                 state=state,
                 context_store=services.get("context_store"),
+                session_factory=services.get("session_factory"),
             )
             report = await report_agent.execute(report_input)
             report_generated = report is not None
@@ -1619,6 +1620,7 @@ def build_investigation_graph(
             replan_count=int(state.get("replan_count", 0)),
             state=state,
             context_store=services.get("context_store"),
+            session_factory=services.get("session_factory"),
         )
         report = await report_agent.execute(report_input)
         # ISSUE-062 B2: When the writeback recovery path routes to report_node,
