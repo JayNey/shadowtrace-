@@ -1196,6 +1196,7 @@ describe("EventDetailPage", () => {
 
   it("generates a report from the empty-state CTA and refreshes", async () => {
     const user = userEvent.setup();
+    mockGetEvent.mockResolvedValue({ data: makeDetail({ status: "reporting" }) });
     renderPage("/events/evt-70#report");
     expect(await screen.findByText("报告尚未生成")).toBeInTheDocument();
 
@@ -1209,6 +1210,7 @@ describe("EventDetailPage", () => {
 
   it("offers force-generate on 422 report_quality_incomplete", async () => {
     const user = userEvent.setup();
+    mockGetEvent.mockResolvedValue({ data: makeDetail({ status: "reporting" }) });
     mockGenerateReport.mockRejectedValueOnce(
       new ApiError({
         error_code: "report_quality_incomplete",
@@ -1232,6 +1234,7 @@ describe("EventDetailPage", () => {
 
   it("confirms downgrade overwrite on 409 report_quality_conflict", async () => {
     const user = userEvent.setup();
+    mockGetEvent.mockResolvedValue({ data: makeDetail({ status: "reporting" }) });
     mockGenerateReport.mockRejectedValueOnce(
       new ApiError({
         error_code: "report_quality_conflict",
@@ -1253,5 +1256,21 @@ describe("EventDetailPage", () => {
         confirm_downgrade: true,
       }),
     );
+  });
+
+  it("warns when the report is generated but the follow-up refresh fails", async () => {
+    const user = userEvent.setup();
+    mockGetEvent
+      .mockResolvedValueOnce({ data: makeDetail({ status: "reporting" }) }) // initial load
+      .mockRejectedValueOnce(new Error("event 500")); // refresh after POST
+    renderPage("/events/evt-70#report");
+    await screen.findByTestId("report-generate-button");
+
+    await user.click(screen.getByTestId("report-generate-button"));
+
+    // The POST succeeded, but the re-sync failed — surfaced as a sync warning,
+    // never as a plain success with stale UI.
+    expect(await screen.findByText("报告已生成，但页面同步失败，请刷新查看最新状态。")).toBeInTheDocument();
+    expect(mockGenerateReport).toHaveBeenCalledWith("evt-70", undefined);
   });
 });

@@ -33,8 +33,14 @@ type DetailResource =
   | "dispositions"
   | "writebacks";
 
+<<<<<<< HEAD
 /** Per-resource fetch success flags (ISSUE-207 review): callers like the inline
  *  approval flow must be able to tell a refresh failure from a success. */
+=======
+/** Per-resource fetch success flags (ISSUE-206): the report tab must be able to
+ *  distinguish a successful POST from a failed follow-up refresh. Kept in sync
+ *  with the ISSUE-207 inline-approval shape. */
+>>>>>>> 2c7e6d7 (fix(ISSUE-206): gate report generation on lifecycle state + sync-failure hint)
 export interface DetailRefreshResult {
   actionsOk: boolean;
   eventOk: boolean;

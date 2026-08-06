@@ -614,8 +614,11 @@ export default function EventDetailPage() {
       setQualityConfirm((q) => ({ ...q, open: false }));
       setRegenerateOpen(false);
       // Refresh the event snapshot — socket report_generated also re-pulls the
-      // event, so the report tab updates without a manual page reload.
-      await refresh("event");
+      // event. If the re-sync fails, say so instead of pretending it succeeded.
+      const { eventOk } = await refresh("event");
+      if (!eventOk) {
+        message.warning("报告已生成，但页面同步失败，请刷新查看最新状态。");
+      }
     } catch (err: unknown) {
       if (err instanceof ApiError && err.error_code === "report_quality_incomplete") {
         message.error("报告质量不完整：存在占位章节。可强制生成以存档降级件。");
