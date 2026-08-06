@@ -68,7 +68,10 @@ test.describe("ISSUE-103 · investigate mode modal", () => {
     await page.getByRole("button", { name: "开始调查" }).click();
 
     await expect.poll(() => capturedBody).not.toBeNull();
-    expect(capturedBody).toMatchObject({ include_response_execution: false });
+    expect(capturedBody).toMatchObject({
+      include_response_execution: false,
+      generate_report: false,
+    });
   });
 
   test("full-loop selection sends include_response_execution=true", async ({ page }) => {

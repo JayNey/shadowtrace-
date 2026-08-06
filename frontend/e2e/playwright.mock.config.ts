@@ -14,6 +14,7 @@ export default defineConfig({
     "**/knowledge-review.spec.ts",
     "**/event-todo-bar.spec.ts",
     "**/event-detail-approval.spec.ts",
+    "**/event-detail-report-generation.spec.ts",
   ],
   fullyParallel: false,
   workers: 1,

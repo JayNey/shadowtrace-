@@ -186,7 +186,12 @@ describe("ReportViewer", () => {
     const user = userEvent.setup();
     const onGenerate = vi.fn();
     render(
-      <ReportViewer report={null} loading={false} onGenerate={onGenerate} />,
+      <ReportViewer
+        report={null}
+        loading={false}
+        eventStatus="reporting"
+        onGenerate={onGenerate}
+      />,
     );
     const button = screen.getByTestId("report-generate-button");
     expect(button).toBeInTheDocument();
@@ -201,6 +206,7 @@ describe("ReportViewer", () => {
       <ReportViewer
         report={null}
         loading={false}
+        eventStatus="reporting"
         onGenerate={vi.fn()}
         generating
       />,
@@ -232,6 +238,7 @@ describe("ReportViewer", () => {
           updated_at: new Date().toISOString(),
         }}
         loading={false}
+        eventStatus="reporting"
         onRegenerate={onRegenerate}
       />,
     );

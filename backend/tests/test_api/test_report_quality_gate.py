@@ -20,7 +20,7 @@ from app.api.v1.deps import reset_deps
 from app.core.config import get_settings
 from app.main import app
 from app.models.agent_io import ReportPhaseStatus
-from app.models.enums import FinalVerdict, ReportQuality, Severity
+from app.models.enums import EventStatus, FinalVerdict, ReportQuality, Severity
 from app.models.report import InvestigationReport, ReportSection
 
 _DEV_TOKENS = json.dumps(
@@ -47,6 +47,10 @@ def _dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _hdr() -> dict[str, str]:
     return {"Authorization": "Bearer analyst-token"}
+
+
+def _event_stub(event_id: str, *, status: EventStatus = EventStatus.REPORTING) -> SimpleNamespace:
+    return SimpleNamespace(event_id=event_id, status=status)
 
 
 def _sections(**overrides: str) -> list[ReportSection]:
@@ -159,7 +163,7 @@ async def test_post_report_rejects_incomplete_without_force() -> None:
     )
     event_service = AsyncMock()
     event_service.get_event = AsyncMock(
-        return_value=SimpleNamespace(event_id=incomplete.event_id)
+        return_value=_event_stub(incomplete.event_id),
     )
     event_service.get_report = AsyncMock(return_value=None)
     event_service.upsert_report = AsyncMock()
@@ -205,7 +209,7 @@ async def test_post_report_force_archives_incomplete() -> None:
     )
     event_service = AsyncMock()
     event_service.get_event = AsyncMock(
-        return_value=SimpleNamespace(event_id=incomplete.event_id)
+        return_value=_event_stub(incomplete.event_id),
     )
     event_service.get_report = AsyncMock(return_value=None)
     event_service.upsert_report = AsyncMock(return_value=incomplete)
@@ -249,7 +253,7 @@ async def test_post_report_template_returns_degraded_template() -> None:
     )
     event_service = AsyncMock()
     event_service.get_event = AsyncMock(
-        return_value=SimpleNamespace(event_id=template.event_id)
+        return_value=_event_stub(template.event_id),
     )
     event_service.get_report = AsyncMock(return_value=None)
     event_service.upsert_report = AsyncMock(return_value=template)
@@ -302,7 +306,7 @@ async def test_post_report_downgrade_complete_requires_confirm() -> None:
     )
     event_service = AsyncMock()
     event_service.get_event = AsyncMock(
-        return_value=SimpleNamespace(event_id=degraded.event_id)
+        return_value=_event_stub(degraded.event_id),
     )
     event_service.get_report = AsyncMock(return_value=complete)
     event_service.upsert_report = AsyncMock()
@@ -350,7 +354,7 @@ async def test_post_report_incomplete_assessed_without_mocking_quality() -> None
     )
     event_service = AsyncMock()
     event_service.get_event = AsyncMock(
-        return_value=SimpleNamespace(event_id=raw.event_id)
+        return_value=_event_stub(raw.event_id),
     )
     event_service.get_report = AsyncMock(return_value=None)
     event_service.upsert_report = AsyncMock()
@@ -385,3 +389,21 @@ async def test_post_report_incomplete_assessed_without_mocking_quality() -> None
     assert body["error_code"] == "report_quality_incomplete"
     assert body["details"]["report_quality"] == "incomplete_placeholder"
     event_service.upsert_report.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_report_rejects_analyzing_lifecycle() -> None:
+    """ISSUE-206: refuse POST /report while investigation is still running."""
+    event_id = "evt-206-analyzing"
+    event_service = AsyncMock()
+    event_service.get_event = AsyncMock(
+        return_value=_event_stub(event_id, status=EventStatus.ANALYZING)
+    )
+    client = _client_with_event_service(event_service)
+
+    resp = client.post(f"/api/v1/events/{event_id}/report", headers=_hdr())
+
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["error_code"] == "invalid_state_transition"
+    assert body["details"]["status"] == "analyzing"

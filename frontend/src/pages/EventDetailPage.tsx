@@ -54,7 +54,6 @@ import {
 } from "../stores/approvalStore";
 import { isApprovalUiDisabled } from "../config/auth";
 import { showResumeFeedback } from "../utils/approvalFeedback";
-import { ApiError } from "../services/apiClient";
 
 const BASE_TAB_KEYS = [
   "source",
@@ -636,6 +635,8 @@ export default function EventDetailPage() {
           errorCode: "report_quality_conflict",
           retryParams: { confirm_downgrade: true },
         });
+      } else if (err instanceof ApiError && err.error_code === "invalid_state_transition") {
+        message.error("分析尚未完成，请待事件进入「报告生成」状态后再生成报告。");
       } else if (err instanceof ApiError) {
         message.error(err.message || err.error_code || "报告生成失败");
       } else {

@@ -108,7 +108,7 @@ export default function ReportViewer({
     // (REPORTING/CLOSED) — never while the investigation is still running.
     const canGenerate =
       onGenerate != null &&
-      (eventStatus === "reporting" || eventStatus === "closed" || eventStatus === undefined);
+      (eventStatus === "reporting" || eventStatus === "closed");
     return (
       <div style={{ textAlign: "center", padding: 48 }}>
         <FileTextOutlined style={{ fontSize: 48, color: "#d9d9d9" }} />
@@ -145,9 +145,7 @@ export default function ReportViewer({
             <ReportExportButtons report={report} />
           </div>
           {onRegenerate != null &&
-            (eventStatus === "reporting" ||
-              eventStatus === "closed" ||
-              eventStatus === undefined) && (
+            (eventStatus === "reporting" || eventStatus === "closed") && (
               <Button
                 size="small"
                 icon={<ReloadOutlined />}

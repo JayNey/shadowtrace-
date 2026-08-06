@@ -6,7 +6,6 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import type { EventDetailResponse } from "../../src/types/event";
 import { ApiError } from "../../src/services/apiClient";
 import { useAgentStatusStore } from "../../src/stores/agentStatusStore";
-import { ApiError } from "../../src/services/apiClient";
 
 const mockGetEvent = vi.fn();
 const mockGetTimeline = vi.fn();
@@ -1256,6 +1255,25 @@ describe("EventDetailPage", () => {
         confirm_downgrade: true,
       }),
     );
+  });
+
+  it("surfaces invalid_state_transition when report generation is too early", async () => {
+    const user = userEvent.setup();
+    mockGetEvent.mockResolvedValue({ data: makeDetail({ status: "reporting" }) });
+    mockGenerateReport.mockRejectedValueOnce(
+      new ApiError({
+        error_code: "invalid_state_transition",
+        error_message: "report generation requires analysis to be complete",
+      }),
+    );
+    renderPage("/events/evt-70#report");
+    await screen.findByTestId("report-generate-button");
+
+    await user.click(screen.getByTestId("report-generate-button"));
+
+    expect(
+      await screen.findByText("分析尚未完成，请待事件进入「报告生成」状态后再生成报告。"),
+    ).toBeInTheDocument();
   });
 
   it("warns when the report is generated but the follow-up refresh fails", async () => {
