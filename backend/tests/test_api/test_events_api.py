@@ -139,6 +139,69 @@ async def _create_test_event(
     return event.event_id
 
 
+async def _seed_evidence_limited_demotion_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    title: str = "Evidence limited demotion",
+) -> str:
+    """Seed high risk + none verdict with structured demotion snapshot (ISSUE-241)."""
+    from uuid import uuid4
+
+    from app.services.risk_verdict_projection import (
+        EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT,
+        merge_risk_assessment_into_snapshot,
+    )
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    now = datetime.now(UTC)
+    snapshot = merge_risk_assessment_into_snapshot(
+        None,
+        {
+            "risk_score": 70,
+            "severity": "high",
+            "confidence": 0.08,
+            "scoring_mode": "rule_only",
+            "evidence_limited": True,
+            "verdict_reason_codes": [EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT],
+        },
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title=title,
+                    description="ISSUE-241 demotion observability fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.NONE.value,
+                    risk_score=70,
+                    confidence=0.08,
+                    entities={},
+                    creation_source_ref={
+                        "source_kind": "incident",
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "t1",
+                        "connector_id": f"conn-{sfx}",
+                        "source_object_id": f"INC-{sfx}",
+                        "source_status_raw": "open",
+                        "source_disposition": "pending",
+                        "schema_version": "1",
+                    },
+                    source_reference_snapshots=[],
+                    disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+                    source_type="manual",
+                    occurred_at=now,
+                    event_context_snapshot=snapshot,
+                    row_version=1,
+                )
+            )
+    return event_id
+
+
 async def _seed_reporting_required_event(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -533,6 +596,36 @@ async def test_list_events_filters_by_status(
     data = resp.json()
     for item in data["items"]:
         assert item["status"] == "new"
+
+
+@pytest.mark.asyncio
+async def test_list_events_projects_evidence_limited_demotion_fields(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-241: list/detail API expose demotion observability from snapshot."""
+    from app.services.risk_verdict_projection import (
+        EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT,
+    )
+
+    event_id = await _seed_evidence_limited_demotion_event(session_factory)
+
+    list_resp = client.get("/api/v1/events", headers=_hdr())
+    assert list_resp.status_code == 200, list_resp.text
+    item = next(i for i in list_resp.json()["items"] if i["event_id"] == event_id)
+    assert item["risk_score"] == 70
+    assert item["final_verdict"] == "none"
+    assert item["evidence_limited"] is True
+    assert item["scoring_mode"] == "rule_only"
+    assert item["verdict_reason_codes"] == [
+        EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT
+    ]
+
+    detail_resp = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert detail_resp.status_code == 200, detail_resp.text
+    risk = detail_resp.json()["event"]["event_context_snapshot"]["risk_assessment"]
+    assert risk["evidence_limited"] is True
+    assert EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT in risk["verdict_reason_codes"]
 
 
 # --------------------------------------------------------------------------- #
