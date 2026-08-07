@@ -17,6 +17,10 @@ from app.agents.report_agent import (
 )
 from app.agents.report_llm_failure import llm_failure_metadata
 from app.agents.report_section_builder import (
+    ACTIONS_STATUS_SUMMARY_LABEL,
+    DECISION_BRIEF_LABEL,
+    EVIDENCE_LIMITED_REASON_LABEL,
+    EVIDENCE_SUMMARY_LABEL,
     NOT_EXECUTED_ACTIONS,
     NOT_EXECUTED_VERIFICATION,
     PLACEHOLDER_LOW_RISK_NO_EVIDENCE,
@@ -1313,6 +1317,54 @@ def test_llm_merge_preserves_investigation_limitation_lines() -> None:
     assert "gap: identity | reason=tool_timeout" in evidence_chain.content
     assert "Suspicious outbound transfer" in overview.content
     assert "attack_storyline_limitation" in storyline.content or "调查限制" in storyline.content
+
+
+def test_llm_merge_preserves_template_enrichment_briefs() -> None:
+    """ISSUE-246: LLM overview merge must keep structured template enrichment lines."""
+    builder = ReportSectionBuilder()
+    event_id = "evt-merge-enrich"
+    sections = builder.build(
+        event_id=event_id,
+        evidence_output=EvidenceOutput(
+            evidence_list=[],
+            overall_confidence=0.2,
+            collection_status=CollectionStatus.FAILED,
+            failed_sources=["endpoint"],
+            gaps=[
+                EvidenceGap(
+                    event_id=event_id,
+                    missing_source=EvidenceSource.ENDPOINT,
+                    reason="provider_timeout",
+                )
+            ],
+        ),
+        risk_assessment=RiskAssessment(
+            risk_score=70,
+            severity=Severity.HIGH,
+            confidence=0.35,
+            risk_factors=[],
+            scoring_mode=ScoringMode.RULE_ONLY,
+            evidence_limited=True,
+        ),
+        triage_result=TriageResult(
+            event_type=EventType.DATA_EXFILTRATION,
+            severity=Severity.HIGH,
+            need_investigation=True,
+            decision_summary="merge 后仍需保留的结构化分诊结论",
+        ),
+    )
+    merged = ReportAgent(llm_client=None)._merge_sections(
+        sections,
+        {"overview": "LLM-generated analyst summary only."},
+    )
+    overview = next(section for section in merged if section.key == "overview")
+
+    assert overview.content.startswith("LLM-generated analyst summary only.")
+    assert f"{DECISION_BRIEF_LABEL}:" in overview.content
+    assert "merge 后仍需保留的结构化分诊结论" in overview.content
+    assert f"{EVIDENCE_SUMMARY_LABEL}:" in overview.content
+    assert f"{EVIDENCE_LIMITED_REASON_LABEL}:" in overview.content
+    assert f"{ACTIONS_STATUS_SUMMARY_LABEL}:" in overview.content
 
 
 def test_llm_failure_metadata_timeout_code() -> None:
