@@ -207,6 +207,7 @@ async def test_get_super_agent_reuses_stack_convergence_guard(
         "state_machine": MagicMock(),
         "degraded_flags": MagicMock(),
         "react_executor_factory": MagicMock(),
+        "output_quality_evaluator": MagicMock(),
     }
     monkeypatch.setattr(deps, "_get_investigation_stack", AsyncMock(return_value=fake_stack))
     monkeypatch.setattr(deps, "get_event_lease", lambda: MagicMock())
@@ -366,6 +367,7 @@ async def test_get_pipeline_wires_stack_convergence_guard(
         "state_machine": MagicMock(),
         "degraded_flags": MagicMock(),
         "react_executor_factory": MagicMock(),
+        "output_quality_evaluator": MagicMock(),
     }
     monkeypatch.setattr(deps, "_get_investigation_stack", AsyncMock(return_value=fake_stack))
     monkeypatch.setattr(deps, "_get_agent_task_service", lambda: MagicMock())

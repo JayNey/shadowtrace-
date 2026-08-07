@@ -197,6 +197,7 @@ async def test_planner_and_response_receive_event_bus(monkeypatch: pytest.Monkey
         "state_machine": MagicMock(),
         "degraded_flags": MagicMock(),
         "react_executor_factory": MagicMock(),
+        "output_quality_evaluator": MagicMock(),
     }
     monkeypatch.setattr(deps, "_get_investigation_stack", AsyncMock(return_value=fake_stack))
     monkeypatch.setattr(deps, "get_event_lease", lambda: MagicMock())

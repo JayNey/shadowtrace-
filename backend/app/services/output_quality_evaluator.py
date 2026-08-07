@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from app.agents.prompts.quality_judge_prompt import build_quality_judge_messages
@@ -56,6 +57,11 @@ def _verdict_from_score(score: float) -> QualityVerdict:
     if score >= _WARN_THRESHOLD:
         return QualityVerdict.WARN
     return QualityVerdict.FAIL
+
+
+def _quality_scores_list_payload(results: dict[str, OutputQualityScore]) -> list[dict[str, Any]]:
+    """Serialize scores for ``EventContext.quality_scores`` (list, ISSUE-233)."""
+    return [score.model_dump(mode="json") for score in results.values()]
 
 
 # --------------------------------------------------------------------------- #
@@ -140,15 +146,13 @@ class OutputQualityEvaluator:
         event_context: dict[str, Any],
         results: dict[str, OutputQualityScore],
     ) -> None:
-        """Write agent_name → score dict to WorkingMemory when bound (ISSUE-065 §4)."""
+        """Write ``quality_scores`` list to WorkingMemory when bound (EventContext schema)."""
         if self._bound_wm is None or not results:
             return
         event_id = event_context.get("event_id")
         if not event_id:
             return
-        payload = {
-            agent_name: score.model_dump(mode="json") for agent_name, score in results.items()
-        }
+        payload = _quality_scores_list_payload(results)
         try:
             await self._bound_wm.write(str(event_id), "quality_scores", payload)
         except Exception:
@@ -262,6 +266,70 @@ class OutputQualityEvaluator:
             return None
 
         return max(0.0, min(1.0, score))
+
+
+def build_output_quality_evaluator(
+    *,
+    working_memory: Any | None = None,
+    llm_client: Any | None = None,
+    judge_enabled: bool = False,
+) -> OutputQualityEvaluator:
+    """Factory for production DI (ISSUE-233).
+
+    Rule-based scoring is always available; LLM judge remains gated by
+    ``judge_enabled`` (wired from ``QUALITY_JUDGE_ENABLED`` in deps).
+    """
+    return OutputQualityEvaluator(
+        llm_client=llm_client,
+        judge_enabled=judge_enabled,
+        working_memory=working_memory,
+    )
+
+
+async def evaluate_investigation_quality_scores(
+    evaluator: OutputQualityEvaluator | None,
+    event_context: Any,
+) -> dict[str, OutputQualityScore]:
+    """Evaluate agent outputs at investigation completion; fail-soft (ISSUE-233).
+
+    Persists ``quality_scores`` via the evaluator's bound WorkingMemory when
+    configured. Updates ``EventContext.quality_scores`` in-place when an
+    ``EventContext`` instance is supplied.
+    """
+    if evaluator is None:
+        return {}
+
+    from app.models.context import EventContext
+
+    if isinstance(event_context, EventContext):
+        ctx_dict = event_context.model_dump(mode="json")
+        event_id = (
+            event_context.event.event_id
+            if event_context.event is not None
+            else ctx_dict.get("event_id")
+        )
+    elif isinstance(event_context, Mapping):
+        ctx_dict = dict(event_context)
+        event_id = ctx_dict.get("event_id")
+    else:
+        return {}
+
+    if event_id:
+        ctx_dict.setdefault("event_id", event_id)
+
+    try:
+        scores = await evaluator.evaluate_all(ctx_dict)
+    except Exception:
+        logger.warning(
+            "Investigation quality evaluation failed for event=%s",
+            event_id,
+            exc_info=True,
+        )
+        return {}
+
+    if isinstance(event_context, EventContext) and scores:
+        event_context.quality_scores = _quality_scores_list_payload(scores)
+    return scores
 
 
 # ====================================================================== #

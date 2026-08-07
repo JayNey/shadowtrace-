@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
@@ -24,6 +25,8 @@ from app.models.agent_io import OutputQualityScore
 from app.models.enums import QualityVerdict
 from app.services.output_quality_evaluator import (
     OutputQualityEvaluator,
+    build_output_quality_evaluator,
+    evaluate_investigation_quality_scores,
     _completeness,
     _consistency,
     _grounding_ratio,
@@ -625,7 +628,7 @@ class _FakeWorkingMemory:
 @pytest.mark.asyncio
 class TestQualityScoresWriteBack:
     async def test_scores_written_to_working_memory(self) -> None:
-        """Caller can persist quality_scores dict to WorkingMemory."""
+        """Caller can persist quality_scores list to WorkingMemory."""
         wm = _FakeWorkingMemory()
         evaluator = OutputQualityEvaluator(working_memory=wm, judge_enabled=False)
         context = {
@@ -640,11 +643,17 @@ class TestQualityScoresWriteBack:
 
         stored = await wm.read("evt-030", "quality_scores")
         assert stored is not None
-        assert set(stored.keys()) >= {"triage", "evidence", "risk", "report"}
-        triage_entry = stored["triage"]
+        assert isinstance(stored, list)
+        assert len(stored) == 4
+        agent_names = {entry["agent_name"] for entry in stored if isinstance(entry, dict)}
+        assert agent_names >= {"triage", "evidence", "risk", "report"}
+        triage_entry = next(e for e in stored if e.get("agent_name") == "triage")
         assert "score" in triage_entry
         assert "verdict" in triage_entry
         assert "metrics" in triage_entry
+        from app.models.context import EventContext
+
+        EventContext.model_validate({"quality_scores": stored})
 
 
 # ====================================================================== #
@@ -662,3 +671,147 @@ class TestDeterminism:
         assert r1.score == r2.score
         assert r1.verdict == r2.verdict
         assert r1.metrics == r2.metrics
+
+
+# ====================================================================== #
+# production wiring — ISSUE-233
+# ====================================================================== #
+
+
+class TestBuildOutputQualityEvaluator:
+    def test_factory_rule_only_by_default(self) -> None:
+        wm = _FakeWorkingMemory()
+        evaluator = build_output_quality_evaluator(working_memory=wm, judge_enabled=False)
+        assert evaluator is not None
+        assert evaluator._judge_enabled is False  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+class TestEvaluateInvestigationQualityScores:
+    async def test_populates_event_context_and_working_memory(self) -> None:
+        wm = _FakeWorkingMemory()
+        evaluator = build_output_quality_evaluator(working_memory=wm, judge_enabled=False)
+        from app.models.context import EventContext
+        from app.models.enums import (
+            DispositionPolicy,
+            EventStatus,
+            EventType,
+            FinalVerdict,
+            Severity,
+            WritebackReadiness,
+        )
+        from app.models.security_event import EventSummary
+
+        event_id = "evt-233-prod"
+        ec = EventContext(
+            event=EventSummary(
+                event_id=event_id,
+                title="Quality wiring test",
+                event_type=EventType.DATA_EXFILTRATION,
+                severity=Severity.HIGH,
+                status=EventStatus.REPORTING,
+                final_verdict=FinalVerdict.NONE,
+                risk_score=0,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            ),
+            triage_result=_high_quality_triage(),
+            evidence_output=_high_quality_evidence(),
+            risk_assessment=_high_quality_risk(),
+        )
+
+        scores = await evaluate_investigation_quality_scores(evaluator, ec)
+
+        assert set(scores.keys()) == {"triage", "evidence", "risk"}
+        assert len(ec.quality_scores) == 3
+        stored = await wm.read(event_id, "quality_scores")
+        assert stored is not None
+        assert isinstance(stored, list)
+        assert len(stored) == 3
+        agent_names = {entry["agent_name"] for entry in stored if isinstance(entry, dict)}
+        assert agent_names == {"triage", "evidence", "risk"}
+        from app.models.context import EventContext
+
+        EventContext.model_validate({"quality_scores": stored})
+
+    async def test_none_evaluator_is_no_op(self) -> None:
+        from app.models.context import EventContext
+
+        ec = EventContext()
+        scores = await evaluate_investigation_quality_scores(None, ec)
+        assert scores == {}
+        assert ec.quality_scores == []
+
+    async def test_fail_soft_on_evaluator_error(self) -> None:
+        class _BrokenEvaluator:
+            async def evaluate_all(self, _ctx: dict[str, Any]) -> dict[str, OutputQualityScore]:
+                raise RuntimeError("evaluator exploded")
+
+        from app.models.context import EventContext
+
+        ec = EventContext(triage_result=_high_quality_triage())
+        scores = await evaluate_investigation_quality_scores(_BrokenEvaluator(), ec)  # type: ignore[arg-type]
+        assert scores == {}
+        assert ec.quality_scores == []
+
+
+@pytest.mark.asyncio
+class TestAnalysisOnlyPipelineQualityWiring:
+    async def test_persist_complete_runs_quality_evaluation(self) -> None:
+        """Pipeline completion hook must populate quality_scores without breaking context."""
+        from app.models.context import EventContext
+        from app.models.enums import (
+            DispositionPolicy,
+            EventStatus,
+            EventType,
+            FinalVerdict,
+            Severity,
+            WritebackReadiness,
+        )
+        from app.models.security_event import EventSummary
+        from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
+
+        event_id = "evt-233-pipeline"
+        ec = EventContext(
+            event=EventSummary(
+                event_id=event_id,
+                title="Pipeline quality",
+                event_type=EventType.DATA_EXFILTRATION,
+                severity=Severity.HIGH,
+                status=EventStatus.REPORTING,
+                final_verdict=FinalVerdict.NONE,
+                risk_score=0,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            ),
+            triage_result=_high_quality_triage(),
+            evidence_output=_high_quality_evidence(),
+            risk_assessment=_high_quality_risk(),
+        )
+        wm = _FakeWorkingMemory()
+        evaluator = build_output_quality_evaluator(working_memory=wm, judge_enabled=False)
+
+        context_store = MagicMock()
+        context_store.get_full_context = AsyncMock(return_value=ec)
+        context_store.set = AsyncMock()
+
+        pipeline = AnalysisOnlyPipeline(
+            triage_agent=MagicMock(),
+            evidence_agent=MagicMock(),
+            rag_agent=MagicMock(),
+            risk_agent=MagicMock(),
+            report_agent=MagicMock(),
+            context_store=context_store,
+            output_quality_evaluator=evaluator,
+        )
+
+        await pipeline._persist_analysis_only_complete(event_id)
+
+        stored = await wm.read(event_id, "quality_scores")
+        assert stored is not None
+        assert isinstance(stored, list)
+        assert len(stored) == 3
+        EventContext.model_validate({"quality_scores": stored})
+        context_store.set.assert_awaited_once_with(event_id, "analysis_only_complete", True)

@@ -208,6 +208,7 @@ class AnalysisOnlyPipeline:
         agent_artifact_service: Any | None = None,
         content_projection_service: Any | None = None,
         convergence_guard: Any | None = None,
+        output_quality_evaluator: Any | None = None,
     ) -> None:
         self._triage = triage_agent
         self._evidence = evidence_agent
@@ -228,6 +229,7 @@ class AnalysisOnlyPipeline:
         self._agent_artifact_service = agent_artifact_service
         self._content_projection_service = content_projection_service
         self._convergence_guard = convergence_guard
+        self._output_quality_evaluator = output_quality_evaluator
 
         # Back-compat aliases for ISSUE-047 unit tests.
         self.triage_agent = triage_agent
@@ -731,7 +733,27 @@ class AnalysisOnlyPipeline:
                 exc_info=True,
             )
 
+    async def _evaluate_quality_scores(self, event_id: str) -> None:
+        """Run OutputQualityEvaluator at pipeline completion (ISSUE-233)."""
+        if self._output_quality_evaluator is None or self._context_store is None:
+            return
+        from app.services.output_quality_evaluator import evaluate_investigation_quality_scores
+
+        try:
+            context = await self._context_store.get_full_context(event_id)
+            await evaluate_investigation_quality_scores(
+                self._output_quality_evaluator,
+                context,
+            )
+        except Exception:
+            logger.warning(
+                "AnalysisOnlyPipeline: quality evaluation failed for event=%s",
+                event_id,
+                exc_info=True,
+            )
+
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
+        await self._evaluate_quality_scores(event_id)
         if self._context_store is not None:
             try:
                 await self._context_store.set(event_id, "analysis_only_complete", True)

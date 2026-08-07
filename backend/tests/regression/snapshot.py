@@ -94,8 +94,16 @@ def _normalize_metrics(raw: dict[str, float]) -> dict[str, float]:
     }
 
 
-def _normalize_quality_scores(raw: dict[str, Any]) -> dict[str, float]:
+def _normalize_quality_scores(raw: dict[str, Any] | list[Any]) -> dict[str, float]:
     scores: dict[str, float] = {}
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            agent_name = item.get("agent_name")
+            if agent_name and "score" in item:
+                scores[str(agent_name)] = _round_float(float(item["score"]))
+        return scores
     for agent_name, payload in sorted(raw.items()):
         if isinstance(payload, dict) and "score" in payload:
             scores[agent_name] = _round_float(float(payload["score"]))

@@ -64,6 +64,8 @@ FIELD_OWNERSHIP: dict[str, str] = {
     "budget_usage": "BudgetService",
     "guard_violations": "OutputGuard",
     "convergence_state": "ConvergenceGuard",
+    # ISSUE-233: populated by OutputQualityEvaluator at investigation completion
+    # (SuperAgent / AnalysisOnlyPipeline); rule-based by default, optional LLM judge.
     "quality_scores": "OutputQualityEvaluator",
     "scratchpad": "WorkingMemory",
     "degraded_flags": "DegradedFlagService",

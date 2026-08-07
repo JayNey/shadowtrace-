@@ -292,6 +292,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         investigation_graph: Any | None = None,
         memory_agent: _AgentProtocol | None = None,
         audit_service: Any | None = None,
+        output_quality_evaluator: Any | None = None,
     ) -> None:
         super().__init__(
             working_memory=working_memory,
@@ -318,6 +319,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         self.react_enabled = react_enabled
         self._investigation_graph = investigation_graph
         self.memory_agent = memory_agent
+        self._output_quality_evaluator = output_quality_evaluator
         self._transition_failures: dict[str, list[dict[str, Any]]] = {}
         self._memory_tasks: set[asyncio.Task[None]] = set()
 
@@ -449,6 +451,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 ec = await self._finalize_analysis_artifacts(ec)
             else:
                 ec = final_state.get("event_context", event_context)
+            await self._run_quality_evaluation_step(ec)
             await self._persist_event_context(ec)
             if not include_response_execution:
                 await self._persist_analysis_only_complete(event_id)
@@ -1106,6 +1109,26 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             ec.storyline is not None,
         )
         return ec
+
+    async def _run_quality_evaluation_step(self, ec: EventContext) -> None:
+        """Persist rule-based quality scores after analysis (ISSUE-233).
+
+        Fail-soft: evaluation errors must not block investigation completion or
+        downstream writeback paths.
+        """
+        if self._output_quality_evaluator is None:
+            return
+        from app.services.output_quality_evaluator import evaluate_investigation_quality_scores
+
+        event_id = _event_id_from_context(ec)
+        try:
+            await evaluate_investigation_quality_scores(self._output_quality_evaluator, ec)
+        except Exception:
+            logger.warning(
+                "SuperAgent: quality evaluation failed for event=%s",
+                event_id,
+                exc_info=True,
+            )
 
     async def _run_storyline_step(self, ec: EventContext) -> None:
         """Optional StorylineService step (P1 capability switch).

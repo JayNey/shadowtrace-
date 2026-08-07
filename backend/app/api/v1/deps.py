@@ -900,6 +900,13 @@ async def _build_investigation_agents() -> dict[str, Any]:
         llm_client=llm_client,
         working_memory=wm.for_writer("StorylineService"),
     )
+    from app.services.output_quality_evaluator import build_output_quality_evaluator
+
+    output_quality_evaluator = build_output_quality_evaluator(
+        working_memory=wm,
+        llm_client=llm_client,
+        judge_enabled=settings.quality_judge_enabled,
+    )
 
     return {
         "settings": settings,
@@ -917,6 +924,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         "report": report,
         "graph_agent": graph_agent,
         "storyline_service": storyline_service,
+        "output_quality_evaluator": output_quality_evaluator,
         "memory": memory,
         "context_store": _get_context_store(),
         "degraded_flags": _get_degraded_flags(),
@@ -968,6 +976,7 @@ async def get_pipeline() -> Any:
             # lifecycle (reset after each run) instead of leaving counters
             # behind for re-investigations of the same event.
             convergence_guard=stack["convergence_guard"],
+            output_quality_evaluator=stack["output_quality_evaluator"],
         )
     return _pipeline
 
@@ -1032,6 +1041,7 @@ async def get_super_agent() -> Any:
             audit_service=_get_audit_log(),
             graph_agent=stack["graph_agent"],
             storyline_service=stack["storyline_service"],
+            output_quality_evaluator=stack["output_quality_evaluator"],
         )
     return _super_agent
 
