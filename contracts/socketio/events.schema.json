@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://shadowtrace.local/socketio/events.schema.json",
   "title": "ShadowTrace Socket.IO Event Envelope Schema (ISSUE-040)",
-  "description": "Unified envelope and 17 event-type payloads for the /events namespace.",
+  "description": "Unified envelope and 18 event-type payloads for the /events namespace.",
   "definitions": {
     "SocketEventEnvelope": {
       "type": "object",
@@ -31,6 +31,7 @@
             "risk_updated",
             "report_generated",
             "final_verdict_updated",
+            "event_type_rewritten",
             "disposition_submitted",
             "writeback_updated",
             "writeback_readback_failed"
@@ -438,6 +439,27 @@
       },
       "additionalProperties": false
     },
+    "EventTypeRewrittenPayload": {
+      "description": "Broadcast when triage ORM rewrites security_event.event_type (ISSUE-209 / ISSUE-237).",
+      "type": "object",
+      "required": [
+        "event_type",
+        "previous_event_type",
+        "operator"
+      ],
+      "properties": {
+        "event_type": {
+          "type": "string"
+        },
+        "previous_event_type": {
+          "type": "string"
+        },
+        "operator": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
     "DispositionSubmittedPayload": {
       "type": "object",
       "required": [
@@ -802,6 +824,24 @@
             },
             "payload": {
               "$ref": "#/definitions/FinalVerdictUpdatedPayload"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "description": "event_type_rewritten",
+      "allOf": [
+        {
+          "$ref": "#/definitions/SocketEventEnvelope"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "event_type_rewritten"
+            },
+            "payload": {
+              "$ref": "#/definitions/EventTypeRewrittenPayload"
             }
           }
         }

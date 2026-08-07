@@ -4,7 +4,7 @@ Acceptance criteria
 -------------------
 1. A subscribed client receives a ``state_change`` message **within 1 second**
    of a state transition.
-2. All 17 event types are declared in the committed Socket.IO schema
+2. All 18 event types are declared in the committed Socket.IO schema
    (``contracts/socketio/events.schema.json``, exported from canonical
    ``backend/app/contracts/socketio/events.schema.json``)
    and every per-type payload validates against its definition in the schema.
@@ -87,12 +87,12 @@ def test_schema_file_exists_and_is_valid_json() -> None:
     assert "definitions" in doc
 
 
-def test_schema_defines_all_sixteen_event_types() -> None:
+def test_schema_defines_all_event_types() -> None:
     """Every event type in SOCKET_MESSAGE_TYPES must have a oneOf entry."""
     doc = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
     one_of = doc.get("oneOf")
     assert isinstance(one_of, list), "Schema root must have oneOf."
-    assert len(one_of) == 17, f"Expected 17 entries in oneOf, got {len(one_of)}"
+    assert len(one_of) == 18, f"Expected 18 entries in oneOf, got {len(one_of)}"
 
     types_in_schema: set[str] = set()
     for entry in one_of:
@@ -681,7 +681,7 @@ async def test_dispatch_redacts_secrets_before_emit(redis_required: RedisClient)
 
 @pytest.mark.asyncio
 async def test_all_event_types_publishable(bus: tuple[EventBus, RedisClient]) -> None:
-    """Each of the 17 event types can be published with schema-valid payloads."""
+    """Each of the 18 event types can be published with schema-valid payloads."""
     event_bus, _redis = bus
     event_id = _event_id("alltype1")
 
@@ -900,6 +900,11 @@ def _example_payload(event_type: str) -> dict:
             "verdict": "true_positive",
             "previous_verdict": "uncertain",
             "matched_case_id": "case-0a1b2c3d",
+        },
+        "event_type_rewritten": {
+            "event_type": "malicious_process",
+            "previous_event_type": "other",
+            "operator": "TriageAgent",
         },
         "disposition_submitted": {
             "disposition_id": "disp-0a1b2c3d",

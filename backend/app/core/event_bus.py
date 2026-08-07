@@ -1,4 +1,4 @@
-"""Redis Pub/Sub event bus — sole publisher for the 16 Socket event types (ISSUE-013)."""
+"""Redis Pub/Sub event bus — sole publisher for Socket event types (ISSUE-013)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from app.core.sanitization import sanitize_data
 
 logger = logging.getLogger(__name__)
 
-# Intro §4.2.4 SocketEventEnvelope message types (17).
+# Intro §4.2.4 SocketEventEnvelope message types (18).
 SOCKET_MESSAGE_TYPES: frozenset[str] = frozenset(
     {
         "event_created",
@@ -29,6 +29,7 @@ SOCKET_MESSAGE_TYPES: frozenset[str] = frozenset(
         "risk_updated",
         "report_generated",
         "final_verdict_updated",
+        "event_type_rewritten",
         "disposition_submitted",
         "writeback_updated",
         "writeback_readback_failed",
