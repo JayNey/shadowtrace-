@@ -963,11 +963,13 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     if _blocked_ref is not None:
                         blocked_wb.add(_blocked_ref)
                     overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
-                elif (
-                    not terminal_activated and activate_result.skipped_reason == "already_submitted"
+                elif not terminal_activated and activate_result.skipped_reason in (
+                    "already_submitted",
+                    "concurrent_head_conflict",
                 ):
                     logger.info(
-                        "Phase 2 activation idempotent: already_submitted wb=%s event=%s",
+                        "Phase 2 activation idempotent: %s wb=%s event=%s",
+                        activate_result.skipped_reason,
                         activate_result.writeback_id,
                         event_id,
                     )

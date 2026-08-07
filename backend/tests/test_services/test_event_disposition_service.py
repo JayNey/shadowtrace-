@@ -1120,6 +1120,8 @@ async def test_concurrent_activate_and_submit_keeps_single_active_head(
                 "concurrent_head_conflict",
                 "already_submitted",
             ), r
+            assert r.writeback_id is not None, r
+            assert r.disposition_id is not None, r
 
     async with session_factory() as session:
         active = (
@@ -1134,4 +1136,106 @@ async def test_concurrent_activate_and_submit_keeps_single_active_head(
                 )
             )
         ).scalars().all()
+        all_outboxes = (
+            await session.execute(
+                select(orm.DispositionOutbox).where(
+                    orm.DispositionOutbox.event_id == event_id,
+                    orm.DispositionOutbox.closure_cycle == 1,
+                )
+            )
+        ).scalars().all()
     assert len(active) == 1, f"expected exactly one active head, got {len(active)}"
+    if len(activated) == 2:
+        superseded = [o for o in all_outboxes if o.superseded_by_disposition_id is not None]
+        assert len(superseded) >= 1, "serial supersede must mark prior head lineage"
+        assert active[0].supersedes_disposition_id is not None
+
+
+@pytest.mark.asyncio
+async def test_second_action_supersedes_first_with_lineage(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    disposition_service: EventDispositionService,
+    cleanup: None,
+) -> None:
+    """ISSUE-219: a later Action on the same event/cycle supersedes the prior
+    active head via enqueue_command (replan path), with full lineage."""
+    await _seed_connector_and_source(session_factory, mock_xdr_client=mock_xdr_client)
+    event_id = await _create_event(session_factory, store)
+    deferred_a = _deferred_action(event_id=event_id)
+    deferred_b = _deferred_action(event_id=event_id)
+    await _insert_action(session_factory, event_id, deferred_a)
+    await _insert_action(session_factory, event_id, deferred_b)
+    await _seed_effect_verification(store, event_id, action_id=deferred_a.action_id)
+    await _seed_effect_verification(store, event_id, action_id=deferred_b.action_id)
+
+    first = await disposition_service.activate_and_submit(event_id, 1, "op-a")
+    second = await disposition_service.activate_and_submit(event_id, 1, "op-b")
+    assert first.activated is True
+    assert second.activated is True
+
+    async with session_factory() as session:
+        active = (
+            await session.execute(
+                select(orm.DispositionOutbox).where(
+                    orm.DispositionOutbox.event_id == event_id,
+                    orm.DispositionOutbox.closure_cycle == 1,
+                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                )
+            )
+        ).scalars().all()
+        first_row = await session.scalar(
+            select(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.disposition_id == first.disposition_id
+            )
+        )
+        second_row = await session.scalar(
+            select(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.disposition_id == second.disposition_id
+            )
+        )
+    assert len(active) == 1
+    assert active[0].disposition_id == second.disposition_id
+    assert first_row is not None
+    assert second_row is not None
+    assert first_row.superseded_by_disposition_id == second.disposition_id
+    assert second_row.supersedes_disposition_id == first.disposition_id
+
+
+def test_active_head_unique_violation_matches_constraint_name() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.event_disposition_service import _is_active_head_unique_violation
+
+    class _Diag:
+        constraint_name = "uq_disposition_outbox_event_status_active_head"
+
+    exc = IntegrityError("insert", {}, Exception("orig"))
+    exc.orig = type("Orig", (), {"diag": _Diag()})()
+    assert _is_active_head_unique_violation(exc) is True
+
+
+def test_other_unique_violation_not_misclassified_as_active_head() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.event_disposition_service import _is_active_head_unique_violation
+
+    class _Diag:
+        constraint_name = "uq_disposition_outbox_idempotency_key"
+
+    exc = IntegrityError("insert", {}, Exception("orig"))
+    exc.orig = type("Orig", (), {"diag": _Diag()})()
+    assert _is_active_head_unique_violation(exc) is False
+
+
+def test_active_head_unique_violation_message_fallback() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    from app.services.event_disposition_service import _is_active_head_unique_violation
+
+    exc = IntegrityError("insert", {}, Exception("orig"))
+    exc.orig = Exception(
+        'duplicate key violates unique constraint "uq_disposition_outbox_event_status_active_head"'
+    )
+    assert _is_active_head_unique_violation(exc) is True

@@ -40,6 +40,21 @@ logger = logging.getLogger(__name__)
 
 _OPERATOR = "EventDispositionService"
 _LOGICAL_SLOT = "terminal"
+_ACTIVE_HEAD_UNIQUE_INDEX = "uq_disposition_outbox_event_status_active_head"
+
+
+def _is_active_head_unique_violation(exc: IntegrityError) -> bool:
+    """True when exc is the event-scoped terminal active-head partial unique index."""
+    orig = exc.orig
+    if orig is not None:
+        diag = getattr(orig, "diag", None)
+        if diag is not None:
+            name = getattr(diag, "constraint_name", None)
+            if name == _ACTIVE_HEAD_UNIQUE_INDEX:
+                return True
+        if _ACTIVE_HEAD_UNIQUE_INDEX in str(orig):
+            return True
+    return _ACTIVE_HEAD_UNIQUE_INDEX in str(exc)
 
 
 class DispositionActivationResult(BaseModel):
@@ -381,7 +396,7 @@ class EventDispositionService:
             # has already been rolled back by the begin() context.  The winner's
             # head stays active — treat this activation as an idempotent no-op
             # carrying the winner's lineage (disposition_id/writeback_id).
-            if "uq_disposition_outbox_event_status_active_head" in str(exc.orig):
+            if _is_active_head_unique_violation(exc):
                 async with self._session_factory() as conflict_session:
                     winner = await conflict_session.scalar(
                         select(orm.DispositionOutbox)
@@ -564,6 +579,14 @@ async def _find_active_terminal_outbox(
     action_id: str,
     closure_cycle: int,
 ) -> orm.DispositionOutbox | None:
+    """Return the active terminal outbox for this Action (idempotent replay).
+
+    Scoped by ``action_id`` so a *different* Action on the same
+    ``(event_id, closure_cycle)`` can still reach ``enqueue_command`` and
+    supersede the prior event-level head (replan / concurrent activation).
+    The event-scoped partial unique index remains the final single-head
+    invariant; ``enqueue_command`` writes ``superseded_by_disposition_id``.
+    """
     outbox: orm.DispositionOutbox | None = await session.scalar(
         select(orm.DispositionOutbox)
         .where(
