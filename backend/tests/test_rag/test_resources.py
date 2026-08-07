@@ -273,9 +273,11 @@ def test_warmup_retrieval_resources_builds_pipeline(monkeypatch: pytest.MonkeyPa
 
 def test_celery_task_releases_retrieval_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     stack_mock = MagicMock()
+    redis_mock = MagicMock()
     reset_mock = MagicMock()
     embed_mock = MagicMock()
     monkeypatch.setattr("app.api.v1.deps.reset_investigation_stack_cache", stack_mock)
+    monkeypatch.setattr("app.api.v1.deps.reset_loop_bound_redis_resources", redis_mock)
     monkeypatch.setattr("app.rag.resources.reset_loaded_retrieval_resources", reset_mock)
     monkeypatch.setattr("app.core.embedding.factory.reset_embedding_client", embed_mock)
 
@@ -283,6 +285,7 @@ def test_celery_task_releases_retrieval_cache(monkeypatch: pytest.MonkeyPatch) -
 
     _release_celery_task_loop_resources()
     stack_mock.assert_called_once()
+    redis_mock.assert_called_once()
     reset_mock.assert_called_once()
     embed_mock.assert_called_once()
 

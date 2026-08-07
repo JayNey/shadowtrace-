@@ -1,0 +1,287 @@
+"""Celery asyncio.run × Redis checkpointer lifecycle (ISSUE-252 / ID-R2-009)."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from app.core.metrics import checkpoint_health_snapshot
+from app.core.redis_client import RedisClient, is_event_loop_error
+from app.orchestration.checkpointer import (
+    RedisCheckpointer,
+    checkpoint_key_for_event,
+    get_checkpoint_health,
+    reset_checkpoint_health_state_for_tests,
+)
+
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
+
+def _redis_reachable() -> bool:
+    client = RedisClient(url=REDIS_URL, max_connections=2)
+
+    async def _ping() -> bool:
+        try:
+            return await client.ping()
+        finally:
+            await client.aclose()
+
+    try:
+        return bool(asyncio.run(_ping()))
+    except Exception:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _reset_checkpoint_observability() -> None:
+    reset_checkpoint_health_state_for_tests()
+    yield
+    reset_checkpoint_health_state_for_tests()
+
+
+def _empty_checkpoint() -> dict[str, Any]:
+    return {
+        "v": 1,
+        "id": "cp-test",
+        "ts": "2026-01-01T00:00:00+00:00",
+        "channel_values": {},
+        "channel_versions": {},
+        "versions_seen": {},
+    }
+
+
+def _config(thread_id: str) -> dict[str, Any]:
+    return {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+
+
+@pytest.mark.skipif(not _redis_reachable(), reason="Redis not reachable")
+def test_redis_client_survives_consecutive_asyncio_run() -> None:
+    """Strategy B defense: same RedisClient across two asyncio.run loops."""
+    client = RedisClient(url=REDIS_URL, max_connections=2)
+    key = "shadowtrace:test:issue252:loop"
+
+    async def _roundtrip(value: bytes) -> bytes | None:
+        r = client.get_client()
+        await r.set(key, value, ex=60)
+        return await r.get(key)
+
+    try:
+        assert asyncio.run(_roundtrip(b"first")) == b"first"
+        assert asyncio.run(_roundtrip(b"second")) == b"second"
+    finally:
+        asyncio.run(client.aclose())
+
+
+@pytest.mark.skipif(not _redis_reachable(), reason="Redis not reachable")
+def test_checkpointer_persist_load_across_celery_style_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two investigate+resume-style asyncio.run cycles must keep Redis checkpoints."""
+    from app.api.v1 import deps
+    from app.core.config import get_settings
+    from app.tasks.investigation_tasks import _release_celery_task_loop_resources
+
+    monkeypatch.setenv("REDIS_URL", REDIS_URL)
+    get_settings.cache_clear()
+    deps.reset_deps()
+    event_a = "evt-issue252-a"
+    event_b = "evt-issue252-b"
+    loop_closed_hits = 0
+
+    class _CountingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            nonlocal loop_closed_hits
+            msg = record.getMessage().lower()
+            if "event loop is closed" in msg:
+                loop_closed_hits += 1
+
+    handler = _CountingHandler()
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+
+        async def _investigate_persist(event_id: str) -> None:
+            redis = deps._get_redis()
+            saver = await RedisCheckpointer.create(redis)
+            assert saver.memory_fallback is False
+            # Seed InMemorySaver storage the same way production aput does,
+            # then exercise the Redis persist path under a fresh loop.
+            config = _config(event_id)
+            saver._memory.put(
+                config,
+                _empty_checkpoint(),  # type: ignore[arg-type]
+                {},  # type: ignore[arg-type]
+                {},
+            )
+            await saver._persist(event_id)
+            assert saver.memory_fallback is False
+            raw = await redis.get_client().get(checkpoint_key_for_event(event_id))
+            assert raw is not None
+
+        async def _resume_load(event_id: str) -> None:
+            redis = deps._get_redis()
+            saver = await RedisCheckpointer.create(redis)
+            assert saver.memory_fallback is False
+            await saver._hydrate(event_id)
+            assert saver.memory_fallback is False
+            assert event_id in saver._memory.storage
+
+        # investigate → release → investigate → release → resume ×2
+        asyncio.run(_investigate_persist(event_a))
+        _release_celery_task_loop_resources()
+        asyncio.run(_investigate_persist(event_b))
+        _release_celery_task_loop_resources()
+        asyncio.run(_resume_load(event_a))
+        _release_celery_task_loop_resources()
+        asyncio.run(_resume_load(event_b))
+
+        health = get_checkpoint_health()
+        assert health["memory_fallback"] is False
+        assert loop_closed_hits == 0
+    finally:
+        root.removeHandler(handler)
+        _release_celery_task_loop_resources()
+        deps.reset_deps()
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_persist_recovers_from_event_loop_error_without_sticky_fallback() -> None:
+    """Closed-loop persist errors rebind + retry; must not stick memory_fallback."""
+
+    class _LoopAwareStore:
+        def __init__(self) -> None:
+            self.values: dict[str, bytes] = {}
+            self.calls = 0
+
+        async def get(self, key: str) -> bytes | None:
+            return self.values.get(key)
+
+        async def set(self, key: str, value: bytes, *, ex: int | None = None) -> None:
+            del ex
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("Event loop is closed")
+            self.values[key] = value
+
+        async def delete(self, key: str) -> None:
+            self.values.pop(key, None)
+
+    class _LoopAwareRedis:
+        def __init__(self) -> None:
+            self.store = _LoopAwareStore()
+            self.rebinds = 0
+
+        async def ping(self) -> bool:
+            return True
+
+        def get_client(self) -> _LoopAwareStore:
+            return self.store
+
+        async def rebind_to_current_loop(self) -> None:
+            self.rebinds += 1
+
+    redis = _LoopAwareRedis()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    saver._memory.storage["evt-loop-recover"] = {}
+    await saver._persist("evt-loop-recover")
+
+    assert saver.memory_fallback is False
+    assert redis.rebinds == 1
+    assert checkpoint_key_for_event("evt-loop-recover") in redis.store.values
+    snapshot = checkpoint_health_snapshot()
+    assert snapshot["loop_rebinds"] == 1
+    assert snapshot["fallback_triggers"] == 0
+
+
+@pytest.mark.asyncio
+async def test_persist_loop_error_falls_back_when_rebind_retry_fails() -> None:
+    class _AlwaysClosedStore:
+        async def set(self, key: str, value: bytes, *, ex: int | None = None) -> None:
+            del key, value, ex
+            raise RuntimeError("Event loop is closed")
+
+        async def get(self, key: str) -> bytes | None:
+            del key
+            raise RuntimeError("Event loop is closed")
+
+    class _BrokenRedis:
+        def __init__(self) -> None:
+            self.store = _AlwaysClosedStore()
+
+        async def ping(self) -> bool:
+            return True
+
+        def get_client(self) -> _AlwaysClosedStore:
+            return self.store
+
+        async def rebind_to_current_loop(self) -> None:
+            return None
+
+    redis = _BrokenRedis()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    saver._memory.storage["evt-loop-fail"] = {}
+    await saver._persist("evt-loop-fail")
+
+    assert saver.memory_fallback is True
+    assert "evt-loop-fail" in saver._memory_pinned_threads
+    health = get_checkpoint_health()
+    assert health["fallback_triggers"] == 1
+
+
+def test_is_event_loop_error_detects_common_messages() -> None:
+    assert is_event_loop_error(RuntimeError("Event loop is closed"))
+    assert is_event_loop_error(RuntimeError("Task got Future attached to a different loop"))
+    assert not is_event_loop_error(ConnectionError("redis down"))
+
+
+def test_release_celery_resources_clears_redis_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.api.v1 import deps
+    from app.tasks.investigation_tasks import _release_celery_task_loop_resources
+
+    fake = MagicMock()
+    fake.aclose = MagicMock()
+    deps._redis_client = fake  # type: ignore[assignment]
+    deps._event_lease = object()
+    deps._context_store = object()
+    deps._event_bus = object()
+
+    stack_mock = MagicMock()
+    retrieval_mock = MagicMock()
+    playbook_mock = MagicMock()
+    embed_mock = MagicMock()
+    monkeypatch.setattr(deps, "reset_investigation_stack_cache", stack_mock)
+    monkeypatch.setattr(
+        "app.rag.resources.reset_loaded_retrieval_resources",
+        retrieval_mock,
+    )
+    monkeypatch.setattr(
+        "app.playbook.resources.reset_playbook_resources_cache",
+        playbook_mock,
+    )
+    monkeypatch.setattr(
+        "app.core.embedding.factory.reset_embedding_client",
+        embed_mock,
+    )
+
+    # Avoid nested asyncio.run against MagicMock.aclose — null path is enough.
+    async def _noop_aclose() -> None:
+        return None
+
+    fake.aclose = _noop_aclose
+
+    _release_celery_task_loop_resources()
+
+    stack_mock.assert_called_once()
+    retrieval_mock.assert_called_once()
+    playbook_mock.assert_called_once()
+    embed_mock.assert_called_once()
+    assert deps._redis_client is None
+    assert deps._event_lease is None
+    assert deps._context_store is None
+    assert deps._event_bus is None

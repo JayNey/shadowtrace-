@@ -50,6 +50,20 @@ class _FakeRedis:
         return _release
 
 
+class _FakeRedisClient:
+    """RedisClient-shaped wrapper so EventLease can call ``get_client()``."""
+
+    def __init__(self, raw: _FakeRedis) -> None:
+        self._raw = raw
+
+    def get_client(self) -> _FakeRedis:
+        return self._raw
+
+
+def _lease_with_fake(fake_redis: _FakeRedis) -> EventLease:
+    return EventLease(_FakeRedisClient(fake_redis))  # type: ignore[arg-type]
+
+
 _real_asyncio_sleep = asyncio.sleep
 
 
@@ -90,8 +104,7 @@ async def _cancel_renew_task(task: asyncio.Task[None]) -> None:
 async def test_renew_exception_triggers_on_renewal_failed_after_threshold() -> None:
     """After max_renew_failures+1 consecutive exceptions, on_renewal_failed is set."""
     fake_redis = _FakeRedis(renew_side_effect=ConnectionError("redis down"))
-    lease = EventLease(None)
-    lease._redis = fake_redis  # type: ignore[assignment]
+    lease = _lease_with_fake(fake_redis)
 
     renewal_failed = asyncio.Event()
     async with _fast_renew_loop():
@@ -123,8 +136,7 @@ async def test_renew_exception_resets_after_successful_renew() -> None:
     fake_redis = _FakeRedis()
     fake_redis.expire = _flaky_renew  # type: ignore[method-assign]
 
-    lease = EventLease(None)
-    lease._redis = fake_redis  # type: ignore[assignment]
+    lease = _lease_with_fake(fake_redis)
 
     renewal_failed = asyncio.Event()
     async with _fast_renew_loop():
@@ -149,8 +161,7 @@ async def test_renew_owner_mismatch_still_triggers_immediately() -> None:
     fake_redis = _FakeRedis()
     fake_redis.get = AsyncMock(return_value=b"worker-thief")  # type: ignore[method-assign]
 
-    lease = EventLease(None)
-    lease._redis = fake_redis  # type: ignore[assignment]
+    lease = _lease_with_fake(fake_redis)
 
     renewal_failed = asyncio.Event()
     async with _fast_renew_loop():
@@ -181,8 +192,7 @@ async def test_renew_single_exception_below_threshold_does_not_trigger() -> None
     fake_redis = _FakeRedis()
     fake_redis.expire = _error_then_succeed  # type: ignore[method-assign]
 
-    lease = EventLease(None)
-    lease._redis = fake_redis  # type: ignore[assignment]
+    lease = _lease_with_fake(fake_redis)
 
     renewal_failed = asyncio.Event()
     async with _fast_renew_loop():
@@ -214,8 +224,7 @@ async def test_renew_exception_default_threshold() -> None:
     fake_redis = _FakeRedis()
     fake_redis.expire = _always_error  # type: ignore[method-assign]
 
-    lease = EventLease(None)
-    lease._redis = fake_redis  # type: ignore[assignment]
+    lease = _lease_with_fake(fake_redis)
 
     renewal_failed = asyncio.Event()
     async with _fast_renew_loop():
@@ -236,8 +245,7 @@ async def test_renew_exception_default_threshold() -> None:
 async def test_renew_loop_exits_on_first_exception_with_threshold_zero() -> None:
     """max_renew_failures=0 means the first exception triggers failure."""
     fake_redis = _FakeRedis(renew_side_effect=ConnectionError("boom"))
-    lease = EventLease(None)
-    lease._redis = fake_redis  # type: ignore[assignment]
+    lease = _lease_with_fake(fake_redis)
 
     renewal_failed = asyncio.Event()
     async with _fast_renew_loop():
@@ -258,8 +266,7 @@ async def test_renew_loop_exits_on_first_exception_with_threshold_zero() -> None
 async def test_renew_success_does_not_trigger() -> None:
     """Normal successful renewal never sets on_renewal_failed."""
     fake_redis = _FakeRedis()
-    lease = EventLease(None)
-    lease._redis = fake_redis  # type: ignore[assignment]
+    lease = _lease_with_fake(fake_redis)
 
     renewal_failed = asyncio.Event()
     async with _fast_renew_loop():

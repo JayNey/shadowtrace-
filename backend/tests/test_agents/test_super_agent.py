@@ -167,7 +167,11 @@ class _RenewalExceptionLease(_InMemoryEventLease):
                 del key, ttl
                 raise ConnectionError("redis unavailable")
 
-        self._event_lease._redis = _ErrorRedis()  # type: ignore[assignment]
+        class _ErrorRedisClient:
+            def get_client(self) -> _ErrorRedis:
+                return _ErrorRedis()
+
+        self._event_lease = EventLease(_ErrorRedisClient())  # type: ignore[arg-type]
         return await self._event_lease.start_renewal(
             event_id,
             owner_id,
