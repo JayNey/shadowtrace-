@@ -495,13 +495,14 @@ class ApprovalEngine:
                         )
                     )
                     if replay is not None:
-                        return
+                        # Idempotent decision_id replay: no new transition / resume.
+                        return ApprovalOutcome()
 
                 record = await self._load_pending_record_row(session, action_id)
 
                 if record is not None and record.decided_at is not None:
                     if decision_id and record.decision_id == decision_id:
-                        return
+                        return ApprovalOutcome()
                     raise ApprovalDecisionConflictError(
                         "approval already decided by another operator",
                         details={

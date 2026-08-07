@@ -8,7 +8,10 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-import app.bootstrap  # noqa: F401  # ISSUE-223: redacting logging before app imports
+# Side-effect import only — do not bind the name ``app`` (clashes with FastAPI instance).
+from app import (
+    bootstrap as _bootstrap,  # noqa: F401  # ISSUE-223: redacting logging before app imports
+)
 from app.api.v1 import api_router
 from app.api.v1.errors import register_exception_handlers
 from app.api.v1.health import shutdown_health_clients

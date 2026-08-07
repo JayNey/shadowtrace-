@@ -37,7 +37,9 @@ _CandidateT = TypeVar("_CandidateT", bound="ActionCandidateLike")
 
 
 class ActionCandidateLike(Protocol):
-    tool_name: str
+    # Read-only property so frozen dataclasses (e.g. ActionCandidate) structurally match.
+    @property
+    def tool_name(self) -> str: ...
 
 
 def has_actionable_containment_targets(entities: EntitySet) -> bool:

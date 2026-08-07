@@ -1663,9 +1663,7 @@ async def generate_report(
             details={
                 "event_id": event_id,
                 "existing_quality": (
-                    existing_quality.value
-                    if hasattr(existing_quality, "value")
-                    else str(existing_quality)
+                    existing_quality.value if existing_quality is not None else None
                 ),
                 "incoming_quality": report.report_quality.value,
             },

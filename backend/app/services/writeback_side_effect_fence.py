@@ -51,10 +51,16 @@ def assert_writeback_side_effects_allowed(
     *,
     settings: Settings | None = None,
     action_id: str | None = None,
-    execution_owner: ExecutionOwner,
+    execution_owner: ExecutionOwner | None,
 ) -> None:
-    """Combined claim/delivery fence: live side effects + XDR writeback."""
+    """Combined claim/delivery fence: live side effects + XDR writeback.
+
+    ``execution_owner=None`` (system/verification actions) skips the XDR gate;
+    live side-effect fence still applies.
+    """
     assert_live_side_effects_allowed(settings=settings, action_id=action_id)
+    if execution_owner is None:
+        return
     assert_xdr_writeback_allowed(
         settings=settings,
         action_id=action_id,

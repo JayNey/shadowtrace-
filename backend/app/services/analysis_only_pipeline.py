@@ -826,8 +826,12 @@ class AnalysisOnlyPipeline:
         expected_status: EventStatus,
     ) -> None:
         """Best-effort MemoryAgent pass; knowledge failures degrade."""
+        context_store = self._context_store
+        memory_agent = self._memory_agent
+        if context_store is None or memory_agent is None:
+            return
         try:
-            context = await self._context_store.get_full_context(event_id)
+            context = await context_store.get_full_context(event_id)
             if context.event is None or context.event.status is not expected_status:
                 # Snapshot moved past the scheduled status (e.g. REPORTING was
                 # closed meanwhile) — the current-status path owns consolidation.
@@ -837,7 +841,7 @@ class AnalysisOnlyPipeline:
             from app.agents.super_agent import _investigation_result_from_context
 
             result = _investigation_result_from_context(context)
-            await self._memory_agent.execute(
+            await memory_agent.execute(
                 MemoryAgentInput(event_id=event_id, investigation_result=result)
             )
         except Exception as exc:

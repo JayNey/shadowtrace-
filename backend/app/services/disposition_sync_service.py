@@ -714,7 +714,23 @@ class DispositionSyncService:
                         ),
                     )
                     return
-                execution_owner = ExecutionOwner(action_row.execution_owner)
+                raw_execution_owner = action_row.execution_owner
+                if raw_execution_owner is None:
+                    logger.warning(
+                        "outbox delivery blocked: missing execution_owner outbox=%s action_id=%s",
+                        outbox_id,
+                        outbox.action_id,
+                    )
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=datetime.now(UTC),
+                        error_detail=(
+                            "action missing execution_owner for writeback fence: "
+                            f"{outbox.action_id}"
+                        ),
+                    )
+                    return
+                execution_owner = ExecutionOwner(raw_execution_owner)
                 try:
                     assert_writeback_side_effects_allowed(
                         action_id=outbox.action_id,
