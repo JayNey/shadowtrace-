@@ -461,6 +461,37 @@ async def _seed_immediate_pending_verification(
     await store.set(event_id, "verification_result", payload.model_dump(mode="json"))
 
 
+async def _seed_non_verifiable_fp_verification(
+    store: EventContextStore,
+    event_id: str,
+    *,
+    immediate_id: str,
+    deferred_id: str,
+    detail: str = "non_verifiable_action",
+) -> None:
+    payload = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id=immediate_id,
+                effect_status=EffectStatus.SKIPPED,
+                detail=detail,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            ),
+            VerificationActionResult(
+                action_id=deferred_id,
+                effect_status=EffectStatus.SKIPPED,
+                detail="deferred_pending_activation",
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+            ),
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    await store.set(event_id, "verification_result", payload.model_dump(mode="json"))
+
+
 @pytest.mark.asyncio
 async def test_activate_required_plan_submits_event_status_update(
     session_factory: async_sessionmaker[AsyncSession],
@@ -911,6 +942,132 @@ def test_resolver_false_positive_blocked_when_immediate_pending() -> None:
     assert result.need_manual_resolution is True
 
 
+def test_resolver_false_positive_blocked_when_non_verifiable_skipped() -> None:
+    """ISSUE-232: non-disposition_only FP must not IGNORED with unverified effects."""
+    from app.services.terminal_disposition_resolver import TerminalDispositionResolver
+
+    verification = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id="act-ticket",
+                effect_status=EffectStatus.SKIPPED,
+                detail="non_verifiable_action",
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            ),
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    resolver = TerminalDispositionResolver()
+    result = resolver.resolve(
+        final_verdict=FinalVerdict.FALSE_POSITIVE,
+        verification=verification,
+        approved_terminal_dispositions=[SourceDisposition.IGNORED],
+        disposition_only=False,
+        disposition_policy=DispositionPolicy.REQUIRED,
+        writeback_readiness=WritebackReadiness.READY,
+    )
+    assert result.disposition is None
+    assert result.need_manual_resolution is True
+
+
+def test_resolver_false_positive_blocked_when_no_verification_tool_skipped() -> None:
+    """ISSUE-232: no_verification_tool_registered must block FP auto-IGNORED."""
+    from app.services.terminal_disposition_resolver import TerminalDispositionResolver
+
+    verification = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id="act-unregistered",
+                effect_status=EffectStatus.SKIPPED,
+                detail="no_verification_tool_registered",
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            ),
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    resolver = TerminalDispositionResolver()
+    result = resolver.resolve(
+        final_verdict=FinalVerdict.FALSE_POSITIVE,
+        verification=verification,
+        approved_terminal_dispositions=[SourceDisposition.IGNORED],
+        disposition_only=False,
+        disposition_policy=DispositionPolicy.REQUIRED,
+        writeback_readiness=WritebackReadiness.READY,
+    )
+    assert result.disposition is None
+    assert result.need_manual_resolution is True
+
+
+def test_resolver_false_positive_blocked_when_mixed_verified_and_non_verifiable() -> None:
+    """ISSUE-232: one unverified applicable row blocks FP even if others are VERIFIED."""
+    from app.services.terminal_disposition_resolver import TerminalDispositionResolver
+
+    verification = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id="act-block",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            ),
+            VerificationActionResult(
+                action_id="act-ticket",
+                effect_status=EffectStatus.SKIPPED,
+                detail="non_verifiable_action",
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            ),
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    resolver = TerminalDispositionResolver()
+    result = resolver.resolve(
+        final_verdict=FinalVerdict.FALSE_POSITIVE,
+        verification=verification,
+        approved_terminal_dispositions=[SourceDisposition.IGNORED],
+        disposition_only=False,
+        disposition_policy=DispositionPolicy.REQUIRED,
+        writeback_readiness=WritebackReadiness.READY,
+    )
+    assert result.disposition is None
+    assert result.need_manual_resolution is True
+
+
+def test_resolver_false_positive_ignored_when_only_deferred_skipped() -> None:
+    """ISSUE-232: deferred_pending_activation must not block FP IGNORED."""
+    from app.services.terminal_disposition_resolver import TerminalDispositionResolver
+
+    verification = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id="act-deferred",
+                effect_status=EffectStatus.SKIPPED,
+                detail="deferred_pending_activation",
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+            ),
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    resolver = TerminalDispositionResolver()
+    result = resolver.resolve(
+        final_verdict=FinalVerdict.FALSE_POSITIVE,
+        verification=verification,
+        approved_terminal_dispositions=[SourceDisposition.IGNORED],
+        disposition_only=False,
+        disposition_policy=DispositionPolicy.REQUIRED,
+        writeback_readiness=WritebackReadiness.READY,
+    )
+    assert result.disposition is SourceDisposition.IGNORED
+    assert result.need_manual_resolution is False
+
+
 def test_resolver_threat_blocked_when_immediate_pending() -> None:
     from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 
@@ -1065,6 +1222,73 @@ async def test_immediate_pending_fp_blocks_even_if_verification_success_forged(
         immediate_id=immediate_id,
         deferred_id=deferred.action_id,
         overall_status=VerificationOverallStatus.SUCCESS,
+    )
+    await seed_minimum_disposition_audit(session_factory, event_id)
+
+    result = await disposition_service.activate_and_submit(event_id, 1, "test-operator")
+    assert result.activated is False
+    assert result.skipped_reason == "effect_not_ready"
+
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(orm.DispositionOutbox)
+            .where(orm.DispositionOutbox.event_id == event_id)
+        )
+        assert int(count or 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_non_verifiable_fp_does_not_enqueue_terminal_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    disposition_service: EventDispositionService,
+    cleanup: None,
+) -> None:
+    """ISSUE-232: FP + non_verifiable IMMEDIATE must not activate terminal outbox."""
+    event_id = await _create_event(
+        session_factory,
+        store,
+        final_verdict=FinalVerdict.FALSE_POSITIVE,
+        disposition_only=False,
+    )
+    immediate_id = f"act-ticket-{_sfx()}"
+    deferred = _deferred_action(
+        event_id=event_id,
+        approved=[SourceDisposition.IGNORED],
+    )
+    locator = _locator()
+    await _insert_action(
+        session_factory,
+        event_id,
+        Action.model_validate(
+            {
+                "action_id": immediate_id,
+                "event_id": event_id,
+                "plan_revision": 1,
+                "action_fingerprint": f"fp-{immediate_id}",
+                "action_category": ActionCategory.RESPONSE,
+                "action_name": "create ticket",
+                "tool_name": "create_ticket",
+                "action_level": ActionLevel.L2,
+                "execution_phase": ActionExecutionPhase.IMMEDIATE,
+                "execution_owner": ExecutionOwner.DIRECT_TOOL,
+                "status": ActionStatus.SUCCESS,
+                "writeback_required": False,
+                "writeback_applicable": False,
+                "writeback_readiness": WritebackReadiness.NOT_REQUIRED,
+                "disposition_source_ref": locator,
+                "idempotency_key": f"idem-{immediate_id}",
+            }
+        ),
+    )
+    await _insert_action(session_factory, event_id, deferred)
+    await _seed_non_verifiable_fp_verification(
+        store,
+        event_id,
+        immediate_id=immediate_id,
+        deferred_id=deferred.action_id,
+        detail="non_verifiable_action",
     )
     await seed_minimum_disposition_audit(session_factory, event_id)
 

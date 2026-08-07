@@ -19,6 +19,7 @@ from app.models.enums import (
 from app.models.verification_readiness import (
     applicable_effect_results,
     has_immediate_effect_pending,
+    has_unverified_applicable_effects,
 )
 
 SkippedReason = Literal[
@@ -74,6 +75,8 @@ class TerminalDispositionResolver:
         resolved: SourceDisposition | None
         if final_verdict is FinalVerdict.FALSE_POSITIVE:
             if has_immediate_effect_pending(verification):
+                return TerminalDispositionResolveResult(need_manual_resolution=True)
+            if has_unverified_applicable_effects(verification):
                 return TerminalDispositionResolveResult(need_manual_resolution=True)
             resolved = SourceDisposition.IGNORED
         elif final_verdict is FinalVerdict.CONFIRMED_THREAT:
