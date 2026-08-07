@@ -23,7 +23,10 @@ from app.core.errors import (
     GuardrailViolationError,
     InvestigationInProgressError,
     InvestigationLeaseLostError,
+    InvalidStateTransitionError,
+    ShadowTraceError,
     ToolCallGrantUnavailableError,
+    ValidationError,
 )
 from app.models.agent_io import (
     CollectionStatus,
@@ -219,6 +222,110 @@ class _MockEventService:
         return self.events.get(event_id)
 
 
+class _FlakyTransitionEventService(_MockEventService):
+    """Fails the first *fail_count* ``transition_status`` calls, then succeeds."""
+
+    def __init__(
+        self,
+        events: dict[str, dict[str, object]] | None = None,
+        *,
+        fail_count: int = 0,
+        fail_exc: Exception | None = None,
+    ) -> None:
+        super().__init__(events)
+        self.fail_count = fail_count
+        self.fail_exc = fail_exc or ConnectionError("db unavailable")
+        self.attempts = 0
+
+    async def transition_status(
+        self,
+        event_id: str,
+        target: EventStatus,
+        *,
+        context: object | None = None,
+        operator: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        del context, operator, reason
+        self.attempts += 1
+        if self.attempts <= self.fail_count:
+            raise self.fail_exc
+        await super().transition_status(event_id, target)
+
+
+class _AlwaysFailTransitionEventService(_MockEventService):
+    """Always raises on ``transition_status``."""
+
+    def __init__(
+        self,
+        events: dict[str, dict[str, object]] | None = None,
+        *,
+        fail_exc: Exception | None = None,
+    ) -> None:
+        super().__init__(events)
+        self.fail_exc = fail_exc or ConnectionError("db unavailable")
+        self.attempts = 0
+
+    async def transition_status(
+        self,
+        event_id: str,
+        target: EventStatus,
+        *,
+        context: object | None = None,
+        operator: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        del context, operator, reason, target
+        self.attempts += 1
+        raise self.fail_exc
+
+
+class _InvalidTransitionEventService(_MockEventService):
+    """Raises ``InvalidStateTransitionError`` on every transition attempt."""
+
+    def __init__(self, events: dict[str, dict[str, object]] | None = None) -> None:
+        super().__init__(events)
+        self.attempts = 0
+
+    async def transition_status(
+        self,
+        event_id: str,
+        target: EventStatus,
+        *,
+        context: object | None = None,
+        operator: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        del context, operator, reason
+        self.attempts += 1
+        raise InvalidStateTransitionError(
+            "illegal transition",
+            current=EventStatus.NEW,
+            target=target,
+        )
+
+
+class _NonRetryableTransitionEventService(_MockEventService):
+    """Raises a non-retryable validation error on every transition attempt."""
+
+    def __init__(self, events: dict[str, dict[str, object]] | None = None) -> None:
+        super().__init__(events)
+        self.attempts = 0
+
+    async def transition_status(
+        self,
+        event_id: str,
+        target: EventStatus,
+        *,
+        context: object | None = None,
+        operator: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        del context, operator, reason, target
+        self.attempts += 1
+        raise ValidationError("permanent transition rejection")
+
+
 # --------------------------------------------------------------------------- #
 # Stub agents
 # --------------------------------------------------------------------------- #
@@ -410,6 +517,8 @@ def _build_super_agent(
     event_bus: Any | None = None,
     context_store: Any | None = None,
     react_enabled: bool = False,
+    transition_max_retries: int = 3,
+    transition_retry_backoff_seconds: float = 0.0,
 ) -> SuperAgent:
     """Build a SuperAgent with stub agents for isolated testing."""
     return SuperAgent(
@@ -424,6 +533,8 @@ def _build_super_agent(
         event_bus=event_bus,
         context_store=context_store,
         react_enabled=react_enabled,
+        transition_max_retries=transition_max_retries,
+        transition_retry_backoff_seconds=transition_retry_backoff_seconds,
     )
 
 
@@ -1050,3 +1161,196 @@ class TestAgentRetryPolicy:
             await agent._execute_with_agent_retries(_EVENT_ID, "evidence_agent", factory)
 
         assert calls["n"] == 1
+
+
+class TestTransitionRetryPolicy:
+    """ISSUE-234: bounded retry + fail-closed for transient transition errors."""
+
+    async def test_transient_transition_retries_then_succeeds(self) -> None:
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        event_service = _FlakyTransitionEventService(events, fail_count=2)
+        agent = _build_super_agent(
+            event_service=event_service,
+            transition_max_retries=3,
+            transition_retry_backoff_seconds=0.0,
+        )
+        await agent.investigate(_EVENT_ID)
+
+        assert events[_EVENT_ID]["status"] == EventStatus.REPORTING
+        assert event_service.attempts >= 3
+
+    async def test_transition_retry_exhaustion_fails_closed(self) -> None:
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        event_service = _AlwaysFailTransitionEventService(events)
+        agent = _build_super_agent(
+            event_service=event_service,
+            transition_max_retries=2,
+            transition_retry_backoff_seconds=0.0,
+        )
+
+        with pytest.raises(ShadowTraceError) as exc:
+            await agent.investigate(_EVENT_ID)
+
+        assert exc.value.error_code == "internal_error"
+        assert events[_EVENT_ID]["status"] is EventStatus.NEW
+        assert event_service.attempts >= 3
+
+    async def test_invalid_state_transition_is_not_retried(self) -> None:
+        from app.models.context import EventContext
+        from app.models.enums import (
+            DispositionPolicy,
+            FinalVerdict,
+            WritebackReadiness,
+        )
+        from app.models.security_event import EventSummary
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        event_service = _InvalidTransitionEventService(events)
+        agent = SuperAgent(
+            event_service=event_service,  # type: ignore[arg-type]
+            transition_max_retries=3,
+            transition_retry_backoff_seconds=0.0,
+        )
+        ec = EventContext(
+            event=EventSummary(
+                event_id=_EVENT_ID,
+                event_type=EventType.INSIDER_THREAT,
+                title="Suspicious login",
+                status=EventStatus.NEW,
+                severity=Severity.MEDIUM,
+                risk_score=50,
+                final_verdict=FinalVerdict.NONE,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            )
+        )
+
+        with pytest.raises(InvalidStateTransitionError):
+            await agent._transition(_EVENT_ID, EventStatus.TRIAGING, ec=ec)
+
+        assert event_service.attempts == 1
+        assert events[_EVENT_ID]["status"] is EventStatus.NEW
+
+    async def test_transition_refreshes_context_status_after_retry(self) -> None:
+        from app.models.context import EventContext
+        from app.models.enums import (
+            DispositionPolicy,
+            FinalVerdict,
+            WritebackReadiness,
+        )
+        from app.models.security_event import EventSummary
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        event_service = _FlakyTransitionEventService(events, fail_count=1)
+        agent = SuperAgent(
+            event_service=event_service,  # type: ignore[arg-type]
+            transition_max_retries=2,
+            transition_retry_backoff_seconds=0.0,
+        )
+        ec = EventContext(
+            event=EventSummary(
+                event_id=_EVENT_ID,
+                event_type=EventType.INSIDER_THREAT,
+                title="Suspicious login",
+                status=EventStatus.NEW,
+                severity=Severity.MEDIUM,
+                risk_score=50,
+                final_verdict=FinalVerdict.NONE,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            )
+        )
+
+        await agent._transition(_EVENT_ID, EventStatus.TRIAGING, ec=ec)
+
+        assert ec.event is not None
+        assert ec.event.status == EventStatus.TRIAGING
+        assert event_service.attempts == 2
+
+    async def test_non_retryable_transition_error_fails_immediately(self) -> None:
+        from app.models.context import EventContext
+        from app.models.enums import (
+            DispositionPolicy,
+            FinalVerdict,
+            WritebackReadiness,
+        )
+        from app.models.security_event import EventSummary
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        event_service = _NonRetryableTransitionEventService(events)
+        agent = SuperAgent(
+            event_service=event_service,  # type: ignore[arg-type]
+            transition_max_retries=3,
+            transition_retry_backoff_seconds=0.0,
+        )
+        ec = EventContext(
+            event=EventSummary(
+                event_id=_EVENT_ID,
+                event_type=EventType.INSIDER_THREAT,
+                title="Suspicious login",
+                status=EventStatus.NEW,
+                severity=Severity.MEDIUM,
+                risk_score=50,
+                final_verdict=FinalVerdict.NONE,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            )
+        )
+
+        with pytest.raises(ShadowTraceError) as exc:
+            await agent._transition(_EVENT_ID, EventStatus.TRIAGING, ec=ec)
+
+        assert exc.value.error_code == "internal_error"
+        assert event_service.attempts == 1
+        assert events[_EVENT_ID]["status"] is EventStatus.NEW
+
+    async def test_transition_max_retries_zero_single_attempt(self) -> None:
+        from app.models.context import EventContext
+        from app.models.enums import (
+            DispositionPolicy,
+            FinalVerdict,
+            WritebackReadiness,
+        )
+        from app.models.security_event import EventSummary
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        event_service = _AlwaysFailTransitionEventService(events)
+        agent = SuperAgent(
+            event_service=event_service,  # type: ignore[arg-type]
+            transition_max_retries=0,
+            transition_retry_backoff_seconds=0.0,
+        )
+        ec = EventContext(
+            event=EventSummary(
+                event_id=_EVENT_ID,
+                event_type=EventType.INSIDER_THREAT,
+                title="Suspicious login",
+                status=EventStatus.NEW,
+                severity=Severity.MEDIUM,
+                risk_score=50,
+                final_verdict=FinalVerdict.NONE,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            )
+        )
+
+        with pytest.raises(ShadowTraceError):
+            await agent._transition(_EVENT_ID, EventStatus.TRIAGING, ec=ec)
+
+        assert event_service.attempts == 1

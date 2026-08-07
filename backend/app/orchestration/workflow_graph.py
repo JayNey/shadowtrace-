@@ -14,6 +14,7 @@ from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
 from app.core.errors import InvalidStateTransitionError, ValidationError
+from app.orchestration.event_status_transition_retry import transition_with_bounded_retry
 from app.models.agent_io import (
     CollectionStatus,
     EffectStatus,
@@ -466,13 +467,25 @@ async def _transition_status(
     context: TransitionContext | None = None,
     reason: str,
 ) -> InvestigationState:
+    settings = get_settings()
     state_machine = cast(StateMachineService, services["state_machine"])
-    await state_machine.transition(
-        state["event_id"],
-        target,
-        context=context,
-        operator=_GRAPH_OPERATOR,
-        reason=reason,
+
+    async def _call_transition() -> None:
+        await state_machine.transition(
+            state["event_id"],
+            target,
+            context=context,
+            operator=_GRAPH_OPERATOR,
+            reason=reason,
+        )
+
+    await transition_with_bounded_retry(
+        _call_transition,
+        event_id=state["event_id"],
+        target=target,
+        max_retries=settings.super_agent_transition_max_retries,
+        backoff_seconds=settings.super_agent_transition_retry_backoff_seconds,
+        log_prefix="InvestigationGraph",
     )
     return cast(InvestigationState, {"event_status": target.value})
 

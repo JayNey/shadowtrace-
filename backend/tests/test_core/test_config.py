@@ -226,3 +226,10 @@ def test_is_production_strips_and_normalizes_app_env(app_env: str, expected: boo
     """ISSUE-217: Settings.is_production() is the single source of truth."""
     settings = Settings(**_base_kwargs(APP_ENV=app_env))
     assert settings.is_production() is expected
+
+
+def test_super_agent_transition_retry_settings_defaults() -> None:
+    """ISSUE-234: bounded transition retry defaults are production-safe."""
+    settings = Settings(APP_ENV="development")
+    assert settings.super_agent_transition_max_retries == 3
+    assert settings.super_agent_transition_retry_backoff_seconds == 0.2

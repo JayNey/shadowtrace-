@@ -30,12 +30,14 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 from app.agents.base import AgentOutput, BaseAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
+from app.core.config import get_settings
 from app.core.errors import (
     InvestigationInProgressError,
     InvestigationLeaseLostError,
     ShadowTraceError,
     is_retryable,
 )
+from app.orchestration.event_status_transition_retry import transition_with_bounded_retry
 from app.models.agent_io import (
     CollectionStatus,
     EvidenceAgentInput,
@@ -293,12 +295,25 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         memory_agent: _AgentProtocol | None = None,
         audit_service: Any | None = None,
         output_quality_evaluator: Any | None = None,
+        transition_max_retries: int | None = None,
+        transition_retry_backoff_seconds: float | None = None,
     ) -> None:
         super().__init__(
             working_memory=working_memory,
             trace_service=trace_service,
             audit_service=audit_service,
             event_bus=event_bus,
+        )
+        settings = get_settings()
+        self._transition_max_retries = (
+            settings.super_agent_transition_max_retries
+            if transition_max_retries is None
+            else transition_max_retries
+        )
+        self._transition_retry_backoff_seconds = (
+            settings.super_agent_transition_retry_backoff_seconds
+            if transition_retry_backoff_seconds is None
+            else transition_retry_backoff_seconds
         )
         self.triage_agent = triage_agent
         self.evidence_agent = evidence_agent
@@ -320,7 +335,6 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         self._investigation_graph = investigation_graph
         self.memory_agent = memory_agent
         self._output_quality_evaluator = output_quality_evaluator
-        self._transition_failures: dict[str, list[dict[str, Any]]] = {}
         self._memory_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------ #
@@ -435,16 +449,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     event_id=event_id,
                 )
 
-            # 5. Fail closed when state-machine transitions did not persist.
-            failures = self._transition_failures.pop(event_id, [])
-            if failures:
-                raise ShadowTraceError(
-                    message=(f"SuperAgent state transitions failed for event={event_id}"),
-                    error_code="internal_error",
-                    details={"failures": failures},
-                )
-
-            # 6. Persist final EventContext state so downstream consumers
+            # 5. Persist final EventContext state so downstream consumers
             #    (API response, frontend, ReportAgent fallback) see latest data.
             if self._investigation_graph is not None:
                 ec = await self._load_event_context(event_id)
@@ -483,14 +488,6 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             await self._transition(
                 event_id, EventStatus.FAILED, reason="exception", ec=event_context
             )
-            failures = self._transition_failures.pop(event_id, [])
-            if failures:
-                logger.warning(
-                    "SuperAgent: %d transition failure(s) before FAILED for event=%s: %s",
-                    len(failures),
-                    event_id,
-                    failures,
-                )
             raise
         finally:
             if renewal_task is not None:
@@ -1320,6 +1317,29 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
     # State machine helpers
     # ------------------------------------------------------------------ #
 
+    async def _refresh_event_status_in_context(
+        self,
+        event_id: str,
+        ec: EventContext | None,
+    ) -> None:
+        """Sync in-memory ``EventContext.event.status`` from persistence."""
+        if self.event_service is None or ec is None or ec.event is None:
+            return
+        try:
+            event = await self.event_service.get_event(event_id)
+            if event is None:
+                return
+            if hasattr(event, "status"):
+                ec.event.status = event.status
+            elif isinstance(event, dict) and "status" in event:
+                ec.event.status = event["status"]  # type: ignore[assignment]
+        except Exception:
+            logger.debug(
+                "SuperAgent: failed to refresh event status for event=%s",
+                event_id,
+                exc_info=True,
+            )
+
     async def _transition(
         self,
         event_id: str,
@@ -1334,57 +1354,26 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         transition = getattr(self.event_service, "transition_status", None)
         if transition is None:
             return
-        try:
-            transition_kwargs: dict[str, Any] = {
-                "operator": _SUPER_AGENT_OPERATOR,
-                "reason": reason or f"super_agent:{target.value}",
-            }
-            if context is not None:
-                transition_kwargs["context"] = context
-            await transition(event_id, target, **transition_kwargs)
-            # Refresh the in-memory status so subsequent _current_status_from_context
-            # checks see the latest state.
-            if self.event_service is not None and ec is not None and ec.event is not None:
-                try:
-                    event = await self.event_service.get_event(event_id)
-                    if event is not None and hasattr(event, "status"):
-                        ec.event.status = event.status
-                except Exception:
-                    logger.debug(
-                        "SuperAgent: failed to refresh event status for event=%s",
-                        event_id,
-                        exc_info=True,
-                    )
-        except Exception as exc:
-            from app.core.errors import InvalidStateTransitionError
 
-            # Invalid-state transitions are logic bugs — they must surface.
-            if isinstance(exc, InvalidStateTransitionError):
-                logger.error(
-                    "SuperAgent: illegal state transition for event=%s → %s",
-                    event_id,
-                    target.value,
-                    exc_info=True,
-                )
-                raise
-            # Transient failures (DB, network) are logged but not re-raised
-            # because the graph may still complete its analysis nodes.
-            # Accumulate per-event_id so concurrent investigations on the
-            # same SuperAgent singleton never mix up failures.
-            self._transition_failures.setdefault(event_id, []).append(
-                {
-                    "event_id": event_id,
-                    "target": target.value,
-                    "error": str(exc),
-                }
-            )
-            logger.warning(
-                "SuperAgent: transition to %s failed for event=%s (%d total)",
-                target.value,
-                event_id,
-                len(self._transition_failures.get(event_id, [])),
-                exc_info=True,
-            )
+        transition_kwargs: dict[str, Any] = {
+            "operator": _SUPER_AGENT_OPERATOR,
+            "reason": reason or f"super_agent:{target.value}",
+        }
+        if context is not None:
+            transition_kwargs["context"] = context
+
+        async def _call_transition() -> None:
+            await transition(event_id, target, **transition_kwargs)
+
+        await transition_with_bounded_retry(
+            _call_transition,
+            event_id=event_id,
+            target=target,
+            max_retries=self._transition_max_retries,
+            backoff_seconds=self._transition_retry_backoff_seconds,
+            log_prefix="SuperAgent",
+        )
+        await self._refresh_event_status_in_context(event_id, ec)
 
     async def _load_event_context(self, event_id: str) -> EventContext:
         """Load or create an EventContext for the given event.

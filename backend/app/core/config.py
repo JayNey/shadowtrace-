@@ -192,6 +192,20 @@ class Settings(BaseSettings):
         ge=0,
         le=50,
     )
+    super_agent_transition_max_retries: int = Field(
+        default=3,
+        alias="SUPER_AGENT_TRANSITION_MAX_RETRIES",
+        ge=0,
+        le=10,
+        description="Bounded retries for transient SuperAgent EventStatus transitions (ISSUE-234)",
+    )
+    super_agent_transition_retry_backoff_seconds: float = Field(
+        default=0.2,
+        alias="SUPER_AGENT_TRANSITION_RETRY_BACKOFF_SECONDS",
+        ge=0.0,
+        le=60.0,
+        description="Initial backoff seconds between SuperAgent transition retries (ISSUE-234)",
+    )
     react_shadow_retention_hours: int = Field(
         default=168,
         alias="REACT_SHADOW_RETENTION_HOURS",
