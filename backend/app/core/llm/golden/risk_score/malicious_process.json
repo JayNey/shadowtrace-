@@ -1,0 +1,35 @@
+{
+  "content": {
+    "factors": {
+      "asset_impact": {
+        "score": 84,
+        "reason": "Endpoint hosting suspicious binary is a production workstation with elevated blast radius"
+      },
+      "behavior_anomaly": {
+        "score": 90,
+        "reason": "Unsigned process spawn and persistence-like process_create chain deviate from baseline"
+      },
+      "evidence_confidence": {
+        "score": 86,
+        "reason": "Endpoint telemetry and process lineage corroborate malicious execution with high confidence"
+      },
+      "attack_stage": {
+        "score": 80,
+        "reason": "Behavior aligns with execution/persistence stage rather than benign software noise"
+      },
+      "data_sensitivity": {
+        "score": 72,
+        "reason": "Host role implies access to internal business data if process is attacker-controlled"
+      },
+      "threat_intel": {
+        "score": 88,
+        "reason": "Process hash/name correlates with known malicious tooling indicators in mock intel"
+      }
+    },
+    "raw_confidence": 0.9
+  },
+  "model_name": "mock-model",
+  "prompt_tokens": 220,
+  "completion_tokens": 160,
+  "total_tokens": 380
+}

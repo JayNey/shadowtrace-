@@ -93,6 +93,20 @@ def test_insider_scenario_goldens_preserve_demo_regression_pack() -> None:
     assert "pc-fin-023" in blob
 
 
+@pytest.mark.parametrize(
+    "scenario_file",
+    ["malicious_process.json", "insider_privilege_abuse.json"],
+)
+def test_threat_scenario_risk_goldens_restore_confirmed_threat_band(scenario_file: str) -> None:
+    """ISSUE-229: threat packs must not fall through to neutral default.json."""
+    risk_content = _load_golden("risk_score", scenario_file).get("content", {})
+    assert isinstance(risk_content, dict)
+    assert _average_risk_score(risk_content) >= _CONFIRMED_THREAT_THRESHOLD
+    blob = json.dumps(risk_content, ensure_ascii=False).lower()
+    for marker in _DEMO_MARKERS:
+        assert marker not in blob, f"{scenario_file} must not reuse insider demo markers"
+
+
 def test_insider_scenario_goldens_are_internally_consistent() -> None:
     triage_content = _load_golden("triage_extract", "insider_data_exfiltration.json").get(
         "content", {}

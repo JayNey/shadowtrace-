@@ -280,8 +280,8 @@ async def test_regression_fails_when_agent_verdict_changes(
     scenario_id = "account_anomaly_fp"
     baseline = load_baseline(scenario_id)
     assert baseline is not None
-    # ISSUE-099/114 golden path: source enrichment + advisory FP → confirmed_threat.
-    assert baseline["final_verdict"] == "confirmed_threat"
+    # ISSUE-229: Mock regression contract for this pack is NONE under neutral default risk.
+    assert baseline["final_verdict"] == "none"
 
     event_id = await ingest_and_run_golden_chain(
         scenario_id=scenario_id,

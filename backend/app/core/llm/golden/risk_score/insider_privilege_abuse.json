@@ -1,0 +1,35 @@
+{
+  "content": {
+    "factors": {
+      "asset_impact": {
+        "score": 86,
+        "reason": "Privileged account activity targets high-value identity and access control surfaces"
+      },
+      "behavior_anomaly": {
+        "score": 91,
+        "reason": "Abnormal privilege escalation and sensitive role changes deviate from normal operator patterns"
+      },
+      "evidence_confidence": {
+        "score": 84,
+        "reason": "Identity and audit logs consistently show unauthorized privileged actions"
+      },
+      "attack_stage": {
+        "score": 78,
+        "reason": "Activity indicates privilege abuse / credential misuse mid-intrusion stage"
+      },
+      "data_sensitivity": {
+        "score": 80,
+        "reason": "Privileged access can expose confidential HR/finance systems and secrets"
+      },
+      "threat_intel": {
+        "score": 74,
+        "reason": "Insider-threat pattern matches prior abuse playbooks without requiring external C2 intel"
+      }
+    },
+    "raw_confidence": 0.88
+  },
+  "model_name": "mock-model",
+  "prompt_tokens": 220,
+  "completion_tokens": 160,
+  "total_tokens": 380
+}
