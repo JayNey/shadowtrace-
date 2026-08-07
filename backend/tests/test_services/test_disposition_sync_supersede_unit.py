@@ -98,12 +98,29 @@ class _FakeResult:
         return (1,)
 
 
+class _FakeScalarsResult:
+    def __init__(self, rows: list[str]) -> None:
+        self._rows = rows
+
+    def all(self) -> list[str]:
+        return self._rows
+
+
 class _FakeSession:
     """Records enqueue_command interactions; only prior-head query returns a row."""
 
-    def __init__(self, source_row: Any, prior_head: orm.DispositionOutbox | None) -> None:
+    def __init__(
+        self,
+        source_row: Any,
+        prior_head: orm.DispositionOutbox | None,
+        *,
+        approved_action_ids: list[str] | None = None,
+    ) -> None:
         self.source_row = source_row
         self.prior_head = prior_head
+        self.approved_action_ids = (
+            approved_action_ids if approved_action_ids is not None else ["act-1"]
+        )
         self.added: list[Any] = []
         self.flush_count = 0
         self.scalar_calls = 0
@@ -124,6 +141,9 @@ class _FakeSession:
         if self.scalar_calls == 1:
             return self.prior_head
         return None
+
+    async def scalars(self, stmt: Any) -> _FakeScalarsResult:
+        return _FakeScalarsResult(self.approved_action_ids)
 
     async def execute(self, stmt: Any, params: dict[str, Any] | None = None) -> _FakeResult:
         return _FakeResult()
@@ -217,3 +237,72 @@ async def test_enqueue_entity_action_submit_never_supersedes() -> None:
     assert added_outbox.supersedes_disposition_id is None
     # The prior head must not be marked superseded by a non-terminal intent.
     assert session.prior_head.superseded_by_disposition_id is None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_command_resolves_approved_action_ids_for_guard() -> None:
+    """ISSUE-224: enqueue_command must pass a real approved set to the guard."""
+    from app.core.guardrails import OutboundDispositionGuard
+
+    captured: dict[str, object] = {}
+    guard = OutboundDispositionGuard()
+    original_validate = guard.validate
+
+    async def _capture_validate(command: Any, context: dict[str, object]) -> Any:
+        captured.update(context)
+        return await original_validate(command, context)
+
+    guard.validate = _capture_validate  # type: ignore[method-assign]
+
+    source_row = SimpleNamespace(next_outbox_sequence=1)
+    session = _FakeSession(
+        source_row,
+        prior_head=None,
+        approved_action_ids=["act-approved-1", "act-1"],
+    )
+    service = DispositionSyncService(
+        session_factory=AsyncMock(),  # type: ignore[arg-type]
+        context_store=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=AsyncMock(),  # type: ignore[arg-type]
+        outbound_guard=guard,
+    )
+
+    await service.enqueue_command(
+        session,
+        command=_command(intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT),
+        event_id="evt-1",
+        source_record_id="src-1",
+    )
+
+    assert captured["approved_action_ids"] == ["act-1", "act-approved-1"]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_command_rejects_unapproved_action_id() -> None:
+    """ISSUE-224: guard blocks when command.action_id is not in resolved set."""
+    from app.core.errors import GuardrailViolationError
+    from app.core.guardrails import OutboundDispositionGuard
+
+    source_row = SimpleNamespace(next_outbox_sequence=1)
+    session = _FakeSession(
+        source_row,
+        prior_head=None,
+        approved_action_ids=["act-other"],
+    )
+    service = DispositionSyncService(
+        session_factory=AsyncMock(),  # type: ignore[arg-type]
+        context_store=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=AsyncMock(),  # type: ignore[arg-type]
+        outbound_guard=OutboundDispositionGuard(),
+    )
+
+    with pytest.raises(GuardrailViolationError) as exc_info:
+        await service.enqueue_command(
+            session,
+            command=_command(intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT),
+            event_id="evt-1",
+            source_record_id="src-1",
+        )
+
+    violations = exc_info.value.details["violations"]
+    assert any(item["rule_name"] == "disposition_approved_action" for item in violations)

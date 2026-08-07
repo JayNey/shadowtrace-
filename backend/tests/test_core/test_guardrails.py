@@ -398,10 +398,8 @@ async def test_outbound_guard_accepts_action_id_in_approved_set() -> None:
 async def test_outbound_guard_skips_approval_when_not_provided() -> None:
     """When approved_action_ids is absent, the guard skips the check.
 
-    This is backward-compatible behaviour: callers that don't provide
-    the approved set (e.g. ``_deliver_outbox``) still pass.  The
-    ``disposition_approved_action`` rule is a second line of defence
-    that only engages when context carries the approved set.
+    Delivery-time validation (``_deliver_outbox``) omits the set because
+    enqueue already enforced approval; other guard rules still apply there.
     """
     outbound = OutboundDispositionGuard()
     result = await outbound.validate(

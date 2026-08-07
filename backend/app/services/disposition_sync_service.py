@@ -54,6 +54,7 @@ from app.services.context_service import (
     append_list_context_journal_in_session,
 )
 from app.services.disposition_command_factory import DispositionCommandFactory
+from app.services.disposition_guard_context import resolve_approved_action_ids
 from app.services.writeback_side_effect_fence import (
     WRITEBACK_FENCE_BLOCKED_ERROR_CODE,
     assert_writeback_side_effects_allowed,
@@ -137,6 +138,12 @@ class DispositionSyncService:
             "source_locator": command.source_locator,
             **(guard_context or {}),
         }
+        if "approved_action_ids" not in ctx:
+            ctx["approved_action_ids"] = await resolve_approved_action_ids(
+                session,
+                event_id=event_id,
+                plan_revision=command.closure_cycle,
+            )
         await self._guard.validate(command, ctx)
 
         source_row = await session.get(
