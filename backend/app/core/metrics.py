@@ -21,12 +21,14 @@ _writeback_dead_letter_total: Any | None = None
 _action_unknown_total: Any | None = None
 _checkpoint_fallback_total: Any | None = None
 _checkpoint_memory_fallback_gauge: Any | None = None
+_checkpoint_loop_rebind_total: Any | None = None
 _budget_redis_fallback_total: Any | None = None
 _budget_redis_recovery_total: Any | None = None
 _budget_redis_degraded_gauge: Any | None = None
 _initialized = False
 _process_checkpoint_fallback_active = False
 _process_checkpoint_fallback_triggers = 0
+_process_checkpoint_loop_rebinds = 0
 _process_budget_redis_degraded = False
 _process_reservation_redis_degraded = False
 
@@ -34,7 +36,8 @@ _process_reservation_redis_degraded = False
 def _ensure_metrics() -> None:
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
     global _writeback_dead_letter_total, _action_unknown_total, _checkpoint_fallback_total
-    global _checkpoint_memory_fallback_gauge, _budget_redis_fallback_total
+    global _checkpoint_memory_fallback_gauge, _checkpoint_loop_rebind_total
+    global _budget_redis_fallback_total
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
 
     if not telemetry.is_telemetry_enabled():
@@ -77,6 +80,11 @@ def _ensure_metrics() -> None:
         _checkpoint_memory_fallback_gauge = _meter.create_up_down_counter(
             name="shadowtrace_checkpoint_memory_fallback",
             description="1 when any checkpointer in this process uses memory fallback, else 0",
+            unit="1",
+        )
+        _checkpoint_loop_rebind_total = _meter.create_counter(
+            name="shadowtrace_checkpoint_loop_rebind_total",
+            description="Checkpoint Redis ops recovered by rebinding to the current event loop",
             unit="1",
         )
         _budget_redis_fallback_total = _meter.create_counter(
@@ -167,6 +175,19 @@ def record_checkpoint_fallback(*, reason: str) -> None:
         logger.debug("checkpoint fallback metric export failed", exc_info=True)
 
 
+def record_checkpoint_loop_rebind(*, op: str) -> None:
+    """Increment counter when checkpoint Redis recovers via event-loop rebind."""
+    global _process_checkpoint_loop_rebinds
+    _process_checkpoint_loop_rebinds += 1
+    _ensure_metrics()
+    if _checkpoint_loop_rebind_total is None:
+        return
+    try:
+        _checkpoint_loop_rebind_total.add(1, {"op": op})
+    except Exception:
+        logger.debug("checkpoint loop rebind metric export failed", exc_info=True)
+
+
 def set_checkpoint_memory_fallback(active: bool) -> None:
     """Set process-wide checkpoint memory fallback gauge (0/1)."""
     global _process_checkpoint_fallback_active
@@ -188,6 +209,7 @@ def checkpoint_health_snapshot() -> dict[str, int | bool]:
     return {
         "memory_fallback": _process_checkpoint_fallback_active,
         "fallback_triggers": _process_checkpoint_fallback_triggers,
+        "loop_rebinds": _process_checkpoint_loop_rebinds,
     }
 
 
@@ -263,9 +285,11 @@ def reset_metrics_for_tests() -> None:
     """Allow tests to re-register instruments after telemetry reset."""
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
     global _writeback_dead_letter_total, _action_unknown_total, _checkpoint_fallback_total
-    global _checkpoint_memory_fallback_gauge, _budget_redis_fallback_total
+    global _checkpoint_memory_fallback_gauge, _checkpoint_loop_rebind_total
+    global _budget_redis_fallback_total
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _process_checkpoint_fallback_active, _process_checkpoint_fallback_triggers
+    global _process_checkpoint_loop_rebinds
     global _process_budget_redis_degraded, _process_reservation_redis_degraded
     _meter = None
     _writeback_total = None
@@ -275,12 +299,14 @@ def reset_metrics_for_tests() -> None:
     _action_unknown_total = None
     _checkpoint_fallback_total = None
     _checkpoint_memory_fallback_gauge = None
+    _checkpoint_loop_rebind_total = None
     _budget_redis_fallback_total = None
     _budget_redis_recovery_total = None
     _budget_redis_degraded_gauge = None
     _initialized = False
     _process_checkpoint_fallback_active = False
     _process_checkpoint_fallback_triggers = 0
+    _process_checkpoint_loop_rebinds = 0
     _process_budget_redis_degraded = False
     _process_reservation_redis_degraded = False
 
@@ -288,8 +314,10 @@ def reset_metrics_for_tests() -> None:
 def reset_checkpoint_metrics_for_tests() -> None:
     """Reset only checkpoint metric process counters (alias for tests)."""
     global _process_checkpoint_fallback_active, _process_checkpoint_fallback_triggers
+    global _process_checkpoint_loop_rebinds
     _process_checkpoint_fallback_active = False
     _process_checkpoint_fallback_triggers = 0
+    _process_checkpoint_loop_rebinds = 0
 
 
 def reset_budget_redis_metrics_for_tests() -> None:
@@ -308,6 +336,7 @@ __all__ = [
     "record_budget_redis_fallback",
     "record_budget_redis_recovery",
     "record_checkpoint_fallback",
+    "record_checkpoint_loop_rebind",
     "record_writeback",
     "record_writeback_retry",
     "record_writeback_dead_letter",

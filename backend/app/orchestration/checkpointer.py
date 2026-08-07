@@ -23,9 +23,10 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from app.core.metrics import (
     record_checkpoint_fallback,
+    record_checkpoint_loop_rebind,
     set_checkpoint_memory_fallback,
 )
-from app.core.redis_client import RedisClient
+from app.core.redis_client import RedisClient, is_event_loop_error
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ def checkpoint_key_for_event(event_id: str) -> str:
 
 def _fallback_reason_category(message: str) -> str:
     lowered = message.lower()
+    if "event loop" in lowered or "different loop" in lowered:
+        return "event_loop"
     if "unavailable" in lowered:
         return "unavailable"
     if "load" in lowered:
@@ -82,6 +85,7 @@ def get_checkpoint_health() -> dict[str, object]:
         "memory_fallback": memory_fallback,
         "recoverable": not memory_fallback,
         "fallback_triggers": snapshot["fallback_triggers"],
+        "loop_rebinds": snapshot["loop_rebinds"],
         "memory_pinned_thread_count": memory_pinned_thread_count,
         "redis_recovery_enabled": settings.checkpoint_attempt_redis_recovery,
     }
@@ -192,8 +196,52 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
                     "(%s thread(s) remain memory-pinned until event completion)",
                     len(self._memory_pinned_threads),
                 )
-        except Exception:
+        except Exception as exc:
+            if is_event_loop_error(exc):
+                try:
+                    await self._rebind_redis_client()
+                    if await self._redis.ping():
+                        self.memory_fallback = False
+                        set_checkpoint_memory_fallback(False)
+                        record_checkpoint_loop_rebind(op="recovery_probe")
+                        logger.info(
+                            "checkpoint Redis recovered after event-loop rebind; "
+                            "new thread_ids resume Redis persistence "
+                            "(%s thread(s) remain memory-pinned)",
+                            len(self._memory_pinned_threads),
+                        )
+                except Exception:
+                    return
             return
+
+    async def _rebind_redis_client(self) -> None:
+        redis = self._redis
+        if redis is None:
+            return
+        rebind = getattr(redis, "rebind_to_current_loop", None)
+        if callable(rebind):
+            await rebind()
+
+    async def _redis_call_with_loop_retry(
+        self,
+        op: str,
+        awaitable_factory: Any,
+    ) -> Any:
+        """Run a Redis awaitable; on closed/cross-loop errors, rebind once and retry."""
+        try:
+            return await awaitable_factory()
+        except Exception as exc:
+            if not is_event_loop_error(exc):
+                raise
+            logger.warning(
+                "checkpoint Redis %s hit event-loop error; rebinding client and retrying",
+                op,
+                exc_info=True,
+            )
+            await self._rebind_redis_client()
+            result = await awaitable_factory()
+            record_checkpoint_loop_rebind(op=op)
+            return result
 
     def _enable_memory_fallback(self, message: str, *, exc_info: bool = False) -> None:
         global _PROCESS_LAST_FALLBACK_REMINDER_AT
@@ -316,10 +364,20 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         self._memory_pinned_threads.discard(thread_id)
         if was_pinned or self._redis is None or self.memory_fallback:
             return
+        redis = self._redis
         try:
-            await self._redis.get_client().delete(checkpoint_key_for_event(thread_id))
-        except Exception:
-            self._enable_memory_fallback("Redis checkpoint delete failed", exc_info=True)
+            await self._redis_call_with_loop_retry(
+                "delete",
+                lambda: redis.get_client().delete(checkpoint_key_for_event(thread_id)),
+            )
+        except Exception as exc:
+            if is_event_loop_error(exc):
+                self._enable_memory_fallback(
+                    "Redis checkpoint delete failed (event loop)",
+                    exc_info=True,
+                )
+            else:
+                self._enable_memory_fallback("Redis checkpoint delete failed", exc_info=True)
             raise
 
     def _export(self, thread_id: str) -> bytes | None:
@@ -363,13 +421,22 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         if redis is None:
             return
         try:
-            raw = await redis.get_client().get(checkpoint_key_for_event(thread_id))
+            raw = await self._redis_call_with_loop_retry(
+                "load",
+                lambda: redis.get_client().get(checkpoint_key_for_event(thread_id)),
+            )
             if raw is not None:
                 value = raw if isinstance(raw, bytes) else str(raw).encode()
                 self._import(thread_id, value)
-        except Exception:
+        except Exception as exc:
             self._pin_thread_to_memory(thread_id)
-            self._enable_memory_fallback("Redis checkpoint load failed", exc_info=True)
+            if is_event_loop_error(exc):
+                self._enable_memory_fallback(
+                    "Redis checkpoint load failed (event loop)",
+                    exc_info=True,
+                )
+            else:
+                self._enable_memory_fallback("Redis checkpoint load failed", exc_info=True)
 
     async def _persist(self, thread_id: str) -> None:
         if not self._uses_redis_for_thread(thread_id):
@@ -383,14 +450,26 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         if redis is None:
             return
         try:
-            await redis.get_client().set(
-                checkpoint_key_for_event(thread_id),
-                raw,
-                ex=self._ttl_seconds,
+            await self._redis_call_with_loop_retry(
+                "persist",
+                lambda: redis.get_client().set(
+                    checkpoint_key_for_event(thread_id),
+                    raw,
+                    ex=self._ttl_seconds,
+                ),
             )
-        except Exception:
+        except Exception as exc:
             self._pin_thread_to_memory(thread_id)
-            self._enable_memory_fallback("Redis checkpoint persist failed", exc_info=True)
+            if is_event_loop_error(exc):
+                self._enable_memory_fallback(
+                    "Redis checkpoint persist failed (event loop)",
+                    exc_info=True,
+                )
+            else:
+                self._enable_memory_fallback(
+                    "Redis checkpoint persist failed",
+                    exc_info=True,
+                )
 
 
 async def build_checkpointer(
