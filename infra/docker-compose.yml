@@ -153,6 +153,7 @@ services:
       context: ../frontend
       dockerfile: Dockerfile
       args:
+        # ISSUE-221: dev token is explicit here — not baked into the Dockerfile default.
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
         VITE_SOCKET_URL: ${VITE_SOCKET_URL:-}
         VITE_DEV_AUTH_TOKEN: ${VITE_DEV_AUTH_TOKEN:-bootstrap-token}

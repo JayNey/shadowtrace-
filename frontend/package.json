@@ -11,6 +11,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit && tsc --noEmit -p e2e/tsconfig.json",
     "test": "vitest run",
+    "verify:production-build": "node scripts/verify-no-dev-auth-token-in-build.mjs",
     "test:e2e": "playwright test -c e2e/playwright.config.ts",
     "test:e2e:mock": "playwright test -c e2e/playwright.mock.config.ts",
     "test:e2e:knowledge": "playwright test -c e2e/playwright.mock.config.ts",

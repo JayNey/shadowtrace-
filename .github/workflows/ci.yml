@@ -413,6 +413,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Verify production build has no inlined dev auth token (ISSUE-221)
+        run: pnpm run verify:production-build
+
   docker-build:
     name: docker-build
     runs-on: ubuntu-latest

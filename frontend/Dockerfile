@@ -4,9 +4,11 @@ RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 COPY . .
+# ISSUE-221: default empty — production images must not embed a dev bearer token
+# when build-args are omitted. Compose / CI pass VITE_DEV_AUTH_TOKEN explicitly.
 ARG VITE_API_BASE_URL=/api/v1
 ARG VITE_SOCKET_URL=
-ARG VITE_DEV_AUTH_TOKEN=bootstrap-token
+ARG VITE_DEV_AUTH_TOKEN=
 ARG VITE_AUTH_SUBJECT=bootstrap
 ARG VITE_APPROVER_DISPLAY=Bootstrap Operator
 ARG VITE_EVENT_CHAT_ENABLED=true

@@ -301,6 +301,38 @@ Mock 模式下的 `ALLOW_*` 始终为 `false`。
 5. 生产环境应启用 trusted-proxy（`TRUSTED_AUTH_PROXY_ENABLED=true`）并配置显式 allowlist；若关闭 trusted-proxy 且 `APP_ENV=production`，除 proxy 外无可用认证路径（`DEV_AUTH_TOKENS` 一律拒绝）。
 6. **生产环境禁止设置前端构建变量 `VITE_AUTH_ROLES` / `VITE_DEV_AUTH_TOKEN`**。真实用户角色由 trusted-proxy 按请求注入（`X-Auth-Roles`），前端构建时共享的角色配置无法代表请求级 principal；设置了这些变量会导致内联审批等按角色门控的 UI 在合法用户上被错误禁用（ISSUE-207）。它们仅用于 Mock/Compose 单 token 开发阶段。
 
+### 生产前端镜像构建检查清单（ISSUE-221）
+
+独立构建生产 SPA / 前端 Docker 镜像时（**非** `infra/docker-compose.yml` 开发栈）：
+
+- [ ] **未**向 `docker build` / CI 传入 `VITE_DEV_AUTH_TOKEN`（`frontend/Dockerfile` 默认空，forget 覆盖即无 Bearer 内嵌）
+- [ ] **未**设置 `VITE_AUTH_ROLES`（见 ISSUE-207）
+- [ ] 使用 trusted-proxy 注入身份；backend 不暴露 `:8000` 到公网（见上节）
+- [ ] 本地 Compose 开发仍可通过 compose build-args 显式传入 `bootstrap-token` / `e2e-token`（`docker-compose.yml` 已配置）
+
+验证示例（产物不得自动携带 dev Bearer）：
+
+```bash
+cd frontend
+pnpm build   # 不 export VITE_DEV_AUTH_TOKEN
+pnpm run verify:production-build
+```
+
+示例（**生产**镜像构建 — 不传 dev token）：
+
+```bash
+docker build -f frontend/Dockerfile frontend \
+  --build-arg VITE_API_BASE_URL=/api/v1
+# 勿加 --build-arg VITE_DEV_AUTH_TOKEN=...
+```
+
+示例（**Compose 开发** — 显式 dev token，与 Makefile/`make up` 一致）：
+
+```bash
+docker compose -f infra/docker-compose.yml build frontend
+# 等价于传入 VITE_DEV_AUTH_TOKEN=bootstrap-token（可经 infra/.env 覆盖）
+```
+
 示例（内网 ingress 位于 `10.0.0.5`，backend 仅接受来自该地址的身份头）：
 
 ```ini
