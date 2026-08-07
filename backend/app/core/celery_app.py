@@ -26,9 +26,11 @@ def _resolve_broker_url() -> str:
 def init_worker_telemetry(**kwargs: object) -> None:
     """Bootstrap SessionProvider + OpenTelemetry in each Celery child (ISSUE-118/092)."""
     del kwargs
+    from app.core.logging_setup import configure_logging
     from app.core.telemetry import setup_telemetry
     from app.db.session_provider import init_worker_session_provider
 
+    configure_logging()
     provider = init_worker_session_provider()
     setup_telemetry(engine=provider.engine())
     logger.debug("Celery worker session provider + telemetry initialized")
