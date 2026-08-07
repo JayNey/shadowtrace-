@@ -132,16 +132,16 @@ def _agent_title(agent_name: str, status: str, output_data: Any) -> str:
     title = f"{agent_name} {verb}{label}"
 
     basis = _agent_decision_basis(output_data, agent_name=agent_name)
-    if agent_name in {"TriageAgent", "triage_agent"} and isinstance(output_data, dict):
-        severity = output_data.get("severity")
-        if severity is not None:
-            return f"{title}：severity={severity}"
     conclusion = basis.get("structured_conclusion") or basis.get("brief")
     if isinstance(conclusion, str) and conclusion.strip():
         return f"{title}：{conclusion[:120]}"
     unavailable = basis.get("summary_unavailable")
     if isinstance(unavailable, str) and unavailable.strip():
         return f"{title}：summary_unavailable={unavailable.strip()}"
+    if agent_name in {"TriageAgent", "triage_agent"} and isinstance(output_data, dict):
+        severity = output_data.get("severity")
+        if severity is not None:
+            return f"{title}：severity={severity}"
     return f"{title}：status={status}"
 
 

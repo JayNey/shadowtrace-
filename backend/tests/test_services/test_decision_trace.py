@@ -904,7 +904,7 @@ class TestDecisionTraceDegradationAndEdgeCases:
         agent = next(
             e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
         )
-        assert agent.title == "TriageAgent 完成分诊：severity=high"
+        assert agent.title == "TriageAgent 完成分诊：critical exfiltration detected"
         assert agent.detail["severity"] == "high"
         assert agent.detail["structured_conclusion"] == "critical exfiltration detected"
         assert agent.detail["confidence"] == 0.95
@@ -935,7 +935,62 @@ class TestDecisionTraceDegradationAndEdgeCases:
         agent = next(
             e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
         )
-        assert agent.title == "triage_agent 完成分诊：severity=high"
+        assert agent.title == "triage_agent 完成分诊：critical exfiltration detected"
+
+    @pytest.mark.asyncio
+    async def test_triage_title_uses_synthesized_brief_when_decision_summary_missing(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """ISSUE-243: triage titles prefer synthesized typed brief over severity-only."""
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="triage_agent",
+                    output_data={
+                        "severity": "high",
+                        "event_type": "data_exfiltration",
+                        "need_investigation": True,
+                    },
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        agent = next(
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        )
+        assert "event_type=data_exfiltration" in agent.title
+        assert "severity=high" in agent.title
+        assert "status=completed" not in agent.title
+
+    @pytest.mark.asyncio
+    async def test_triage_title_falls_back_to_severity_when_no_brief(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        event_id = _id("evt")
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="triage_agent",
+                    output_data={"severity": "medium"},
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        agent = next(
+            e for e in trace.entries if e.entry_type == DecisionTraceEntryType.AGENT_EXECUTION
+        )
+        assert agent.title == "triage_agent 完成分诊：severity=medium"
 
     @pytest.mark.asyncio
     async def test_legacy_react_trace_decision_basis_does_not_leak_cot(
