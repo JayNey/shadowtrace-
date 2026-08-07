@@ -1228,3 +1228,85 @@ async def test_direct_tool_reclaimed_reuses_job_without_reinvoking_provider(
         assert row is not None
         assert row.execution_job_id == job_id
         assert row.status == ActionStatus.UNKNOWN.value
+
+
+@pytest.mark.asyncio
+async def test_xdr_managed_replan_enqueue_uses_action_plan_revision(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    """ISSUE-231: after replan (plan_revision>=2) an XDR_MANAGED entity
+    submission must enqueue with closure_cycle = action.plan_revision (not the
+    hardcoded 1), so the guard's approved_action_ids resolution (by
+    plan_revision) finds the rev-N approved set instead of failing closed."""
+    oid = f"INC-{_sfx()}"
+    await _seed_connector_and_source(
+        session_factory, object_id=oid, mock_xdr_client=mock_xdr_client
+    )
+    event_id = await _create_event(session_factory, store, object_id=oid)
+    await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            disposition_source_ref=_locator(object_id=oid),
+            plan_revision=2,
+        ),
+    )
+
+    await execution_service.execute_plan(event_id)
+
+    async with session_factory() as session:
+        outboxes = (
+            await session.scalars(
+                select(orm.DispositionOutbox).where(orm.DispositionOutbox.event_id == event_id)
+            )
+        ).all()
+        assert len(outboxes) == 1, "replan entity submission must enqueue (not fail closed)"
+        assert outboxes[0].intent_kind == "entity_action_submit"
+        assert outboxes[0].closure_cycle == 2
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_replan_execution_result_enqueues_with_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    """ISSUE-231/SUS-304: a DIRECT_TOOL rev=2 execution-result writeback is
+    enqueued only after the action reached SUCCESS — it must use
+    closure_cycle=2 and the approved snapshot resolved while the action was
+    still EXECUTING (resolve by status would find an empty set)."""
+    oid = f"INC-{_sfx()}"
+    await _seed_connector_and_source(session_factory, object_id=oid)
+    event_id = await _create_event(session_factory, store, object_id=oid)
+    await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+            disposition_source_ref=_locator(object_id=oid),
+            plan_revision=2,
+        ),
+    )
+
+    await execution_service.execute_plan(event_id)
+
+    async with session_factory() as session:
+        outboxes = (
+            await session.scalars(
+                select(orm.DispositionOutbox).where(orm.DispositionOutbox.event_id == event_id)
+            )
+        ).all()
+        assert len(outboxes) == 1, (
+            "execution-result writeback after SUCCESS must enqueue via the "
+            "approved snapshot (SUS-304), not fail closed"
+        )
+        assert outboxes[0].intent_kind == "execution_result_record"
+        assert outboxes[0].closure_cycle == 2

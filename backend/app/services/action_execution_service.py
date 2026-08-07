@@ -38,6 +38,7 @@ from app.services.disposition_command_factory import (
     DispositionCommandFactory,
     entity_action_code_for,
 )
+from app.services.disposition_guard_context import resolve_approved_action_ids
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.playbook_approval_binding import validate_approval_binding
 from app.services.state_machine_service import StateMachineService
@@ -423,7 +424,10 @@ class ActionExecutionService:
             operator_id=operator,
             disposition_id=new_disposition_id(),
             writeback_id="pending",
-            closure_cycle=1,
+            # ISSUE-231: align with EventDispositionService — the guard resolves
+            # approved_action_ids by plan_revision (= closure_cycle); hardcoding
+            # 1 broke replan (rev>=2) enqueues (fail-closed reject).
+            closure_cycle=int(action.plan_revision),
             entity_action_code=entity_action_code_for(action),
         )
         idempotency_key = action.idempotency_key or f"{action.action_id}:xdr"
@@ -497,6 +501,20 @@ class ActionExecutionService:
         settings = get_settings()
         lease_seconds = settings.action_execution_lease_seconds
         now = datetime.now(UTC)
+        # ISSUE-231/SUS-304: execution_result_record is enqueued only after the
+        # action has reached SUCCESS, by which time resolve_approved_action_ids
+        # (APPROVED|EXECUTING) returns an empty set.  Resolve the approved
+        # snapshot up front — the action is still EXECUTING here, so the
+        # snapshot legitimately includes it via the active set — and pass it
+        # explicitly at enqueue time instead of re-resolving.
+        approved_snapshot: list[str] | None = None
+        if action.writeback_applicable:
+            async with self._session_factory() as snapshot_session:
+                approved_snapshot = await resolve_approved_action_ids(
+                    snapshot_session,
+                    event_id=action.event_id,
+                    plan_revision=int(action.plan_revision),
+                )
         async with self._session_factory() as session:
             async with session.begin():
                 existing_job = await session.scalar(
@@ -585,7 +603,10 @@ class ActionExecutionService:
                 source_concurrency_token=await self._current_concurrency_token(source_record_id),
                 operator_id=operator,
                 disposition_id=new_disposition_id(),
-                closure_cycle=1,
+                # ISSUE-231: align with EventDispositionService — the guard
+                # resolves approved_action_ids by plan_revision; hardcoding 1
+                # broke replan (rev>=2) execution-result enqueues.
+                closure_cycle=int(action.plan_revision),
             )
             async with self._session_factory() as session:
                 async with session.begin():
@@ -594,6 +615,14 @@ class ActionExecutionService:
                         command=command,
                         event_id=action.event_id,
                         source_record_id=source_record_id,
+                        # SUS-304: the action is already SUCCESS here, so pass
+                        # the approved snapshot resolved while it was EXECUTING
+                        # instead of letting the guard resolve an empty set.
+                        guard_context=(
+                            {"approved_action_ids": approved_snapshot}
+                            if approved_snapshot is not None
+                            else None
+                        ),
                     )
 
     async def _finalize_mock_direct_tool_job(self, job_id: str) -> ActionExecutionJob | None:
