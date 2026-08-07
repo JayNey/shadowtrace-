@@ -2,34 +2,34 @@
   "content": {
     "factors": {
       "asset_impact": {
-        "score": 86,
-        "reason": "Privileged account activity targets high-value identity and access control surfaces"
+        "score": 80,
+        "reason": "SRV-ADMIN-003 admin server and privileged service account in abuse path"
       },
       "behavior_anomaly": {
-        "score": 91,
-        "reason": "Abnormal privilege escalation and sensitive role changes deviate from normal operator patterns"
+        "score": 88,
+        "reason": "Privilege escalation and admin-right abuse pattern exceeds normal ops baseline"
       },
       "evidence_confidence": {
-        "score": 84,
-        "reason": "Identity and audit logs consistently show unauthorized privileged actions"
+        "score": 82,
+        "reason": "Identity and endpoint logs show coordinated privilege escalation activity"
       },
       "attack_stage": {
-        "score": 78,
-        "reason": "Activity indicates privilege abuse / credential misuse mid-intrusion stage"
+        "score": 86,
+        "reason": "Insider threat activity reaches privilege use and sensitive access stage"
       },
       "data_sensitivity": {
-        "score": 80,
-        "reason": "Privileged access can expose confidential HR/finance systems and secrets"
+        "score": 78,
+        "reason": "Admin server access implies elevated internal data exposure risk"
       },
       "threat_intel": {
         "score": 74,
-        "reason": "Insider-threat pattern matches prior abuse playbooks without requiring external C2 intel"
+        "reason": "Privilege-abuse indicators match insider-threat escalation patterns"
       }
     },
-    "raw_confidence": 0.88
+    "raw_confidence": 0.82
   },
   "model_name": "mock-model",
-  "prompt_tokens": 220,
-  "completion_tokens": 160,
-  "total_tokens": 380
+  "prompt_tokens": 205,
+  "completion_tokens": 145,
+  "total_tokens": 350
 }
