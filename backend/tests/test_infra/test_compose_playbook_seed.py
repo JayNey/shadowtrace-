@@ -47,6 +47,28 @@ def test_compose_workers_do_not_seed_playbook() -> None:
         )
 
 
+def test_compose_workers_skip_db_migrate_and_wait_for_backend() -> None:
+    """ISSUE-238 regression: workers must not race backend alembic on cold boot."""
+    data = yaml.safe_load(COMPOSE_PATH.read_text(encoding="utf-8"))
+    services = data.get("services") or {}
+    for name in ("worker", "scheduler-beat", "scheduler-worker"):
+        service = services.get(name) or {}
+        env = service.get("environment") or {}
+        depends_on = service.get("depends_on") or {}
+        assert env.get("SKIP_DB_MIGRATE") == "true", f"{name} must skip alembic migrate"
+        assert depends_on.get("backend", {}).get("condition") == "service_healthy", (
+            f"{name} must wait for backend healthy before start"
+        )
+
+
+def test_entrypoint_documents_skip_migrate_and_playbook_seed() -> None:
+    text = ENTRYPOINT_PATH.read_text(encoding="utf-8")
+    assert "ISSUE-238" in text
+    assert "ISSUE-245" in text
+    assert "SKIP_DB_MIGRATE" in text
+    assert "SEED_PLAYBOOK_RELEASE" in text
+
+
 def test_makefile_demo_sets_playbook_required() -> None:
     text = MAKEFILE_PATH.read_text(encoding="utf-8")
     assert "PLAYBOOK_REQUIRED=" in text
