@@ -41,6 +41,10 @@ from app.services.disposition_command_factory import (
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.playbook_approval_binding import validate_approval_binding
 from app.services.state_machine_service import StateMachineService
+from app.services.writeback_side_effect_fence import (
+    assert_live_side_effects_allowed,
+    assert_writeback_side_effects_allowed,
+)
 from app.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -229,12 +233,7 @@ class ActionExecutionService:
         plan_revision: int | None = None,
         operator: str = _EXECUTION_OPERATOR,
     ) -> ExecutionSummary:
-        settings = get_settings()
-        if settings.allow_live_side_effects:
-            raise ValidationError(
-                "live side effects are disabled in ISSUE-059 P0",
-                details={"allow_live_side_effects": True},
-            )
+        assert_live_side_effects_allowed()
         await self.reconcile_stale_executions(limit=20, event_id=event_id)
         revision = plan_revision or await self._current_revision(event_id)
         immediate = await self._load_claimable_actions(event_id, revision)
@@ -733,22 +732,10 @@ class ActionExecutionService:
         session: AsyncSession,
         action: Action,
     ) -> None:
-        settings = get_settings()
-        if settings.allow_live_side_effects:
-            raise ValidationError(
-                "live side effects are disabled in ISSUE-059 P0",
-                details={"allow_live_side_effects": True, "action_id": action.action_id},
-            )
-        if action.execution_owner is ExecutionOwner.XDR_MANAGED:
-            disposition_mode = settings.disposition_mode.strip().lower()
-            if "mock" not in disposition_mode and not settings.allow_xdr_writeback:
-                raise ValidationError(
-                    "xdr writeback is not enabled for live disposition mode",
-                    details={
-                        "action_id": action.action_id,
-                        "disposition_mode": settings.disposition_mode,
-                    },
-                )
+        assert_writeback_side_effects_allowed(
+            action_id=action.action_id,
+            execution_owner=action.execution_owner,
+        )
         if action.disposition_source_ref is None:
             if action.writeback_applicable or action.execution_owner is ExecutionOwner.XDR_MANAGED:
                 raise ValidationError(

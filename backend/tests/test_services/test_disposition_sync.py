@@ -1659,3 +1659,446 @@ async def test_append_receipt_preserves_mock_receipt_gate_fields(
     assert persisted.raw_result["simulated"] is True
     assert persisted.raw_result["status"] == "confirmed"
     assert persisted.simulated is True
+
+
+@pytest.mark.asyncio
+async def test_deliver_outbox_blocked_when_writeback_fence_closed_after_enqueue(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-222: enqueue under mock, flip settings, deliver must not submit."""
+    from app.core.config import Settings, get_settings
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-fence",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": f"idem-{_sfx()}",
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            record = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(command):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(command)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
+    blocked_settings = Settings.model_validate(
+        {
+            **get_settings().model_dump(),
+            "DISPOSITION_MODE": "live_xdr",
+            "ALLOW_XDR_WRITEBACK": False,
+        }
+    )
+    monkeypatch.setattr(
+        "app.services.writeback_side_effect_fence.get_settings",
+        lambda: blocked_settings,
+    )
+    monkeypatch.setattr(
+        "app.services.disposition_sync_service.get_settings",
+        lambda: blocked_settings,
+    )
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+    assert submit_calls == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, record.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+        assert row.last_error_detail is not None
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert receipts == []
+
+
+@pytest.mark.asyncio
+async def test_deliver_outbox_sync_ready_blocked_when_writeback_fence_closed(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-222: synchronous deliver_outbox on READY must fail-closed too."""
+    from app.core.config import Settings, get_settings
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(command):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(command)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
+    blocked_settings = Settings.model_validate(
+        {
+            **get_settings().model_dump(),
+            "ALLOW_LIVE_SIDE_EFFECTS": True,
+        }
+    )
+    monkeypatch.setattr(
+        "app.services.writeback_side_effect_fence.get_settings",
+        lambda: blocked_settings,
+    )
+
+    await sync.deliver_outbox(outbox_id)
+    assert submit_calls == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_deliver_outbox_live_side_effects_blocked_via_worker(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-222: worker delivery must fail-closed when ALLOW_LIVE_SIDE_EFFECTS is on."""
+    from app.core.config import Settings, get_settings
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(command):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(command)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+    monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
+    blocked_settings = Settings.model_validate(
+        {
+            **get_settings().model_dump(),
+            "ALLOW_LIVE_SIDE_EFFECTS": True,
+        }
+    )
+    monkeypatch.setattr(
+        "app.services.writeback_side_effect_fence.get_settings",
+        lambda: blocked_settings,
+    )
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+    assert submit_calls == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_deliver_outbox_fence_blocks_from_waiting_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-222: WAITING_RETRY outbox must fail-closed when writeback fence is closed."""
+    from app.core.config import Settings, get_settings
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.WAITING_RETRY.value,
+                    attempt=1,
+                    next_retry_at=datetime.now(UTC) - timedelta(seconds=5),
+                )
+            )
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(command):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(command)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+    monkeypatch.setattr(get_settings, "cache_clear", lambda: None)
+    blocked_settings = Settings.model_validate(
+        {
+            **get_settings().model_dump(),
+            "DISPOSITION_MODE": "live_xdr",
+            "ALLOW_XDR_WRITEBACK": False,
+        }
+    )
+    monkeypatch.setattr(
+        "app.services.writeback_side_effect_fence.get_settings",
+        lambda: blocked_settings,
+    )
+
+    await sync.deliver_outbox(outbox_id)
+    assert submit_calls == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_deliver_outbox_fence_blocks_when_action_row_missing(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-222: missing action row must fail-closed without adapter.submit."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    real_get = AsyncSession.get
+
+    async def _get_without_action(self, entity, ident, **kwargs):  # type: ignore[no-untyped-def]
+        if entity is orm.Action:
+            return None
+        return await real_get(self, entity, ident, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "get", _get_without_action)
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(command):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(command)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    await sync.deliver_outbox(outbox_id)
+    assert submit_calls == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+        assert row.last_error_detail is not None
+        assert action_id in row.last_error_detail

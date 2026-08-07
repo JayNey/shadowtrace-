@@ -38,6 +38,7 @@ from app.models.disposition import DispositionCommand, DispositionOutboxRecord, 
 from app.models.enums import (
     ConfirmationEvidence,
     DispositionIntentKind,
+    ExecutionOwner,
     ExecutionSubstate,
     OutboxDeliveryStatus,
     WritebackStatus,
@@ -53,6 +54,10 @@ from app.services.context_service import (
     append_list_context_journal_in_session,
 )
 from app.services.disposition_command_factory import DispositionCommandFactory
+from app.services.writeback_side_effect_fence import (
+    WRITEBACK_FENCE_BLOCKED_ERROR_CODE,
+    assert_writeback_side_effects_allowed,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -680,6 +685,34 @@ class DispositionSyncService:
                     OutboxDeliveryStatus.WAITING_RETRY,
                 }:
                     return
+                action_row = await session.get(orm.Action, outbox.action_id)
+                if action_row is None:
+                    logger.warning(
+                        "outbox delivery blocked: action row missing outbox=%s action_id=%s",
+                        outbox_id,
+                        outbox.action_id,
+                    )
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=datetime.now(UTC),
+                        error_detail=(
+                            f"action row not found for writeback fence: {outbox.action_id}"
+                        ),
+                    )
+                    return
+                execution_owner = ExecutionOwner(action_row.execution_owner)
+                try:
+                    assert_writeback_side_effects_allowed(
+                        action_id=outbox.action_id,
+                        execution_owner=execution_owner,
+                    )
+                except ValidationError as exc:
+                    self._block_outbox_for_writeback_fence(
+                        outbox,
+                        now=datetime.now(UTC),
+                        error_detail=str(exc),
+                    )
+                    return
                 command = DispositionCommand.model_validate(outbox.command_payload)
                 await self._guard.validate(
                     command,
@@ -1043,6 +1076,32 @@ class DispositionSyncService:
         validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
         outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
         outbox.next_retry_at = None
+        record_writeback_dead_letter(adapter=self._adapter_label(outbox))
+        return OutboxDeliveryStatus.DEAD_LETTER
+
+    def _block_outbox_for_writeback_fence(
+        self,
+        outbox: orm.DispositionOutbox,
+        *,
+        now: datetime,
+        error_detail: str,
+    ) -> OutboxDeliveryStatus:
+        """Fail-closed delivery block when live/XDR writeback fences are closed (ISSUE-222)."""
+        current = OutboxDeliveryStatus(outbox.delivery_status)
+        if current is OutboxDeliveryStatus.LEASED:
+            return self._release_leased_outbox_to_dead_letter(
+                outbox,
+                now=now,
+                error_code=WRITEBACK_FENCE_BLOCKED_ERROR_CODE,
+                error_detail=error_detail,
+            )
+
+        outbox.last_error_code = WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+        outbox.last_error_detail = self._truncate_error_detail(error_detail)
+        outbox.updated_at = now
+        outbox.next_retry_at = None
+        validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
+        outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
         record_writeback_dead_letter(adapter=self._adapter_label(outbox))
         return OutboxDeliveryStatus.DEAD_LETTER
 

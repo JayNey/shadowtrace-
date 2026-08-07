@@ -419,14 +419,20 @@ JOB_STATUS_TRANSITIONS: dict[ExecutionJobStatus, set[ExecutionJobStatus]] = {
 }
 
 OUTBOX_DELIVERY_TRANSITIONS: dict[OutboxDeliveryStatus, set[OutboxDeliveryStatus]] = {
-    OutboxDeliveryStatus.READY: {OutboxDeliveryStatus.LEASED},
+    OutboxDeliveryStatus.READY: {
+        OutboxDeliveryStatus.LEASED,
+        OutboxDeliveryStatus.DEAD_LETTER,  # writeback fence blocked (ISSUE-222)
+    },
     OutboxDeliveryStatus.LEASED: {
         OutboxDeliveryStatus.DELIVERED,
         OutboxDeliveryStatus.WAITING_RETRY,
         OutboxDeliveryStatus.PAUSED,
         OutboxDeliveryStatus.DEAD_LETTER,
     },
-    OutboxDeliveryStatus.WAITING_RETRY: {OutboxDeliveryStatus.LEASED},
+    OutboxDeliveryStatus.WAITING_RETRY: {
+        OutboxDeliveryStatus.LEASED,
+        OutboxDeliveryStatus.DEAD_LETTER,  # writeback fence blocked (ISSUE-222)
+    },
     OutboxDeliveryStatus.PAUSED: {
         OutboxDeliveryStatus.READY,  # after status lookup / manual adjudication
         OutboxDeliveryStatus.DEAD_LETTER,
