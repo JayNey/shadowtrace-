@@ -104,6 +104,36 @@ async def test_execute_graph_resume_records_degraded_and_raises() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reporting_checkpoint_missing_keeps_status_reporting() -> None:
+    """ISSUE-247: checkpoint_missing on REPORTING must not mark the event FAILED."""
+    degraded = MagicMock()
+    degraded.set_flag = AsyncMock(return_value=["graph_resume_failed=checkpoint_missing"])
+    degraded.has_flag = AsyncMock(return_value=False)
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
+    agent = MagicMock()
+    agent._investigation_graph = graph
+    factory = _SessionFactory(EventStatus.REPORTING.value)
+
+    with pytest.raises(GraphResumeFailedError) as exc_info:
+        await execute_graph_resume_with_retry(
+            "evt-247-keep-reporting",
+            session_factory=factory,
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(
+                return_value=MagicMock(set_execution_substate=AsyncMock())
+            ),
+            degraded_flags=degraded,
+        )
+
+    assert exc_info.value.error_type == "checkpoint_missing"
+    # Observability records degraded/audit in-place; status stays REPORTING.
+    assert factory._status == EventStatus.REPORTING.value
+    degraded.set_flag.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_execute_graph_resume_retries_transient_errors() -> None:
     degraded = MagicMock()
     degraded.has_flag = AsyncMock(return_value=False)

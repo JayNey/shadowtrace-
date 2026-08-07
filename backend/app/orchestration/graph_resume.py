@@ -529,7 +529,7 @@ async def resume_investigation_from_checkpoint(
         await _delegate_execute_investigation(session_factory, event_id)
         return
 
-    config = {"configurable": {"thread_id": event_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": event_id}}
     runtime = await get_workflow_runtime()
     has_checkpoint = await prepare_graph_resume_state(
         session_factory,
