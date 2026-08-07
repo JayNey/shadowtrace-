@@ -310,6 +310,7 @@ def test_decision_basis_synthesizes_memory_agent_brief() -> None:
 
 
 def test_decision_basis_short_text_mode_uses_bounded_non_cot_fallback() -> None:
+    # Use an agent without typed synthesis rules so short_text fallback is exercised.
     basis = TraceProjection.decision_basis(
         {
             "event_id": "evt-short-text",
@@ -317,7 +318,7 @@ def test_decision_basis_short_text_mode_uses_bounded_non_cot_fallback() -> None:
             "thought": "must never be used",
             "summary": "legacy narrative must never be used",
         },
-        agent_name="memory_agent",
+        agent_name="storyline_service",
         rationale_mode="short_text",
     )
     assert basis["structured_conclusion"] == "bounded operator note"
