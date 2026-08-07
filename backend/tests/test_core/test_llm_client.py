@@ -341,6 +341,48 @@ async def test_empty_content_retries_once_with_higher_max_tokens() -> None:
 
 
 @pytest.mark.asyncio
+async def test_empty_content_retry_charges_budget_only_on_success() -> None:
+    charges: list[dict[str, Any]] = []
+
+    async def charge(**kwargs: Any) -> None:
+        charges.append(kwargs)
+
+    attempts = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        payload = json.loads(request.content)
+        if attempts == 1:
+            return httpx.Response(
+                200,
+                json=_response("", model=payload["model"], completion_tokens=48),
+            )
+        return httpx.Response(
+            200,
+            json=_response(
+                '{"event_type":"host_compromise","confidence":0.81}',
+                model=payload["model"],
+            ),
+        )
+
+    audit = InMemoryLLMCallAuditRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        await _client(http_client, audit=audit, budget_callback=charge).chat(
+            MESSAGES,
+            event_id="evt-2026-empty-budget",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+            max_tokens=256,
+            json_mode=True,
+            response_model=TriagePayload,
+        )
+
+    assert len(charges) == 1
+    assert charges[0]["completion_tokens"] == 3
+
+
+@pytest.mark.asyncio
 async def test_empty_content_does_not_enter_json_repair_path() -> None:
     calls: list[dict[str, Any]] = []
 
@@ -653,8 +695,9 @@ async def test_guard_and_budget_hooks_run_for_each_actual_request() -> None:
 
     assert len(guard.steps) == 2
     assert all(step[1] == "llm_call" for step in guard.steps)
-    assert len(charges) == 2
-    assert sum(item["prompt_tokens"] for item in charges) == 8
+    # First invalid-json attempt parses before charge; only the repair success bills budget.
+    assert len(charges) == 1
+    assert charges[0]["prompt_tokens"] == 4
 
 
 @pytest.mark.asyncio

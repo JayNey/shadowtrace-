@@ -646,7 +646,6 @@ class BaseLLMClient(ABC):
         if error is None:
             assert raw is not None
             try:
-                await self._charge_budget(raw, event_id=event_id, agent_name=agent_name)
                 parsed = (
                     self._parse(
                         raw.content,
@@ -656,6 +655,7 @@ class BaseLLMClient(ABC):
                     if json_mode
                     else None
                 )
+                await self._charge_budget(raw, event_id=event_id, agent_name=agent_name)
                 status = "success"
             except ShadowTraceError as exc:
                 status = exc.error_code

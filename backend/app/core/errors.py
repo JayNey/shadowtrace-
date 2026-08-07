@@ -77,6 +77,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "internal_error": ErrorCategory.SYSTEM,
     # State machine
     "invalid_state_transition": ErrorCategory.PERMANENT,
+    "closed_simulated_receipt_rejected": ErrorCategory.PERMANENT,
     "closed_requires_report": ErrorCategory.PERMANENT,
     "invalid_verdict_status_combination": ErrorCategory.PERMANENT,
     # Tools / LLM / budget / guardrail
@@ -92,6 +93,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "llm_custom_not_probed": ErrorCategory.SYSTEM,
     "budget_exceeded": ErrorCategory.BUDGET,
     "guardrail_failed": ErrorCategory.GUARDRAIL,
+    "guardrail_blocked": ErrorCategory.GUARDRAIL,
     "guardrail_violation": ErrorCategory.GUARDRAIL,
     "working_memory_unauthorized_write": ErrorCategory.GUARDRAIL,
     "tool_not_found": ErrorCategory.USER_INPUT,
@@ -121,6 +123,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     # Product / API surface codes referenced in the plan
     "investigation_in_progress": ErrorCategory.PERMANENT,
     "investigation_lease_lost": ErrorCategory.PERMANENT,
+    "lease_expired": ErrorCategory.TRANSIENT,
     "storyline_not_ready": ErrorCategory.USER_INPUT,
     "context_not_ready": ErrorCategory.USER_INPUT,
     "evidence_not_ready": ErrorCategory.USER_INPUT,
