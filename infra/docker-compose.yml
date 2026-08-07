@@ -4,6 +4,11 @@
 # Core services (no profile):
 #   postgres  redis  mock-xdr  backend  frontend
 #
+# DB migrations (ISSUE-238): only ``backend`` runs ``alembic upgrade head`` via
+# ``docker-entrypoint.sh``. Celery workers / beat / mock-xdr set
+# ``SKIP_DB_MIGRATE=true`` and ``depends_on: backend: service_healthy`` so they
+# never race on ``alembic_version`` during parallel first boot.
+#
 # Optional profiles:
 #   --profile worker     Celery investigation worker
 #   --profile scheduler  Celery Beat + ingestion worker (ISSUE-107)
@@ -181,6 +186,7 @@ services:
   # --------------------------------------------------------------------------
   # Celery worker — async investigation execution
   #   docker compose --profile worker up -d
+  # Migrations: SKIP_DB_MIGRATE — backend owns alembic (ISSUE-238).
   # --------------------------------------------------------------------------
   worker:
     profiles: ["worker", "demo"]
@@ -192,6 +198,7 @@ services:
       - path: ../.env.live
         required: false
     environment:
+      SKIP_DB_MIGRATE: "true"
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace
       REDIS_URL: redis://redis:6379/0
       SOURCE_MODE: mock_xdr
@@ -234,6 +241,8 @@ services:
         condition: service_healthy
       mock-xdr:
         condition: service_healthy
+      backend:
+        condition: service_healthy
 
   # --------------------------------------------------------------------------
   # Ingestion scheduler — Celery Beat + dedicated ingestion worker (ISSUE-107)
@@ -256,6 +265,7 @@ services:
       - path: ../.env.live
         required: false
     environment:
+      SKIP_DB_MIGRATE: "true"
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace
       REDIS_URL: redis://redis:6379/0
       SOURCE_MODE: mock_xdr
@@ -290,6 +300,8 @@ services:
         condition: service_healthy
       mock-xdr:
         condition: service_healthy
+      backend:
+        condition: service_healthy
 
   scheduler-worker:
     profiles: ["scheduler", "demo"]
@@ -301,6 +313,7 @@ services:
       - path: ../.env.live
         required: false
     environment:
+      SKIP_DB_MIGRATE: "true"
       DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace
       REDIS_URL: redis://redis:6379/0
       SOURCE_MODE: mock_xdr
@@ -342,6 +355,8 @@ services:
       redis:
         condition: service_healthy
       mock-xdr:
+        condition: service_healthy
+      backend:
         condition: service_healthy
 
   # --------------------------------------------------------------------------
