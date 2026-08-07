@@ -171,18 +171,6 @@ async def test_analysis_only_short_circuit_skips_report_when_generate_report_fal
 # --------------------------------------------------------------------------- #
 
 
-def test_analysis_only_run_orders_report_before_reporting_transition() -> None:
-    """Lock the _run source contract: generate+mark precedes REPORTING."""
-    import inspect
-
-    from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
-
-    src = inspect.getsource(AnalysisOnlyPipeline._run)
-    gen_idx = src.index("_generate_and_mark_report")
-    reporting_idx = src.index("EventStatus.REPORTING")
-    assert gen_idx < reporting_idx
-
-
 @pytest.mark.asyncio
 async def test_analysis_only_generate_report_true_persists_before_reporting() -> None:
     """ISSUE-242: report mark completes before REPORTING transition is issued."""
