@@ -1054,6 +1054,71 @@ def reset_investigation_stack_cache() -> None:
     _investigation_stack = None
 
 
+def reset_loop_bound_redis_resources() -> None:
+    """Drop Redis and redis-backed singletons after Celery ``asyncio.run`` (ISSUE-252).
+
+    Strategy B: redis.asyncio clients are loop-bound. Each worker task must discard
+    the process-cached Redis client (and anything holding it) so the next
+    ``asyncio.run`` binds fresh clients. SessionProvider is intentionally kept —
+    worker NullPool engines are already loop-safe across consecutive runs.
+    """
+    import asyncio
+
+    global _redis_client, _context_store, _degraded_flags
+    global _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
+    global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
+    global _behavior_observation_service
+    global _disposition_sync, _action_execution, _rollback_service
+    global _adapter_registry, _workflow_runtime, _event_disposition
+    global _impact_assessment_service
+    global _tool_call_grant_service, _agent_task_service
+    global _memory_governance, _detection_governance, _detection_promotion
+    global _detection_context_projector, _detection_context_service
+
+    client = _redis_client
+    _redis_client = None
+    _context_store = None
+    _degraded_flags = None
+    _event_service = None
+    _state_machine = None
+    _event_bus = None
+    _pipeline = None
+    _super_agent = None
+    _event_lease = None
+    _investigation_stack = None
+    _investigation_intent_service = None
+    _behavior_observation_service = None
+    _approval_engine = None
+    _impact_assessment_service = None
+    _disposition_sync = None
+    _action_execution = None
+    _rollback_service = None
+    _adapter_registry = None
+    _workflow_runtime = None
+    _event_disposition = None
+    _tool_call_grant_service = None
+    _agent_task_service = None
+    _memory_governance = None
+    _detection_governance = None
+    _detection_promotion = None
+    _detection_context_projector = None
+    _detection_context_service = None
+
+    if client is None:
+        return
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop (Celery Strategy B after asyncio.run) — close cleanly.
+        try:
+            asyncio.run(client.aclose())
+        except Exception:
+            logger.debug("Redis aclose after Celery task failed", exc_info=True)
+        return
+    # Called from inside a running loop (tests / reset_deps): drop references only.
+    # Closing via asyncio.run would nest loops; RedisClient rebind handles reuse.
+
+
 def reset_deps() -> None:
     """Reset all lazy singletons (for tests)."""
     global _redis_client, _context_store, _degraded_flags
@@ -1086,39 +1151,13 @@ def reset_deps() -> None:
     reset_loaded_retrieval_resources()
     reset_playbook_resources_cache()
     reset_evidence_projection_default()
-    _redis_client = None
-    _context_store = None
-    _degraded_flags = None
+    reset_loop_bound_redis_resources()
     _audit_log = None
-    _event_service = None
-    _state_machine = None
-    _event_bus = None
-    _pipeline = None
-    _super_agent = None
-    _event_lease = None
-    _investigation_stack = None
-    _investigation_intent_service = None
-    _behavior_observation_service = None
-    _approval_engine = None
-    _impact_assessment_service = None
-    _disposition_sync = None
-    _action_execution = None
-    _rollback_service = None
-    _adapter_registry = None
-    _workflow_runtime = None
-    _event_disposition = None
     _opensearch_client = None
     _search_service = None
     _tool_call_log = None
     _graph_sync_service = None
     _neo4j_client = None
-    _memory_governance = None
-    _detection_governance = None
-    _detection_promotion = None
-    _detection_context_projector = None
-    _detection_context_service = None
     _decision_record_service = None
-    _tool_call_grant_service = None
-    _agent_task_service = None
     _agent_artifact_service = None
     _content_projection_service = None

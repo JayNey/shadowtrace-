@@ -54,13 +54,27 @@ class EventLease:
     When Redis is unavailable, ``acquire`` raises
     :class:`~app.core.errors.DependencyUnavailableError` (HTTP 503).  Other
     methods return falsy values when Redis is down.
+
+    Holds :class:`RedisClient` (not a raw ``redis.asyncio`` handle) so Celery
+    Strategy B / loop rebind can refresh the underlying client (ISSUE-252).
     """
 
     def __init__(self, redis_client: RedisClient | None) -> None:
-        self._redis: Any = None
-        if redis_client is not None:
-            self._redis = redis_client.get_client()
+        self._redis_client = redis_client
         self._release_script: Any = None  # cached registered Lua script
+        self._release_script_client_id: int | None = None
+
+    def _raw_redis(self) -> Any | None:
+        if self._redis_client is None:
+            return None
+        return self._redis_client.get_client()
+
+    def _release_script_for(self, redis: Any) -> Any:
+        client_id = id(redis)
+        if self._release_script is None or self._release_script_client_id != client_id:
+            self._release_script = redis.register_script(_RELEASE_SCRIPT)
+            self._release_script_client_id = client_id
+        return self._release_script
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -79,7 +93,8 @@ class EventLease:
         the lease.  Raises :class:`~app.core.errors.DependencyUnavailableError`
         when Redis is unavailable.
         """
-        if self._redis is None:
+        redis = self._raw_redis()
+        if redis is None:
             logger.warning(
                 "EventLease.acquire: Redis unavailable, refusing lease for event=%s",
                 event_id,
@@ -90,7 +105,7 @@ class EventLease:
                 details={"event_id": event_id, "dependency": "redis"},
             )
         key = _lease_key(event_id)
-        acquired = await self._redis.set(key, owner_id, nx=True, ex=ttl_s)
+        acquired = await redis.set(key, owner_id, nx=True, ex=ttl_s)
         if acquired:
             logger.info(
                 "EventLease: acquired lease for event=%s owner=%s ttl=%ds",
@@ -113,10 +128,11 @@ class EventLease:
         ``False`` when the key is absent (lease lost / expired / released by
         another party) or the owner no longer matches.
         """
-        if self._redis is None:
+        redis = self._raw_redis()
+        if redis is None:
             return False
         key = _lease_key(event_id)
-        current = await self._redis.get(key)
+        current = await redis.get(key)
         if current is None:
             # Lease already expired / released — cannot renew what we don't own.
             logger.warning(
@@ -134,7 +150,7 @@ class EventLease:
                 decoded,
             )
             return False
-        await self._redis.expire(key, DEFAULT_LEASE_TTL_S)
+        await redis.expire(key, DEFAULT_LEASE_TTL_S)
         logger.debug(
             "EventLease: renewed lease for event=%s owner=%s",
             event_id,
@@ -150,12 +166,12 @@ class EventLease:
         Returns ``False`` when the key exists but is owned by a different
         party — the caller must NOT proceed as if the lease is released.
         """
-        if self._redis is None:
+        redis = self._raw_redis()
+        if redis is None:
             return False
         key = _lease_key(event_id)
-        if self._release_script is None:
-            self._release_script = self._redis.register_script(_RELEASE_SCRIPT)
-        result: Any = await self._release_script(keys=[key], args=[owner_id])
+        script = self._release_script_for(redis)
+        result: Any = await script(keys=[key], args=[owner_id])
         code = int(result) if result is not None else -1
         if code == 1:
             logger.info(
@@ -181,10 +197,11 @@ class EventLease:
 
     async def get_owner(self, event_id: str) -> str | None:
         """Inspect the current lease owner (for diagnostics only)."""
-        if self._redis is None:
+        redis = self._raw_redis()
+        if redis is None:
             return None
         key = _lease_key(event_id)
-        value = await self._redis.get(key)
+        value = await redis.get(key)
         if value is None:
             return None
         return value.decode("utf-8") if isinstance(value, bytes) else value
