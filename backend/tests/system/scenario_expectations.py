@@ -84,19 +84,19 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
     "account_anomaly_fp": ScenarioExpectation(
         scenario_id="account_anomaly_fp",
         event_type=EventType.ACCOUNT_ANOMALY,
-        # Demo pack is an ops-change FP in narrative; golden path may land threat/advisory FP.
-        # Rule-fallback (LLM fail): score bands stay <70 without post-evidence close_as_fp
-        # (ISSUE-114), so VerdictResolver → NONE. #675 also downgrades
-        # evidence_limited+CONFIRMED_THREAT → NONE when that path applies.
-        verdict=FinalVerdict.CONFIRMED_THREAT,
+        # ISSUE-229: FP narrative pack. After ISSUE-201 neutral default risk golden,
+        # Mock regression lands NONE @ ~43 (no close_as_fp adjudication on this path).
+        # Keep advisory FP / threat in acceptable for alternate enrichment paths.
+        verdict=FinalVerdict.NONE,
         acceptable_verdicts=(
-            FinalVerdict.CONFIRMED_THREAT,
-            FinalVerdict.POSSIBLE_FALSE_POSITIVE,
             FinalVerdict.NONE,
+            FinalVerdict.POSSIBLE_FALSE_POSITIVE,
+            FinalVerdict.FALSE_POSITIVE,
+            FinalVerdict.CONFIRMED_THREAT,
         ),
-        # Regression golden baseline: confirmed_threat @ 71 (ISSUE-099 enrichment).
-        risk_min=65,
-        risk_max=75,
+        # Regression golden baseline (ISSUE-229): none @ 43 under neutral default risk.
+        risk_min=35,
+        risk_max=55,
         rule_fallback_risk_min=30,
         rule_fallback_risk_max=45,
         rule_fallback=True,
@@ -107,17 +107,16 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
     "suspicious_domain_access": ScenarioExpectation(
         scenario_id="suspicious_domain_access",
         event_type=EventType.SUSPICIOUS_DOMAIN,
-        verdict=FinalVerdict.CONFIRMED_THREAT,
+        # ISSUE-229: no scenario risk golden → neutral default → NONE (not threat).
+        verdict=FinalVerdict.NONE,
         acceptable_verdicts=(
-            FinalVerdict.CONFIRMED_THREAT,
-            FinalVerdict.POSSIBLE_FALSE_POSITIVE,
             FinalVerdict.NONE,
+            FinalVerdict.POSSIBLE_FALSE_POSITIVE,
+            FinalVerdict.CONFIRMED_THREAT,
         ),
-        # Regression golden baseline: confirmed_threat @ 70.
-        # Rule-fallback band is <70 → NONE under ISSUE-035; also allow advisory FP
-        # from pre-evidence signals (unlike host_compromise, which omits advisory FP).
-        risk_min=65,
-        risk_max=75,
+        # Regression golden baseline (ISSUE-229): none @ 42 under neutral default risk.
+        risk_min=35,
+        risk_max=55,
         rule_fallback_risk_min=40,
         rule_fallback_risk_max=60,
         rule_fallback=True,
@@ -143,6 +142,7 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
     "malicious_process": ScenarioExpectation(
         scenario_id="malicious_process",
         event_type=EventType.MALICIOUS_PROCESS,
+        # ISSUE-229: threat pack restored via risk_score/malicious_process.json (not baseline wipe).
         verdict=FinalVerdict.CONFIRMED_THREAT,
         acceptable_verdicts=(FinalVerdict.CONFIRMED_THREAT, FinalVerdict.NONE),
         risk_min=70,
@@ -157,6 +157,7 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
     "insider_privilege_abuse": ScenarioExpectation(
         scenario_id="insider_privilege_abuse",
         event_type=EventType.INSIDER_THREAT,
+        # ISSUE-229: threat pack restored via risk_score/insider_privilege_abuse.json.
         verdict=FinalVerdict.CONFIRMED_THREAT,
         acceptable_verdicts=(FinalVerdict.CONFIRMED_THREAT, FinalVerdict.NONE),
         risk_min=65,
@@ -190,16 +191,16 @@ SCENARIO_EXPECTATIONS: dict[str, ScenarioExpectation] = {
     "other_unclassified": ScenarioExpectation(
         scenario_id="other_unclassified",
         event_type=EventType.OTHER,
-        verdict=FinalVerdict.CONFIRMED_THREAT,
+        # ISSUE-229: unclassified pack stays NONE under neutral default risk golden.
+        verdict=FinalVerdict.NONE,
         acceptable_verdicts=(
-            FinalVerdict.CONFIRMED_THREAT,
-            FinalVerdict.POSSIBLE_FALSE_POSITIVE,
             FinalVerdict.NONE,
+            FinalVerdict.POSSIBLE_FALSE_POSITIVE,
+            FinalVerdict.CONFIRMED_THREAT,
         ),
-        # Regression golden baseline: confirmed_threat @ 71.
-        # Rule-fallback band is <70 → NONE is expected under ISSUE-035 score gate.
-        risk_min=65,
-        risk_max=75,
+        # Regression golden baseline (ISSUE-229): none @ 43 under neutral default risk.
+        risk_min=35,
+        risk_max=55,
         rule_fallback_risk_min=45,
         rule_fallback_risk_max=60,
         rule_fallback=True,

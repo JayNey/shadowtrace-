@@ -1,0 +1,35 @@
+{
+  "content": {
+    "factors": {
+      "asset_impact": {
+        "score": 80,
+        "reason": "SRV-ADMIN-003 admin server and privileged service account in abuse path"
+      },
+      "behavior_anomaly": {
+        "score": 88,
+        "reason": "Privilege escalation and admin-right abuse pattern exceeds normal ops baseline"
+      },
+      "evidence_confidence": {
+        "score": 82,
+        "reason": "Identity and endpoint logs show coordinated privilege escalation activity"
+      },
+      "attack_stage": {
+        "score": 86,
+        "reason": "Insider threat activity reaches privilege use and sensitive access stage"
+      },
+      "data_sensitivity": {
+        "score": 78,
+        "reason": "Admin server access implies elevated internal data exposure risk"
+      },
+      "threat_intel": {
+        "score": 74,
+        "reason": "Privilege-abuse indicators match insider-threat escalation patterns"
+      }
+    },
+    "raw_confidence": 0.82
+  },
+  "model_name": "mock-model",
+  "prompt_tokens": 205,
+  "completion_tokens": 145,
+  "total_tokens": 350
+}

@@ -1,0 +1,35 @@
+{
+  "content": {
+    "factors": {
+      "asset_impact": {
+        "score": 82,
+        "reason": "DEV-WKS-012 developer endpoint running suspicious ransomware-stage binary chain"
+      },
+      "behavior_anomaly": {
+        "score": 90,
+        "reason": "Encoded PowerShell and ransomware-like process spawn sequence is highly anomalous"
+      },
+      "evidence_confidence": {
+        "score": 84,
+        "reason": "Endpoint and network telemetry corroborate malicious process execution"
+      },
+      "attack_stage": {
+        "score": 92,
+        "reason": "Activity reaches execution and impact staging consistent with ransomware prep"
+      },
+      "data_sensitivity": {
+        "score": 76,
+        "reason": "Developer workstation may hold source code and internal build artifacts"
+      },
+      "threat_intel": {
+        "score": 80,
+        "reason": "External C2 domain and malicious_process keyword align with high-risk intel"
+      }
+    },
+    "raw_confidence": 0.84
+  },
+  "model_name": "mock-model",
+  "prompt_tokens": 210,
+  "completion_tokens": 150,
+  "total_tokens": 360
+}
