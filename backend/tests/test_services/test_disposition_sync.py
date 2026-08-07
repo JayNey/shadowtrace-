@@ -2102,3 +2102,207 @@ async def test_deliver_outbox_fence_blocks_when_action_row_missing(
         assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
         assert row.last_error_detail is not None
         assert action_id in row.last_error_detail
+
+
+@pytest.mark.asyncio
+async def test_deliver_rejects_after_approval_revoked(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-235 (SUS-301): an approval revoked between enqueue and delivery
+    must fail-closed — the entity-class outbox is not delivered (the
+    enqueue-time approved snapshot must not go out after revoke/supersede)."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-revoke",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": f"idem-{_sfx()}",
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            record = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+
+    # Revoke the approval while the outbox is still in flight.
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.REJECTED.value
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    await sync.deliver_outbox(record.outbox_id)
+
+    # Fail-closed: never submitted, outbox dead-lettered with the fence code.
+    assert submit_calls == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, record.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+        assert row.last_error_detail is not None
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert receipts == []
+
+
+@pytest.mark.asyncio
+async def test_deliver_execution_result_rejected_after_supersede(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-235: an EXECUTION_RESULT_RECORD whose action was superseded after
+    enqueue (supersede-only — status may still be SUCCESS) must not be
+    delivered; the delivery-time re-check fails closed."""
+    from app.models.enums import ExecutionJobStatus, OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-result",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.DIRECT_TOOL,
+            "status": ActionStatus.SUCCESS,
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": f"idem-{_sfx()}",
+        }
+    )
+    job = orm.ActionExecutionJob(
+        job_id=f"job-{_sfx()}",
+        event_id=event_id,
+        action_id=action_id,
+        provider_name="mock_tool_provider",
+        idempotency_key=f"idem-job-{_sfx()}",
+        status=ExecutionJobStatus.SUCCESS.value,
+        claimed_by="worker",
+        lease_expires_at=None,
+        attempt=1,
+    )
+    command = factory.build_execution_result_record(
+        action,
+        job,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        closure_cycle=1,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            record = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+    assert record.intent_kind.value == "execution_result_record"
+
+    # Supersede-only: the action stays SUCCESS but is superseded by rev 2.
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_result_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_result_submit)
+
+    await sync.deliver_outbox(record.outbox_id)
+
+    assert submit_calls == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, record.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE

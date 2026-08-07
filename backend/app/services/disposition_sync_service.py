@@ -691,7 +691,14 @@ class DispositionSyncService:
                     OutboxDeliveryStatus.WAITING_RETRY,
                 }:
                     return
-                action_row = await session.get(orm.Action, outbox.action_id)
+                # ISSUE-235: lock the action row for the delivery-time approval
+                # re-check so a concurrent revoke cannot slip in between the
+                # check and the adapter submit (TOCTOU 纵深防御).
+                action_row = await session.get(
+                    orm.Action,
+                    outbox.action_id,
+                    with_for_update=True,
+                )
                 if action_row is None:
                     logger.warning(
                         "outbox delivery blocked: action row missing outbox=%s action_id=%s",
@@ -720,6 +727,46 @@ class DispositionSyncService:
                     )
                     return
                 command = DispositionCommand.model_validate(outbox.command_payload)
+                # ISSUE-235 (SUS-301): TOCTOU 纵深防御 — deliver relies on the
+                # enqueue-time approved_action_ids snapshot and does not
+                # re-derive it; an approval revoked between enqueue and
+                # delivery would still go out.  Re-check entity-class commands
+                # right before delivery: the action must still be in the
+                # effective approved set (APPROVED/EXECUTING/SUCCESS, not
+                # superseded).  Fail-closed → DEAD_LETTER, never delivered.
+                if command.intent_kind in {
+                    DispositionIntentKind.ENTITY_ACTION_SUBMIT,
+                    DispositionIntentKind.EXECUTION_RESULT_RECORD,
+                }:
+                    from app.models.enums import ActionStatus as _DeliverActionStatus
+
+                    if (
+                        action_row.status
+                        not in {
+                            _DeliverActionStatus.APPROVED.value,
+                            _DeliverActionStatus.EXECUTING.value,
+                            _DeliverActionStatus.SUCCESS.value,
+                            _DeliverActionStatus.PARTIAL_SUCCESS.value,
+                        }
+                        or action_row.superseded_by_revision is not None
+                    ):
+                        logger.warning(
+                            "outbox delivery blocked: approval revoked before delivery "
+                            "outbox=%s action_id=%s status=%s superseded_by=%s",
+                            outbox_id,
+                            outbox.action_id,
+                            action_row.status,
+                            action_row.superseded_by_revision,
+                        )
+                        self._block_outbox_for_writeback_fence(
+                            outbox,
+                            now=datetime.now(UTC),
+                            error_detail=(
+                                "approval revoked before delivery: "
+                                f"action status={action_row.status}"
+                            ),
+                        )
+                        return
                 # ISSUE-224: the outbox was already validated against the
                 # real approved set at enqueue time; the delivery-time guard
                 # re-validates source_locator, message_code, and analysis
