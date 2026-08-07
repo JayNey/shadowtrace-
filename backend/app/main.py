@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager, suppress
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+import app.bootstrap  # noqa: F401  # ISSUE-223: redacting logging before app imports
 from app.api.v1 import api_router
 from app.api.v1.errors import register_exception_handlers
 from app.api.v1.health import shutdown_health_clients
@@ -18,8 +19,6 @@ from app.core.socketio_manager import SocketIOManager
 from app.core.telemetry import setup_telemetry
 from app.db.session import dispose_session_provider, get_session_provider
 from app.orchestration.orchestration_config import assert_orchestration_mode
-
-configure_logging()
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +39,10 @@ _socketio_manager = SocketIOManager(_redis)
 
 @asynccontextmanager
 async def _lifespan(application: FastAPI) -> AsyncIterator[None]:
+    # Uvicorn installs dedicated handlers after ``app.main`` import; refresh once
+    # serving starts so access/error logs also pass through RedactingFormatter.
+    configure_logging(force=True)
+
     # Fail-closed (ISSUE-093 §5): validate runtime settings BEFORE serving any
     # traffic. Settings construction raises ConfigurationError if app_env is
     # production and any mock/simulation mode is active.

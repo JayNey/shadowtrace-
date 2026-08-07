@@ -7,10 +7,10 @@ import io
 import logging
 
 import pytest
+from uvicorn.config import Config
 
 from app.core.logging_setup import configure_logging, reset_logging_setup_for_tests
 from app.core.sanitization import RedactingFormatter
-from app.core.telemetry import disposition_span
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +68,32 @@ def test_configure_logging_is_idempotent_without_double_wrap() -> None:
     assert isinstance(second_formatter, RedactingFormatter)
 
 
+def test_configure_logging_redacts_uvicorn_logger_output() -> None:
+    stream = io.StringIO()
+    root = logging.getLogger()
+    root.handlers.clear()
+    configure_logging()
+
+    Config("app.main:socket_app", host="127.0.0.1", port=8000, log_level="info")
+    configure_logging(force=True)
+
+    uvicorn_logger = logging.getLogger("uvicorn")
+    assert uvicorn_logger.handlers
+    from app.core.logging_setup import _RedactingFormatterAdapter
+
+    assert isinstance(uvicorn_logger.handlers[0].formatter, _RedactingFormatterAdapter)
+
+    for handler in uvicorn_logger.handlers:
+        if isinstance(handler, logging.StreamHandler):
+            handler.stream = stream
+
+    uvicorn_logger.info("startup token=super-secret-token password='plain-text-password'")
+    output = stream.getvalue()
+    assert "super-secret-token" not in output
+    assert "plain-text-password" not in output
+    assert "[REDACTED]" in output
+
+
 def test_main_import_installs_redacting_formatter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OTEL_ENABLED", "false")
     from app.core.config import get_settings
@@ -75,7 +101,9 @@ def test_main_import_installs_redacting_formatter(monkeypatch: pytest.MonkeyPatc
     get_settings.cache_clear()
     reset_logging_setup_for_tests()
 
-    main = importlib.import_module("app.main")
+    import app.main as main
+
+    main = importlib.reload(main)
     assert main.app.title == "ShadowTrace"
 
     root = logging.getLogger()
@@ -83,39 +111,20 @@ def test_main_import_installs_redacting_formatter(monkeypatch: pytest.MonkeyPatc
     assert any(isinstance(handler.formatter, RedactingFormatter) for handler in root.handlers)
 
 
-def test_disposition_span_still_records_only_identifier_attributes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+def test_celery_worker_init_configures_redacting_logging(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    original = configure_logging
 
-    span_exporter = InMemorySpanExporter()
-    tracer_provider = TracerProvider()
-    tracer_provider.add_span_processor(SimpleSpanProcessor(span_exporter))
+    def _spy(*args: object, **kwargs: object) -> None:
+        calls.append((args, kwargs))
+        original(*args, **kwargs)
 
-    monkeypatch.setattr("app.core.telemetry._ENABLED", True)
-    monkeypatch.setattr(
-        "app.core.telemetry.get_tracer",
-        lambda name: tracer_provider.get_tracer(name),
-    )
+    monkeypatch.setattr("app.core.logging_setup.configure_logging", _spy)
+    from app.core.celery_app import init_worker_telemetry
+    from app.db.session_provider import reset_session_provider
 
-    with disposition_span(
-        "disposition.submit",
-        event_id="evt-logging-test",
-        action_id="act-logging-test",
-        disposition_id="disp-logging-test",
-        writeback_id="wbk-logging-test",
-    ):
-        pass
+    reset_session_provider()
+    init_worker_telemetry(sender=None)
 
-    span_exporter.force_flush()
-    finished = span_exporter.get_finished_spans()
-    assert len(finished) == 1
-    attrs = dict(finished[0].attributes or {})
-    assert attrs["shadowtrace.event_id"] == "evt-logging-test"
-    assert attrs["shadowtrace.action_id"] == "act-logging-test"
-    assert attrs["shadowtrace.disposition_id"] == "disp-logging-test"
-    assert attrs["shadowtrace.writeback_id"] == "wbk-logging-test"
-    assert "password" not in attrs
-    assert "token" not in attrs
+    assert calls
+    assert calls[0][1].get("force") is None

@@ -136,6 +136,32 @@ def test_otel_disabled_is_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     assert metrics_module._writeback_total is None
 
 
+def test_disposition_span_records_only_identifier_attributes(
+    enabled_telemetry: TelemetryReaders,
+) -> None:
+    span_exporter, _, _ = enabled_telemetry
+
+    with disposition_span(
+        "disposition.submit",
+        event_id="evt-logging-test",
+        action_id="act-logging-test",
+        disposition_id="disp-logging-test",
+        writeback_id="wbk-logging-test",
+    ):
+        pass
+
+    span_exporter.force_flush()
+    finished = span_exporter.get_finished_spans()
+    assert len(finished) == 1
+    attrs = dict(finished[0].attributes or {})
+    assert attrs["shadowtrace.event_id"] == "evt-logging-test"
+    assert attrs["shadowtrace.action_id"] == "act-logging-test"
+    assert attrs["shadowtrace.disposition_id"] == "disp-logging-test"
+    assert attrs["shadowtrace.writeback_id"] == "wbk-logging-test"
+    assert "password" not in attrs
+    assert "token" not in attrs
+
+
 def test_celery_worker_init_calls_setup_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, object]] = []
 
