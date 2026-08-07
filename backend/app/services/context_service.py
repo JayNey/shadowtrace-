@@ -15,7 +15,6 @@ from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.v1.schemas import EventSummary
 from app.core.redis_client import RedisClient
 from app.db import models as orm
 from app.models.context import EventContext
@@ -31,7 +30,7 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
-from app.models.security_event import SecurityEvent
+from app.models.security_event import EventSummary, SecurityEvent
 from app.services.classification_source import derive_classification_source
 
 logger = logging.getLogger(__name__)

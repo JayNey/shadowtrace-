@@ -19,7 +19,6 @@ from sqlalchemy import and_, case, delete, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.api.v1.schemas import EventSummary
 from app.core.config import get_settings
 from app.core.errors import (
     ClassificationConflictError,
@@ -53,7 +52,7 @@ from app.models.report import (
     observability_from_sections,
     stamp_report_observability_in_sections,
 )
-from app.models.security_event import SecurityEvent
+from app.models.security_event import EventSummary, SecurityEvent
 from app.models.source import SourceReference
 from app.models.tool_meta import TERMINAL_DISPOSITION_TOOL
 from app.models.workflow import TransitionContext, validate_verdict_status
