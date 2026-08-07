@@ -1,0 +1,73 @@
+name: cursor-issue-automation
+
+# Opens a Cursor Cloud Automation run when a GitHub issue is created.
+# Repo secrets required:
+#   CURSOR_WEBHOOK_URL
+#   CURSOR_AUTOMATION_TOKEN
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue number to hand to the Cursor automation"
+        required: true
+        type: string
+
+concurrency:
+  group: cursor-issue-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  trigger-cursor:
+    name: trigger-cursor-webhook
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Build payload and POST Cursor webhook
+        env:
+          CURSOR_WEBHOOK_URL: ${{ secrets.CURSOR_WEBHOOK_URL }}
+          CURSOR_AUTH_TOKEN: ${{ secrets.CURSOR_AUTOMATION_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ISSUE_JSON: ${{ github.event_name == 'issues' && toJSON(github.event.issue) || '' }}
+          DISPATCH_NUMBER: ${{ inputs.issue_number || '' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CURSOR_WEBHOOK_URL:-}" ] || [ -z "${CURSOR_AUTH_TOKEN:-}" ]; then
+            echo "::error::Missing CURSOR_WEBHOOK_URL or CURSOR_AUTOMATION_TOKEN repo secrets"
+            exit 1
+          fi
+
+          if [ "${EVENT_NAME}" = "issues" ]; then
+            PAYLOAD=$(printf '%s' "${ISSUE_JSON}" | jq -c \
+              --arg repo "${REPO}" \
+              '{
+                issue_number: .number,
+                issue_title: .title,
+                issue_body: (.body // ""),
+                issue_url: .html_url,
+                repo: $repo
+              }')
+          else
+            DATA=$(gh api "repos/${REPO}/issues/${DISPATCH_NUMBER}")
+            PAYLOAD=$(printf '%s' "${DATA}" | jq -c \
+              --arg repo "${REPO}" \
+              '{
+                issue_number: .number,
+                issue_title: .title,
+                issue_body: (.body // ""),
+                issue_url: .html_url,
+                repo: $repo
+              }')
+          fi
+
+          ISSUE_NUMBER=$(printf '%s' "${PAYLOAD}" | jq -r .issue_number)
+          echo "Posting Cursor webhook for ${REPO}#${ISSUE_NUMBER}"
+          curl -fsSL -X POST "${CURSOR_WEBHOOK_URL}" \
+            -H "Authorization: Bearer ${CURSOR_AUTH_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "${PAYLOAD}"
+          echo "Cursor webhook accepted"
