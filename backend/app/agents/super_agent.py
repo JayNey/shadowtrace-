@@ -1332,7 +1332,7 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             if hasattr(event, "status"):
                 ec.event.status = event.status
             elif isinstance(event, dict) and "status" in event:
-                ec.event.status = event["status"]  # type: ignore[assignment]
+                ec.event.status = event["status"]
         except Exception:
             logger.debug(
                 "SuperAgent: failed to refresh event status for event=%s",

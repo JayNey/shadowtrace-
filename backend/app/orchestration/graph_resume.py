@@ -11,6 +11,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from langchain_core.runnables import RunnableConfig
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -344,7 +345,7 @@ async def resume_investigation_from_checkpoint(
         )
         return
 
-    config = {"configurable": {"thread_id": event_id}}
+    config: RunnableConfig = {"configurable": {"thread_id": event_id}}
     runtime = await get_workflow_runtime()
     has_checkpoint = await prepare_graph_resume_state(
         session_factory,
