@@ -187,6 +187,18 @@ class SocketClient {
       });
       return;
     }
+    if (type === "event_type_rewritten") {
+      this.emit({
+        type: "event_type_rewritten",
+        event_id,
+        payload: {
+          event_type: String(payload.event_type ?? ""),
+          previous_event_type: String(payload.previous_event_type ?? ""),
+          operator: String(payload.operator ?? ""),
+        },
+      });
+      return;
+    }
     if (
       type === "risk_updated" ||
       type === "final_verdict_updated" ||

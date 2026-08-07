@@ -168,11 +168,14 @@ async def test_rewrite_event_type_applied_updates_orm(monkeypatch: pytest.Monkey
     session_factory = MagicMock(return_value=_AsyncCM(session))
     store = AsyncMock()
     store.set = AsyncMock(return_value=SimpleNamespace(redis_ok=True))
+    event_bus = AsyncMock()
+    event_bus.publish_event = AsyncMock(return_value=True)
 
     service = EventService(
         session_factory=session_factory,
         store=store,
         degraded_flags=AsyncMock(),
+        event_bus=event_bus,
     )
 
     fake_event = SimpleNamespace(row_version=2)
@@ -197,6 +200,15 @@ async def test_rewrite_event_type_applied_updates_orm(monkeypatch: pytest.Monkey
     assert row.row_version == 2
     assert session.add.called
     store.set.assert_awaited()
+    event_bus.publish_event.assert_awaited_once_with(
+        "evt-211-apply",
+        "event_type_rewritten",
+        {
+            "event_type": EventType.DATA_EXFILTRATION.value,
+            "previous_event_type": EventType.OTHER.value,
+            "operator": "TriageAgent",
+        },
+    )
     get_settings.cache_clear()
 
 

@@ -162,6 +162,35 @@ describe("socketClient", () => {
     });
   });
 
+  it("maps event_type_rewritten envelope to typed payload", async () => {
+    const { socketClient } = await import("../../src/services/socketClient");
+    const handler = vi.fn();
+    socketClient.connect();
+    socketClient.onEvent(handler);
+
+    eventHandler?.({
+      type: "event_type_rewritten",
+      event_id: "evt-rewrite",
+      sequence: 5,
+      timestamp: "2026-01-01T00:00:00Z",
+      payload: {
+        event_type: "malicious_process",
+        previous_event_type: "other",
+        operator: "TriageAgent",
+      },
+    });
+
+    expect(handler).toHaveBeenCalledWith({
+      type: "event_type_rewritten",
+      event_id: "evt-rewrite",
+      payload: {
+        event_type: "malicious_process",
+        previous_event_type: "other",
+        operator: "TriageAgent",
+      },
+    });
+  });
+
   it.each([
     "risk_updated",
     "final_verdict_updated",

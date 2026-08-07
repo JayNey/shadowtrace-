@@ -65,9 +65,16 @@ export interface SocketApprovalPayload {
   impact_assessment?: Record<string, unknown> | null;
 }
 
+export interface SocketEventTypeRewrittenPayload {
+  event_type: string;
+  previous_event_type: string;
+  operator: string;
+}
+
 export type EventDetailSocketEventType =
   | "risk_updated"
   | "final_verdict_updated"
+  | "event_type_rewritten"
   | "action_executed"
   | "action_verified"
   | "disposition_submitted"
