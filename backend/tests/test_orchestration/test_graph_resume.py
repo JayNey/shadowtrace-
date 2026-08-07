@@ -416,3 +416,186 @@ async def test_resume_fallback_execute_investigation_when_graph_never_started() 
         include_response_execution=True,
     )
     graph.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_reporting_without_graph_uses_report_only_not_full_restart() -> None:
+    """ISSUE-247: REPORTING + graph=None must not call execute_investigation()."""
+    from app.models.agent_io import CollectionStatus, EvidenceOutput, RiskAssessment, ScoringMode
+    from app.models.enums import Severity
+
+    report = MagicMock()
+    report_agent = MagicMock()
+    report_agent.execute = AsyncMock(return_value=report)
+    context_store = MagicMock()
+    context_store.get = AsyncMock(
+        side_effect=lambda _eid, field: {
+            "evidence_output": EvidenceOutput(collection_status=CollectionStatus.COMPLETED),
+            "risk_assessment": RiskAssessment(
+                risk_score=70,
+                severity=Severity.HIGH,
+                confidence=0.8,
+                scoring_mode=ScoringMode.RULE_ONLY,
+            ),
+        }.get(field)
+    )
+    context_store.set = AsyncMock()
+    event_service = MagicMock()
+    event_service.get_report = AsyncMock(return_value=None)
+
+    agent = MagicMock()
+    agent._investigation_graph = None
+    agent.report_agent = report_agent
+    agent.context_store = context_store
+    agent.event_service = event_service
+
+    with (
+        patch(
+            "app.tasks.investigation_tasks.execute_investigation",
+            new_callable=AsyncMock,
+        ) as execute,
+        patch(
+            "app.orchestration.workflow_graph.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ) as invoke,
+    ):
+        await resume_investigation_from_checkpoint(
+            _SessionFactory(EventStatus.REPORTING.value),
+            "evt-247-report-only",
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+        )
+
+    execute.assert_not_awaited()
+    invoke.assert_not_awaited()
+    report_agent.execute.assert_awaited_once()
+    set_fields = {call.args[1] for call in context_store.set.await_args_list}
+    assert "report_generated" in set_fields
+    assert "analysis_only_complete" in set_fields
+
+
+@pytest.mark.asyncio
+async def test_resume_closed_or_failed_without_graph_is_noop() -> None:
+    """ISSUE-247: CLOSED/FAILED must never full-graph restart when graph is absent."""
+    for status in (EventStatus.CLOSED.value, EventStatus.FAILED.value):
+        agent = MagicMock()
+        agent._investigation_graph = None
+        agent.report_agent = MagicMock(execute=AsyncMock())
+
+        with patch(
+            "app.tasks.investigation_tasks.execute_investigation",
+            new_callable=AsyncMock,
+        ) as execute:
+            await resume_investigation_from_checkpoint(
+                _SessionFactory(status),
+                f"evt-247-{status}",
+                get_super_agent=AsyncMock(return_value=agent),
+                get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            )
+
+        execute.assert_not_awaited()
+        agent.report_agent.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resume_reporting_missing_checkpoint_keeps_reporting_error() -> None:
+    """ISSUE-247: REPORTING + missing checkpoint raises checkpoint_missing (no restart)."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=MagicMock(values={}))
+    agent = MagicMock()
+    agent._investigation_graph = graph
+
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    with (
+        patch(
+            "app.tasks.investigation_tasks.execute_investigation",
+            new_callable=AsyncMock,
+        ) as execute,
+        pytest.raises(GraphResumeFailedError) as exc_info,
+    ):
+        await resume_investigation_from_checkpoint(
+            _SessionFactory(EventStatus.REPORTING.value),
+            "evt-247-no-ckpt",
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=runtime),
+        )
+
+    assert exc_info.value.error_type == "checkpoint_missing"
+    execute.assert_not_awaited()
+    graph.ainvoke.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_resume_reporting_with_checkpoint_invokes_graph_not_execute() -> None:
+    """ISSUE-247 / ISSUE-192: REPORTING + checkpoint continues via ainvoke(None)."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "needs_approval_wait": True,
+                "execution_substate": ExecutionSubstate.WAITING_APPROVAL.value,
+                "event_status": EventStatus.WAITING_APPROVAL.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    agent = MagicMock()
+    agent._investigation_graph = graph
+
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    with (
+        patch(
+            "app.tasks.investigation_tasks.execute_investigation",
+            new_callable=AsyncMock,
+        ) as execute,
+        patch(
+            "app.orchestration.graph_resume.invoke_investigation_graph",
+            new_callable=AsyncMock,
+        ) as invoke,
+    ):
+        await resume_investigation_from_checkpoint(
+            _SessionFactory(EventStatus.REPORTING.value),
+            "evt-247-ckpt-reporting",
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=runtime),
+        )
+
+    execute.assert_not_awaited()
+    invoke.assert_awaited_once()
+    graph.aupdate_state.assert_awaited()
+    runtime.set_execution_substate.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_resume_executing_without_graph_still_delegates_execute() -> None:
+    """ISSUE-247 must not break approve→EXECUTING_RESPONSE graph=None fallback."""
+    agent = MagicMock()
+    agent._investigation_graph = None
+
+    with (
+        patch(
+            "app.services.investigation_guidance.resolve_include_response_execution_for_resume",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "app.tasks.investigation_tasks.execute_investigation",
+            new_callable=AsyncMock,
+        ) as execute,
+    ):
+        await resume_investigation_from_checkpoint(
+            _SessionFactory(EventStatus.EXECUTING_RESPONSE.value),
+            "evt-247-executing-fallback",
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+        )
+
+    execute.assert_awaited_once_with(
+        "evt-247-executing-fallback",
+        include_response_execution=True,
+    )

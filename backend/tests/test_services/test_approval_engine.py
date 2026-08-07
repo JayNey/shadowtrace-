@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -1034,6 +1034,129 @@ async def test_evaluate_plan_resume_hook_called_when_fully_decided(
     )
     result = await engine.evaluate_plan(event_id, 1, _risk())
     assert result.needs_wait is False
+    resume.assert_awaited_once_with(event_id)
+
+
+@pytest.mark.asyncio
+async def test_timeout_all_reject_resume_keeps_reporting_without_full_restart(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    state_machine: StateMachineService,
+    fake_bus: FakeEventBus,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-247: system_timeout full reject → REPORTING; resume must not FAILED."""
+    from app.models.agent_io import CollectionStatus, EvidenceOutput
+    from app.orchestration.graph_resume import resume_investigation_from_checkpoint
+
+    event_id = await _create_event(session_factory, store)
+    await store.set(
+        event_id,
+        "evidence_output",
+        EvidenceOutput(collection_status=CollectionStatus.COMPLETED),
+    )
+    await store.set(event_id, "risk_assessment", _risk())
+
+    report = MagicMock()
+    report_agent = MagicMock()
+    report_agent.execute = AsyncMock(return_value=report)
+    event_service = MagicMock()
+    event_service.get_report = AsyncMock(return_value=None)
+    agent = MagicMock()
+    agent._investigation_graph = None
+    agent.report_agent = report_agent
+    agent.context_store = store
+    agent.event_service = event_service
+
+    execute_mock = AsyncMock()
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.execute_investigation",
+        execute_mock,
+    )
+
+    async def _resume(eid: str) -> None:
+        await resume_investigation_from_checkpoint(
+            session_factory,
+            eid,
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+        )
+
+    engine = ApprovalEngine(
+        session_factory,
+        event_bus=fake_bus,  # type: ignore[arg-type]
+        state_machine=state_machine,
+        context_store=store,
+        resume_investigation=_resume,
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    async with session_factory() as session:
+        async with session.begin():
+            record = await session.scalar(
+                select(ApprovalRecordORM).where(ApprovalRecordORM.action_id == action.action_id)
+            )
+            assert record is not None
+            record.timeout_at = datetime.now(UTC) - timedelta(minutes=1)
+
+    await engine.handle_timeout(action.action_id, approval_cycle=0)
+
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, event_id)
+        assert event is not None
+        assert event.status == EventStatus.REPORTING.value
+        assert "triaging" not in (event.degraded_flags or [])
+        assert not any(
+            str(flag).startswith("graph_resume_failed=invalid_state_transition")
+            for flag in (event.degraded_flags or [])
+        )
+
+    execute_mock.assert_not_awaited()
+    report_agent.execute.assert_awaited_once()
+    assert await store.get(event_id, "report_generated") is True
+    # ISSUE-206: REPORTING remains in the on-demand report generation allow-list.
+    from app.api.v1.events import REPORT_GENERATION_ALLOWED_STATUSES
+
+    assert EventStatus.REPORTING in REPORT_GENERATION_ALLOWED_STATUSES
+
+
+@pytest.mark.asyncio
+async def test_approve_resume_still_targets_executing_response(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    state_machine: StateMachineService,
+    fake_bus: FakeEventBus,
+    cleanup: None,
+) -> None:
+    """ISSUE-247 regression: partial/full approve path still advances to execute."""
+    resume = AsyncMock()
+    engine = ApprovalEngine(
+        session_factory,
+        event_bus=fake_bus,  # type: ignore[arg-type]
+        state_machine=state_machine,
+        resume_investigation=resume,
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L2),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    principal = Principal(subject="approver-1", roles=["approver"])
+    await engine.approve(action.action_id, principal, "approved", "dec-approve-247")
+
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, event_id)
+        assert event is not None
+        assert event.status == EventStatus.EXECUTING_RESPONSE.value
     resume.assert_awaited_once_with(event_id)
 
 

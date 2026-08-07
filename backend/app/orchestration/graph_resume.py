@@ -1,8 +1,12 @@
-"""Checkpoint resume helpers for LangGraph investigation (ISSUE-059 / ISSUE-192).
+"""Checkpoint resume helpers for LangGraph investigation (ISSUE-059 / ISSUE-192 / ISSUE-247).
 
 Production ``resume_investigation`` hooks must continue from the saved
 checkpoint after ``approval_wait_node`` or writeback halt — not restart via
 ``SuperAgent.investigate()`` with fresh initial state.
+
+ISSUE-247: once DB status is already ``REPORTING`` / ``CLOSED`` / ``FAILED``,
+resume must never fall back to a full-graph ``execute_investigation()`` restart
+(that produces illegal ``reporting → triaging`` and marks FAILED).
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
+from app.models.agent_io import EvidenceOutput, RiskAssessment
 from app.models.enums import (
     DispositionIntentKind,
     DispositionPolicy,
@@ -40,6 +45,15 @@ _GRAPH_NEVER_STARTED_STATUSES = frozenset(
     {
         EventStatus.NEW.value,
         EventStatus.TRIAGING.value,
+    }
+)
+
+# Post-analysis / terminal statuses: never restart from triage (ISSUE-247).
+_NO_FULL_GRAPH_RESTART_STATUSES = frozenset(
+    {
+        EventStatus.REPORTING.value,
+        EventStatus.CLOSED.value,
+        EventStatus.FAILED.value,
     }
 )
 
@@ -319,6 +333,142 @@ async def prepare_graph_resume_state(
     return True
 
 
+async def _persist_context_flag(store: Any, event_id: str, field: str, value: Any) -> None:
+    if store is None:
+        return
+    try:
+        await store.set(event_id, field, value)
+    except Exception:
+        logger.warning(
+            "failed to persist %s=%s event=%s",
+            field,
+            value,
+            event_id,
+            exc_info=True,
+        )
+
+
+async def _resume_report_only_from_analysis(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    agent: Any,
+) -> None:
+    """Generate/persist report for an event already at REPORTING (no graph).
+
+    Used when approval fully rejects / times out and the SuperAgent has no
+    wired investigation graph. Must not restart triage (ISSUE-247).
+    """
+    from app.orchestration.graph_resume_observability import GraphResumeFailedError
+    from app.services.report_input_builder import build_report_agent_input
+
+    report_agent = getattr(agent, "report_agent", None)
+    context_store = getattr(agent, "context_store", None)
+    if report_agent is None:
+        raise GraphResumeFailedError(
+            "report-only resume requires ReportAgent on SuperAgent",
+            event_id=event_id,
+            error_type="report_agent_missing",
+        )
+    if context_store is None:
+        raise GraphResumeFailedError(
+            "report-only resume requires context_store for analysis artifacts",
+            event_id=event_id,
+            error_type="report_prerequisites_missing",
+        )
+
+    evidence_raw = await context_store.get(event_id, "evidence_output")
+    risk_raw = await context_store.get(event_id, "risk_assessment")
+    if evidence_raw is None or risk_raw is None:
+        raise GraphResumeFailedError(
+            "report-only resume missing evidence_output/risk_assessment in context",
+            event_id=event_id,
+            error_type="report_prerequisites_missing",
+        )
+
+    try:
+        evidence_output = (
+            evidence_raw
+            if isinstance(evidence_raw, EvidenceOutput)
+            else EvidenceOutput.model_validate(evidence_raw)
+        )
+        risk_assessment = (
+            risk_raw
+            if isinstance(risk_raw, RiskAssessment)
+            else RiskAssessment.model_validate(risk_raw)
+        )
+    except Exception as exc:
+        raise GraphResumeFailedError(
+            "report-only resume: stored evidence/risk payloads are invalid",
+            event_id=event_id,
+            error_type="report_prerequisites_invalid",
+        ) from exc
+
+    # Idempotent: if a report row already exists, keep REPORTING and skip work.
+    event_service = getattr(agent, "event_service", None)
+    get_report = getattr(event_service, "get_report", None) if event_service is not None else None
+    if get_report is not None:
+        try:
+            existing = await get_report(event_id=event_id)
+        except TypeError:
+            existing = await get_report(event_id)
+        if existing is not None:
+            await _persist_context_flag(context_store, event_id, "report_generated", True)
+            await _persist_context_flag(context_store, event_id, "analysis_only_complete", True)
+            logger.info(
+                "report-only resume: report already present event=%s; keeping REPORTING",
+                event_id,
+            )
+            return
+
+    report_input = await build_report_agent_input(
+        event_id,
+        evidence_output=evidence_output,
+        risk_assessment=risk_assessment,
+        context_store=context_store,
+        session_factory=session_factory,
+    )
+    try:
+        report = await report_agent.execute(report_input)
+    except Exception as exc:
+        await _persist_context_flag(context_store, event_id, "report_generated", False)
+        raise GraphResumeFailedError(
+            f"report-only resume failed: {type(exc).__name__}: {exc}",
+            event_id=event_id,
+            error_type="report_generation_failed",
+        ) from exc
+
+    if report is None:
+        await _persist_context_flag(context_store, event_id, "report_generated", False)
+        raise GraphResumeFailedError(
+            "report-only resume: ReportAgent returned no report",
+            event_id=event_id,
+            error_type="report_generation_failed",
+        )
+
+    await _persist_context_flag(context_store, event_id, "report_generated", True)
+    await _persist_context_flag(context_store, event_id, "analysis_only_complete", True)
+    logger.info("report-only resume completed event=%s (status remains REPORTING)", event_id)
+
+
+async def _delegate_execute_investigation(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+) -> None:
+    from app.services.investigation_guidance import (
+        resolve_include_response_execution_for_resume,
+    )
+    from app.tasks.investigation_tasks import execute_investigation
+
+    include_response = await resolve_include_response_execution_for_resume(
+        session_factory,
+        event_id,
+    )
+    await execute_investigation(
+        event_id,
+        include_response_execution=include_response,
+    )
+
+
 async def resume_investigation_from_checkpoint(
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
@@ -326,26 +476,60 @@ async def resume_investigation_from_checkpoint(
     get_super_agent: GetSuperAgent,
     get_workflow_runtime: GetWorkflowRuntime,
 ) -> None:
-    """Resume LangGraph from checkpoint after approval or writeback."""
+    """Resume LangGraph from checkpoint after approval or writeback.
+
+    ISSUE-247: ``REPORTING`` / ``CLOSED`` / ``FAILED`` never fall back to a
+    full-graph ``execute_investigation()`` restart. ``REPORTING`` continues via
+    checkpoint → ``report_node``, or a report-only narrow path when no graph is
+    wired. Missing checkpoint on ``REPORTING`` raises ``checkpoint_missing``
+    while leaving the event at ``REPORTING`` (caller records degraded flags).
+    """
+    from app.orchestration.graph_resume_observability import GraphResumeFailedError
+
     agent = await get_super_agent()
     graph = getattr(agent, "_investigation_graph", None)
-    if graph is None:
-        from app.services.investigation_guidance import (
-            resolve_include_response_execution_for_resume,
-        )
-        from app.tasks.investigation_tasks import execute_investigation
+    status_value = await _read_event_status(session_factory, event_id)
 
-        include_response = await resolve_include_response_execution_for_resume(
+    if status_value in _NO_FULL_GRAPH_RESTART_STATUSES:
+        if status_value in {EventStatus.CLOSED.value, EventStatus.FAILED.value}:
+            logger.info(
+                "resume skipped for terminal status=%s event=%s",
+                status_value,
+                event_id,
+            )
+            return
+
+        # REPORTING: continue report phase only — never restart triage.
+        if graph is None:
+            await _resume_report_only_from_analysis(session_factory, event_id, agent)
+            return
+
+        config: RunnableConfig = {"configurable": {"thread_id": event_id}}
+        runtime = await get_workflow_runtime()
+        has_checkpoint = await prepare_graph_resume_state(
             session_factory,
+            graph,
             event_id,
+            runtime,
         )
-        await execute_investigation(
-            event_id,
-            include_response_execution=include_response,
-        )
+        if not has_checkpoint:
+            raise GraphResumeFailedError(
+                f"no checkpoint for event in status {status_value}",
+                event_id=event_id,
+                error_type="checkpoint_missing",
+            )
+
+        projection = EvidenceProjection(session_factory)
+        with bind_evidence_projection(projection):
+            await invoke_investigation_graph(graph, None, config)
         return
 
-    config: RunnableConfig = {"configurable": {"thread_id": event_id}}
+    if graph is None:
+        # Only safe for pre-graph statuses; post-analysis handled above.
+        await _delegate_execute_investigation(session_factory, event_id)
+        return
+
+    config = {"configurable": {"thread_id": event_id}}
     runtime = await get_workflow_runtime()
     has_checkpoint = await prepare_graph_resume_state(
         session_factory,
@@ -354,24 +538,9 @@ async def resume_investigation_from_checkpoint(
         runtime,
     )
     if not has_checkpoint:
-        status_value = await _read_event_status(session_factory, event_id)
         if status_value in _GRAPH_NEVER_STARTED_STATUSES:
-            from app.services.investigation_guidance import (
-                resolve_include_response_execution_for_resume,
-            )
-            from app.tasks.investigation_tasks import execute_investigation
-
-            include_response = await resolve_include_response_execution_for_resume(
-                session_factory,
-                event_id,
-            )
-            await execute_investigation(
-                event_id,
-                include_response_execution=include_response,
-            )
+            await _delegate_execute_investigation(session_factory, event_id)
             return
-        from app.orchestration.graph_resume_observability import GraphResumeFailedError
-
         raise GraphResumeFailedError(
             f"no checkpoint for event in status {status_value}",
             event_id=event_id,
