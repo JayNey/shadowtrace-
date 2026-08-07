@@ -343,6 +343,8 @@ async def test_rule_path_two_classified_evidence_single_phase() -> None:
 
 async def test_rule_path_evidence_scarce_single_phase() -> None:
     """< 3 evidence items, all unclassified → single POST_ACTION phase."""
+    from app.models.agent_io import StorylineGroundingStatus
+
     evidence_list = [
         _make_evidence(
             source="asset",
@@ -364,6 +366,8 @@ async def test_rule_path_evidence_scarce_single_phase() -> None:
     assert len(storyline.phases) == 1
     assert storyline.phases[0].phase_name == StorylinePhaseName.POST_ACTION
     assert len(storyline.narrative_summary) > 0
+    assert storyline.grounding_status is StorylineGroundingStatus.EVIDENCE_GROUNDED
+    assert len(storyline.claim_refs) >= 1
 
 
 async def test_rule_path_empty_evidence() -> None:

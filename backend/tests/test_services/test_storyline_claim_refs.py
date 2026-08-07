@@ -116,6 +116,16 @@ def test_attach_downgrades_evidence_grounded_when_no_claim_refs() -> None:
     assert attached.schema_version == "2.0"
 
 
+def test_attach_downgrades_legacy_grounded_when_no_claim_refs() -> None:
+    """Defence-in-depth: legacy grounded label also downgrades without claims."""
+    attached = attach_storyline_claim_refs(
+        _empty_storyline(),
+        grounding_status=StorylineGroundingStatus.LEGACY_EVIDENCE_GROUNDED,
+    )
+    assert attached.grounding_status is StorylineGroundingStatus.UNGROUNDED
+    assert attached.claim_refs == []
+
+
 def test_finalize_storyline_empty_phases_not_evidence_grounded() -> None:
     """ISSUE-244: finalize must not label empty phases as evidence_grounded."""
     from app.services import storyline_service as storyline_module

@@ -29,6 +29,14 @@ def build_storyline_claim_refs(storyline: AttackStoryline) -> list[StorylineClai
     return refs
 
 
+_GROUNDED_STATUSES = frozenset(
+    {
+        StorylineGroundingStatus.EVIDENCE_GROUNDED,
+        StorylineGroundingStatus.LEGACY_EVIDENCE_GROUNDED,
+    }
+)
+
+
 def resolve_storyline_grounding_status(
     storyline: AttackStoryline,
     *,
@@ -52,10 +60,8 @@ def attach_storyline_claim_refs(
 ) -> AttackStoryline:
     claim_refs = build_storyline_claim_refs(storyline)
     status = grounding_status
-    # Defence-in-depth: never allow evidence_grounded without bindable claims.
-    if status is StorylineGroundingStatus.EVIDENCE_GROUNDED and (
-        not storyline.phases or not claim_refs
-    ):
+    # Defence-in-depth: never allow grounded labels without bindable claims.
+    if status in _GROUNDED_STATUSES and (not storyline.phases or not claim_refs):
         status = StorylineGroundingStatus.UNGROUNDED
     return storyline.model_copy(
         update={
