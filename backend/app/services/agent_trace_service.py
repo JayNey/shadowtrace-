@@ -4,9 +4,10 @@ Stores redacted, bounded input/output projections so the audit trail reveals
 *what* an Agent decided and *which* evidence it cited, without persisting raw
 payloads, secrets, prompts, or hidden reasoning chains.
 
-ISSUE-243: every agent_execution must carry a non-empty structured brief
-(``decision_summary`` / ``structured_conclusion``) or an explicit
-``summary_unavailable`` reason. Raw CoT keys remain omitted / ``[NOT_RETAINED]``.
+ISSUE-243 / ISSUE-255: every agent_execution must carry a non-empty structured
+brief (``decision_summary`` / ``structured_conclusion``) or an explicit
+``summary_unavailable`` reason. Coverage includes rag/graph/super/memory typed
+projections. Raw CoT keys remain omitted / ``[NOT_RETAINED]``.
 """
 
 from __future__ import annotations
@@ -406,15 +407,103 @@ def _synthesize_from_typed_fields(agent_name: str | None, data: dict[str, Any]) 
             ]
         )
 
-    if name in {"react_engine", "super_agent"}:
-        reason = _safe_scalar_text(data.get("reason_code"))
-        selected = _safe_scalar_text(data.get("selected_action"))
+    if name == "rag_agent":
+        techniques = data.get("attack_techniques") or []
+        similar = data.get("similar_cases") or []
+        playbooks = data.get("playbook_refs") or []
+        citations = data.get("citations") or []
+        fp = data.get("fp_similarity") if isinstance(data.get("fp_similarity"), Mapping) else {}
+        technique_ids: list[str] = []
+        if isinstance(techniques, list):
+            for item in techniques[:3]:
+                if isinstance(item, Mapping) and item.get("technique_id") is not None:
+                    technique_ids.append(str(item["technique_id"]))
         return _join_kv(
             [
-                f"reason_code={reason}" if reason else "",
-                f"selected_action={selected}" if selected else "",
+                f"techniques={len(techniques) if isinstance(techniques, list) else 0}",
+                f"top={','.join(technique_ids)}" if technique_ids else "",
+                f"fp_max={fp.get('max_score')}" if fp.get("max_score") is not None else "",
+                f"similar_cases={len(similar) if isinstance(similar, list) else 0}",
+                f"playbook_refs={len(playbooks) if isinstance(playbooks, list) else 0}",
+                f"citations={len(citations) if isinstance(citations, list) else 0}",
+                f"degraded={_safe_scalar_text(data.get('degraded'))}"
+                if data.get("degraded") is not None
+                else "",
             ]
         )
+
+    if name == "graph_agent":
+        nodes = data.get("nodes") or []
+        edges = data.get("edges") or []
+        central = data.get("central_entities") or []
+        paths = data.get("attack_path_candidates") or []
+        central_preview = ""
+        if isinstance(central, list) and central:
+            central_preview = ",".join(str(item) for item in central[:3] if item is not None)
+        return _join_kv(
+            [
+                f"nodes={len(nodes) if isinstance(nodes, list) else 0}",
+                f"edges={len(edges) if isinstance(edges, list) else 0}",
+                f"central={central_preview}" if central_preview else "",
+                f"attack_paths={len(paths) if isinstance(paths, list) else 0}",
+                f"degraded={_safe_scalar_text(data.get('degraded'))}"
+                if data.get("degraded") is not None
+                else "",
+                f"degraded_reason={_safe_scalar_text(data.get('degraded_reason'))}"
+                if _safe_scalar_text(data.get("degraded_reason"))
+                else "",
+            ]
+        )
+
+    if name == "memory_agent":
+        cases = data.get("case_records") or []
+        fp_rules = data.get("fp_rules") or []
+        profiles = data.get("profile_updates") or []
+        sigma = data.get("sigma_drafts") or []
+        return _join_kv(
+            [
+                f"case_records={len(cases) if isinstance(cases, list) else 0}",
+                f"fp_rules={len(fp_rules) if isinstance(fp_rules, list) else 0}",
+                f"profile_updates={len(profiles) if isinstance(profiles, list) else 0}",
+                f"sigma_drafts={len(sigma) if isinstance(sigma, list) else 0}",
+            ]
+        )
+
+    if name in {"react_engine", "super_agent"}:
+        # SuperAgent wraps InvestigationResult in AgentOutput.data; ReAct may
+        # put typed fields at the top level. Never promote nested narrative.
+        nested = data.get("data") if isinstance(data.get("data"), Mapping) else {}
+
+        def _pick(key: str) -> Any:
+            if key != "data" and key in data and data[key] is not None:
+                return data[key]
+            if isinstance(nested, Mapping):
+                return nested.get(key)
+            return None
+
+        parts: list[str] = []
+        for key in (
+            "final_status",
+            "final_verdict",
+            "reason_code",
+            "selected_action",
+            "report_id",
+        ):
+            text = _safe_scalar_text(_pick(key))
+            if text:
+                parts.append(f"{key}={text}")
+        writeback_required = _pick("writeback_required")
+        if writeback_required is not None:
+            wb_text = _safe_scalar_text(writeback_required)
+            if wb_text:
+                parts.append(f"writeback_required={wb_text}")
+        if not parts and data.get("success") is not None:
+            success_text = _safe_scalar_text(data.get("success"))
+            if success_text:
+                parts.append(f"success={success_text}")
+        if data.get("degraded") or (isinstance(nested, Mapping) and nested.get("degraded")):
+            parts.append("degraded=true")
+        return _join_kv(parts)
 
     # Generic typed fallback for unknown agents / ClassName variants.
     return _join_kv(
@@ -431,6 +520,12 @@ def _synthesize_from_typed_fields(agent_name: str | None, data: dict[str, Any]) 
             f"reason_code={data.get('reason_code')}" if data.get("reason_code") is not None else "",
             f"selected_action={data.get('selected_action')}"
             if data.get("selected_action") is not None
+            else "",
+            f"final_status={data.get('final_status')}"
+            if data.get("final_status") is not None
+            else "",
+            f"final_verdict={data.get('final_verdict')}"
+            if data.get("final_verdict") is not None
             else "",
         ]
     )
