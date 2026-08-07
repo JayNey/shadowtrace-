@@ -42,6 +42,7 @@ COMPOSE_DEMO := COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 	--profile demo
 
 # Optional: set WORKER=1 to include the Celery investigation worker (sets TASK_MODE=celery).
+# DB migrations: only the backend container runs alembic; workers use SKIP_DB_MIGRATE (ISSUE-238).
 WORKER ?=
 WORKER_PROFILE = $(if $(WORKER),--profile worker,)
 # Optional: set SCHEDULER=1 to include Celery Beat + ingestion worker (ISSUE-107).

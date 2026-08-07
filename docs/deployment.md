@@ -32,6 +32,8 @@ make smoke-bootstrap
 
 启动后在前端 **事件看板** 可见 3 个演示事件；`make bootstrap` 会自动对 `new` 状态事件 POST `/investigate`，也可在前端手动再次触发。
 
+**数据库迁移（ISSUE-238）：** 仅 `backend` 容器在启动时执行 `alembic upgrade head`。Celery `worker` / `scheduler-beat` / `scheduler-worker` 与 `mock-xdr` 均设置 `SKIP_DB_MIGRATE=true`，并等待 `backend` healthy 后再启动，避免空 volume 首次并行 `up` 时双份迁移竞态。
+
 ### Mock 全栈 Demo（ISSUE-141）
 
 一键启动 **core + investigation worker + ingestion scheduler + observability**（Mock-only，容器内 OTEL 走 `http://otel-collector:4318`）：
