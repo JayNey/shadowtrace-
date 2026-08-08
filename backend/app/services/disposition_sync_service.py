@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -48,7 +49,6 @@ from app.models.enums import (
 )
 from app.models.ids import new_writeback_id
 from app.models.workflow import (
-    adapter_capabilities_allow_safe_retry,
     delivery_status_eligible_for_operator_retry_pause,
     is_operator_retry_terminal_success,
     operator_retry_writeback_status_blocked,
@@ -74,6 +74,7 @@ _DEFAULT_LEASE_SECONDS = 30
 _ERROR_DETAIL_MAX_LEN = 500
 OUTBOX_SUPERSEDED_ERROR_CODE = "superseded_by_new_head"
 _OPERATOR_RETRY_REPLAY_PREFIX = "operator_retry:replay"
+_OPERATOR_RETRY_OPERATION_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class _PausedLookupKind(StrEnum):
@@ -340,6 +341,14 @@ class DispositionSyncService:
     ) -> WritebackStatus:
         result: WritebackStatus
         sync_event_id: str | None = None
+        blocked_error: WritebackConflictError | None = None
+        if operation_id is not None and not _OPERATOR_RETRY_OPERATION_ID_RE.fullmatch(
+            operation_id,
+        ):
+            raise ValidationError(
+                "operation_id must be 1-128 chars of [A-Za-z0-9._:-]",
+                details={"operation_id": operation_id},
+            )
         async with self._session_factory() as session:
             async with session.begin():
                 outbox = await session.scalar(
@@ -353,6 +362,34 @@ class DispositionSyncService:
                         details={"writeback_id": writeback_id},
                     )
 
+                delivery = OutboxDeliveryStatus(outbox.delivery_status)
+                latest = (
+                    WritebackStatus(outbox.latest_writeback_status)
+                    if outbox.latest_writeback_status
+                    else None
+                )
+
+                # CONFIRMED is forever denied — check before operation replay.
+                if operator_retry_writeback_status_blocked(latest):
+                    raise WritebackConflictError(
+                        "CONFIRMED writeback cannot be retried",
+                        details={
+                            "writeback_id": writeback_id,
+                            "status": latest.value if latest else None,
+                        },
+                    )
+
+                if outbox.superseded_by_disposition_id is not None:
+                    raise WritebackConflictError(
+                        "superseded outbox head cannot be retried",
+                        details={
+                            "writeback_id": writeback_id,
+                            "superseded_by_disposition_id": (
+                                outbox.superseded_by_disposition_id
+                            ),
+                        },
+                    )
+
                 if operation_id is not None:
                     replay_status = await self._find_operator_retry_replay(
                         session,
@@ -362,22 +399,6 @@ class DispositionSyncService:
                     )
                     if replay_status is not None:
                         return replay_status
-
-                delivery = OutboxDeliveryStatus(outbox.delivery_status)
-                latest = (
-                    WritebackStatus(outbox.latest_writeback_status)
-                    if outbox.latest_writeback_status
-                    else None
-                )
-
-                if operator_retry_writeback_status_blocked(latest):
-                    raise WritebackConflictError(
-                        "CONFIRMED writeback cannot be retried",
-                        details={
-                            "writeback_id": writeback_id,
-                            "status": latest.value if latest else None,
-                        },
-                    )
 
                 if latest is WritebackStatus.UNKNOWN and delivery is OutboxDeliveryStatus.DELIVERED:
                     raise WritebackConflictError(
@@ -456,6 +477,7 @@ class DispositionSyncService:
                         validate_outbox_delivery_transition(
                             OutboxDeliveryStatus.PAUSED,
                             OutboxDeliveryStatus.DELIVERED,
+                            lookup_confirmed_submission=True,
                         )
                         await self._append_receipt(session, outbox, receipt=decision.receipt)
                         outbox.latest_writeback_status = decision.target_status.value
@@ -486,13 +508,30 @@ class DispositionSyncService:
                         result = decision.target_status
                         sync_event_id = outbox.event_id
                     elif decision.action is _OperatorRetryAction.BLOCKED:
-                        raise WritebackConflictError(
+                        # Commit PAUSED gate + audit, then raise 409 outside the txn.
+                        # Do not attach operation_id — a blocked attempt must not replay
+                        # as a successful WritebackStatus response.
+                        await self._record_operator_retry_audit(
+                            session,
+                            outbox,
+                            operator=operator,
+                            operation_id=None,
+                            reason=reason,
+                            audit_reason=(
+                                f"operator_retry:blocked:{decision.reason or 'lookup'}"
+                            ),
+                            from_delivery=OutboxDeliveryStatus.PAUSED.value,
+                            to_delivery=OutboxDeliveryStatus.PAUSED.value,
+                            result_status=latest or WritebackStatus.FAILED,
+                        )
+                        blocked_error = WritebackConflictError(
                             decision.reason or "operator retry blocked after lookup",
                             details={
                                 "writeback_id": writeback_id,
                                 "delivery_status": OutboxDeliveryStatus.PAUSED.value,
                             },
                         )
+                        result = latest or WritebackStatus.FAILED
                     else:
                         current_writeback = latest or WritebackStatus.FAILED
                         target_writeback = WritebackStatus.PENDING
@@ -532,6 +571,8 @@ class DispositionSyncService:
                         record_writeback_retry(adapter=self._adapter_label(outbox))
                         result = target_writeback
 
+        if blocked_error is not None:
+            raise blocked_error
         if sync_event_id is not None:
             await self._sync_writeback_summary(sync_event_id)
             await self._maybe_resume(sync_event_id)
@@ -643,6 +684,37 @@ class DispositionSyncService:
                 )
                 outbox.latest_writeback_status = status.value
                 outbox.updated_at = datetime.now(UTC)
+                # Fence undelivered outboxes when provider lookup proves terminal success
+                # so a concurrent operator-retry READY claim cannot re-egress (ISSUE-274).
+                if is_operator_retry_terminal_success(status):
+                    delivery = OutboxDeliveryStatus(outbox.delivery_status)
+                    if delivery in {
+                        OutboxDeliveryStatus.READY,
+                        OutboxDeliveryStatus.PAUSED,
+                        OutboxDeliveryStatus.WAITING_RETRY,
+                    }:
+                        validate_outbox_delivery_transition(
+                            delivery,
+                            OutboxDeliveryStatus.DELIVERED,
+                            lookup_confirmed_submission=True,
+                        )
+                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                        outbox.delivered_at = outbox.delivered_at or datetime.now(UTC)
+                        outbox.locked_by = None
+                        outbox.locked_at = None
+                        outbox.lease_expires_at = None
+                        outbox.next_retry_at = None
+                    elif delivery is OutboxDeliveryStatus.LEASED:
+                        validate_outbox_delivery_transition(
+                            delivery,
+                            OutboxDeliveryStatus.DELIVERED,
+                        )
+                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                        outbox.delivered_at = outbox.delivered_at or datetime.now(UTC)
+                        outbox.locked_by = None
+                        outbox.locked_at = None
+                        outbox.lease_expires_at = None
+                        outbox.next_retry_at = None
                 action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
                 _mirror_writeback_status_to_action(action, status.value)
                 event_id = outbox.event_id
@@ -1349,13 +1421,18 @@ class DispositionSyncService:
         to_delivery: str,
         result_status: WritebackStatus,
     ) -> None:
-        _ = reason
-        replay_reason = audit_reason
+        note = (reason or "").strip()
         if operation_id is not None:
             replay_reason = (
                 f"{_OPERATOR_RETRY_REPLAY_PREFIX}:{outbox.writeback_id}:"
                 f"{operation_id}:{result_status.value}"
             )
+            if note:
+                replay_reason = f"{replay_reason}|note:{note}"
+        else:
+            replay_reason = audit_reason
+            if note and note not in replay_reason:
+                replay_reason = f"{replay_reason}|note:{note}"
         session.add(
             orm.EventAuditLog(
                 event_id=outbox.event_id,
@@ -1365,6 +1442,7 @@ class DispositionSyncService:
                 reason=replay_reason,
             )
         )
+        _ = to_delivery
 
     async def _evaluate_operator_retry_lookup(
         self,
@@ -1373,9 +1451,7 @@ class DispositionSyncService:
     ) -> _OperatorRetryDecision:
         adapter = self._resolve_adapter(outbox)
         caps = adapter.capabilities()
-        safe_retry = adapter_capabilities_allow_safe_retry(
-            supports_idempotency=caps.supports_idempotency,
-        )
+        safe_retry = adapter.allows_safe_retry()
         if not (caps.supports_lookup_by_idempotency or caps.supports_status_query):
             return _OperatorRetryDecision(
                 action=_OperatorRetryAction.BLOCKED,
@@ -1385,12 +1461,14 @@ class DispositionSyncService:
         command = DispositionCommand.model_validate(outbox.command_payload)
         receipt: DispositionReceipt | None = None
         lookup_degraded = False
+        idempotency_lookup_done = False
         try:
             if caps.supports_lookup_by_idempotency:
                 receipt = await adapter.lookup_submission(
                     command.idempotency_key,
                     command.source_locator,
                 )
+                idempotency_lookup_done = True
             if receipt is None and caps.supports_status_query:
                 latest_receipt = await session.scalar(
                     select(orm.DispositionReceipt)
@@ -1444,15 +1522,21 @@ class DispositionSyncService:
                 reason=f"lookup returned non-retryable status {receipt.status.value}",
             )
 
-        if safe_retry:
+        # Never-accepted only when idempotency lookup authoritatively returned None.
+        if idempotency_lookup_done:
+            if safe_retry:
+                return _OperatorRetryDecision(
+                    action=_OperatorRetryAction.RE_ENQUEUE,
+                    lookup_never_accepted=True,
+                    adapter_allows_safe_retry=True,
+                )
             return _OperatorRetryDecision(
-                action=_OperatorRetryAction.RE_ENQUEUE,
-                lookup_never_accepted=True,
-                adapter_allows_safe_retry=True,
+                action=_OperatorRetryAction.BLOCKED,
+                reason="lookup proves never-accepted but adapter lacks safe-retry",
             )
         return _OperatorRetryDecision(
             action=_OperatorRetryAction.BLOCKED,
-            reason="lookup proves never-accepted but adapter lacks safe-retry",
+            reason="cannot prove never-accepted without idempotency lookup",
         )
 
     def _resolve_adapter(self, outbox: orm.DispositionOutbox) -> BaseDispositionAdapter:

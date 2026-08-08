@@ -131,8 +131,10 @@ def client() -> TestClient:
     # Source-record GET must not hit real Postgres in contract tests.
     app.dependency_overrides[_real_get_session_factory] = lambda: _empty_session_factory
 
+    mock_disposition_sync = _MockDispositionSyncService()
+
     async def _mock_disposition_sync() -> _MockDispositionSyncService:
-        return _MockDispositionSyncService()
+        return mock_disposition_sync
 
     async def _mock_execution_job_query() -> _MockExecutionJobQueryService:
         return _MockExecutionJobQueryService()
@@ -140,7 +142,9 @@ def client() -> TestClient:
     app.dependency_overrides[_real_get_disposition_sync] = _mock_disposition_sync
     app.dependency_overrides[_real_get_execution_job_query] = _mock_execution_job_query
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
-    yield TestClient(app)
+    client = TestClient(app)
+    client.mock_disposition_sync = mock_disposition_sync  # type: ignore[attr-defined]
+    yield client
     app.dependency_overrides.clear()
 
 
@@ -297,6 +301,11 @@ class _MockDispositionSyncService:
         "wbk-unknown": WritebackStatus.UNKNOWN,
     }
 
+    def __init__(self) -> None:
+        self._retry_ops: dict[tuple[str, str], WritebackStatus] = {}
+        self.retry_calls = 0
+        self.process_ready_calls = 0
+
     async def list_event_dispositions(
         self, event_id: str
     ) -> list[tuple[DispositionCommand, WritebackStatus | None]]:
@@ -369,7 +378,8 @@ class _MockDispositionSyncService:
         operation_id: str | None = None,
         reason: str | None = None,
     ) -> WritebackStatus:
-        _ = (operator, operation_id, reason)
+        _ = (operator, reason)
+        self.retry_calls += 1
         status = self._KNOWN_WRITEBACKS.get(writeback_id)
         if status is None:
             raise EventNotFoundError(
@@ -386,6 +396,12 @@ class _MockDispositionSyncService:
                 "CONFIRMED writeback cannot be retried",
                 details={"writeback_id": writeback_id, "status": status.value},
             )
+        if operation_id is not None:
+            key = (writeback_id, operation_id)
+            cached = self._retry_ops.get(key)
+            if cached is not None:
+                return cached
+            self._retry_ops[key] = WritebackStatus.PENDING
         return WritebackStatus.PENDING
 
     async def resolve_writeback(
@@ -416,6 +432,7 @@ class _MockDispositionSyncService:
 
     async def process_ready_outboxes(self, *, limit: int = 10) -> int:
         _ = limit
+        self.process_ready_calls += 1
         return 0
 
 
@@ -754,6 +771,8 @@ def test_writeback_retry_requires_verification_then_idempotent(client: TestClien
     assert confirmed.json()["error_code"] == "writeback_conflict"
 
     # Failed writeback operator retry is idempotent when replaying operation_id.
+    mock_sync = client.mock_disposition_sync  # type: ignore[attr-defined]
+    before_calls = mock_sync.retry_calls
     body = {"operation_id": "op-contract-replay-1"}
     first = client.post(
         "/api/v1/writebacks/wbk-failed-retry/retry",
@@ -767,6 +786,10 @@ def test_writeback_retry_requires_verification_then_idempotent(client: TestClien
     )
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()
+    assert first.json()["status"] == "pending"
+    # Same shared mock must see both calls and cache the operation_id replay.
+    assert mock_sync.retry_calls == before_calls + 2
+    assert ("wbk-failed-retry", "op-contract-replay-1") in mock_sync._retry_ops
 
 
 def test_readiness_recheck_is_idempotent(client: TestClient) -> None:

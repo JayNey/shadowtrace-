@@ -422,6 +422,7 @@ OUTBOX_DELIVERY_TRANSITIONS: dict[OutboxDeliveryStatus, set[OutboxDeliveryStatus
     OutboxDeliveryStatus.READY: {
         OutboxDeliveryStatus.LEASED,
         OutboxDeliveryStatus.DEAD_LETTER,  # writeback fence blocked (ISSUE-222)
+        OutboxDeliveryStatus.DELIVERED,  # provider lookup confirmed before egress (ISSUE-274)
     },
     OutboxDeliveryStatus.LEASED: {
         OutboxDeliveryStatus.DELIVERED,
@@ -432,12 +433,12 @@ OUTBOX_DELIVERY_TRANSITIONS: dict[OutboxDeliveryStatus, set[OutboxDeliveryStatus
     OutboxDeliveryStatus.WAITING_RETRY: {
         OutboxDeliveryStatus.LEASED,
         OutboxDeliveryStatus.DEAD_LETTER,  # writeback fence blocked (ISSUE-222)
+        OutboxDeliveryStatus.DELIVERED,  # provider lookup confirmed before re-claim (ISSUE-274)
     },
     OutboxDeliveryStatus.PAUSED: {
         OutboxDeliveryStatus.READY,  # after status lookup / manual adjudication
-        OutboxDeliveryStatus.DELIVERED,  # lookup found the external submission
+        OutboxDeliveryStatus.DELIVERED,  # lookup found the external submission / reconcile
         OutboxDeliveryStatus.DEAD_LETTER,
-        OutboxDeliveryStatus.DELIVERED,  # operator retry reconcile — no re-egress (ISSUE-274)
     },
     OutboxDeliveryStatus.DELIVERED: {
         OutboxDeliveryStatus.PAUSED,  # operator retry from failed writeback (ISSUE-274)
@@ -1220,9 +1221,14 @@ def delivery_status_eligible_for_operator_retry_pause(
 def adapter_capabilities_allow_safe_retry(
     *,
     supports_idempotency: bool,
+    supports_lookup_by_idempotency: bool,
 ) -> bool:
-    """Adapter declares idempotent resubmit safe (ISSUE-274 / WRITEBACK_STATUS_TRANSITIONS)."""
-    return supports_idempotency
+    """Adapter declares idempotent resubmit safe (ISSUE-274 / WRITEBACK_STATUS_TRANSITIONS).
+
+    Mirrors ``BaseDispositionAdapter.allows_safe_retry``: both idempotent submit
+    and authoritative idempotency lookup are required.
+    """
+    return supports_idempotency and supports_lookup_by_idempotency
 
 
 def is_operator_retry_terminal_success(writeback_status: WritebackStatus) -> bool:
@@ -1277,12 +1283,17 @@ def validate_outbox_delivery_transition(
             target=target,
         )
     if (
-        current is OutboxDeliveryStatus.PAUSED
+        current
+        in {
+            OutboxDeliveryStatus.PAUSED,
+            OutboxDeliveryStatus.READY,
+            OutboxDeliveryStatus.WAITING_RETRY,
+        }
         and target is OutboxDeliveryStatus.DELIVERED
         and not lookup_confirmed_submission
     ):
         raise InvalidStateTransitionError(
-            "PAUSED→DELIVERED requires a provider lookup receipt",
+            f"{current.value}→DELIVERED requires a provider lookup receipt",
             current=current,
             target=target,
         )

@@ -12,6 +12,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
 
 import httpx
@@ -518,6 +519,7 @@ async def _insert_operator_retry_outbox(
     delivery_status: OutboxDeliveryStatus,
     writeback_status: WritebackStatus | None,
     idempotency_key: str | None = None,
+    superseded_by_disposition_id: str | None = None,
 ) -> tuple[str, str]:
     writeback_id = f"wbk-{_sfx()}"
     outbox_id = f"obx-{_sfx()}"
@@ -547,6 +549,7 @@ async def _insert_operator_retry_outbox(
                     intent_kind="entity_action_submit",
                     logical_slot="default",
                     idempotency_key=idem,
+                    superseded_by_disposition_id=superseded_by_disposition_id,
                     command_payload=command_payload,
                     command_payload_sha256="deadbeef",
                     delivery_status=delivery_status.value,
@@ -703,8 +706,20 @@ async def test_operator_retry_lookup_degraded_stays_paused(
         delivery_status=OutboxDeliveryStatus.DEAD_LETTER,
         writeback_status=WritebackStatus.FAILED,
     )
+    adapter = registry.get("mock_xdr")
+    original_submit = adapter.submit
+    submit_calls = 0
+
+    async def _counting_submit(*args: Any, **kwargs: Any) -> Any:
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(*args, **kwargs)
+
+    adapter.submit = _counting_submit  # type: ignore[method-assign]
     with pytest.raises(WritebackConflictError, match="lookup degraded"):
         await sync.retry_writeback(writeback_id, operator="operator-1")
+    await sync.process_ready_outboxes(limit=5)
+    assert submit_calls == 0
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
@@ -766,6 +781,16 @@ async def test_operator_retry_late_confirmed_reconcile_no_resend(
                 source_record_id=source_record_id,
             )
     await sync.process_ready_outboxes(limit=1)
+    adapter = sync._adapters.get("mock_xdr")
+    original_submit = adapter.submit
+    submit_calls = 0
+
+    async def _counting_submit(*args: Any, **kwargs: Any) -> Any:
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(*args, **kwargs)
+
+    adapter.submit = _counting_submit  # type: ignore[method-assign]
     async with session_factory() as session:
         async with session.begin():
             row = await session.get(orm.DispositionOutbox, record.outbox_id)
@@ -774,6 +799,8 @@ async def test_operator_retry_late_confirmed_reconcile_no_resend(
             row.delivery_status = OutboxDeliveryStatus.DELIVERED.value
     status = await sync.retry_writeback(record.writeback_id, operator="operator-1")
     assert status in {WritebackStatus.CONFIRMED, WritebackStatus.ACCEPTED}
+    await sync.process_ready_outboxes(limit=5)
+    assert submit_calls == 0
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, record.outbox_id)
         assert row is not None
@@ -872,12 +899,58 @@ async def test_operator_retry_without_safe_retry_blocked(
         delivery_status=OutboxDeliveryStatus.DEAD_LETTER,
         writeback_status=WritebackStatus.FAILED,
     )
+    adapter = registry.get("live_stub")
+    original_submit = adapter.submit
+    submit_calls = 0
+
+    async def _counting_submit(*args: Any, **kwargs: Any) -> Any:
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(*args, **kwargs)
+
+    adapter.submit = _counting_submit  # type: ignore[method-assign]
     with pytest.raises(WritebackConflictError, match="lookup capability unavailable"):
         await sync.retry_writeback(writeback_id, operator="operator-1")
+    await sync.process_ready_outboxes(limit=5)
+    assert submit_calls == 0
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
         assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_superseded_head_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DEAD_LETTER,
+        writeback_status=WritebackStatus.FAILED,
+        superseded_by_disposition_id="disp-new-head",
+    )
+    with pytest.raises(WritebackConflictError, match="superseded"):
+        await sync.retry_writeback(writeback_id, operator="operator-1")
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
 
 
 @pytest.mark.asyncio
