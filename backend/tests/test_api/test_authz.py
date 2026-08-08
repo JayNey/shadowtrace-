@@ -35,10 +35,12 @@ def _dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
 def client() -> TestClient:
     from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
     from app.api.v1.deps import get_event_service as _real_get_event_service
+    from app.api.v1.deps import get_execution_job_query_service as _real_get_execution_job_query
     from app.api.v1.deps import get_state_machine as _real_get_state_machine
     from tests.test_api.test_contracts import (
         _MockDispositionSyncService,
         _MockEventService,
+        _MockExecutionJobQueryService,
         _MockStateMachine,
     )
 
@@ -64,15 +66,20 @@ def client() -> TestClient:
     async def _mock_disposition_sync() -> _MockDispositionSyncService:
         return _MockDispositionSyncService()
 
+    async def _mock_execution_job_query() -> _MockExecutionJobQueryService:
+        return _MockExecutionJobQueryService()
+
     app.dependency_overrides[get_approval_engine] = _stub_engine
     app.dependency_overrides[_real_get_event_service] = _mock_event_service
     app.dependency_overrides[_real_get_state_machine] = _mock_state_machine
     app.dependency_overrides[_real_get_disposition_sync] = _mock_disposition_sync
+    app.dependency_overrides[_real_get_execution_job_query] = _mock_execution_job_query
     yield TestClient(app)
     app.dependency_overrides.pop(get_approval_engine, None)
     app.dependency_overrides.pop(_real_get_event_service, None)
     app.dependency_overrides.pop(_real_get_state_machine, None)
     app.dependency_overrides.pop(_real_get_disposition_sync, None)
+    app.dependency_overrides.pop(_real_get_execution_job_query, None)
 
 
 def _hdr(role: str) -> dict[str, str]:

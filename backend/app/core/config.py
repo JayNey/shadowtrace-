@@ -171,6 +171,14 @@ class Settings(BaseSettings):
     retrieval_default_tenant_id: str = Field(default="local", alias="RETRIEVAL_DEFAULT_TENANT_ID")
     retrieval_fixture_fallback: bool = Field(default=False, alias="RETRIEVAL_FIXTURE_FALLBACK")
     playbook_fixture_fallback: bool = Field(default=False, alias="PLAYBOOK_FIXTURE_FALLBACK")
+    execution_job_fixture_enabled: bool = Field(
+        default=False,
+        alias="EXECUTION_JOB_FIXTURE_ENABLED",
+        description=(
+            "When true, GET /execution-jobs/{job_id} may serve the explicit "
+            "demo fixture job-0a1b2c3d for contract/demo tests. Forbidden in production."
+        ),
+    )
     playbook_release_require_active: bool = Field(
         default=False,
         alias="PLAYBOOK_RELEASE_REQUIRE_ACTIVE",
@@ -537,6 +545,8 @@ class Settings(BaseSettings):
             violations.append("retrieval_fixture_fallback=true")
         if self.playbook_fixture_fallback:
             violations.append("playbook_fixture_fallback=true")
+        if self.execution_job_fixture_enabled:
+            violations.append("execution_job_fixture_enabled=true")
         if self.react_enabled and not self.tool_call_grant_required:
             violations.append("react_enabled=true requires tool_call_grant_required=true")
         if self.react_shadow_pivot_enabled and not self.tool_call_grant_required:

@@ -17,6 +17,7 @@ from app.api.v1.deps import _get_context_store as _real_get_context_store
 from app.api.v1.deps import _get_session_factory as _real_get_session_factory
 from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
 from app.api.v1.deps import get_event_service as _real_get_event_service
+from app.api.v1.deps import get_execution_job_query_service as _real_get_execution_job_query
 from app.api.v1.deps import get_state_machine as _real_get_state_machine
 from app.api.v1.errors import register_exception_handlers
 from app.core.config import get_settings
@@ -133,7 +134,11 @@ def client() -> TestClient:
     async def _mock_disposition_sync() -> _MockDispositionSyncService:
         return _MockDispositionSyncService()
 
+    async def _mock_execution_job_query() -> _MockExecutionJobQueryService:
+        return _MockExecutionJobQueryService()
+
     app.dependency_overrides[_real_get_disposition_sync] = _mock_disposition_sync
+    app.dependency_overrides[_real_get_execution_job_query] = _mock_execution_job_query
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
     yield TestClient(app)
     app.dependency_overrides.clear()
@@ -399,6 +404,24 @@ class _MockDispositionSyncService:
     async def process_ready_outboxes(self, *, limit: int = 10) -> int:
         _ = limit
         return 0
+
+
+class _MockExecutionJobQueryService:
+    """Contract-test stub: serves the explicit demo fixture only."""
+
+    async def get_execution_job(self, job_id: str, *, principal: Any) -> s.ExecutionJobResponse:
+        _ = principal
+        from app.services.execution_job_query_service import demo_execution_job_response
+
+        fixture = demo_execution_job_response(job_id)
+        if fixture is None:
+            from app.core.errors import ResourceNotFoundError
+
+            raise ResourceNotFoundError(
+                f"execution job {job_id} not found",
+                details={"job_id": job_id},
+            )
+        return fixture
 
 
 class _MockStateMachine:

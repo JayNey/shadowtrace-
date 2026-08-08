@@ -61,6 +61,7 @@ _tool_call_grant_service: Any = None  # ToolCallGrantService (ISSUE-134)
 _agent_task_service: Any = None  # AgentTaskService (ISSUE-133)
 _agent_artifact_service: Any = None  # AgentArtifactService (ISSUE-133)
 _content_projection_service: Any = None  # ContentProjectionService (ISSUE-133)
+_execution_job_query: Any = None  # ExecutionJobQueryService (ISSUE-271)
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -668,6 +669,24 @@ ActionExecutionDep = Annotated[Any, Depends(get_action_execution)]
 RollbackServiceDep = Annotated[Any, Depends(get_rollback_service)]
 
 
+def get_execution_job_query_service() -> Any:
+    """Return the authoritative execution job read service (ISSUE-271)."""
+    global _execution_job_query
+    if _execution_job_query is None:
+        from app.core.config import get_settings
+        from app.services.execution_job_query_service import ExecutionJobQueryService
+
+        settings = get_settings()
+        _execution_job_query = ExecutionJobQueryService(
+            _get_session_factory(),
+            fixture_enabled=settings.execution_job_fixture_enabled,
+        )
+    return _execution_job_query
+
+
+ExecutionJobQueryDep = Annotated[Any, Depends(get_execution_job_query_service)]
+
+
 async def _get_wm() -> Any:
     """Return a shared WorkingMemory instance."""
     from app.services.working_memory import WorkingMemory
@@ -1094,6 +1113,7 @@ def reset_loop_bound_redis_resources() -> None:
     _context_store = None
     _degraded_flags = None
     _decision_record_service = None
+    _execution_job_query = None
     _event_service = None
     _state_machine = None
     _event_bus = None
@@ -1174,5 +1194,6 @@ def reset_deps() -> None:
     _graph_sync_service = None
     _neo4j_client = None
     _decision_record_service = None
+    _execution_job_query = None
     _agent_artifact_service = None
     _content_projection_service = None
