@@ -211,12 +211,23 @@ def headers_from_socketio_environ(
 
 
 def client_host_from_socketio_environ(environ: Mapping[str, Any]) -> str:
-    """Best-effort client address for trusted-proxy auth at the Socket.IO handshake."""
-    forwarded = environ.get("HTTP_X_FORWARDED_FOR")
-    if isinstance(forwarded, str) and forwarded.strip():
-        return forwarded.split(",")[0].strip()
+    """Return the direct peer address for trusted-proxy handshake validation.
+
+    Forwarded headers are intentionally ignored: they describe the original
+    client and are attacker-controlled when the backend is reached directly.
+    The trusted-proxy allowlist must match the direct network peer, exactly as
+    the REST authentication dependency uses ``request.client.host``.
+    """
     remote = environ.get("REMOTE_ADDR")
-    return remote if isinstance(remote, str) else ""
+    if isinstance(remote, str) and remote.strip():
+        return remote.strip()
+
+    scope = environ.get("asgi.scope") or environ.get("scope")
+    if isinstance(scope, dict):
+        client = scope.get("client")
+        if isinstance(client, (list, tuple)) and client and isinstance(client[0], str):
+            return client[0]
+    return ""
 
 
 def resolve_principal_from_socketio_handshake(

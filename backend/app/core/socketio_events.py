@@ -77,8 +77,15 @@ class SocketIOSessionRegistry:
     def remove(self, sid: str) -> None:
         self._sessions.pop(sid, None)
 
+    def clear(self) -> None:
+        self._sessions.clear()
+
     def get(self, sid: str) -> _SocketSession | None:
         return self._sessions.get(sid)
+
+    def items(self) -> tuple[tuple[str, _SocketSession], ...]:
+        """Return a stable snapshot for validation during broadcast."""
+        return tuple(self._sessions.items())
 
     def track_room(self, sid: str, room: str) -> None:
         session = self._sessions.get(sid)
@@ -101,14 +108,61 @@ def _session_still_valid(session: _SocketSession) -> bool:
     if not session.auth_fingerprint:
         return True
     try:
-        resolve_principal(
+        current_principal = resolve_principal(
             headers={"Authorization": session.auth_fingerprint},
             client_host="",
         )
     except AuthenticationError:
         return False
-    else:
-        return True
+    return current_principal == session.principal
+
+
+async def disconnect_invalid_sessions(
+    sio: socketio.AsyncServer,
+    sessions: SocketIOSessionRegistry,
+) -> bool:
+    """Remove revoked bearer sessions before any room broadcast.
+
+    Returns ``False`` if room cleanup or disconnect could not be completed.
+    Callers must fail closed and skip the broadcast in that case.
+    """
+    cleanup_ok = True
+    for sid, session in sessions.items():
+        if _session_still_valid(session):
+            continue
+
+        room_cleanup_ok = True
+        for room in tuple(session.rooms):
+            try:
+                await sio.leave_room(sid, room, namespace=SOCKETIO_NAMESPACE)
+            except Exception:
+                room_cleanup_ok = False
+                logger.warning(
+                    "socketio revoked session room cleanup failed sid=%s room=%s",
+                    sid,
+                    room,
+                    exc_info=True,
+                )
+
+        disconnect_ok = True
+        try:
+            await sio.disconnect(sid, namespace=SOCKETIO_NAMESPACE)
+        except Exception:
+            disconnect_ok = False
+            logger.warning(
+                "socketio revoked session disconnect failed sid=%s",
+                sid,
+                exc_info=True,
+            )
+
+        if disconnect_ok:
+            sessions.remove(sid)
+        elif room_cleanup_ok:
+            sessions.clear_rooms(sid)
+        else:
+            cleanup_ok = False
+
+    return cleanup_ok
 
 
 async def _event_readable(event_id: str) -> bool:
@@ -293,5 +347,6 @@ __all__ = [
     "SOCKETIO_NAMESPACE",
     "SocketIOSessionRegistry",
     "_event_room",
+    "disconnect_invalid_sessions",
     "register_handlers",
 ]

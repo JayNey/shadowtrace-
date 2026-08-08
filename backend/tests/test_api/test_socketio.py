@@ -40,6 +40,11 @@ import socketio
 import uvicorn
 from fastapi import FastAPI
 
+from app.core.auth import (
+    AuthenticationError,
+    client_host_from_socketio_environ,
+    resolve_principal_from_socketio_handshake,
+)
 from app.core.config import get_settings
 from app.core.event_bus import SOCKET_MESSAGE_TYPES, EventBus
 from app.core.redis_client import RedisClient
@@ -48,6 +53,7 @@ from app.core.socketio_events import (
     SOCKETIO_NAMESPACE,
     SocketIOSessionRegistry,
     _event_room,
+    disconnect_invalid_sessions,
     register_handlers,
 )
 from app.core.socketio_manager import SocketIOManager
@@ -97,6 +103,7 @@ def _socket_headers(*, origin: str = _ALLOWED_TEST_ORIGIN) -> dict[str, str]:
         "Authorization": "Bearer analyst-token",
         "Origin": origin,
     }
+
 
 # ---------------------------------------------------------------------------
 # Redis fixture (skipped when unreachable)
@@ -265,6 +272,45 @@ def _connect_session(sio: socketio.AsyncServer, sid: str) -> None:
     sio.manager.rooms[ns][sid][sid] = eio_sid
 
 
+def test_socketio_trusted_proxy_ignores_spoofed_forwarded_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The proxy allowlist is matched against the direct peer, never XFF."""
+    monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_ALLOWLIST", "10.0.0.8")
+    get_settings.cache_clear()
+    environ = {
+        "HTTP_X_AUTH_SUBJECT": "spoofed-user",
+        "HTTP_X_AUTH_ROLES": "admin",
+        "HTTP_X_FORWARDED_FOR": "10.0.0.8",
+        "REMOTE_ADDR": "203.0.113.20",
+    }
+
+    assert client_host_from_socketio_environ(environ) == "203.0.113.20"
+    with pytest.raises(AuthenticationError):
+        resolve_principal_from_socketio_handshake(environ)
+
+
+def test_socketio_trusted_proxy_accepts_allowlisted_direct_peer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real trusted proxy may forward any end-user address without breaking auth."""
+    monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "true")
+    monkeypatch.setenv("TRUSTED_PROXY_ALLOWLIST", "10.0.0.8")
+    get_settings.cache_clear()
+    environ = {
+        "HTTP_X_AUTH_SUBJECT": "proxied-user",
+        "HTTP_X_AUTH_ROLES": "analyst",
+        "HTTP_X_FORWARDED_FOR": "198.51.100.42",
+        "REMOTE_ADDR": "10.0.0.8",
+    }
+
+    principal = resolve_principal_from_socketio_handshake(environ)
+
+    assert principal.subject == "proxied-user"
+    assert principal.roles == ["analyst"]
+
+
 class TestEventHandlers:
     """Unit tests for connect / disconnect / subscribe handlers."""
 
@@ -376,6 +422,39 @@ class TestEventHandlers:
         await handler(sid)
 
     @pytest.mark.asyncio
+    async def test_revoked_bearer_leaves_rooms_before_broadcast(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        sio: socketio.AsyncServer,
+        sessions: SocketIOSessionRegistry,
+    ) -> None:
+        sid = _fake_sid()
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        await connect_handler(sid, _auth_environ(), None)
+        assert sid in sio.manager.rooms[SOCKETIO_NAMESPACE][GLOBAL_ROOM]
+
+        monkeypatch.setenv(
+            "DEV_AUTH_TOKENS",
+            json.dumps(
+                {
+                    "analyst-token": {"subject": "analyst-1", "roles": []},
+                    "norole-token": {"subject": "norole-1", "roles": []},
+                }
+            ),
+        )
+        disconnect = AsyncMock()
+        sio.disconnect = disconnect  # type: ignore[method-assign]
+
+        cleanup_ok = await disconnect_invalid_sessions(sio, sessions)
+
+        assert cleanup_ok is True
+        assert sessions.get(sid) is None
+        assert sid not in sio.manager.rooms[SOCKETIO_NAMESPACE].get(GLOBAL_ROOM, {})
+        disconnect.assert_awaited_once_with(sid, namespace=SOCKETIO_NAMESPACE)
+
+    @pytest.mark.asyncio
     async def test_subscribe_joins_event_room(self, sio: socketio.AsyncServer) -> None:
         """subscribe event adds client to event:{event_id} room."""
         sid = _fake_sid()
@@ -467,6 +546,45 @@ class TestEventHandlers:
         assert room in ns_rooms
         for sid in (sid_a, sid_b):
             assert sid in ns_rooms[room], f"{sid} missing from {room}"
+
+
+@pytest.mark.asyncio
+async def test_manager_periodically_revalidates_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+    cleanup = AsyncMock(return_value=True)
+
+    async def _finish_interval(_delay: float) -> None:
+        manager._stopping = True
+
+    monkeypatch.setattr("app.core.socketio_manager.asyncio.sleep", _finish_interval)
+    monkeypatch.setattr(
+        "app.core.socketio_manager.disconnect_invalid_sessions",
+        cleanup,
+    )
+
+    await manager._validate_sessions()
+
+    cleanup.assert_awaited_once_with(manager.sio, manager._sessions)
+
+
+@pytest.mark.asyncio
+async def test_manager_stop_clears_registry_without_detaching_handlers() -> None:
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+    registry = manager._sessions
+    sid = _fake_sid()
+    _connect_session(manager.sio, sid)
+    connect_handler = manager.sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+    assert connect_handler is not None
+    await connect_handler(sid, _auth_environ(), None)
+    assert registry.get(sid) is not None
+    manager.sio.disconnect = AsyncMock()  # type: ignore[method-assign]
+
+    await manager.stop()
+
+    assert manager._sessions is registry
+    assert registry.get(sid) is None
 
 
 # ---------------------------------------------------------------------------
