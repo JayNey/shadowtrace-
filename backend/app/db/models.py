@@ -330,11 +330,20 @@ class ActionExecutionJob(Base):
 
 class ActionTargetResult(Base):
     __tablename__ = "action_target_result"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id",
+            "canonical_target",
+            "attempt",
+            name="uq_action_target_result_job_target_attempt",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     job_id: Mapped[str] = mapped_column(
         String, ForeignKey("action_execution_job.job_id"), nullable=False, index=True
     )
+    attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     canonical_target: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     code: Mapped[str | None] = mapped_column(String, nullable=True)

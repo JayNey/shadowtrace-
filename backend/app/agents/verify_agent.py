@@ -60,6 +60,7 @@ from app.models.execution import ActionExecutionJob
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.models.verification_readiness import has_immediate_effect_pending
 from app.services.event_disposition_service import DispositionActivationResult
+from app.services.execution_job_persistence import job_from_row, load_target_results_by_job_ids
 from app.services.working_memory import BoundWorkingMemory
 
 logger = logging.getLogger(__name__)
@@ -1432,7 +1433,14 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         )
                     )
                 ).all()
-                jobs_map = {r.action_id: _job_from_row(r) for r in job_rows}
+                targets_by_job = await load_target_results_by_job_ids(session, list(job_rows))
+                jobs_map = {
+                    row.action_id: job_from_row(
+                        row,
+                        target_results=targets_by_job.get(row.job_id, []),
+                    )
+                    for row in job_rows
+                }
 
             # Load outbox records.
             outbox_map: dict[str, list[Any]] = {}
@@ -2250,30 +2258,6 @@ def _action_from_row(row: orm.Action) -> Action:
         rollback_status=(ActionStatus(row.rollback_status) if row.rollback_status else None),
         source_action_id=row.source_action_id,
         updated_at=row.updated_at,
-    )
-
-
-def _job_from_row(row: orm.ActionExecutionJob) -> ActionExecutionJob:
-    """Reconstruct ActionExecutionJob domain model from ORM row."""
-    return ActionExecutionJob(
-        job_id=row.job_id,
-        event_id=row.event_id,
-        action_id=row.action_id,
-        provider_name=row.provider_name,
-        idempotency_key=row.idempotency_key,
-        provider_job_id=row.provider_job_id,
-        status=ExecutionJobStatus(row.status),
-        claimed_by=row.claimed_by,
-        lease_expires_at=row.lease_expires_at,
-        poll_after_ms=row.poll_after_ms,
-        attempt=row.attempt,
-        provider_code=row.provider_code,
-        provider_message=row.provider_message,
-        raw_result=row.raw_result or {},
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        started_at=row.started_at,
-        finished_at=row.finished_at,
     )
 
 

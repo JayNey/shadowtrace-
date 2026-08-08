@@ -40,6 +40,12 @@ from app.services.disposition_command_factory import (
 )
 from app.services.disposition_guard_context import resolve_approved_action_ids
 from app.services.disposition_sync_service import DispositionSyncService
+from app.services.execution_job_persistence import (
+    job_from_row,
+    load_target_results_by_job_ids,
+    load_target_results_for_job,
+    sync_target_results_in_tx,
+)
 from app.services.playbook_approval_binding import validate_approval_binding
 from app.services.state_machine_service import StateMachineService
 from app.services.writeback_side_effect_fence import (
@@ -132,7 +138,8 @@ class DbExecutionJobStore:
             row = await session.get(orm.ActionExecutionJob, job_id)
             if row is None:
                 return None
-            return _job_from_row(row)
+            targets = await load_target_results_for_job(session, job_id, row.attempt)
+            return job_from_row(row, target_results=targets)
 
     async def cas_update_job(
         self,
@@ -146,31 +153,17 @@ class DbExecutionJobStore:
                 row = await session.get(orm.ActionExecutionJob, job_id, with_for_update=True)
                 if row is None or ExecutionJobStatus(row.status) is not expected_status:
                     return False
+                if updated.target_results:
+                    synced = await sync_target_results_in_tx(
+                        session,
+                        job_id=job_id,
+                        attempt=updated.attempt,
+                        targets=updated.target_results,
+                    )
+                    if not synced:
+                        return False
                 _apply_job_row(row, updated)
                 return True
-
-
-def _job_from_row(row: orm.ActionExecutionJob) -> ActionExecutionJob:
-    return ActionExecutionJob(
-        job_id=row.job_id,
-        event_id=row.event_id,
-        action_id=row.action_id,
-        provider_name=row.provider_name,
-        idempotency_key=row.idempotency_key,
-        provider_job_id=row.provider_job_id,
-        status=ExecutionJobStatus(row.status),
-        claimed_by=row.claimed_by,
-        lease_expires_at=row.lease_expires_at,
-        poll_after_ms=row.poll_after_ms,
-        attempt=row.attempt,
-        provider_code=row.provider_code,
-        provider_message=row.provider_message,
-        raw_result=row.raw_result or {},
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        started_at=row.started_at,
-        finished_at=row.finished_at,
-    )
 
 
 def _apply_job_row(row: orm.ActionExecutionJob, job: ActionExecutionJob) -> None:
@@ -1076,6 +1069,7 @@ class ActionExecutionService:
                     select(orm.DispositionOutbox).where(orm.DispositionOutbox.event_id == event_id)
                 )
             ).all()
+            targets_by_job = await load_target_results_by_job_ids(session, list(jobs))
             writeback_summary = await self._context_store.get(event_id, "writeback_summary")
         writeback_counts: Counter[str] = Counter()
         writeback_ids: list[str] = []
@@ -1084,6 +1078,10 @@ class ActionExecutionService:
             if outbox.latest_writeback_status:
                 writeback_counts[outbox.latest_writeback_status] += 1
         counts = Counter(ActionStatus(row.status).value for row in actions)
+        domain_jobs = [
+            job_from_row(job, target_results=targets_by_job.get(job.job_id, [])) for job in jobs
+        ]
+        jobs_by_action = {job.action_id: job for job in domain_jobs}
         action_views = [
             ExecutionActionView(
                 action_id=row.action_id,
@@ -1095,6 +1093,11 @@ class ActionExecutionService:
                 writeback_status=(
                     WritebackStatus(row.writeback_status) if row.writeback_status else None
                 ),
+                target_results=(
+                    jobs_by_action[row.action_id].target_results
+                    if row.action_id in jobs_by_action
+                    else []
+                ),
             )
             for row in actions
         ]
@@ -1102,7 +1105,7 @@ class ActionExecutionService:
             event_id=event_id,
             plan_revision=plan_revision,
             action_counts=dict(counts),
-            jobs=[_job_from_row(job) for job in jobs],
+            jobs=domain_jobs,
             actions=action_views,
             writeback_counts=dict(writeback_counts),
             writeback_ids=writeback_ids,
