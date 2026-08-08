@@ -20,7 +20,12 @@ from app.core.auth import Principal
 from app.core.config import get_settings
 from app.db import models as orm
 from app.models.enums import ActionLevel, ActionStatus, EventStatus, ExecutionSubstate
-from app.orchestration.workflow_graph import NODE_APPROVAL_WAIT, NODE_EXECUTE, NODE_VERIFY
+from app.orchestration.workflow_graph import (
+    NODE_APPROVAL_WAIT,
+    NODE_EXECUTE,
+    NODE_MANUAL_HOLD,
+    NODE_VERIFY,
+)
 from app.services.context_service import EventContextStore
 from app.tasks import investigation_tasks as tasks
 from tests.integration.autonomous_e2e.helpers import (
@@ -169,6 +174,11 @@ async def test_production_resume_hook_after_real_approval_wait_halt(
     assert NODE_VERIFY in node_trace or verify_trace is not None or bool(verification), (
         f"resume must reach verify tail; trace={node_trace}"
     )
+    # Resume must clear the approval-wait halt. Verify may still route to
+    # manual_hold (effect_not_ready) and re-set halted — that is not an
+    # approval-resume regression.
+    if NODE_MANUAL_HOLD not in node_trace:
+        assert post_checkpoint.get("halted") is False, post_checkpoint
 
     reset_deps()
     get_settings.cache_clear()

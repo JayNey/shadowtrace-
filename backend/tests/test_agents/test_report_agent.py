@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import logging
+
 import pytest
 
 from app.agents.report_agent import (
@@ -1124,6 +1126,7 @@ def test_builder_evidence_chain_includes_evidence_id() -> None:
 async def test_llm_failure_emits_structured_observability(
     wm: _FakeWorkingMemory,
     event_service: _FakeEventService,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     event_id = f"evt-report-llm-obs-{uuid4().hex[:8]}"
     await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
@@ -1132,17 +1135,22 @@ async def test_llm_failure_emits_structured_observability(
         working_memory=wm,
         event_service=event_service,
     )
-    report = await agent.execute(
-        ReportAgentInput(
-            event_id=event_id,
-            evidence_output=_main_evidence(event_id),
-            risk_assessment=_high_risk(),
+    report_logger = logging.getLogger("app.agents.report_agent")
+    report_logger.disabled = False
+    report_logger.propagate = True
+    with caplog.at_level(logging.WARNING, logger="app.agents.report_agent"):
+        report = await agent.execute(
+            ReportAgentInput(
+                event_id=event_id,
+                evidence_output=_main_evidence(event_id),
+                risk_assessment=_high_risk(),
+            )
         )
-    )
 
     assert report.generated_by == GENERATED_BY_TEMPLATE
     assert report.error_detail
     assert report.warnings == ["report_llm_fallback:llm_invalid_json"]
+    assert "error_code=llm_invalid_json" in caplog.text
 
     basis = TraceProjection.decision_basis(report.model_dump(mode="json"))
     assert basis["warnings"] == ["report_llm_fallback:llm_invalid_json"]

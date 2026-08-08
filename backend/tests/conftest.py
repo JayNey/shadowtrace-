@@ -21,6 +21,12 @@ ingestion module when both define them. Do **not** reintroduce production-wiring
 fixture names (``event_service``, ``source_ingester``) under ingestion plugins.
 """
 
+from __future__ import annotations
+
+import os
+import random
+from typing import Any
+
 pytest_plugins = [
     "tests.test_tools.tool_system_fixtures",
     "tests.test_orchestration.orchestration_fixtures",
@@ -28,3 +34,13 @@ pytest_plugins = [
     "tests.integration.integration_fixtures",
     "tests.test_ingestion.ingestion_fixtures",
 ]
+
+
+def pytest_collection_modifyitems(config: Any, items: list[Any]) -> None:
+    """Optional deterministic shuffle for ISSUE-267 random-order retests."""
+    del config
+    seed = os.environ.get("SHADOWTRACE_TEST_SHUFFLE_SEED")
+    if seed is None or seed == "":
+        return
+    rng = random.Random(seed)
+    rng.shuffle(items)

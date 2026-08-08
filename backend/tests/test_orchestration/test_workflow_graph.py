@@ -590,8 +590,13 @@ class TestResolveVerifyWritebackStatus:
         )
         assert _resolve_verify_writeback_statuses(result) is None
 
-    def test_status_map_uses_latest_status_on_duplicate_writeback_id(self) -> None:
+    def test_status_map_uses_latest_status_on_duplicate_writeback_id(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
         """Duplicate writeback_id entries keep the latest status and log a warning."""
+        import logging
+
         result = self._result(
             failed_writebacks=["wbk-dup"],
             results=[
@@ -605,8 +610,16 @@ class TestResolveVerifyWritebackStatus:
                 ),
             ],
         )
-        statuses = _resolve_verify_writeback_statuses(result)
+        graph_logger = logging.getLogger("app.orchestration.workflow_graph")
+        graph_logger.disabled = False
+        graph_logger.propagate = True
+        with caplog.at_level(
+            logging.WARNING,
+            logger="app.orchestration.workflow_graph",
+        ):
+            statuses = _resolve_verify_writeback_statuses(result)
         assert statuses == {"wbk-dup": "conflict"}
+        assert "conflicting status for wbk-dup" in caplog.text
 
 
 class TestRouteAfterTriage:

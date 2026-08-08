@@ -6,6 +6,7 @@ and integration suites do not cross-contaminate when sharing one database.
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 
 import pytest_asyncio
@@ -43,7 +44,17 @@ async def clear_shadowtrace_redis_keys(redis_client: RedisClient) -> None:
             await client.delete(*keys)
     except RuntimeError:
         # TestClient may close the asyncio loop before fixture teardown runs.
-        pass
+        # Recreate a short-lived client so CI cleanup still clears leases/checkpoints.
+        if os.environ.get("CI") != "true" and os.environ.get("GITHUB_ACTIONS") != "true":
+            return
+        fallback = RedisClient(url=os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
+        try:
+            client = fallback.get_client()
+            keys = [key async for key in client.scan_iter(match="shadowtrace:*", count=500)]
+            if keys:
+                await client.delete(*keys)
+        finally:
+            await fallback.aclose()
 
 
 @pytest_asyncio.fixture

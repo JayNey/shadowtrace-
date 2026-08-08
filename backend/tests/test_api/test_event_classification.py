@@ -340,17 +340,19 @@ async def test_patch_syncs_triage_result_event_type(
     detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
     assert detail.status_code == 200
     snap = detail.json()["event"].get("event_context_snapshot") or {}
-    triage = snap.get(TRIAGE_RESULT_KEY) or {}
-    override = snap.get("classification_override") or {}
-    assert triage.get("event_type") == "data_exfiltration" or override.get(
-        "event_type"
-    ) == "data_exfiltration"
+    # ISSUE-254: API projection whitelists classification_override, not triage_result.
+    assert snap.get("classification_override", {}).get("event_type") == "data_exfiltration"
+    assert TRIAGE_RESULT_KEY not in snap
 
     stored = await event_service._store.get(event_id, TRIAGE_RESULT_KEY)
     assert isinstance(stored, dict)
     assert stored.get("event_type") == "data_exfiltration"
 
     async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        orm_snap = row.event_context_snapshot or {}
+        assert orm_snap.get(TRIAGE_RESULT_KEY, {}).get("event_type") == "data_exfiltration"
         rows = (
             (
                 await session.execute(

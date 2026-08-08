@@ -751,12 +751,20 @@ class TraceProjection:
                 text = str(code).strip()
                 if text and text not in warnings:
                     warnings.append(text[:500])
-            if reason_codes and not structured_conclusion:
-                structured_conclusion = (
-                    f"risk_score={data.get('risk_score')} "
+            if reason_codes:
+                demotion_brief = (
                     f"evidence_limited=true "
                     f"verdict_reason_codes={','.join(str(c) for c in reason_codes[:5] if c)}"
-                )[:512]
+                )
+                if not structured_conclusion:
+                    structured_conclusion = (
+                        f"risk_score={data.get('risk_score')} {demotion_brief}"
+                    )[:512]
+                elif "verdict_reason_codes=" not in structured_conclusion:
+                    # Keep synthesized severity/score brief and append demotion codes.
+                    structured_conclusion = (
+                        f"{structured_conclusion} {demotion_brief}"
+                    )[:512]
 
         entity_audit: dict[str, Any] = {}
         for key in _DECISION_ENTITY_FIELDS:

@@ -1396,8 +1396,8 @@ async def test_second_action_supersedes_first_with_lineage(
     active head via enqueue_command (replan path), with full lineage."""
     await _seed_connector_and_source(session_factory, mock_xdr_client=mock_xdr_client)
     event_id = await _create_event(session_factory, store)
-    deferred_a = _deferred_action(event_id=event_id)
-    deferred_b = _deferred_action(event_id=event_id)
+    deferred_a = _deferred_action(event_id=event_id, plan_revision=1)
+    deferred_b = _deferred_action(event_id=event_id, plan_revision=1)
     await _insert_action(session_factory, event_id, deferred_a)
     await _insert_action(session_factory, event_id, deferred_b)
     await _seed_effect_verification(store, event_id, action_id=deferred_a.action_id)
@@ -1405,10 +1405,20 @@ async def test_second_action_supersedes_first_with_lineage(
     await seed_minimum_disposition_audit(session_factory, event_id)
 
     first = await disposition_service.activate_and_submit(event_id, 1, "op-a")
-    second = await disposition_service.activate_and_submit(event_id, 1, "op-b")
     assert first.activated is True
-    assert second.activated is False
-    assert second.skipped_reason == "already_submitted"
+    assert first.action_id is not None
+
+    # Replan: hide whichever deferred Action was activated first (loader orders by
+    # action_id), so the sibling head on the same closure cycle is selected and
+    # enqueue_command supersedes the prior outbox.
+    async with session_factory() as session:
+        async with session.begin():
+            activated_row = await session.get(orm.Action, first.action_id)
+            assert activated_row is not None
+            activated_row.superseded_by_revision = 2
+
+    second = await disposition_service.activate_and_submit(event_id, 1, "op-b")
+    assert second.activated is True
 
     async with session_factory() as session:
         active = (
@@ -1418,6 +1428,8 @@ async def test_second_action_supersedes_first_with_lineage(
                         orm.DispositionOutbox.event_id == event_id,
                         orm.DispositionOutbox.closure_cycle == 1,
                         orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                        orm.DispositionOutbox.intent_kind
+                        == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
                     )
                 )
             )
@@ -1429,10 +1441,17 @@ async def test_second_action_supersedes_first_with_lineage(
                 orm.DispositionOutbox.disposition_id == first.disposition_id
             )
         )
+        second_row = await session.scalar(
+            select(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.disposition_id == second.disposition_id
+            )
+        )
     assert len(active) == 1
-    assert active[0].disposition_id == first.disposition_id
+    assert active[0].disposition_id == second.disposition_id
     assert first_row is not None
-    assert first_row.superseded_by_disposition_id is None
+    assert second_row is not None
+    assert first_row.superseded_by_disposition_id == second.disposition_id
+    assert second_row.supersedes_disposition_id == first.disposition_id
 
 
 def test_active_head_unique_violation_matches_constraint_name() -> None:

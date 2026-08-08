@@ -6,15 +6,13 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -155,13 +153,7 @@ async def test_concurrent_activate_only_one_active_per_instance(
         service.activate_revision(second.scope_revision_id),
         return_exceptions=True,
     )
-    assert any(not isinstance(item, Exception) for item in results)
-    assert all(
-        isinstance(item, IntegrityError)
-        or "uq_detection_scope_revision_one_active_per_instance" in str(item)
-        or not isinstance(item, Exception)
-        for item in results
-    )
+    assert not any(isinstance(item, Exception) for item in results), results
     active_for_instance = await service.get_active_revision_for_instance(
         source_tenant_id=identity.source_tenant_id,
         source_product=identity.source_product,
@@ -180,23 +172,6 @@ async def test_concurrent_activate_only_one_active_per_instance(
             )
         )
         assert len(list(active_rows)) == 1
-
-    async with session_factory() as session:
-        async with session.begin():
-            extras = await session.scalars(
-                select(orm.DetectionScopeRevision).where(
-                    orm.DetectionScopeRevision.source_tenant_id == identity.source_tenant_id,
-                    orm.DetectionScopeRevision.source_product == identity.source_product,
-                    orm.DetectionScopeRevision.integration_instance_id
-                    == identity.integration_instance_id,
-                    orm.DetectionScopeRevision.lifecycle_state
-                    == DetectionScopeLifecycleState.ACTIVE.value,
-                )
-            )
-            now = datetime.now(UTC)
-            for row in list(extras)[1:]:
-                row.lifecycle_state = DetectionScopeLifecycleState.RETIRED.value
-                row.retired_at = now
 
 
 @pytest.mark.asyncio

@@ -1065,56 +1065,86 @@ async def test_duplicate_job_dedup_repoints_action_execution_job_id(
     keeper row before duplicate jobs are deleted."""
     from datetime import UTC, datetime, timedelta
 
-    from sqlalchemy import text
-
     sfx = _sfx()
-    event_id = await _seed_event(session, sfx)
-    action_id = await _seed_action(session, event_id, sfx, f"fp-{sfx}")
     idem = f"idem-dedup-{sfx}"
-    keeper_job_id = f"job-new-{sfx}"
-    stale_job_id = f"job-old-{sfx}"
+    old_job_id = f"job-old-{sfx}"
+    new_job_id = f"job-new-{sfx}"
+    t_old = datetime(2026, 1, 1, tzinfo=UTC)
     t_new = datetime(2026, 1, 2, tzinfo=UTC)
 
-    session.add(
-        m.ActionExecutionJob(
-            job_id=keeper_job_id,
-            event_id=event_id,
-            action_id=action_id,
-            provider_name="mock_tool_provider",
-            idempotency_key=idem,
-            status="running",
-            claimed_by="worker",
-            lease_expires_at=t_new + timedelta(hours=1),
-            attempt=2,
-            created_at=t_new,
-            updated_at=t_new,
-        )
-    )
-    await session.flush()
-    await session.execute(
-        text("UPDATE action SET execution_job_id = :job_id WHERE action_id = :action_id"),
-        {"job_id": keeper_job_id, "action_id": action_id},
-    )
-
-    # uq_action_execution_job_idempotency_key prevents duplicate seed rows; smoke-test
-    # that the dedup repoint SQL still executes cleanly with a single keeper job.
-    await session.execute(
-        text(
-            """
-            UPDATE action a
-            SET execution_job_id = kept.job_id
-            FROM action_execution_job doomed
-            JOIN action_execution_job kept
-              ON kept.idempotency_key = doomed.idempotency_key
-             AND (kept.created_at, kept.job_id) > (doomed.created_at, doomed.job_id)
-            WHERE a.execution_job_id = doomed.job_id
-            """
-        )
-    )
-    await session.flush()
-
-    row = await session.get(m.Action, action_id)
-    assert row is not None
-    assert row.execution_job_id == keeper_job_id
-
+    # Temporarily drop the unique index so we can seed the pre-0034 duplicate
+    # shape that the migration SQL was written to heal.
     await session.rollback()
+    await session.execute(text("DROP INDEX IF EXISTS uq_action_execution_job_idempotency_key"))
+    await session.commit()
+    try:
+        event_id = await _seed_event(session, sfx)
+        action_id = await _seed_action(session, event_id, sfx, f"fp-{sfx}")
+        session.add(
+            m.ActionExecutionJob(
+                job_id=old_job_id,
+                event_id=event_id,
+                action_id=action_id,
+                provider_name="mock_tool_provider",
+                idempotency_key=idem,
+                status="queued",
+                claimed_by=None,
+                lease_expires_at=None,
+                attempt=1,
+                created_at=t_old,
+                updated_at=t_old,
+            )
+        )
+        session.add(
+            m.ActionExecutionJob(
+                job_id=new_job_id,
+                event_id=event_id,
+                action_id=action_id,
+                provider_name="mock_tool_provider",
+                idempotency_key=idem,
+                status="running",
+                claimed_by="worker",
+                lease_expires_at=t_new + timedelta(hours=1),
+                attempt=2,
+                created_at=t_new,
+                updated_at=t_new,
+            )
+        )
+        await session.execute(
+            text("UPDATE action SET execution_job_id = :job_id WHERE action_id = :action_id"),
+            {"job_id": old_job_id, "action_id": action_id},
+        )
+        await session.flush()
+
+        await session.execute(
+            text(
+                """
+                UPDATE action a
+                SET execution_job_id = kept.job_id
+                FROM action_execution_job doomed
+                JOIN action_execution_job kept
+                  ON kept.idempotency_key = doomed.idempotency_key
+                 AND (kept.created_at, kept.job_id) > (doomed.created_at, doomed.job_id)
+                WHERE a.execution_job_id = doomed.job_id
+                """
+            )
+        )
+        await session.flush()
+
+        row = await session.get(m.Action, action_id)
+        assert row is not None
+        assert row.execution_job_id == new_job_id
+    finally:
+        await session.rollback()
+        await session.execute(
+            text("DELETE FROM action_execution_job WHERE idempotency_key = :idem"),
+            {"idem": idem},
+        )
+        await session.commit()
+        await session.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_action_execution_job_idempotency_key "
+                "ON action_execution_job (idempotency_key)"
+            )
+        )
+        await session.commit()

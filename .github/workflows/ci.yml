@@ -80,10 +80,10 @@ jobs:
       - name: Mypy
         run: uv run --frozen mypy app
 
-  backend-test:
-    name: backend-test
+  backend-closure-gates:
+    name: backend-closure-gates
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     defaults:
       run:
         working-directory: backend
@@ -159,6 +159,59 @@ jobs:
             backend/tests/adversarial/artifacts/latest_full_loop_audit.json
           if-no-files-found: error
 
+  backend-test:
+    name: backend-test
+    runs-on: ubuntu-latest
+    # Measured cancel at ~20m on suite-only runs; isolation + parallel closure gates
+    # allow a p95-based budget that still runs coverage/timing/random retest.
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: shadowtrace
+          POSTGRES_PASSWORD: shadowtrace
+          POSTGRES_DB: shadowtrace
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shadowtrace -d shadowtrace"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Verify uv.lock
+        run: uv lock --check
+
+      - name: Install backend (frozen dev)
+        run: uv sync --frozen --extra dev
+
       - name: Pytest with coverage (ISSUE-267)
         run: >
           uv run --frozen pytest --cov=app --cov-report=term
@@ -166,13 +219,19 @@ jobs:
           --junitxml=junit-default.xml
           --durations=25 --durations-min=0.5
 
+      - name: Classify default-suite JUnit failures
+        if: always()
+        run: >
+          uv run --frozen python scripts/summarize_pytest_junit.py
+          junit-default.xml --github-summary
+
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: backend-junit-default
           path: backend/junit-default.xml
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: ISSUE-055 orchestration coverage gate
         run: >
@@ -203,7 +262,7 @@ jobs:
             backend/junit-timing-1.xml
             backend/junit-timing-2.xml
             backend/junit-timing-3.xml
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: Upload coverage summary
         if: always()
@@ -211,7 +270,50 @@ jobs:
         with:
           name: backend-coverage
           path: backend/coverage.xml
-          if-no-files-found: warn
+          if-no-files-found: error
+
+      - name: Clean-service random-order retest (ISSUE-267)
+        env:
+          SHADOWTRACE_TEST_SHUFFLE_SEED: "267"
+        run: |
+          uv run --frozen python - <<'PY'
+          import asyncio
+          import os
+          from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+          from sqlalchemy.pool import NullPool
+          from app.core.redis_client import RedisClient
+          from tests.test_support.db_isolation import (
+              clear_shadowtrace_redis_keys,
+              truncate_business_tables,
+          )
+
+          async def _reset() -> None:
+              engine = create_async_engine(os.environ["DATABASE_URL"], poolclass=NullPool)
+              factory = async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+              redis = RedisClient(url=os.environ["REDIS_URL"])
+              try:
+                  await truncate_business_tables(factory)
+                  await clear_shadowtrace_redis_keys(redis)
+              finally:
+                  await redis.aclose()
+                  await engine.dispose()
+
+          asyncio.run(_reset())
+          PY
+          uv run --frozen pytest \
+            tests/test_services/test_detection_scope_service.py \
+            tests/test_services/test_event_disposition_service.py \
+            tests/test_services/test_context_store.py \
+            tests/test_contracts/test_event_context_schema_export.py \
+            -q --tb=short --junitxml=junit-random-retest.xml
+
+      - name: Upload random-retest JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-junit-random-retest
+          path: backend/junit-random-retest.xml
+          if-no-files-found: error
 
   backend-system-test:
     name: backend-system-test

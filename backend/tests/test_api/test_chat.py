@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -284,19 +286,46 @@ def test_chat_endpoint_rejects_more_than_ten_history_items() -> None:
     assert response.status_code == 422
 
 
-async def test_mock_mode_is_deterministic_and_returns_grounded_reference() -> None:
+async def test_mock_mode_is_deterministic_and_returns_grounded_reference(
+    tmp_path: Path,
+) -> None:
+    """Keep production event_qa/default.json neutral; use an isolated golden root."""
+    golden_root = tmp_path / "golden"
+    prompt_dir = golden_root / "event_qa"
+    prompt_dir.mkdir(parents=True)
+    (prompt_dir / "default.json").write_text(
+        json.dumps(
+            {
+                "content": {
+                    "answer": "基于登录证据与风险评分，当前事件判定为高危。",
+                    "references": [
+                        {"ref_type": "evidence", "ref_id": "evd-event-qa-001"},
+                    ],
+                },
+                "model_name": "mock-model",
+                "prompt_tokens": 120,
+                "completion_tokens": 60,
+                "total_tokens": 180,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
     service = EventQAService(
         context_store=_ContextStore(_context()),
         decision_trace_service=_TraceService(_trace()),
-        llm_client=MockLLMClient(audit_recorder=InMemoryLLMCallAuditRecorder()),
+        llm_client=MockLLMClient(
+            golden_root=golden_root,
+            audit_recorder=InMemoryLLMCallAuditRecorder(),
+        ),
     )
 
     first = await service.answer("evt-076", "为什么判定为高危", [])
     second = await service.answer("evt-076", "为什么判定为高危", [])
 
     assert first == second
-    assert "Mock" in first.answer
-    assert first.references == []
+    assert "高危" in first.answer
+    assert first.references == [ChatReference(ref_type="evidence", ref_id="evd-event-qa-001")]
 
 
 async def test_service_filters_invalid_references_and_bounds_safe_context() -> None:
