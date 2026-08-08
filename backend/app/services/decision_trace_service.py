@@ -20,6 +20,7 @@ from app.db.orm.approval import ApprovalRecordORM
 from app.models.decision_trace import DecisionTrace, DecisionTraceEntry, DecisionTraceSummary
 from app.models.enums import DecisionTraceEntryType
 from app.services.agent_trace_service import TraceProjection
+from app.services.context_service import unwrap_journal_value
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +56,12 @@ _HALT_STATUSES: frozenset[str] = frozenset(
 _WRITEBACK_SUBSTATE = "waiting_writeback"
 
 # Timeline entry types that prove investigation resumed after an open writeback wait
-# when the journal leave event is missing. WRITEBACK/DISPOSITION receipts may arrive
-# during the wait itself and must not truncate idle early.
+# when the journal leave event is missing. WRITEBACK/DISPOSITION receipts (and
+# ACTION/TOOL/LLM noise during the wait) must not truncate idle early.
 _WRITEBACK_IDLE_TRUNCATE_TYPES: frozenset[DecisionTraceEntryType] = frozenset(
     {
         DecisionTraceEntryType.AGENT_EXECUTION,
-        DecisionTraceEntryType.TOOL_CALL,
-        DecisionTraceEntryType.LLM_CALL,
         DecisionTraceEntryType.APPROVAL,
-        DecisionTraceEntryType.ACTION_EXECUTION,
     }
 )
 
@@ -554,13 +552,6 @@ def _ms_between(start: datetime, end: datetime) -> int:
     return max(0, int((end - start).total_seconds() * 1000))
 
 
-def _unwrap_journal_scalar(value: Any) -> Any:
-    """Mirror context_service.unwrap_journal_value for scalar journal payloads."""
-    if isinstance(value, dict) and set(value.keys()) == {"_scalar"}:
-        return value["_scalar"]
-    return value
-
-
 def _normalize_substate(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -584,6 +575,24 @@ def _merge_intervals(
             continue
         merged.append((start, end))
     return merged
+
+
+def _clip_intervals_to_window(
+    intervals: list[tuple[datetime, datetime]],
+    *,
+    first_ts: datetime,
+    last_ts: datetime,
+) -> list[tuple[datetime, datetime]]:
+    """Clip idle intervals to the timeline wall-clock window ``[first_ts, last_ts]``."""
+    if last_ts <= first_ts:
+        return []
+    clipped: list[tuple[datetime, datetime]] = []
+    for start, end in intervals:
+        clipped_start = max(start, first_ts)
+        clipped_end = min(end, last_ts)
+        if clipped_end > clipped_start:
+            clipped.append((clipped_start, clipped_end))
+    return clipped
 
 
 def _idle_ms_from_intervals(intervals: list[tuple[datetime, datetime]]) -> int:
@@ -636,7 +645,7 @@ def _writeback_halt_intervals_from_journal(
     intervals: list[tuple[datetime, datetime]] = []
     halt_started: datetime | None = None
     for created_at, raw_value in journal_points:
-        substate = _normalize_substate(_unwrap_journal_scalar(raw_value))
+        substate = _normalize_substate(unwrap_journal_value(raw_value))
         if substate is None:
             continue
         in_writeback = substate == _WRITEBACK_SUBSTATE
@@ -711,7 +720,9 @@ def _compute_timeline_durations(
             )
         )
 
-    idle_ms = _idle_ms_from_intervals(intervals)
+    idle_ms = _idle_ms_from_intervals(
+        _clip_intervals_to_window(intervals, first_ts=first_ts, last_ts=last_ts)
+    )
     if idle_ms > total_ms:
         idle_ms = total_ms
     active_ms = total_ms - idle_ms
@@ -817,6 +828,7 @@ class DecisionTraceService:
                     event_id,
                     exc,
                 )
+                missing.append("execution_substate_journal")
 
         # Sort: timestamp ascending, then entry_type order, then entry_id.
         all_entries.sort(key=_sort_key)
