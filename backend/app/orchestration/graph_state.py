@@ -44,6 +44,11 @@ class InvestigationState(TypedDict, total=False):
     verify_need_action_replan: bool
     verify_failed_actions: list[str] | None
     verify_failed_writebacks: list[str] | None
+    # ISSUE-259: typed recovery queues — recovery handler MUST consume
+    # ``verify_recoverable_writeback_ids`` (real wbk-* IDs) only; actions
+    # awaiting outbox creation stay in ``verify_pending_writeback_action_ids``.
+    verify_recoverable_writeback_ids: list[str] | None
+    verify_pending_writeback_action_ids: list[str] | None
     verify_writeback_status: str | None
     # ISSUE-170: per-writeback status map keyed by writeback_id.  The scalar
     # ``verify_writeback_status`` above is kept for back-compat (single

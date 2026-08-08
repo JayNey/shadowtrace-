@@ -1804,6 +1804,10 @@ class TestRegressionShouldFix:
             writeback_status=WritebackStatus.FAILED,
         )
         job = _job(job_id="job-0001", action_id=action.action_id)
+        _mock_ob = MagicMock()
+        _mock_ob.writeback_id = "wbk-failed-immediate"
+        _mock_ob.attempt = 1
+        outbox_map = {action.action_id: [_mock_ob]}
         ed_svc = FakeEventDispositionService(activated=True)
         agent = VerifyAgent(
             tool_executor=_mock_executor({"check_ip_block_status": _tool_result_success(True)}),
@@ -1813,7 +1817,7 @@ class TestRegressionShouldFix:
             event_disposition_service=ed_svc,
         )
         agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
-            return_value=([action], {"job-0001": job}, {})
+            return_value=([action], {"job-0001": job}, outbox_map)
         )
         agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
             return_value=DispositionPolicy.REQUIRED,
@@ -1825,8 +1829,11 @@ class TestRegressionShouldFix:
         assert result.need_action_replan is False
         # Action is NOT in failed_actions (that's for EFFECT failures only).
         assert action.action_id not in result.failed_actions
-        # Writeback IS in failed_writebacks.
-        assert action.action_id in result.failed_writebacks
+        # Recoverable writeback ID (not action_id) drives recovery handler.
+        assert "wbk-failed-immediate" in result.recoverable_writeback_ids
+        assert result.failed_writebacks == result.recoverable_writeback_ids
+        assert action.action_id not in result.failed_writebacks
+        assert action.action_id not in result.recoverable_writeback_ids
 
     async def test_empty_plan_required_policy_triggers_phase2(self):
         """Empty plan + disposition_policy=REQUIRED → phase 2 still activates.
@@ -3812,6 +3819,8 @@ class TestIssue060ReviewFixes:
         assert result.need_writeback_recovery is True
         assert result.need_manual_resolution is False
         assert result.overall_status == VerificationOverallStatus.WAITING
+        assert "wbk-terminal-no-receipt" in result.recoverable_writeback_ids
+        assert result.recoverable_writeback_ids == result.failed_writebacks
 
     async def test_terminal_writeback_weak_evidence_routes_recovery(self):
         """CONFIRMED + adapter_acknowledged must not yield overall success."""
@@ -4591,6 +4600,9 @@ class TestShouldFixRegression:
         assert len(wb_results) == 1
         assert wb_results[0].detail == "writeback_not_yet_dispatched"
         assert result.need_writeback_recovery is True
+        assert action.action_id in result.pending_writeback_action_ids
+        assert not result.recoverable_writeback_ids
+        assert not result.failed_writebacks
 
     async def test_writeback_status_none_with_outbox_routes_recovery(self):
         """SF-1 counter-case: When wb_status=None but outbox records DO exist,

@@ -401,8 +401,8 @@ class TestWritebackRecoveryExecute:
 class TestWritebackRecoveryGraphNode:
     """Tests for the writeback_recovery_graph_node graph helper."""
 
-    async def test_no_failed_writebacks(self):
-        """No failed writebacks → recovery disabled."""
+    async def test_no_failed_writebacks_invariant_escalates_manual(self):
+        """need_recovery=true with empty queues → invariant failure, not silent clear."""
         handler = WritebackRecoveryHandler(
             state_machine=FakeStateMachine(),
             runtime=FakeRuntime(),
@@ -410,10 +410,32 @@ class TestWritebackRecoveryGraphNode:
         state = _base_state(
             verify_need_writeback_recovery=True,
             verify_failed_writebacks=[],
+            verify_recoverable_writeback_ids=[],
+            verify_pending_writeback_action_ids=[],
         )
         result = await writeback_recovery_graph_node(state, handler=handler)
         assert result["verify_need_writeback_recovery"] is False
-        assert result["execution_substate"] == ExecutionSubstate.NONE.value
+        assert result["verify_need_manual_resolution"] is True
+        assert result["execution_substate"] == ExecutionSubstate.MANUAL_RESOLUTION.value
+        assert result.get("error") == "writeback_recovery_invariant_no_targets"
+
+    async def test_pending_actions_action_scoped_wait(self):
+        """Pending actions without outbox IDs halt without clearing recovery."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+        state = _base_state(
+            verify_need_writeback_recovery=True,
+            verify_failed_writebacks=[],
+            verify_recoverable_writeback_ids=[],
+            verify_pending_writeback_action_ids=["act-pending-001"],
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        assert result["verify_need_writeback_recovery"] is True
+        assert result["halted"] is True
+        assert result["execution_substate"] == ExecutionSubstate.WAITING_WRITEBACK.value
+        assert result["verify_pending_writeback_action_ids"] == ["act-pending-001"]
 
     async def test_wait_sets_halted(self):
         """WAIT action → halted=True for graph pause."""
@@ -1145,3 +1167,41 @@ class TestWritebackRecoveryToCloseTransition:
 
         assert sm._current_status[event_id] == EventStatus.CLOSED
         assert len(sm.transitions) == 2
+
+
+class TestVerifyToRecoveryContract:
+    """ISSUE-259: VerifyAgent output must not be silently cleared by recovery node."""
+
+    async def test_terminal_pending_verify_output_survives_recovery_node(self):
+        """Terminal writeback waiting with real wbk ID loops recovery, not report."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+        state = _base_state(
+            verify_need_writeback_recovery=True,
+            verify_recoverable_writeback_ids=["wbk-terminal-pending"],
+            verify_failed_writebacks=["wbk-terminal-pending"],
+            verify_pending_writeback_action_ids=[],
+            verify_writeback_status="pending",
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        assert result["verify_need_writeback_recovery"] is True
+        assert result["halted"] is True
+        assert result.get("verify_need_manual_resolution") is False
+
+    async def test_legacy_action_id_in_failed_writebacks_migrates_to_pending(self):
+        """Old checkpoints with act-* in verify_failed_writebacks → action-scoped wait."""
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+        state = _base_state(
+            verify_need_writeback_recovery=True,
+            verify_failed_writebacks=["act-legacy-001"],
+        )
+        result = await writeback_recovery_graph_node(state, handler=handler)
+        assert result["verify_need_writeback_recovery"] is True
+        assert result["halted"] is True
+        assert result["verify_pending_writeback_action_ids"] == ["act-legacy-001"]
+        assert result["verify_recoverable_writeback_ids"] == []

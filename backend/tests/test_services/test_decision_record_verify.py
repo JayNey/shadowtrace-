@@ -43,13 +43,15 @@ def test_enrich_verify_agent_failure_output_prefers_need_flags() -> None:
         "need_writeback_recovery": True,
         "need_manual_resolution": False,
         "need_action_replan": False,
-        "failed_writebacks": ["act-beef0002"],
+        "failed_writebacks": ["wbk-beef0002"],
+        "recoverable_writeback_ids": ["wbk-beef0002"],
+        "pending_writeback_action_ids": [],
         "blocked_writebacks": [],
     }
     enriched = _enrich_agent_output("verify_agent", {"event_id": "evt-2"}, output)
     assert enriched["reason_code"] == "need_writeback_recovery"
     assert enriched["selected_action"] == "verify:effect:waiting"
-    assert enriched["gap_refs"] == [{"source": "writeback", "reason": "act-beef0002"}]
+    assert enriched["gap_refs"] == [{"source": "writeback", "reason": "wbk-beef0002"}]
 
 
 def test_enrich_verify_agent_manual_resolution_reason_code() -> None:

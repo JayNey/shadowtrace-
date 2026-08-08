@@ -609,17 +609,26 @@ async def _persist_verify_degraded_result(
         )
 
 
+def _recovery_writeback_ids(verification_result: VerificationResult) -> list[str]:
+    """Return recoverable writeback IDs from verify output (ISSUE-259)."""
+    recoverable = verification_result.recoverable_writeback_ids
+    if recoverable:
+        return recoverable
+    legacy = verification_result.failed_writebacks
+    return [item for item in legacy if item.startswith("wbk-")]
+
+
 def _resolve_verify_writeback_status(
     verification_result: VerificationResult,
 ) -> str | None:
     """Pick the writeback status for the first failed writeback in verify output.
 
     ``WritebackRecoveryHandler`` reads ``verify_writeback_status`` from graph
-    state; when VerifyAgent reports ``failed_writebacks`` we mirror the matching
-    ``VerificationActionResult.writeback_status`` so recovery routes correctly
-    instead of falling back to LOOKUP.
+    state; when VerifyAgent reports recoverable writeback IDs we mirror the
+    matching ``VerificationActionResult.writeback_status`` so recovery routes
+    correctly instead of falling back to LOOKUP.
     """
-    failed = verification_result.failed_writebacks
+    failed = _recovery_writeback_ids(verification_result)
     if not failed:
         return None
     target = failed[0]
@@ -641,7 +650,7 @@ def _resolve_verify_writeback_statuses(
     Only the verify graph node writes this map; recovery nodes read it and
     must not mutate it across LOOKUP/RETRY cycles.
     """
-    failed = verification_result.failed_writebacks
+    failed = _recovery_writeback_ids(verification_result)
     if not failed:
         return None
     failed_set = set(failed)
@@ -1679,6 +1688,8 @@ def build_investigation_graph(
             "verify_need_manual_resolution": verification_result.need_manual_resolution,
             "verify_failed_actions": verification_result.failed_actions,
             "verify_failed_writebacks": verification_result.failed_writebacks,
+            "verify_recoverable_writeback_ids": verification_result.recoverable_writeback_ids,
+            "verify_pending_writeback_action_ids": verification_result.pending_writeback_action_ids,
             "verify_writeback_status": _resolve_verify_writeback_status(verification_result),
             "verify_writeback_status_map": _resolve_verify_writeback_statuses(verification_result),
             "verify_has_partial_success": verification_result.overall_status.value == "partial",
