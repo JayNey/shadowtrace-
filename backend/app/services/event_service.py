@@ -697,14 +697,11 @@ class EventService:
         snapshot = dict(event.event_context_snapshot or {})
         # Backfill missing observability from WM when ORM is empty OR only has
         # partial keys (e.g. risk_assessment) and merge writeback was skipped.
-        needs_evidence = (
-            "collection_status" not in snapshot
-            and not isinstance(snapshot.get("evidence_output"), dict)
+        needs_evidence = "collection_status" not in snapshot and not isinstance(
+            snapshot.get("evidence_output"), dict
         )
         needs_storyline = not isinstance(snapshot.get("storyline"), dict)
-        needs_flags = (
-            "analysis_only_complete" not in snapshot or "report_generated" not in snapshot
-        )
+        needs_flags = "analysis_only_complete" not in snapshot or "report_generated" not in snapshot
         if needs_evidence or needs_storyline or needs_flags or not snapshot:
             try:
                 from app.services.context_service import _context_as_dict, _to_jsonable

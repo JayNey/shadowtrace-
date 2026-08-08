@@ -412,7 +412,6 @@ def _hard_project_api_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     return floor
 
 
-
 __all__ = [
     "SNAPSHOT_SUMMARY_KEYS",
     "build_evidence_snapshot_summary",

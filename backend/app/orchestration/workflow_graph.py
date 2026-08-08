@@ -1776,9 +1776,7 @@ def build_investigation_graph(
             snapshot_svc = services.get("event_service")
             if snapshot_svc is not None:
                 try:
-                    await snapshot_svc.merge_report_generated_context_snapshot(
-                        event_id, generated
-                    )
+                    await snapshot_svc.merge_report_generated_context_snapshot(event_id, generated)
                 except Exception:
                     logger.warning(
                         "failed to merge report_generated snapshot event=%s",

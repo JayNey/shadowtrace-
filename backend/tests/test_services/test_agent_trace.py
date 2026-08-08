@@ -192,7 +192,141 @@ def test_decision_basis_synthesizes_typed_agent_brief() -> None:
     assert "summary_unavailable" not in basis
 
 
+def test_decision_basis_synthesizes_rag_agent_brief() -> None:
+    """ISSUE-255: rag_agent typed retrieval fields → non-empty brief, never CoT."""
+    basis = TraceProjection.decision_basis(
+        {
+            "attack_techniques": [
+                {
+                    "technique_id": "T1041",
+                    "technique_name": "Exfiltration Over C2",
+                    "match_confidence": 0.9,
+                    "citation_id": "cit-1",
+                }
+            ],
+            "fp_similarity": {"max_score": 0.12, "matched_case_id": None},
+            "similar_cases": [{"case_id": "case-1"}],
+            "playbook_refs": [{"playbook_id": "pb-1"}],
+            "citations": [{"citation_id": "cit-1"}],
+            "degraded": False,
+            "summary": "legacy narrative must not win",
+            "thought": "raw CoT must not win",
+        },
+        agent_name="rag_agent",
+    )
+    assert "techniques=1" in basis["structured_conclusion"]
+    assert "top=T1041" in basis["structured_conclusion"]
+    assert "fp_max=0.12" in basis["structured_conclusion"]
+    assert "similar_cases=1" in basis["structured_conclusion"]
+    assert "playbook_refs=1" in basis["structured_conclusion"]
+    assert "summary_unavailable" not in basis
+    assert "legacy narrative" not in str(basis)
+    assert "raw CoT" not in str(basis)
+
+
+def test_decision_basis_synthesizes_rag_agent_empty_retrieval_brief() -> None:
+    """Even empty RAGOutput still yields an explicit typed brief (not unavailable)."""
+    basis = TraceProjection.decision_basis(
+        {
+            "attack_techniques": [],
+            "fp_similarity": {"max_score": 0.0},
+            "similar_cases": [],
+            "playbook_refs": [],
+            "citations": [],
+            "degraded": True,
+        },
+        agent_name="rag_agent",
+    )
+    assert "techniques=0" in basis["structured_conclusion"]
+    assert "degraded=true" in basis["structured_conclusion"]
+    assert "summary_unavailable" not in basis
+
+
+def test_decision_basis_synthesizes_graph_agent_brief() -> None:
+    """ISSUE-255: graph_agent structure counts → brief; GraphSummary narrative ignored."""
+    basis = TraceProjection.decision_basis(
+        {
+            "nodes": [{"node_id": "n1"}, {"node_id": "n2"}],
+            "edges": [{"edge_id": "e1"}],
+            "central_entities": ["user:alice", "host:web01"],
+            "attack_path_candidates": [["n1", "n2"]],
+            "degraded": False,
+            "summary": {"schema_version": "1.0", "features": []},
+            "thought": "must not surface",
+        },
+        agent_name="graph_agent",
+    )
+    assert "nodes=2" in basis["structured_conclusion"]
+    assert "edges=1" in basis["structured_conclusion"]
+    assert "central=user:alice,host:web01" in basis["structured_conclusion"]
+    assert "attack_paths=1" in basis["structured_conclusion"]
+    assert "summary_unavailable" not in basis
+    assert "must not surface" not in str(basis)
+
+
+def test_decision_basis_synthesizes_super_agent_brief_from_nested_data() -> None:
+    """ISSUE-255: SuperAgent AgentOutput.data InvestigationResult projection."""
+    basis = TraceProjection.decision_basis(
+        {
+            "agent_name": "super_agent",
+            "success": True,
+            "degraded": False,
+            "data": {
+                "event_id": "evt-255",
+                "final_status": "CLOSED",
+                "final_verdict": "confirmed_threat",
+                "report_id": "rep-evt-255",
+                "writeback_required": True,
+                "writeback_readiness": "READY",
+            },
+            "summary": "legacy must not win",
+            "rationale": "CoT must not win",
+        },
+        agent_name="super_agent",
+    )
+    assert "final_status=CLOSED" in basis["structured_conclusion"]
+    assert "final_verdict=confirmed_threat" in basis["structured_conclusion"]
+    assert "report_id=rep-evt-255" in basis["structured_conclusion"]
+    assert "writeback_required=true" in basis["structured_conclusion"]
+    assert "summary_unavailable" not in basis
+    assert "legacy must not win" not in str(basis)
+    assert "CoT must not win" not in str(basis)
+
+
+def test_decision_basis_super_agent_empty_data_sets_summary_unavailable() -> None:
+    """ISSUE-255: missing InvestigationResult must not fake a success=true brief."""
+    basis = TraceProjection.decision_basis(
+        {
+            "agent_name": "super_agent",
+            "success": True,
+            "degraded": False,
+            "data": {},
+        },
+        agent_name="super_agent",
+    )
+    assert basis.get("structured_conclusion") in ("", None)
+    assert basis.get("summary_unavailable") == "no_typed_decision_fields"
+    assert "success=true" not in str(basis)
+
+
+def test_decision_basis_synthesizes_memory_agent_brief() -> None:
+    basis = TraceProjection.decision_basis(
+        {
+            "case_records": [{"case_id": "c1"}],
+            "fp_rules": [],
+            "profile_updates": [{"entity_type": "host", "entity_value": "h1", "event_id": "e1"}],
+            "sigma_drafts": ["draft-a", "draft-b"],
+        },
+        agent_name="memory_agent",
+    )
+    assert "case_records=1" in basis["structured_conclusion"]
+    assert "profile_updates=1" in basis["structured_conclusion"]
+    assert "sigma_drafts=2" in basis["structured_conclusion"]
+    assert "summary_unavailable" not in basis
+
+
 def test_decision_basis_short_text_mode_uses_bounded_non_cot_fallback() -> None:
+    # Use an agent without typed synthesis rules so short_text fallback is exercised.
     basis = TraceProjection.decision_basis(
         {
             "event_id": "evt-short-text",
@@ -200,7 +334,7 @@ def test_decision_basis_short_text_mode_uses_bounded_non_cot_fallback() -> None:
             "thought": "must never be used",
             "summary": "legacy narrative must never be used",
         },
-        agent_name="memory_agent",
+        agent_name="storyline_service",
         rationale_mode="short_text",
     )
     assert basis["structured_conclusion"] == "bounded operator note"
@@ -591,6 +725,79 @@ async def test_log_trace_backfills_structured_conclusion_for_risk_agent(
     assert "risk_score=88" in row.output_data["decision_summary"]
     assert row.output_data["_decision_basis"]["brief"]
     assert "must not persist" not in str(row.output_data)
+
+
+@pytest.mark.asyncio
+async def test_log_trace_backfills_briefs_for_rag_graph_super_agents(
+    service: AgentTraceService,
+) -> None:
+    """ISSUE-255: closed-loop rag/graph/super traces get non-empty briefs, no CoT."""
+    event_id = _id("evt")
+    started_at = datetime(2026, 7, 17, 10, 0, 0, tzinfo=UTC)
+    completed_at = started_at + timedelta(milliseconds=50)
+    cases = [
+        (
+            "rag_agent",
+            {
+                "attack_techniques": [],
+                "fp_similarity": {"max_score": 0.0},
+                "similar_cases": [],
+                "playbook_refs": [],
+                "citations": [],
+                "degraded": False,
+                "thought": "rag CoT",
+            },
+            "techniques=0",
+        ),
+        (
+            "graph_agent",
+            {
+                "nodes": [{"node_id": "n1"}],
+                "edges": [],
+                "central_entities": [],
+                "attack_path_candidates": [],
+                "degraded": False,
+                "rationale": "graph CoT",
+            },
+            "nodes=1",
+        ),
+        (
+            "super_agent",
+            {
+                "agent_name": "super_agent",
+                "success": True,
+                "data": {
+                    "event_id": event_id,
+                    "final_status": "REPORTING",
+                    "final_verdict": "suspicious",
+                    "writeback_required": False,
+                    "writeback_readiness": "NOT_REQUIRED",
+                },
+                "reasoning": "super CoT",
+            },
+            "final_status=REPORTING",
+        ),
+    ]
+    for agent_name, output_data, needle in cases:
+        trace_id = await service.log_trace(
+            event_id=event_id,
+            agent_name=agent_name,
+            input_data={"event_id": event_id},
+            output_data=output_data,
+            status="completed",
+            started_at=started_at,
+            completed_at=completed_at,
+        )
+        row = await service.get_trace(trace_id)
+        assert row is not None
+        assert needle in row.output_data["decision_summary"]
+        assert needle in row.output_data["_decision_basis"]["structured_conclusion"]
+        assert row.output_data["_decision_basis"]["brief"]
+        assert "summary_unavailable" not in row.output_data["_decision_basis"]
+        assert "thought" not in row.output_data
+        assert "rationale" not in row.output_data
+        assert "reasoning" not in row.output_data
+        assert "CoT" not in str(row.output_data)
 
 
 @pytest.mark.asyncio

@@ -513,9 +513,25 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
 
         Skip investigate-level socket lifecycle: ``execute`` already publishes
         agent_progress / completed / failed.
+
+        ISSUE-255: attach a typed InvestigationResult projection in
+        ``AgentOutput.data`` so agent_trace can synthesize a structured brief
+        without restoring CoT. When projection fails, leave ``data`` empty so
+        agent_trace emits ``summary_unavailable`` instead of a fake brief.
         """
         await self.investigate(input.event_id, publish_lifecycle=False)
-        return AgentOutput(agent_name="super_agent", success=True)
+        typed_data: dict[str, Any] = {}
+        try:
+            ec = await self._load_event_context(input.event_id)
+            if ec.event is not None:
+                typed_data = _investigation_result_from_context(ec).model_dump(mode="json")
+        except Exception:
+            logger.debug(
+                "SuperAgent: failed to project investigation brief fields event=%s",
+                input.event_id,
+                exc_info=True,
+            )
+        return AgentOutput(agent_name="super_agent", success=True, data=typed_data)
 
     # ------------------------------------------------------------------ #
     # Graph construction
