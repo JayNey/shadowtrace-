@@ -233,6 +233,7 @@ def test_dev_token_rejected_in_production(
     monkeypatch.setenv("EMBEDDING_MODE", "remote")
     monkeypatch.setenv("SIMULATION_ENABLED", "false")
     monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
+    monkeypatch.setenv("SOCKETIO_CORS_ALLOWED_ORIGINS", "https://app.example")
     # ISSUE-217: a non-empty DEV_AUTH_TOKENS is itself a production
     # fail-closed violation, so clear it to exercise the auth-layer gate here.
     monkeypatch.setenv("DEV_AUTH_TOKENS", "")
@@ -259,6 +260,7 @@ def test_dev_token_rejected_when_app_env_has_surrounding_whitespace(
     monkeypatch.setenv("EMBEDDING_MODE", "remote")
     monkeypatch.setenv("SIMULATION_ENABLED", "false")
     monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
+    monkeypatch.setenv("SOCKETIO_CORS_ALLOWED_ORIGINS", "https://app.example")
     monkeypatch.setenv("DEV_AUTH_TOKENS", "")
     get_settings.cache_clear()
     resp = client.get("/api/v1/events", headers=_hdr("admin"))
@@ -284,6 +286,7 @@ def test_is_production_strips_surrounding_whitespace(
     monkeypatch.setenv("EMBEDDING_MODE", "remote")
     monkeypatch.setenv("SIMULATION_ENABLED", "false")
     monkeypatch.setenv("TRUSTED_AUTH_PROXY_ENABLED", "false")
+    monkeypatch.setenv("SOCKETIO_CORS_ALLOWED_ORIGINS", "https://app.example")
     # The autouse _dev_auth fixture sets DEV_AUTH_TOKENS, which is itself a
     # production fail-closed violation; clear it to reach the production cases.
     monkeypatch.setenv("DEV_AUTH_TOKENS", "")

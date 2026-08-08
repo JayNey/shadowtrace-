@@ -31,6 +31,15 @@ class Settings(BaseSettings):
         alias="TRUSTED_AUTH_PROXY_ENABLED",
     )
     trusted_proxy_allowlist: str = Field(default="", alias="TRUSTED_PROXY_ALLOWLIST")
+    socketio_cors_allowed_origins: str = Field(
+        default="",
+        alias="SOCKETIO_CORS_ALLOWED_ORIGINS",
+        description=(
+            "Comma-separated Origin allowlist for Socket.IO handshakes (ISSUE-258). "
+            "Non-production defaults to local dev origins when unset; production "
+            "requires an explicit non-wildcard list."
+        ),
+    )
 
     database_url: str = Field(
         default="postgresql+asyncpg://shadowtrace:shadowtrace@postgres:5432/shadowtrace",
@@ -455,6 +464,14 @@ class Settings(BaseSettings):
                 error_code="configuration_error",
                 details={"app_env": self.app_env, "violations": proxy_violations},
             )
+        socketio_violations = self.socketio_fail_closed_violations()
+        if socketio_violations:
+            raise ConfigurationError(
+                "app_env=production forbids unsafe Socket.IO configuration: "
+                + ", ".join(socketio_violations),
+                error_code="configuration_error",
+                details={"app_env": self.app_env, "violations": socketio_violations},
+            )
 
     def auto_response_fail_closed_violations(self) -> list[str]:
         """Reject live connector/provider combinations when auto-response is on."""
@@ -559,6 +576,42 @@ class Settings(BaseSettings):
             )
         if "*" in hosts:
             violations.append("TRUSTED_PROXY_ALLOWLIST must not contain wildcard '*'")
+        return violations
+
+    def configured_socketio_cors_origins(self) -> list[str]:
+        """Parse ``SOCKETIO_CORS_ALLOWED_ORIGINS`` into a deduplicated list."""
+        return [
+            origin.strip()
+            for origin in self.socketio_cors_allowed_origins.split(",")
+            if origin.strip()
+        ]
+
+    def resolved_socketio_cors_origins(self) -> list[str]:
+        """Effective Socket.IO CORS allowlist for the running environment."""
+        configured = self.configured_socketio_cors_origins()
+        if configured:
+            return configured
+        if not self.is_production():
+            return [
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+                "http://localhost:3000",
+                "http://127.0.0.1:3000",
+                "http://localhost:8000",
+                "http://127.0.0.1:8000",
+            ]
+        return []
+
+    def socketio_fail_closed_violations(self) -> list[str]:
+        """Unsafe Socket.IO settings when ``app_env=production`` (ISSUE-258)."""
+        if not self.is_production():
+            return []
+        origins = self.configured_socketio_cors_origins()
+        violations: list[str] = []
+        if not origins:
+            violations.append("SOCKETIO_CORS_ALLOWED_ORIGINS must be non-empty in production")
+        if "*" in origins:
+            violations.append("SOCKETIO_CORS_ALLOWED_ORIGINS must not contain wildcard '*'")
         return violations
 
 

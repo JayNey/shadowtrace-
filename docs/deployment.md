@@ -372,6 +372,7 @@ Mock 模式下的 `ALLOW_*` 始终为 `false`。
 4. Mock P0 闭环默认使用 `DEV_AUTH_TOKENS`，**不依赖** trusted-proxy 路径。
 5. 生产环境应启用 trusted-proxy（`TRUSTED_AUTH_PROXY_ENABLED=true`）并配置显式 allowlist；若关闭 trusted-proxy 且 `APP_ENV=production`，除 proxy 外无可用认证路径（`DEV_AUTH_TOKENS` 一律拒绝）。
 6. **生产环境禁止设置前端构建变量 `VITE_AUTH_ROLES` / `VITE_DEV_AUTH_TOKEN`**。真实用户角色由 trusted-proxy 按请求注入（`X-Auth-Roles`），前端构建时共享的角色配置无法代表请求级 principal；设置了这些变量会导致内联审批等按角色门控的 UI 在合法用户上被错误禁用（ISSUE-207）。它们仅用于 Mock/Compose 单 token 开发阶段。
+7. `SOCKETIO_CORS_ALLOWED_ORIGINS` 必须配置为允许访问实时通道的精确浏览器 Origin 列表（逗号分隔，例如 `https://soc.example.com`）；生产环境空值或通配符 `*` 会导致进程拒绝启动。
 
 ### 生产前端镜像构建检查清单（ISSUE-221）
 
@@ -411,6 +412,7 @@ docker compose -f infra/docker-compose.yml build frontend
 APP_ENV=production
 TRUSTED_AUTH_PROXY_ENABLED=true
 TRUSTED_PROXY_ALLOWLIST=10.0.0.5
+SOCKETIO_CORS_ALLOWED_ORIGINS=https://soc.example.com
 # DEV_AUTH_TOKENS 留空或不设置
 ```
 

@@ -41,6 +41,7 @@ describe("socketClient", () => {
   afterEach(async () => {
     const { socketClient } = await import("../../src/services/socketClient");
     socketClient.disconnect();
+    vi.unstubAllEnvs();
   });
 
   it("connects to /events namespace", async () => {
@@ -50,6 +51,19 @@ describe("socketClient", () => {
     expect(io).toHaveBeenCalledWith(
       expect.stringContaining("/events"),
       expect.objectContaining({ transports: ["websocket", "polling"] }),
+    );
+  });
+
+  it("uses the configured dev bearer token for handshake auth", async () => {
+    vi.stubEnv("VITE_DEV_AUTH_TOKEN", "socket-test-token");
+    const { io } = await import("socket.io-client");
+    const { socketClient } = await import("../../src/services/socketClient");
+
+    socketClient.connect();
+
+    expect(io).toHaveBeenCalledWith(
+      expect.stringContaining("/events"),
+      expect.objectContaining({ auth: { token: "socket-test-token" } }),
     );
   });
 
