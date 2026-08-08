@@ -689,7 +689,8 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.agents.risk_agent import RiskAgent
     from app.agents.triage_agent import TriageAgent
     from app.core.embedding.factory import get_embedding_client
-    from app.core.guardrails import OutputGuard
+    from app.core.guardrails import OutputGuard, WorkingMemoryGuardViolationWriter
+    from app.services.agent_publication_service import AgentPublicationService
     from app.core.llm.factory import get_llm_client
     from app.orchestration.convergence_guard import ConvergenceGuard
     from app.services.agent_trace_service import AgentTraceService
@@ -713,7 +714,15 @@ async def _build_investigation_agents() -> dict[str, Any]:
         attempt_redis_recovery=settings.budget_attempt_redis_recovery,
         recovery_interval_seconds=settings.budget_redis_recovery_interval_seconds,
     )
-    output_guard = OutputGuard()
+    output_guard = OutputGuard(
+        violation_writer=WorkingMemoryGuardViolationWriter(wm),
+    )
+    publication_service = AgentPublicationService(
+        event_service,
+        degraded_flags=_get_degraded_flags(),
+        event_bus=_get_event_bus(),
+        context_store=_get_context_store(),
+    )
     trace_service = AgentTraceService(
         session_factory,
         decision_record_service=_get_decision_record_service(),
@@ -874,6 +883,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         trace_service=trace_service,
         event_bus=event_bus,
         event_service=event_service,
+        publication_service=publication_service,
         degraded_flags=_get_degraded_flags(),
     )
     report = ReportAgent(
@@ -883,6 +893,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         output_guard=output_guard,
         trace_service=trace_service,
         event_service=event_service,
+        publication_service=publication_service,
         detection_context_service=get_detection_context_service(),
         event_bus=event_bus,
     )
@@ -931,6 +942,7 @@ async def _build_investigation_agents() -> dict[str, Any]:
         "degraded_flags": _get_degraded_flags(),
         "budget_service": budget_service,
         "output_guard": output_guard,
+        "publication_service": publication_service,
         "convergence_guard": convergence_guard,
         "llm_client": llm_client,
         "tool_executor": tool_executor,

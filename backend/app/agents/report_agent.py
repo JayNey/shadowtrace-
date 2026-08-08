@@ -119,6 +119,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         audit_service: Any | None = None,
         event_bus: Any | None = None,
         event_service: Any | None = None,
+        publication_service: Any | None = None,
         detection_context_service: Any | None = None,
         section_builder: ReportSectionBuilder | None = None,
         scenario_id: str | None = None,
@@ -135,6 +136,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             event_bus=event_bus,
         )
         self.event_service = event_service
+        self.publication_service = publication_service
         self.detection_context_service = detection_context_service
         self.section_builder = section_builder or ReportSectionBuilder()
         self.scenario_id = scenario_id
@@ -319,13 +321,62 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             response_phase_status=input.response_phase_status,
             verification_phase_status=input.verification_phase_status,
         )
-
-        if input.persist_report:
-            await self._persist_report(report)
-            await self._write_context(input.event_id, report)
-            await self._record_generate_report_action(input)
-            await self._publish_report_generated(report)
         return report
+
+    async def _publish_approved_output(
+        self,
+        input: ReportAgentInput,
+        output: InvestigationReport,
+    ) -> InvestigationReport:
+        if not input.persist_report:
+            return output
+        publisher = self._resolve_publication_service()
+        if publisher is None:
+            raise RuntimeError(
+                "ReportAgent.persist_report=True requires AgentPublicationService"
+            )
+        plan_revision = 1
+        if input.response_plan is not None and input.response_plan.actions:
+            plan_revision = max(a.plan_revision for a in input.response_plan.actions)
+        from app.services.agent_publication_service import GuardApprovedPublication
+
+        token = GuardApprovedPublication.issue(
+            agent_name=self.agent_name,
+            event_id=input.event_id,
+        )
+        return await publisher.publish_report(
+            event_id=input.event_id,
+            report=output,
+            working_memory=self.working_memory,
+            publication=token,
+            plan_revision=plan_revision,
+            persist_report=True,
+        )
+
+    def _resolve_publication_service(self) -> Any | None:
+        if self.publication_service is not None:
+            return self.publication_service
+        if self.event_service is None:
+            return None
+        from app.services.agent_publication_service import AgentPublicationService
+
+        return AgentPublicationService(
+            self.event_service,
+            event_bus=self.event_bus,
+        )
+
+    async def _build_guard_context(self, input: ReportAgentInput | None) -> dict[str, Any]:
+        context = await super()._build_guard_context(input)
+        if input is None:
+            return context
+        context["evidence_output"] = input.evidence_output.model_dump(mode="json")
+        triage = await self._load_triage(input.event_id)
+        if triage is not None:
+            context.setdefault("entities", triage.entities.model_dump(mode="json"))
+        rag = await self._read_optional(input.event_id, "rag_output")
+        if isinstance(rag, dict):
+            context.setdefault("rag_output", rag)
+        return context
 
     async def _generate_with_llm(
         self,
@@ -740,8 +791,6 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             )
 
     async def _persist_report(self, report: InvestigationReport) -> None:
-        # ISSUE-242: persist_report=True is a hard contract — soft-skipping here
-        # would let callers advance to REPORTING with no DB row (GET /report 404).
         if self.event_service is None:
             raise RuntimeError(
                 "ReportAgent.persist_report=True requires event_service.upsert_report"

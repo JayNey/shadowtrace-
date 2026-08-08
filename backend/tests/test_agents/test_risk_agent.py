@@ -88,6 +88,7 @@ class _FakeEventService:
         operator: str | None = None,
         factor_names: list[str] | None = None,
         risk_assessment: dict[str, Any] | None = None,
+        publication: Any | None = None,
     ) -> None:
         self.risk_updates.append(
             {
@@ -108,8 +109,42 @@ class _FakeEventService:
         *,
         operator: str | None = None,
         context: Any = None,
+        publication: Any | None = None,
     ) -> None:
         self.verdicts.append(verdict)
+
+    async def publish_risk_assessment(
+        self,
+        event_id: str,
+        *,
+        assessment: Any,
+        verdict: FinalVerdict,
+        operator: str,
+        publication: Any,
+    ) -> tuple[bool, Any, Any]:
+        await self.update_risk_fields(
+            event_id,
+            risk_score=assessment.risk_score,
+            severity=assessment.severity,
+            confidence=assessment.confidence,
+            operator=operator,
+            factor_names=[f.factor_name for f in assessment.risk_factors],
+            risk_assessment=assessment.model_dump(mode="json"),
+            publication=publication,
+        )
+        await self.set_final_verdict(
+            event_id,
+            verdict,
+            operator=operator,
+            publication=publication,
+        )
+        return False, object(), object()
+
+    async def publish_final_verdict_mutation(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def sync_event_summary_mutation(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 class _MockDegradedFlags:
@@ -642,13 +677,13 @@ async def test_verdict_written_only_via_event_service(
 
 
 class _FailingRiskSyncEventService(_FakeEventService):
-    async def update_risk_fields(self, *args: Any, **kwargs: Any) -> None:
+    async def publish_risk_assessment(self, *args: Any, **kwargs: Any) -> tuple[bool, Any, Any]:
         raise RuntimeError("risk db sync unavailable")
 
 
 @pytest.mark.asyncio
 async def test_risk_db_sync_failure_propagates(wm: _FakeWorkingMemory) -> None:
-    """update_risk_fields failure must abort RiskAgent after WM write attempt."""
+    """Publication failure after guard must not project risk_assessment to WM."""
     event_id = f"evt-risk-sync-fail-{uuid4().hex[:8]}"
     agent = RiskAgent(
         llm_client=_FailingLLM(),
@@ -664,8 +699,7 @@ async def test_risk_db_sync_failure_propagates(wm: _FakeWorkingMemory) -> None:
             )
         )
     stored = await wm.read(event_id, "risk_assessment")
-    assert stored is not None
-    assert stored["risk_score"] >= 70
+    assert stored is None
 
 
 def _zero_evidence_output(*, status: CollectionStatus = CollectionStatus.FAILED) -> EvidenceOutput:

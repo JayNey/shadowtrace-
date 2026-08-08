@@ -21,10 +21,6 @@ from app.agents.risk_scoring_engine import (
     augment_factors_for_evidence_limited,
     severity_from_score,
 )
-from app.agents.triage_risk_consistency import (
-    TRIAGE_RISK_INCONSISTENCY_FLAG,
-    should_flag_triage_risk_inconsistency,
-)
 from app.agents.verdict_resolver import VerdictResolver
 from app.core.errors import LLMError
 from app.core.llm.prompt_quality import resolve_structured_prompt_timeout
@@ -65,6 +61,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         audit_service: Any | None = None,
         event_bus: Any | None = None,
         event_service: Any | None = None,
+        publication_service: Any | None = None,
         scoring_engine: RiskScoringEngine | None = None,
         verdict_resolver: VerdictResolver | None = None,
         calibration_temperature: float = DEFAULT_TEMPERATURE,
@@ -82,6 +79,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             event_bus=event_bus,
         )
         self.event_service = event_service
+        self.publication_service = publication_service
         self.scoring_engine = scoring_engine or RiskScoringEngine()
         self.verdict_resolver = verdict_resolver or VerdictResolver()
         self.calibration_temperature = float(calibration_temperature)
@@ -204,18 +202,57 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             reason_codes.append(EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT)
 
         assessment = provisional.model_copy(update={"verdict_reason_codes": reason_codes})
-        await self._write_context(input.event_id, assessment)
-        await self._sync_security_event(input.event_id, assessment)
-
         self.last_verdict = verdict
-        await self._persist_verdict(input.event_id, verdict, risk_score=assessment.risk_score)
-        await self._maybe_flag_triage_risk_inconsistency(
-            event_id=input.event_id,
-            triage=input.triage_result,
-            risk_score=assessment.risk_score,
-            final_verdict=verdict,
-        )
         return assessment
+
+    async def _publish_approved_output(
+        self,
+        input: RiskAgentInput,
+        output: RiskAssessment,
+    ) -> RiskAssessment:
+        publisher = self._resolve_publication_service()
+        if publisher is None:
+            return output
+        verdict = self.last_verdict or FinalVerdict.NONE
+        from app.services.agent_publication_service import GuardApprovedPublication
+
+        token = GuardApprovedPublication.issue(
+            agent_name=self.agent_name,
+            event_id=input.event_id,
+        )
+        return await publisher.publish_risk_assessment(
+            event_id=input.event_id,
+            assessment=output,
+            verdict=verdict,
+            triage=input.triage_result,
+            working_memory=self.working_memory,
+            publication=token,
+        )
+
+    def _resolve_publication_service(self) -> Any | None:
+        if self.publication_service is not None:
+            return self.publication_service
+        if self.event_service is None:
+            return None
+        from app.services.agent_publication_service import AgentPublicationService
+
+        return AgentPublicationService(
+            self.event_service,
+            degraded_flags=self.degraded_flags,
+            event_bus=self.event_bus,
+        )
+
+    async def _build_guard_context(self, input: RiskAgentInput | None) -> dict[str, Any]:
+        context = await super()._build_guard_context(input)
+        if input is None:
+            return context
+        context["evidence_output"] = input.evidence_output.model_dump(mode="json")
+        if input.triage_result is not None:
+            context.setdefault(
+                "entities",
+                input.triage_result.entities.model_dump(mode="json"),
+            )
+        return context
 
     async def _score_with_llm(
         self,
@@ -351,107 +388,3 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         except Exception:
             logger.debug("optional WM read failed key=%s", key, exc_info=True)
             return None
-
-    async def _write_context(self, event_id: str, assessment: RiskAssessment) -> None:
-        if self.working_memory is None:
-            return
-        try:
-            await self.working_memory.write(
-                event_id,
-                "risk_assessment",
-                assessment.model_dump(mode="json"),
-            )
-        except Exception:
-            logger.warning(
-                "failed to write risk_assessment to working memory event=%s",
-                event_id,
-                exc_info=True,
-            )
-
-    async def _sync_security_event(
-        self,
-        event_id: str,
-        assessment: RiskAssessment,
-    ) -> None:
-        if self.event_service is None:
-            return
-        updater = getattr(self.event_service, "update_risk_fields", None)
-        if updater is None:
-            logger.debug("event_service lacks update_risk_fields; skip DB risk sync")
-            return
-        try:
-            await updater(
-                event_id,
-                risk_score=assessment.risk_score,
-                severity=assessment.severity,
-                confidence=assessment.confidence,
-                factor_names=[f.factor_name for f in assessment.risk_factors],
-                risk_assessment=assessment.model_dump(mode="json"),
-            )
-        except Exception:
-            logger.warning(
-                "failed to sync risk fields to security_event event=%s",
-                event_id,
-                exc_info=True,
-            )
-            raise
-
-    async def _persist_verdict(
-        self,
-        event_id: str,
-        verdict: FinalVerdict,
-        *,
-        risk_score: int,
-    ) -> None:
-        if self.event_service is None:
-            return
-        try:
-            await self.event_service.set_final_verdict(
-                event_id,
-                verdict,
-                operator="RiskAgent",
-            )
-        except Exception:
-            logger.warning(
-                "set_final_verdict failed event=%s verdict=%s risk_score=%s",
-                event_id,
-                verdict.value,
-                risk_score,
-                exc_info=True,
-            )
-            if (
-                verdict in {FinalVerdict.CONFIRMED_THREAT, FinalVerdict.FALSE_POSITIVE}
-                or risk_score >= 70
-            ):
-                raise
-
-    async def _maybe_flag_triage_risk_inconsistency(
-        self,
-        *,
-        event_id: str,
-        triage: TriageResult,
-        risk_score: int,
-        final_verdict: FinalVerdict,
-    ) -> None:
-        if not should_flag_triage_risk_inconsistency(
-            triage=triage,
-            risk_score=risk_score,
-            final_verdict=final_verdict,
-        ):
-            return
-        if self.degraded_flags is None:
-            return
-        try:
-            await self.degraded_flags.set_flag(
-                event_id,
-                TRIAGE_RISK_INCONSISTENCY_FLAG,
-                True,
-                writer="RiskAgent",
-            )
-        except Exception:
-            logger.warning(
-                "Failed to persist degraded flag %s for event=%s",
-                TRIAGE_RISK_INCONSISTENCY_FLAG,
-                event_id,
-                exc_info=True,
-            )

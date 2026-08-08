@@ -114,6 +114,7 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
             ):
                 output = await self._run(input)
                 output = await self._apply_guardrails(output)
+                output = await self._publish_approved_output(input, output)
                 for hook in self.post_hooks:
                     await hook(self, input)
             duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
@@ -139,6 +140,14 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
     @abstractmethod
     async def _run(self, input: TIn) -> TOut:
         """Subclass-implemented agent body. Must return the stage output model."""
+
+    async def _publish_approved_output(self, input: TIn, output: TOut) -> TOut:
+        """Persist guard-approved output via AgentPublicationService (ISSUE-270).
+
+        Default no-op; RiskAgent / ReportAgent override to publish durable state
+        only after ``_apply_guardrails`` succeeds.
+        """
+        return output
 
     async def _record_trace(
         self,

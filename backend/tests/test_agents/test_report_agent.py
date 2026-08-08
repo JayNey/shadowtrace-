@@ -152,6 +152,25 @@ class _FakeEventService:
         )
         return action_id
 
+    async def publish_investigation_report(
+        self,
+        report: Any,
+        *,
+        plan_revision: int = 1,
+        operator: str,
+        publication: Any,
+    ) -> Any:
+        persisted = await self.upsert_report(report)
+        await self.upsert_generate_report_action(report.event_id, plan_revision=plan_revision)
+        return persisted
+
+    async def merge_report_generated_context_snapshot(
+        self,
+        event_id: str,
+        generated: bool,
+    ) -> None:
+        return None
+
 
 class _FakeEventBus:
     def __init__(self) -> None:
@@ -626,7 +645,7 @@ async def test_report_upsert_is_idempotent_by_report_id(
 
 
 class _FailingPersistEventService(_FakeEventService):
-    async def upsert_report(self, report: Any) -> Any:
+    async def publish_investigation_report(self, *args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("report db unavailable")
 
 
@@ -655,7 +674,7 @@ async def test_report_persist_requires_event_service(wm: _FakeWorkingMemory) -> 
     event_id = f"evt-report-no-svc-{uuid4().hex[:8]}"
     await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
     agent = ReportAgent(llm_client=None, working_memory=wm, event_service=None)
-    with pytest.raises(RuntimeError, match="requires event_service.upsert_report"):
+    with pytest.raises(RuntimeError, match="requires AgentPublicationService"):
         await agent.execute(
             ReportAgentInput(
                 event_id=event_id,
