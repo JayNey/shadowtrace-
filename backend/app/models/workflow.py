@@ -435,6 +435,7 @@ OUTBOX_DELIVERY_TRANSITIONS: dict[OutboxDeliveryStatus, set[OutboxDeliveryStatus
     },
     OutboxDeliveryStatus.PAUSED: {
         OutboxDeliveryStatus.READY,  # after status lookup / manual adjudication
+        OutboxDeliveryStatus.DELIVERED,  # lookup found the external submission
         OutboxDeliveryStatus.DEAD_LETTER,
     },
     OutboxDeliveryStatus.DELIVERED: set(),
@@ -463,8 +464,11 @@ WRITEBACK_STATUS_TRANSITIONS: dict[WritebackStatus, set[WritebackStatus]] = {
         WritebackStatus.UNKNOWN,
     },
     WritebackStatus.UNKNOWN: {
+        WritebackStatus.ACCEPTED,
         WritebackStatus.CONFIRMED,
+        WritebackStatus.PARTIAL,
         WritebackStatus.FAILED,
+        WritebackStatus.CONFLICT,
         WritebackStatus.PENDING,  # only when lookup proves never-accepted
     },
     WritebackStatus.PARTIAL: {
@@ -1172,6 +1176,8 @@ def validate_outbox_delivery_transition(
     target: OutboxDeliveryStatus,
     *,
     lease_expired_resend: bool = False,
+    known_pre_egress_failure: bool = False,
+    lookup_confirmed_submission: bool = False,
 ) -> None:
     if lease_expired_resend and current is OutboxDeliveryStatus.LEASED:
         # Expired lease must PAUSE + lookup first — never direct re-send or
@@ -1183,6 +1189,27 @@ def validate_outbox_delivery_transition(
                 current=current,
                 target=target,
             )
+    if (
+        current is OutboxDeliveryStatus.LEASED
+        and target is OutboxDeliveryStatus.WAITING_RETRY
+        and not known_pre_egress_failure
+    ):
+        raise InvalidStateTransitionError(
+            "LEASED→WAITING_RETRY requires a proven pre-egress failure; "
+            "ambiguous submission outcomes must transition to PAUSED",
+            current=current,
+            target=target,
+        )
+    if (
+        current is OutboxDeliveryStatus.PAUSED
+        and target is OutboxDeliveryStatus.DELIVERED
+        and not lookup_confirmed_submission
+    ):
+        raise InvalidStateTransitionError(
+            "PAUSED→DELIVERED requires a provider lookup receipt",
+            current=current,
+            target=target,
+        )
     if not _edge_allowed(OUTBOX_DELIVERY_TRANSITIONS, current, target):
         raise InvalidStateTransitionError(
             f"illegal outbox delivery {current.value} → {target.value}",
@@ -1212,6 +1239,21 @@ def validate_writeback_status_transition(
                 current=current,
                 target=target,
             )
+    if (
+        current is WritebackStatus.UNKNOWN
+        and target
+        in {
+            WritebackStatus.ACCEPTED,
+            WritebackStatus.PARTIAL,
+            WritebackStatus.CONFLICT,
+        }
+        and not evidence_adjudication
+    ):
+        raise InvalidStateTransitionError(
+            "UNKNOWN→provider status requires lookup or admin adjudication",
+            current=current,
+            target=target,
+        )
     if (
         current in (WritebackStatus.FAILED, WritebackStatus.PARTIAL)
         and target is WritebackStatus.PENDING

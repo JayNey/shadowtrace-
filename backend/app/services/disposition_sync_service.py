@@ -7,7 +7,9 @@ import json
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import and_, or_, select
@@ -66,6 +68,35 @@ logger = logging.getLogger(__name__)
 ResumeInvestigationHook = Callable[[str], Awaitable[None]]
 _DEFAULT_LEASE_SECONDS = 30
 _ERROR_DETAIL_MAX_LEN = 500
+
+
+class _PausedLookupKind(StrEnum):
+    FOUND = "found"
+    NOT_FOUND = "not_found"
+    DEGRADED = "degraded"
+
+
+@dataclass(frozen=True)
+class _PausedLookupClaim:
+    outbox_id: str
+    token: str
+    event_id: str
+    action_id: str
+    disposition_id: str
+    writeback_id: str
+    idempotency_key: str
+    command_payload_sha256: str
+    command: DispositionCommand
+    adapter: BaseDispositionAdapter
+    provider_job_id: str | None
+
+
+@dataclass(frozen=True)
+class _PausedLookupOutcome:
+    kind: _PausedLookupKind
+    receipt: DispositionReceipt | None = None
+    error_code: str | None = None
+    detail: str | None = None
 
 
 class _NullResumeHook:
@@ -710,10 +741,7 @@ class DispositionSyncService:
                             self._worker_id,
                         )
                         return
-                    if (
-                        outbox.lease_expires_at is None
-                        or outbox.lease_expires_at <= now
-                    ):
+                    if outbox.lease_expires_at is None or outbox.lease_expires_at <= now:
                         self._release_leased_outbox_after_lease_expiry(outbox, now=now)
                         return
                 if outbox.superseded_by_disposition_id is not None:
@@ -1121,6 +1149,8 @@ class DispositionSyncService:
         current = OutboxDeliveryStatus(outbox.delivery_status)
         if current is not OutboxDeliveryStatus.LEASED:
             return current
+        if outbox.lease_expires_at is None or outbox.lease_expires_at <= now:
+            return self._release_leased_outbox_after_lease_expiry(outbox, now=now)
 
         settings = get_settings()
         attempt = int(outbox.attempt) + 1
@@ -1140,7 +1170,11 @@ class DispositionSyncService:
             record_writeback_dead_letter(adapter=self._adapter_label(outbox))
             return OutboxDeliveryStatus.DEAD_LETTER
 
-        validate_outbox_delivery_transition(current, OutboxDeliveryStatus.WAITING_RETRY)
+        validate_outbox_delivery_transition(
+            current,
+            OutboxDeliveryStatus.WAITING_RETRY,
+            known_pre_egress_failure=True,
+        )
         outbox.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
         outbox.next_retry_at = now + timedelta(
             seconds=self._outbox_retry_backoff_seconds(attempt),
@@ -1165,7 +1199,8 @@ class DispositionSyncService:
 
         outbox.last_error_code = "lease_expired"
         outbox.last_error_detail = self._truncate_error_detail(
-            f"idempotency_key={outbox.idempotency_key}; "
+            "idempotency_key_sha256="
+            f"{hashlib.sha256(outbox.idempotency_key.encode()).hexdigest()}; "
             f"locked_by={outbox.locked_by}; attempt={outbox.attempt}"
         )
         outbox.locked_by = None
@@ -1211,9 +1246,57 @@ class DispositionSyncService:
         return OutboxDeliveryStatus.PAUSED
 
     async def reconcile_paused_outboxes(self, *, limit: int = 10) -> int:
-        """Lookup-first reconciliation for PAUSED outboxes (ISSUE-260)."""
+        """Lookup-first reconciliation with per-row fencing (ISSUE-260)."""
         reconciled = 0
-        event_ids: list[str] = []
+        claims = await self._claim_paused_outboxes(limit=limit)
+        for claim in claims:
+            outcome = await self._lookup_paused_outbox(claim)
+            try:
+                applied, event_id, status = await self._apply_paused_lookup_outcome(
+                    claim,
+                    outcome,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "paused outbox reconcile apply failed outbox=%s error=%s",
+                    claim.outbox_id,
+                    type(exc).__name__,
+                    exc_info=True,
+                )
+                await self._release_paused_lookup_claim(
+                    claim,
+                    error_code="lookup_apply_failed",
+                    detail=f"{type(exc).__name__}: {exc}",
+                )
+                await self._sync_writeback_summary(claim.event_id)
+                await self._maybe_resume(claim.event_id)
+                if self._bus is not None:
+                    await self._bus.publish_event(
+                        claim.event_id,
+                        "writeback_updated",
+                        {
+                            "writeback_id": claim.writeback_id,
+                            "status": WritebackStatus.UNKNOWN.value,
+                        },
+                    )
+                continue
+            if event_id is not None:
+                await self._sync_writeback_summary(event_id)
+                await self._maybe_resume(event_id)
+                if status is not None and self._bus is not None:
+                    await self._bus.publish_event(
+                        event_id,
+                        "writeback_updated",
+                        {"writeback_id": claim.writeback_id, "status": status.value},
+                    )
+            if applied:
+                reconciled += 1
+        return reconciled
+
+    async def _claim_paused_outboxes(self, *, limit: int) -> list[_PausedLookupClaim]:
+        """Acquire short-lived reconciliation leases without network I/O."""
+        now = datetime.now(UTC)
+        claims: list[_PausedLookupClaim] = []
         async with self._session_factory() as session:
             async with session.begin():
                 rows = (
@@ -1223,6 +1306,11 @@ class DispositionSyncService:
                             orm.DispositionOutbox.delivery_status
                             == OutboxDeliveryStatus.PAUSED.value,
                             orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                            or_(
+                                orm.DispositionOutbox.locked_by.is_(None),
+                                orm.DispositionOutbox.lease_expires_at.is_(None),
+                                orm.DispositionOutbox.lease_expires_at <= now,
+                            ),
                         )
                         .order_by(orm.DispositionOutbox.updated_at.asc())
                         .limit(limit)
@@ -1230,158 +1318,255 @@ class DispositionSyncService:
                     )
                 ).all()
                 for row in rows:
-                    if await self._reconcile_paused_outbox_row(session, row):
-                        reconciled += 1
-                        event_ids.append(row.event_id)
-        for event_id in event_ids:
-            await self._sync_writeback_summary(event_id)
-            await self._maybe_resume(event_id)
-        return reconciled
+                    try:
+                        command = DispositionCommand.model_validate(row.command_payload)
+                        adapter = self._resolve_adapter(row)
+                    except Exception as exc:
+                        row.last_error_code = "lookup_claim_invalid"
+                        row.last_error_detail = self._truncate_error_detail(
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                        row.updated_at = now
+                        continue
+                    latest_receipt = await session.scalar(
+                        select(orm.DispositionReceipt)
+                        .where(orm.DispositionReceipt.writeback_id == row.writeback_id)
+                        .order_by(orm.DispositionReceipt.sequence.desc())
+                        .limit(1)
+                    )
+                    token = f"{self._worker_id}:reconcile:{secrets.token_hex(8)}"
+                    row.locked_by = token
+                    row.locked_at = now
+                    row.lease_expires_at = now + timedelta(seconds=_DEFAULT_LEASE_SECONDS)
+                    row.updated_at = now
+                    action = await session.get(orm.Action, row.action_id, with_for_update=True)
+                    _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
+                    claims.append(
+                        _PausedLookupClaim(
+                            outbox_id=row.outbox_id,
+                            token=token,
+                            event_id=row.event_id,
+                            action_id=row.action_id,
+                            disposition_id=row.disposition_id,
+                            writeback_id=row.writeback_id,
+                            idempotency_key=row.idempotency_key,
+                            command_payload_sha256=row.command_payload_sha256,
+                            command=command,
+                            adapter=adapter,
+                            provider_job_id=(
+                                latest_receipt.provider_job_id
+                                if latest_receipt is not None
+                                else None
+                            ),
+                        )
+                    )
+        return claims
 
-    async def _reconcile_paused_outbox_row(
+    async def _lookup_paused_outbox(
         self,
-        session: AsyncSession,
-        outbox: orm.DispositionOutbox,
-    ) -> bool:
-        now = datetime.now(UTC)
-        current_delivery = OutboxDeliveryStatus(outbox.delivery_status)
-        if current_delivery is not OutboxDeliveryStatus.PAUSED:
-            return False
-        if outbox.superseded_by_disposition_id is not None:
-            return False
-
-        adapter = self._resolve_adapter(outbox)
-        adapter_label = adapter.name
-        caps = adapter.capabilities()
-        command = DispositionCommand.model_validate(outbox.command_payload)
-        lookup_receipt: DispositionReceipt | None = None
-        lookup_degraded = False
-
-        if caps.supports_lookup_by_idempotency or caps.supports_status_query:
+        claim: _PausedLookupClaim,
+    ) -> _PausedLookupOutcome:
+        """Perform provider lookup outside any database transaction."""
+        caps = claim.adapter.capabilities()
+        if not (caps.supports_lookup_by_idempotency or caps.supports_status_query):
+            return _PausedLookupOutcome(
+                kind=_PausedLookupKind.DEGRADED,
+                error_code="lookup_unsupported",
+                detail="adapter lacks lookup/status capability; manual adjudication required",
+            )
+        try:
             with disposition_span(
                 "disposition.lookup_reconcile",
-                event_id=outbox.event_id,
-                action_id=outbox.action_id,
-                disposition_id=outbox.disposition_id,
-                writeback_id=outbox.writeback_id,
+                event_id=claim.event_id,
+                action_id=claim.action_id,
+                disposition_id=claim.disposition_id,
+                writeback_id=claim.writeback_id,
             ):
-                try:
-                    if caps.supports_lookup_by_idempotency:
-                        lookup_receipt = await adapter.lookup_submission(
-                            command.idempotency_key,
-                            command.source_locator,
-                        )
-                    if lookup_receipt is None and caps.supports_status_query:
-                        latest_receipt = await session.scalar(
-                            select(orm.DispositionReceipt)
-                            .where(orm.DispositionReceipt.writeback_id == outbox.writeback_id)
-                            .order_by(orm.DispositionReceipt.sequence.desc())
-                            .limit(1)
-                        )
-                        provider_job_id = (
-                            latest_receipt.provider_job_id if latest_receipt is not None else None
-                        )
-                        if provider_job_id:
-                            lookup_receipt = await adapter.get_status(provider_job_id)
-                except Exception as exc:
-                    lookup_degraded = True
-                    outbox.last_error_code = "lookup_degraded"
-                    outbox.last_error_detail = self._truncate_error_detail(
-                        f"{type(exc).__name__}: {exc}"
+                lookup_receipt: DispositionReceipt | None = None
+                if caps.supports_lookup_by_idempotency:
+                    lookup_receipt = await claim.adapter.lookup_submission(
+                        claim.idempotency_key,
+                        claim.command.source_locator,
                     )
-                    outbox.updated_at = now
-                    logger.warning(
-                        "paused outbox lookup degraded outbox=%s error=%s",
-                        outbox.outbox_id,
-                        type(exc).__name__,
-                    )
-                    return False
-        else:
-            outbox.last_error_code = "lookup_unsupported"
-            outbox.last_error_detail = self._truncate_error_detail(
-                "adapter lacks lookup/status capability; manual adjudication required"
+                if lookup_receipt is None and caps.supports_status_query and claim.provider_job_id:
+                    lookup_receipt = await claim.adapter.get_status(claim.provider_job_id)
+        except Exception as exc:
+            logger.warning(
+                "paused outbox lookup degraded outbox=%s error=%s",
+                claim.outbox_id,
+                type(exc).__name__,
             )
-            outbox.updated_at = now
-            return False
+            return _PausedLookupOutcome(
+                kind=_PausedLookupKind.DEGRADED,
+                error_code="lookup_degraded",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        if lookup_receipt is not None:
+            return _PausedLookupOutcome(
+                kind=_PausedLookupKind.FOUND,
+                receipt=lookup_receipt,
+            )
+        if caps.supports_lookup_by_idempotency:
+            return _PausedLookupOutcome(kind=_PausedLookupKind.NOT_FOUND)
+        return _PausedLookupOutcome(
+            kind=_PausedLookupKind.DEGRADED,
+            error_code="lookup_inconclusive",
+            detail="status query unavailable without a provider job id",
+        )
 
-        if lookup_receipt is None:
-            if not adapter.allows_safe_retry():
-                outbox.last_error_code = "lookup_not_found"
-                outbox.last_error_detail = self._truncate_error_detail(
-                    "lookup found no submission and adapter does not allow safe retry"
+    async def _apply_paused_lookup_outcome(
+        self,
+        claim: _PausedLookupClaim,
+        outcome: _PausedLookupOutcome,
+    ) -> tuple[bool, str | None, WritebackStatus | None]:
+        """Apply a lookup result only if the reconciliation lease still matches."""
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.outbox_id == claim.outbox_id)
+                    .with_for_update()
                 )
+                if outbox is None:
+                    return False, None, None
+                if (
+                    OutboxDeliveryStatus(outbox.delivery_status) is not OutboxDeliveryStatus.PAUSED
+                    or outbox.locked_by != claim.token
+                    or outbox.superseded_by_disposition_id is not None
+                    or outbox.idempotency_key != claim.idempotency_key
+                    or outbox.command_payload_sha256 != claim.command_payload_sha256
+                ):
+                    return False, None, None
+
+                outbox.locked_by = None
+                outbox.locked_at = None
+                outbox.lease_expires_at = None
+                outbox.next_retry_at = None
                 outbox.updated_at = now
-                return False
-            current_status = (
-                WritebackStatus(outbox.latest_writeback_status)
-                if outbox.latest_writeback_status
-                else WritebackStatus.UNKNOWN
-            )
-            validate_writeback_status_transition(
-                current_status,
-                WritebackStatus.PENDING,
-                lookup_never_accepted=True,
-                adapter_allows_safe_retry=True,
-            )
-            outbox.latest_writeback_status = WritebackStatus.PENDING.value
-            outbox.last_error_code = "lookup_never_accepted"
-            outbox.last_error_detail = self._truncate_error_detail(
-                "lookup confirmed never-accepted; safe-retry re-enqueued"
-            )
-            validate_outbox_delivery_transition(
-                current_delivery,
-                OutboxDeliveryStatus.READY,
-            )
-            outbox.delivery_status = OutboxDeliveryStatus.READY.value
-            outbox.updated_at = now
-            action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-            _mirror_writeback_status_to_action(action, WritebackStatus.PENDING.value)
-            record_writeback_retry(adapter=adapter_label)
-            return True
+                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
 
-        if lookup_receipt.status is WritebackStatus.UNKNOWN or lookup_degraded:
-            outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
-            outbox.last_error_code = "lookup_unknown"
-            outbox.last_error_detail = self._truncate_error_detail(
-                "lookup inconclusive; outbox remains paused"
-            )
-            outbox.updated_at = now
-            action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-            _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
-            return False
+                if outcome.kind is _PausedLookupKind.DEGRADED:
+                    outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
+                    outbox.last_error_code = outcome.error_code or "lookup_degraded"
+                    outbox.last_error_detail = self._truncate_error_detail(
+                        outcome.detail or "lookup inconclusive; outbox remains paused"
+                    )
+                    _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
+                    return False, outbox.event_id, WritebackStatus.UNKNOWN
 
-        current_status = (
-            WritebackStatus(outbox.latest_writeback_status)
-            if outbox.latest_writeback_status
-            else WritebackStatus.PENDING
-        )
-        validate_writeback_status_transition(
-            current_status,
-            lookup_receipt.status,
-            evidence_adjudication=True,
-        )
-        parsed_receipt = await self._append_receipt(session, outbox, receipt=lookup_receipt)
-        outbox.latest_writeback_status = parsed_receipt.status.value
-        validate_outbox_delivery_transition(
-            current_delivery,
-            OutboxDeliveryStatus.DELIVERED,
-        )
-        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-        outbox.delivered_at = now
-        outbox.last_error_code = None
-        outbox.last_error_detail = None
-        outbox.updated_at = now
-        action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-        _mirror_writeback_status_to_action(action, parsed_receipt.status.value)
-        if action is not None:
-            await self._apply_action_terminal_from_receipt(
-                session,
-                action,
-                parsed_receipt,
-                adapter_label=adapter_label,
-            )
-        record_writeback(status=parsed_receipt.status.value, adapter=adapter_label)
-        return True
+                if outcome.kind is _PausedLookupKind.NOT_FOUND:
+                    if not claim.adapter.allows_safe_retry():
+                        outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
+                        outbox.last_error_code = "lookup_not_found"
+                        outbox.last_error_detail = self._truncate_error_detail(
+                            "lookup found no submission and adapter does not allow safe retry"
+                        )
+                        _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
+                        return False, outbox.event_id, WritebackStatus.UNKNOWN
+                    current_status = (
+                        WritebackStatus(outbox.latest_writeback_status)
+                        if outbox.latest_writeback_status
+                        else WritebackStatus.UNKNOWN
+                    )
+                    validate_writeback_status_transition(
+                        current_status,
+                        WritebackStatus.PENDING,
+                        lookup_never_accepted=True,
+                        adapter_allows_safe_retry=True,
+                    )
+                    outbox.latest_writeback_status = WritebackStatus.PENDING.value
+                    outbox.last_error_code = "lookup_never_accepted"
+                    outbox.last_error_detail = self._truncate_error_detail(
+                        "lookup confirmed never-accepted; safe-retry re-enqueued"
+                    )
+                    validate_outbox_delivery_transition(
+                        OutboxDeliveryStatus.PAUSED,
+                        OutboxDeliveryStatus.READY,
+                    )
+                    outbox.delivery_status = OutboxDeliveryStatus.READY.value
+                    _mirror_writeback_status_to_action(action, WritebackStatus.PENDING.value)
+                    record_writeback_retry(adapter=claim.adapter.name)
+                    return True, outbox.event_id, WritebackStatus.PENDING
+
+                lookup_receipt = outcome.receipt
+                assert lookup_receipt is not None
+                if lookup_receipt.status is WritebackStatus.UNKNOWN:
+                    outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
+                    outbox.last_error_code = "lookup_unknown"
+                    outbox.last_error_detail = self._truncate_error_detail(
+                        "lookup inconclusive; outbox remains paused"
+                    )
+                    _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
+                    return False, outbox.event_id, WritebackStatus.UNKNOWN
+
+                current_status = (
+                    WritebackStatus(outbox.latest_writeback_status)
+                    if outbox.latest_writeback_status
+                    else WritebackStatus.UNKNOWN
+                )
+                validate_writeback_status_transition(
+                    current_status,
+                    lookup_receipt.status,
+                    evidence_adjudication=True,
+                )
+                parsed_receipt = await self._append_receipt(
+                    session,
+                    outbox,
+                    receipt=lookup_receipt,
+                )
+                outbox.latest_writeback_status = parsed_receipt.status.value
+                validate_outbox_delivery_transition(
+                    OutboxDeliveryStatus.PAUSED,
+                    OutboxDeliveryStatus.DELIVERED,
+                    lookup_confirmed_submission=True,
+                )
+                outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                outbox.delivered_at = now
+                outbox.last_error_code = None
+                outbox.last_error_detail = None
+                _mirror_writeback_status_to_action(action, parsed_receipt.status.value)
+                if action is not None:
+                    await self._apply_action_terminal_from_receipt(
+                        session,
+                        action,
+                        parsed_receipt,
+                        adapter_label=claim.adapter.name,
+                    )
+                record_writeback(
+                    status=parsed_receipt.status.value,
+                    adapter=claim.adapter.name,
+                )
+                return True, outbox.event_id, parsed_receipt.status
+
+    async def _release_paused_lookup_claim(
+        self,
+        claim: _PausedLookupClaim,
+        *,
+        error_code: str,
+        detail: str,
+    ) -> None:
+        """Release a failed reconciliation token without exposing the row to delivery."""
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.outbox_id == claim.outbox_id)
+                    .with_for_update()
+                )
+                if (
+                    outbox is None
+                    or OutboxDeliveryStatus(outbox.delivery_status)
+                    is not OutboxDeliveryStatus.PAUSED
+                    or outbox.locked_by != claim.token
+                ):
+                    return
+                outbox.locked_by = None
+                outbox.locked_at = None
+                outbox.lease_expires_at = None
+                outbox.last_error_code = error_code
+                outbox.last_error_detail = self._truncate_error_detail(detail)
+                outbox.updated_at = datetime.now(UTC)
 
     def _release_leased_outbox_to_dead_letter(
         self,
@@ -1434,6 +1619,62 @@ class DispositionSyncService:
         outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
         record_writeback_dead_letter(adapter=self._adapter_label(outbox))
         return OutboxDeliveryStatus.DEAD_LETTER
+
+    async def _mark_delivery_paused_unknown(
+        self,
+        outbox_id: str,
+        *,
+        error_code: str,
+        error_detail: str,
+    ) -> None:
+        """Persist an ambiguous delivery outcome as UNKNOWN + PAUSED."""
+        now = datetime.now(UTC)
+        event_id: str | None = None
+        writeback_id: str | None = None
+        adapter_label = "unknown"
+        detail = self._truncate_error_detail(error_detail)
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
+                    .with_for_update()
+                )
+                if outbox is None:
+                    return
+                current = OutboxDeliveryStatus(outbox.delivery_status)
+                if current is not OutboxDeliveryStatus.LEASED:
+                    return
+                outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
+                self._pause_outbox_after_unknown_submission(
+                    outbox,
+                    now=now,
+                    error_code=error_code,
+                    error_detail=detail,
+                )
+                await self._append_receipt(
+                    session,
+                    outbox,
+                    status=WritebackStatus.UNKNOWN,
+                    provider_message=detail,
+                )
+                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
+                _mirror_writeback_status_to_action(action, WritebackStatus.UNKNOWN.value)
+                event_id = outbox.event_id
+                writeback_id = outbox.writeback_id
+                adapter_label = self._adapter_label(outbox)
+
+        assert event_id is not None
+        assert writeback_id is not None
+        record_writeback(status=WritebackStatus.UNKNOWN.value, adapter=adapter_label)
+        await self._sync_writeback_summary(event_id)
+        await self._maybe_resume(event_id)
+        if self._bus is not None:
+            await self._bus.publish_event(
+                event_id,
+                "writeback_updated",
+                {"writeback_id": writeback_id, "status": WritebackStatus.UNKNOWN.value},
+            )
 
     async def _mark_delivery_waiting_retry(
         self,
@@ -1504,9 +1745,13 @@ class OutboxWorker:
                     error_detail=str(exc),
                 )
             except Exception as exc:
-                logger.exception("outbox delivery failed outbox=%s", outbox_id)
-                await self._service._mark_delivery_waiting_retry(
+                logger.exception(
+                    "outbox delivery outcome ambiguous; pausing for lookup outbox=%s",
                     outbox_id,
+                )
+                await self._service._mark_delivery_paused_unknown(
+                    outbox_id,
+                    error_code="delivery_outcome_unknown",
                     error_detail=f"{type(exc).__name__}: {exc}",
                 )
         return len(claimed)
@@ -1514,6 +1759,7 @@ class OutboxWorker:
     async def _claim_batch(self, *, limit: int) -> list[str]:
         now = datetime.now(UTC)
         claimed: list[str] = []
+        paused_updates: list[tuple[str, str]] = []
         async with self._service._session_factory() as session:
             async with session.begin():
                 rows = (
@@ -1543,8 +1789,10 @@ class OutboxWorker:
                                 and_(
                                     orm.DispositionOutbox.delivery_status
                                     == OutboxDeliveryStatus.LEASED.value,
-                                    orm.DispositionOutbox.lease_expires_at.is_not(None),
-                                    orm.DispositionOutbox.lease_expires_at < now,
+                                    or_(
+                                        orm.DispositionOutbox.lease_expires_at.is_(None),
+                                        orm.DispositionOutbox.lease_expires_at <= now,
+                                    ),
                                 ),
                             )
                         )
@@ -1564,15 +1812,23 @@ class OutboxWorker:
                         )
                         row.updated_at = now
                         continue
-                    if (
-                        current is OutboxDeliveryStatus.LEASED
-                        and row.lease_expires_at is not None
-                        and row.lease_expires_at < now
+                    if current is OutboxDeliveryStatus.LEASED and (
+                        row.lease_expires_at is None or row.lease_expires_at <= now
                     ):
                         self._service._release_leased_outbox_after_lease_expiry(
                             row,
                             now=now,
                         )
+                        action = await session.get(
+                            orm.Action,
+                            row.action_id,
+                            with_for_update=True,
+                        )
+                        _mirror_writeback_status_to_action(
+                            action,
+                            WritebackStatus.UNKNOWN.value,
+                        )
+                        paused_updates.append((row.event_id, row.writeback_id))
                         continue
                     validate_outbox_delivery_transition(
                         current,
@@ -1585,6 +1841,15 @@ class OutboxWorker:
                     if row.created_at is not None:
                         observe_writeback_queue_age((now - row.created_at).total_seconds())
                     claimed.append(row.outbox_id)
+        for event_id, writeback_id in paused_updates:
+            await self._service._sync_writeback_summary(event_id)
+            await self._service._maybe_resume(event_id)
+            if self._service._bus is not None:
+                await self._service._bus.publish_event(
+                    event_id,
+                    "writeback_updated",
+                    {"writeback_id": writeback_id, "status": WritebackStatus.UNKNOWN.value},
+                )
         return claimed
 
 

@@ -581,6 +581,62 @@ async def test_http_profile_status_lookup_and_lost_response_recovery(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 429, 503])
+async def test_http_lookup_non_404_errors_are_inconclusive(
+    status_code: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-260: only an authoritative 404 means never accepted."""
+    monkeypatch.setenv("ISSUE26_WRITE_TOKEN", "write-token-value")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(status_code)))
+    adapter = HttpDispositionAdapter(
+        _http_config(),
+        capabilities=_candidate_capabilities(),
+        status_endpoint_template="https://candidate.invalid/status/{provider_job_id}",
+        idempotency_lookup_endpoint="https://candidate.invalid/lookup",
+        allow_side_effects=True,
+        client=client,
+    )
+    command = _command(ExecutionOwner.XDR_MANAGED)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await adapter.lookup_submission(
+            command.idempotency_key,
+            command.source_locator,
+        )
+    with pytest.raises(httpx.HTTPStatusError):
+        await adapter.get_status("candidate-job-1")
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_lookup_404_is_authoritative_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ISSUE26_WRITE_TOKEN", "write-token-value")
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(404)))
+    adapter = HttpDispositionAdapter(
+        _http_config(),
+        capabilities=_candidate_capabilities(),
+        status_endpoint_template="https://candidate.invalid/status/{provider_job_id}",
+        idempotency_lookup_endpoint="https://candidate.invalid/lookup",
+        allow_side_effects=True,
+        client=client,
+    )
+    command = _command(ExecutionOwner.XDR_MANAGED)
+
+    assert (
+        await adapter.lookup_submission(
+            command.idempotency_key,
+            command.source_locator,
+        )
+        is None
+    )
+    assert await adapter.get_status("candidate-job-1") is None
+    await client.aclose()
+
+
+@pytest.mark.asyncio
 async def test_http_profile_unknown_capability_and_separated_credentials_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

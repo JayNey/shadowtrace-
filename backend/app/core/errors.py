@@ -36,6 +36,8 @@ _NON_AUTO_RETRY_CODES: frozenset[str] = frozenset(
         "invalid_operation",
         "version_conflict",
         "unknown_delivery",
+        "delivery_outcome_unknown",
+        "submission_unknown",
         "writeback_pending",
         "writeback_failed",  # only Adapter-gated safe retry may re-enqueue
         "auth_error",
@@ -115,6 +117,16 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "invalid_operation": ErrorCategory.PERMANENT,
     "version_conflict": ErrorCategory.PERMANENT,
     "unknown_delivery": ErrorCategory.TRANSIENT,  # verify-first; not auto-retry
+    "delivery_outcome_unknown": ErrorCategory.TRANSIENT,
+    "submission_unknown": ErrorCategory.TRANSIENT,
+    "lookup_apply_failed": ErrorCategory.SYSTEM,
+    "lookup_claim_invalid": ErrorCategory.PERMANENT,
+    "lookup_degraded": ErrorCategory.TRANSIENT,
+    "lookup_inconclusive": ErrorCategory.TRANSIENT,
+    "lookup_never_accepted": ErrorCategory.TRANSIENT,
+    "lookup_not_found": ErrorCategory.PERMANENT,
+    "lookup_unknown": ErrorCategory.TRANSIENT,
+    "lookup_unsupported": ErrorCategory.PERMANENT,
     "writeback_pending": ErrorCategory.PERMANENT,  # state conflict, not system fault
     "writeback_failed": ErrorCategory.TOOL,
     "writeback_conflict": ErrorCategory.PERMANENT,
@@ -140,6 +152,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "report_quality_conflict": ErrorCategory.PERMANENT,
     "report_prerequisites_missing": ErrorCategory.USER_INPUT,
     "report_prerequisites_invalid": ErrorCategory.USER_INPUT,
+    "report_generation_failed": ErrorCategory.LLM,
     # Generic dependency / domain defaults used by subclasses
     "dependency_unavailable": ErrorCategory.TRANSIENT,
     "task_unavailable": ErrorCategory.TRANSIENT,

@@ -234,27 +234,24 @@ class HttpDispositionAdapter(BaseDispositionAdapter):
 
     async def get_status(self, provider_job_id: str) -> DispositionReceipt | None:
         capabilities = self.capabilities()
-        if not capabilities.supports_status_query or self._status_endpoint_template is None:
+        if not capabilities.supports_status_query:
             return None
+        if self._status_endpoint_template is None:
+            raise WritebackUnsupportedError(
+                "status query capability requires a configured endpoint"
+            )
         try:
             endpoint = self._status_endpoint_template.format(
                 provider_job_id=quote(provider_job_id, safe=""),
             )
-        except (KeyError, ValueError):
-            return None
+        except (KeyError, ValueError) as exc:
+            raise WritebackUnsupportedError("status query endpoint template is invalid") from exc
         client = await self._http()
-        try:
-            response = await client.get(endpoint, headers=self._auth_headers())
-        except (httpx.HTTPError, WritebackUnsupportedError):
-            return None
+        response = await client.get(endpoint, headers=self._auth_headers())
         if response.status_code == 404:
             return None
-        if response.status_code >= 400:
-            return None
-        try:
-            return sanitize_disposition_receipt(DispositionReceipt.model_validate(response.json()))
-        except ValueError:
-            return None
+        response.raise_for_status()
+        return sanitize_disposition_receipt(DispositionReceipt.model_validate(response.json()))
 
     async def lookup_submission(
         self,
@@ -262,35 +259,29 @@ class HttpDispositionAdapter(BaseDispositionAdapter):
         source_locator: SourceObjectLocator,
     ) -> DispositionReceipt | None:
         capabilities = self.capabilities()
-        if (
-            not capabilities.supports_lookup_by_idempotency
-            or self._idempotency_lookup_endpoint is None
-        ):
+        if not capabilities.supports_lookup_by_idempotency:
             return None
+        if self._idempotency_lookup_endpoint is None:
+            raise WritebackUnsupportedError(
+                "idempotency lookup capability requires a configured endpoint"
+            )
         locator_bytes = orjson.dumps(
             source_locator.model_dump(mode="json"),
             option=orjson.OPT_SORT_KEYS,
         )
         client = await self._http()
-        try:
-            response = await client.get(
-                self._idempotency_lookup_endpoint,
-                headers=self._auth_headers(),
-                params={
-                    "idempotency_key_sha256": hashlib.sha256(idempotency_key.encode()).hexdigest(),
-                    "source_locator_sha256": hashlib.sha256(locator_bytes).hexdigest(),
-                },
-            )
-        except (httpx.HTTPError, WritebackUnsupportedError):
-            return None
+        response = await client.get(
+            self._idempotency_lookup_endpoint,
+            headers=self._auth_headers(),
+            params={
+                "idempotency_key_sha256": hashlib.sha256(idempotency_key.encode()).hexdigest(),
+                "source_locator_sha256": hashlib.sha256(locator_bytes).hexdigest(),
+            },
+        )
         if response.status_code == 404:
             return None
-        if response.status_code >= 400:
-            return None
-        try:
-            return sanitize_disposition_receipt(DispositionReceipt.model_validate(response.json()))
-        except ValueError:
-            return None
+        response.raise_for_status()
+        return sanitize_disposition_receipt(DispositionReceipt.model_validate(response.json()))
 
     async def health_check(self) -> ConnectorStatus:
         if not self.validate_config() or self._health_endpoint is None:

@@ -192,6 +192,34 @@ async def test_lost_response_returns_unknown_then_lookup(
 
 
 @pytest.mark.asyncio
+async def test_mock_xdr_lookup_non_404_error_is_inconclusive(
+    mock_state: MockXDRState,
+) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(503)),
+        base_url="http://mock-xdr",
+    ) as client:
+        adapter = MockXDRDispositionAdapter(
+            read_token=mock_state.read_token,
+            write_token=mock_state.write_token,
+            client=client,
+        )
+        stored = mock_state.objects[("incident", "88442201")]
+        command = event_disposition_command(
+            token=stored.concurrency_token,
+            idempotency_key="idem-lookup-503",
+            disposition_id="disp-lookup-503",
+        )
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.lookup_submission(
+                command.idempotency_key,
+                command.source_locator,
+            )
+        with pytest.raises(httpx.HTTPStatusError):
+            await adapter.get_status("provider-job-503")
+
+
+@pytest.mark.asyncio
 async def test_submit_and_lookup_transport_failures_return_unknown(
     mock_state: MockXDRState,
 ) -> None:

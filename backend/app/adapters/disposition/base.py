@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.errors import WritebackUnsupportedError
 from app.models.disposition import DispositionCommand, DispositionReceipt, SourceObjectLocator
 from app.models.enums import (
     CapabilityState,
@@ -57,15 +58,27 @@ class BaseDispositionAdapter(ABC):
 
     async def get_status(self, provider_job_id: str) -> DispositionReceipt | None:
         """Optional async job status. Default: unsupported."""
-        return None
+        raise WritebackUnsupportedError(
+            "disposition status query is unsupported",
+            details={"provider_job_id": provider_job_id},
+        )
 
     async def lookup_submission(
         self,
         idempotency_key: str,
         source_locator: SourceObjectLocator,
     ) -> DispositionReceipt | None:
-        """Optional idempotency lookup after lost responses. Default: unsupported."""
-        return None
+        """Look up an earlier submission after a lost response.
+
+        When lookup capability is declared, ``None`` means the provider
+        authoritatively reported that no submission exists. Transport errors,
+        malformed responses, permission failures, and other inconclusive
+        outcomes must raise so callers remain PAUSED instead of retrying.
+        """
+        raise WritebackUnsupportedError(
+            "disposition idempotency lookup is unsupported",
+            details={"adapter": self.name},
+        )
 
     async def confirm_readback(self, command: DispositionCommand) -> DispositionReceipt | None:
         """Optional authoritative readback confirmation (ISSUE-064).

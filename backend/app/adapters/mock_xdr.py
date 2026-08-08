@@ -478,8 +478,7 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
         )
         if resp.status_code == 404:
             return None
-        if resp.status_code >= 400:
-            return None
+        resp.raise_for_status()
         body = resp.json()
         # Job status domain is ExecutionJobStatus — not WritebackStatus.
         terminal = body.get("terminal_writeback_status")
@@ -513,8 +512,7 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
         )
         if resp.status_code == 404:
             return None
-        if resp.status_code >= 400:
-            return None
+        resp.raise_for_status()
         receipt = DispositionReceipt.model_validate(resp.json())
         return sanitize_disposition_receipt(receipt)
 

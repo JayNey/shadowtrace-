@@ -703,6 +703,26 @@ def test_job_and_outbox_and_writeback_edges() -> None:
             OutboxDeliveryStatus.WAITING_RETRY,
             lease_expired_resend=True,
         )
+    with pytest.raises(InvalidStateTransitionError, match="pre-egress"):
+        validate_outbox_delivery_transition(
+            OutboxDeliveryStatus.LEASED,
+            OutboxDeliveryStatus.WAITING_RETRY,
+        )
+    validate_outbox_delivery_transition(
+        OutboxDeliveryStatus.LEASED,
+        OutboxDeliveryStatus.WAITING_RETRY,
+        known_pre_egress_failure=True,
+    )
+    with pytest.raises(InvalidStateTransitionError, match="lookup"):
+        validate_outbox_delivery_transition(
+            OutboxDeliveryStatus.PAUSED,
+            OutboxDeliveryStatus.DELIVERED,
+        )
+    validate_outbox_delivery_transition(
+        OutboxDeliveryStatus.PAUSED,
+        OutboxDeliveryStatus.DELIVERED,
+        lookup_confirmed_submission=True,
+    )
 
     validate_writeback_status_transition(WritebackStatus.PENDING, WritebackStatus.SENDING)
     assert (
@@ -716,6 +736,16 @@ def test_job_and_outbox_and_writeback_edges() -> None:
     validate_writeback_status_transition(
         WritebackStatus.UNKNOWN,
         WritebackStatus.CONFIRMED,
+        evidence_adjudication=True,
+    )
+    with pytest.raises(InvalidStateTransitionError, match="lookup"):
+        validate_writeback_status_transition(
+            WritebackStatus.UNKNOWN,
+            WritebackStatus.ACCEPTED,
+        )
+    validate_writeback_status_transition(
+        WritebackStatus.UNKNOWN,
+        WritebackStatus.ACCEPTED,
         evidence_adjudication=True,
     )
 

@@ -34,7 +34,7 @@ from app.db import models as orm
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
 from app.models.action import Action
-from app.models.disposition import SourceObjectLocator, TargetWritebackResult
+from app.models.disposition import DispositionCommand, SourceObjectLocator, TargetWritebackResult
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -913,8 +913,9 @@ async def test_expired_lease_lookup_reconciles_without_resubmit(
     mock_xdr_client: httpx.AsyncClient,
     mock_xdr_state: MockXDRState,
     cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ISSUE-260 fault injection: provider accepted, crash before receipt → lookup补 receipt."""
+    """ISSUE-260: a real post-submit receipt crash is recovered without resubmit."""
     from app.services.disposition_sync_service import OutboxWorker
 
     (
@@ -926,6 +927,7 @@ async def test_expired_lease_lookup_reconciles_without_resubmit(
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
     sync = _sync_service(session_factory, store, mock_xdr_client)
     factory = DispositionCommandFactory()
+    writeback_id = f"wbk-{_sfx()}"
     action = Action.model_validate(
         {
             "action_id": action_id,
@@ -952,27 +954,19 @@ async def test_expired_lease_lookup_reconciles_without_resubmit(
         source_concurrency_token=concurrency_token,
         operator_id="ActionExecutionService",
         disposition_id=new_disposition_id(),
-        writeback_id="pending",
+        writeback_id=writeback_id,
         closure_cycle=1,
         entity_action_code="block_ip",
     )
-    adapter = MockXDRDispositionAdapter(
-        client=mock_xdr_client,
-        read_token="mock-read-token",
-        write_token="mock-write-token",
-    )
     submit_before = len(mock_xdr_state.disposition_by_id)
-    await adapter.submit(command)
-    assert len(mock_xdr_state.disposition_by_id) == submit_before + 1
 
     outbox_id = f"obx-{_sfx()}"
-    expired = datetime.now(UTC) - timedelta(minutes=5)
     async with session_factory() as session:
         async with session.begin():
             session.add(
                 orm.DispositionOutbox(
                     outbox_id=outbox_id,
-                    writeback_id=f"wbk-{_sfx()}",
+                    writeback_id=writeback_id,
                     disposition_id=command.disposition_id,
                     action_id=action_id,
                     event_id=event_id,
@@ -985,19 +979,32 @@ async def test_expired_lease_lookup_reconciles_without_resubmit(
                     idempotency_key=command.idempotency_key,
                     command_payload=command.model_dump(mode="json"),
                     command_payload_sha256="deadbeef",
-                    delivery_status=OutboxDeliveryStatus.LEASED.value,
-                    locked_by="stale-worker",
-                    locked_at=expired,
-                    lease_expires_at=expired,
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    latest_writeback_status=WritebackStatus.PENDING.value,
                 )
             )
 
+    original_append_receipt = sync._append_receipt
+    fault_injected = False
+
+    async def _crash_once_after_submit(*args: object, **kwargs: object) -> object:
+        nonlocal fault_injected
+        if not fault_injected and kwargs.get("receipt") is not None:
+            fault_injected = True
+            raise RuntimeError("fault injection: crash before receipt commit")
+        return await original_append_receipt(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sync, "_append_receipt", _crash_once_after_submit)
     worker = OutboxWorker(sync)
-    assert await worker.run_once(limit=1) == 0
+    assert await worker.run_once(limit=1) == 1
+    assert fault_injected is True
+    assert len(mock_xdr_state.disposition_by_id) == submit_before + 1
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
         assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.last_error_code == "delivery_outcome_unknown"
 
     assert await worker.run_once(limit=1) == 0
     assert len(mock_xdr_state.disposition_by_id) == submit_before + 1
@@ -1017,7 +1024,10 @@ async def test_expired_lease_lookup_reconciles_without_resubmit(
                 )
             )
         ).all()
-        assert len(receipts) >= 1
+        assert {receipt.status for receipt in receipts} >= {
+            WritebackStatus.UNKNOWN.value,
+            WritebackStatus.ACCEPTED.value,
+        }
 
 
 @pytest.mark.asyncio
@@ -1026,8 +1036,9 @@ async def test_paused_outbox_not_claimed_before_lookup(
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,
     cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ISSUE-260: PAUSED outbox cannot be claimed/delivered before reconciliation."""
+    """ISSUE-260: lookup must finish before a PAUSED row can be submitted."""
     from app.services.disposition_sync_service import OutboxWorker
 
     (
@@ -1066,12 +1077,32 @@ async def test_paused_outbox_not_claimed_before_lookup(
                     last_error_code="lease_expired",
                 )
             )
+    calls: list[str] = []
+    adapter = sync._adapters.get("mock_xdr")
+    original_lookup = adapter.lookup_submission
+    original_submit = adapter.submit
+
+    async def _lookup_first(
+        idempotency_key: str,
+        source_locator: SourceObjectLocator,
+    ) -> object:
+        calls.append("lookup")
+        return await original_lookup(idempotency_key, source_locator)
+
+    async def _submit_after_lookup(command: DispositionCommand) -> object:
+        assert calls == ["lookup"]
+        calls.append("submit")
+        return await original_submit(command)
+
+    monkeypatch.setattr(adapter, "lookup_submission", _lookup_first)
+    monkeypatch.setattr(adapter, "submit", _submit_after_lookup)
     worker = OutboxWorker(sync)
-    assert await worker.run_once(limit=1) == 0
+    assert await worker.run_once(limit=1) == 1
+    assert calls == ["lookup", "submit"]
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
-        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
 
 
 @pytest.mark.asyncio
@@ -1136,6 +1167,161 @@ async def test_lookup_never_accepted_safe_retry_re_enqueues(
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
         assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+
+
+@pytest.mark.asyncio
+async def test_lookup_degraded_keeps_outbox_paused_and_releases_reconcile_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-260: transport/5xx lookup outcomes are not treated as not-found."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    idem = f"idem-degraded-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=idem,
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id,
+                            event_id,
+                            locator,
+                            concurrency_token,
+                        ),
+                        "idempotency_key": idem,
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.PAUSED.value,
+                    latest_writeback_status=WritebackStatus.UNKNOWN.value,
+                )
+            )
+
+    adapter = sync._adapters.get("mock_xdr")
+
+    async def _lookup_503(
+        _idempotency_key: str,
+        _source_locator: SourceObjectLocator,
+    ) -> None:
+        raise httpx.ReadTimeout("provider lookup timed out")
+
+    monkeypatch.setattr(adapter, "lookup_submission", _lookup_503)
+    assert await sync.reconcile_paused_outboxes(limit=1) == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.last_error_code == "lookup_degraded"
+        assert row.locked_by is None
+        assert row.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_batch_isolates_invalid_paused_row(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-260: one malformed PAUSED row cannot roll back another row."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    bad_outbox_id = f"obx-bad-{_sfx()}"
+    good_outbox_id = f"obx-good-{_sfx()}"
+    good_idem = f"idem-good-{_sfx()}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add_all(
+                [
+                    orm.DispositionOutbox(
+                        outbox_id=bad_outbox_id,
+                        writeback_id=f"wbk-bad-{_sfx()}",
+                        disposition_id=f"disp-bad-{_sfx()}",
+                        action_id=action_id,
+                        event_id=event_id,
+                        closure_cycle=1,
+                        source_record_id=source_record_id,
+                        source_locator_hash="hash-bad",
+                        source_sequence=1,
+                        intent_kind="entity_action_submit",
+                        logical_slot="bad",
+                        idempotency_key=f"idem-bad-{_sfx()}",
+                        command_payload={"invalid": True},
+                        command_payload_sha256="bad",
+                        delivery_status=OutboxDeliveryStatus.PAUSED.value,
+                        latest_writeback_status=WritebackStatus.UNKNOWN.value,
+                        updated_at=now - timedelta(seconds=1),
+                    ),
+                    orm.DispositionOutbox(
+                        outbox_id=good_outbox_id,
+                        writeback_id=f"wbk-good-{_sfx()}",
+                        disposition_id=f"disp-good-{_sfx()}",
+                        action_id=action_id,
+                        event_id=event_id,
+                        closure_cycle=1,
+                        source_record_id=source_record_id,
+                        source_locator_hash="hash-good",
+                        source_sequence=2,
+                        intent_kind="entity_action_submit",
+                        logical_slot="good",
+                        idempotency_key=good_idem,
+                        command_payload={
+                            **factory_build_min_command(
+                                action_id,
+                                event_id,
+                                locator,
+                                concurrency_token,
+                            ),
+                            "idempotency_key": good_idem,
+                        },
+                        command_payload_sha256="good",
+                        delivery_status=OutboxDeliveryStatus.PAUSED.value,
+                        latest_writeback_status=WritebackStatus.UNKNOWN.value,
+                        updated_at=now,
+                    ),
+                ]
+            )
+
+    assert await sync.reconcile_paused_outboxes(limit=2) == 1
+    async with session_factory() as session:
+        bad = await session.get(orm.DispositionOutbox, bad_outbox_id)
+        good = await session.get(orm.DispositionOutbox, good_outbox_id)
+        assert bad is not None and good is not None
+        assert bad.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert bad.last_error_code == "lookup_claim_invalid"
+        assert good.delivery_status == OutboxDeliveryStatus.READY.value
+        assert good.latest_writeback_status == WritebackStatus.PENDING.value
 
 
 @pytest.mark.asyncio
@@ -1497,7 +1683,7 @@ async def test_outbox_max_attempts_moves_to_dead_letter(
 
 
 @pytest.mark.asyncio
-async def test_delivery_failure_schedules_backoff_not_hot_retry(
+async def test_delivery_exception_pauses_unknown_without_hot_retry(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,
@@ -1552,14 +1738,15 @@ async def test_delivery_failure_schedules_backoff_not_hot_retry(
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
-        assert row.delivery_status == OutboxDeliveryStatus.WAITING_RETRY.value
-        assert row.attempt == 1
-        assert row.next_retry_at is not None
-        assert row.next_retry_at > datetime.now(UTC)
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.attempt == 0
+        assert row.next_retry_at is None
+        assert row.last_error_code == "delivery_outcome_unknown"
         assert row.last_error_detail is not None
         assert "RuntimeError" in row.last_error_detail
 
-    assert await worker.run_once(limit=1) == 0
+    assert await worker._claim_batch(limit=1) == []
 
 
 @pytest.mark.asyncio
