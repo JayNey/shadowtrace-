@@ -34,6 +34,7 @@ from app.core.errors import (
     ShadowTraceError,
 )
 from app.core.llm.base import LLMResponse
+from app.core.llm.prompt_quality import resolve_structured_prompt_timeout
 from app.core.llm.scenario_context import resolve_llm_scenario_id
 from app.core.network_utils import is_internal_ip
 from app.models.agent_io import (
@@ -663,7 +664,9 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 response_model=TriageLLMResponse,
                 temperature=0.3,
                 max_tokens=4096,
-                timeout=15.0,
+                # ISSUE-251: triage keeps historical 15s; other keys inherit LLM_TIMEOUT
+                # unless STRUCTURED_PROMPT_FAST_FAIL=1.
+                timeout=resolve_structured_prompt_timeout("triage_extract"),
             )
 
             if response.parsed is not None and isinstance(response.parsed, TriageLLMResponse):
