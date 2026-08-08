@@ -498,6 +498,30 @@ async def test_resume_closed_or_failed_without_graph_is_noop() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_closed_or_failed_with_graph_is_noop() -> None:
+    """ISSUE-247: terminal statuses skip resume even when a graph is wired."""
+    graph = MagicMock()
+    graph.aget_state = AsyncMock()
+    for status in (EventStatus.CLOSED.value, EventStatus.FAILED.value):
+        agent = MagicMock()
+        agent._investigation_graph = graph
+
+        with patch(
+            "app.tasks.investigation_tasks.execute_investigation",
+            new_callable=AsyncMock,
+        ) as execute:
+            await resume_investigation_from_checkpoint(
+                _SessionFactory(status),
+                f"evt-247-graph-{status}",
+                get_super_agent=AsyncMock(return_value=agent),
+                get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            )
+
+        execute.assert_not_awaited()
+    graph.aget_state.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_resume_reporting_missing_checkpoint_keeps_reporting_error() -> None:
     """ISSUE-247: REPORTING + missing checkpoint raises checkpoint_missing (no restart)."""
     graph = MagicMock()

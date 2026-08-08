@@ -379,38 +379,49 @@ class ApprovalEngine:
         await self._publish_approval_updated(action, "rejected", SYSTEM_TIMEOUT_OPERATOR, None)
         await self._maybe_advance_plan(action.event_id, action.plan_revision)
 
+    async def _scan_expired_approval_records(
+        self,
+        session: AsyncSession,
+        *,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """Reject expired waiting-approval records (no advisory lock)."""
+        now = now or datetime.now(UTC)
+        touched_events: list[str] = []
+        rows = (
+            await session.scalars(
+                select(ApprovalRecordORM).where(
+                    ApprovalRecordORM.decided_at.is_(None),
+                    ApprovalRecordORM.timeout_at.is_not(None),
+                    ApprovalRecordORM.timeout_at <= now,
+                    ApprovalRecordORM.decision == ApprovalDecisionKind.REQUIRE_APPROVAL.value,
+                )
+            )
+        ).all()
+        for record in rows:
+            action = await self._load_action_row(session, record.action_id)
+            if action is None:
+                continue
+            if action.status != ActionStatus.WAITING_APPROVAL.value:
+                continue
+            record.operator = SYSTEM_TIMEOUT_OPERATOR
+            record.comment = "approval timeout"
+            record.decision = ApprovalDecisionKind.AUTO_REJECT.value
+            record.decided_at = now
+            action.status = ActionStatus.REJECTED.value
+            action.updated_at = now
+            touched_events.append(record.event_id)
+        return touched_events
+
     async def scan_timeouts(self) -> list[str]:
-        now = datetime.now(UTC)
         touched_events: list[str] = []
         async with self._session_factory() as session:
             locked = await session.scalar(text("SELECT pg_try_advisory_lock(580058)"))
             if not locked:
+                logger.warning("scan_timeouts: advisory lock busy; skipping batch scan")
                 return []
             try:
-                rows = (
-                    await session.scalars(
-                        select(ApprovalRecordORM).where(
-                            ApprovalRecordORM.decided_at.is_(None),
-                            ApprovalRecordORM.timeout_at.is_not(None),
-                            ApprovalRecordORM.timeout_at <= now,
-                            ApprovalRecordORM.decision
-                            == ApprovalDecisionKind.REQUIRE_APPROVAL.value,
-                        )
-                    )
-                ).all()
-                for record in rows:
-                    action = await self._load_action_row(session, record.action_id)
-                    if action is None:
-                        continue
-                    if action.status != ActionStatus.WAITING_APPROVAL.value:
-                        continue
-                    record.operator = SYSTEM_TIMEOUT_OPERATOR
-                    record.comment = "approval timeout"
-                    record.decision = ApprovalDecisionKind.AUTO_REJECT.value
-                    record.decided_at = now
-                    action.status = ActionStatus.REJECTED.value
-                    action.updated_at = now
-                    touched_events.append(record.event_id)
+                touched_events = await self._scan_expired_approval_records(session)
                 await session.commit()
             finally:
                 await session.execute(text("SELECT pg_advisory_unlock(580058)"))

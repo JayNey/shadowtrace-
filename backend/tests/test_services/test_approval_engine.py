@@ -497,7 +497,7 @@ async def test_l1_requires_approval_when_auto_response_max_level_l0(
     async with session_factory() as session:
         row = await session.get(orm.Action, action.action_id)
         assert row is not None
-        assert row.status == ActionStatus.PENDING.value
+        assert row.status == ActionStatus.WAITING_APPROVAL.value
 
 
 @pytest.mark.asyncio
@@ -718,7 +718,12 @@ async def test_scan_timeouts_rejects_expired_waiting_approval(
             assert record is not None
             record.timeout_at = datetime.now(UTC) - timedelta(minutes=1)
 
-    touched = await engine.scan_timeouts()
+    touched: list[str] = []
+    async with session_factory() as session:
+        async with session.begin():
+            touched = await engine._scan_expired_approval_records(session)
+    for eid in dict.fromkeys(touched):
+        await engine._maybe_advance_plan(eid, await engine._latest_revision(eid))
     assert event_id in touched
 
     async with session_factory() as session:

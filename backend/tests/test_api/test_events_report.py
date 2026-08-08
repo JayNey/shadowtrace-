@@ -305,3 +305,110 @@ async def test_analysis_only_report_failure_marks_observability() -> None:
     flag_kwargs = degraded.set_flag.await_args
     assert flag_kwargs.args[1] == "report_generation_failed"
     assert flag_kwargs.kwargs["writer"] == "AnalysisOnlyPipeline"
+
+
+@pytest.mark.asyncio
+async def test_post_report_succeeds_when_reporting_after_timeout_all_reject() -> None:
+    """ISSUE-247: all-reject → REPORTING must allow POST/GET report (ISSUE-206 gate)."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from fastapi.testclient import TestClient
+
+    from app.agents.report_section_builder import SECTION_KEYS
+    from app.api.v1.deps import get_event_service, reset_deps
+    from app.main import app
+    from app.models.agent_io import (
+        CollectionStatus,
+        EvidenceOutput,
+        ReportPhaseStatus,
+        RiskAssessment,
+        ScoringMode,
+    )
+    from app.models.enums import EventStatus, FinalVerdict, ReportQuality, Severity
+    from app.models.report import InvestigationReport, ReportSection
+
+    event_id = "evt-247-report-api"
+    report = InvestigationReport(
+        report_id=f"rpt-{event_id}",
+        event_id=event_id,
+        title="timeout all-reject report",
+        summary="summary",
+        sections=[
+            ReportSection(key=key, title=key, content=f"content for {key}") for key in SECTION_KEYS
+        ],
+        final_verdict=FinalVerdict.NONE,
+        risk_score=70,
+        severity=Severity.HIGH,
+        generated_by="llm",
+        generated_at=datetime.now(UTC),
+        report_quality=ReportQuality.COMPLETE,
+    )
+
+    event_service = AsyncMock()
+    event_service.get_event = AsyncMock(
+        return_value=SimpleNamespace(event_id=event_id, status=EventStatus.REPORTING),
+    )
+    event_service.get_report = AsyncMock(return_value=None)
+    event_service.upsert_report = AsyncMock(return_value=report)
+    event_service.upsert_generate_report_action = AsyncMock()
+
+    store = AsyncMock()
+
+    async def _store_get(_eid: str, key: str) -> object | None:
+        if key == "evidence_output":
+            return EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+        if key == "risk_assessment":
+            return RiskAssessment(
+                risk_score=70,
+                severity=Severity.HIGH,
+                confidence=0.8,
+                scoring_mode=ScoringMode.RULE_ONLY,
+            )
+        return None
+
+    store.get = AsyncMock(side_effect=_store_get)
+    report_agent = AsyncMock()
+    report_agent.execute = AsyncMock(return_value=report)
+    stack = {"report": report_agent, "session_factory": MagicMock()}
+    report_input = SimpleNamespace(
+        response_phase_status=ReportPhaseStatus.NOT_EXECUTED,
+        verification_phase_status=ReportPhaseStatus.NOT_EXECUTED,
+    )
+    report_input.model_copy = lambda *, update=None: SimpleNamespace(  # type: ignore[attr-defined]
+        response_phase_status=ReportPhaseStatus.NOT_EXECUTED,
+        verification_phase_status=ReportPhaseStatus.NOT_EXECUTED,
+        **(update or {}),
+    )
+
+    async def _override_event_service() -> object:
+        return event_service
+
+    app.dependency_overrides[get_event_service] = _override_event_service
+    client = TestClient(app)
+    auth_hdr = {"Authorization": "Bearer analyst-token"}
+    report_url = f"/api/v1/events/{event_id}/report"
+    try:
+        with (
+            patch("app.api.v1.events._get_context_store", return_value=store),
+            patch(
+                "app.api.v1.deps._get_investigation_stack",
+                new=AsyncMock(return_value=stack),
+            ),
+            patch(
+                "app.services.report_input_builder.build_report_agent_input",
+                new=AsyncMock(return_value=report_input),
+            ),
+        ):
+            post_resp = client.post(report_url, headers=auth_hdr)
+        assert post_resp.status_code == 200, post_resp.text
+        event_service.upsert_report.assert_awaited()
+
+        event_service.get_report = AsyncMock(return_value=report)
+        get_resp = client.get(report_url, headers=auth_hdr)
+        assert get_resp.status_code == 200
+        assert get_resp.json()["report"]["event_id"] == event_id
+    finally:
+        app.dependency_overrides.clear()
+        reset_deps()

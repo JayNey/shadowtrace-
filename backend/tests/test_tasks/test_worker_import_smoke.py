@@ -46,7 +46,6 @@ def test_agents_prompt_submodule_does_not_eagerly_load_base_agent(
     _fresh_agents_package_exports: None,
 ) -> None:
     import app.agents
-
     from app.agents.prompts import event_qa_prompt  # noqa: F401
 
     assert "BaseAgent" not in app.agents.__dict__
