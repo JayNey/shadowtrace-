@@ -221,7 +221,7 @@ export default function DecisionTraceTimeline({
     [entries, selectedTypes],
   );
 
-  // ISSUE-253: prefer active (excludes WAITING_* idle); wall clock is secondary.
+  // ISSUE-253/257: prefer active (excludes approval + writeback idle); wall secondary.
   const activeMs = summary?.active_duration_ms ?? null;
   const wallMs = summary?.total_duration_ms ?? null;
   const primaryDurationMs = activeMs ?? wallMs;
@@ -243,7 +243,7 @@ export default function DecisionTraceTimeline({
             {formatDurationMs(primaryDurationMs)}
           </Typography.Text>
           {activeMs != null ? (
-            <Typography.Text type="secondary">（有效，已排除审批空等）</Typography.Text>
+            <Typography.Text type="secondary">（有效，已排除审批/写回空等）</Typography.Text>
           ) : (
             <Typography.Text type="secondary">（墙钟）</Typography.Text>
           )}

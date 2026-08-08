@@ -391,9 +391,9 @@ class DecisionTraceResponse(BaseModel):
         description=(
             "Trace aggregates. total_duration_ms is wall-clock (includes WAITING_* "
             "idle); active_duration_ms is effective investigation time excluding "
-            "EventStatus waiting_approval halt gaps inferred from STATE_TRANSITION "
-            "(ISSUE-253). waiting_writeback is an ExecutionSubstate and is not "
-            "deducted unless present on the audit timeline."
+            "the union of EventStatus waiting_approval halt gaps from "
+            "STATE_TRANSITION and ExecutionSubstate waiting_writeback gaps from "
+            "EventContextJournal (ISSUE-253 / ISSUE-257)."
         ),
     )
     missing_sources: list[str] = Field(default_factory=list)

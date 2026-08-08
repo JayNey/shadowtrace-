@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -27,8 +28,12 @@ from app.models.enums import DecisionTraceEntryType
 from app.services.decision_trace_service import (
     _ENTRY_TYPE_ORDER,
     DecisionTraceService,
+    _clip_intervals_to_window,
     _compute_timeline_durations,
+    _idle_ms_from_intervals,
     _is_halt_status,
+    _merge_intervals,
+    _writeback_halt_intervals_from_journal,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -78,6 +83,8 @@ async def clean_tables(
             await session.execute(delete(orm.Action))
             await session.execute(delete(orm.Report))
             await session.execute(delete(orm.Evidence))
+            await session.execute(delete(orm.EventContextJournal))
+            await session.execute(delete(orm.EventContextFieldVersion))
             await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
             await session.execute(delete(orm.SourceConnector))
@@ -97,6 +104,8 @@ async def clean_tables(
             await session.execute(delete(orm.Action))
             await session.execute(delete(orm.Report))
             await session.execute(delete(orm.Evidence))
+            await session.execute(delete(orm.EventContextJournal))
+            await session.execute(delete(orm.EventContextFieldVersion))
             await session.execute(delete(orm.SourceEventLink))
             await session.execute(delete(orm.SourceObject))
             await session.execute(delete(orm.SourceConnector))
@@ -270,6 +279,32 @@ async def _seed_audit_log(
     session.add(row)
     await session.flush()
     return row.id
+
+
+async def _seed_execution_substate_journal(
+    session: AsyncSession,
+    event_id: str,
+    substate: str,
+    *,
+    created_at: datetime,
+    version: int,
+) -> None:
+    """Seed real EventContextJournal execution_substate (ISSUE-257 production path).
+
+    Uses the same ``{"_scalar": ...}`` payload shape as
+    ``append_context_journal_in_session`` / ``WorkflowRuntimeService.set_execution_substate``.
+    Does **not** fabricate EventAuditLog ``to_status=waiting_writeback``.
+    """
+    session.add(
+        orm.EventContextJournal(
+            event_id=event_id,
+            field_name="execution_substate",
+            value={"_scalar": substate},
+            version=version,
+            created_at=created_at,
+        )
+    )
+    await session.flush()
 
 
 async def _seed_action(
@@ -722,6 +757,234 @@ class TestDecisionTraceEmptyAndMissing:
         assert active < wall
         assert wall - active >= 29 * 60 * 1000
 
+    @pytest.mark.asyncio
+    async def test_active_duration_excludes_waiting_writeback_from_journal(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """VERIFYING + journal waiting_writeback idle is deducted (ISSUE-257)."""
+        event_id = _id("evt")
+        t0 = _SEED_NOW
+        enter_wb = t0 + timedelta(minutes=2)
+        leave_wb = enter_wb + timedelta(minutes=20)
+        done = leave_wb + timedelta(seconds=30)
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(session, event_id, started_at=t0)
+                # EventStatus stays verifying — no fake waiting_writeback audit row.
+                await _seed_audit_log(
+                    session,
+                    event_id,
+                    from_status="executing_response",
+                    to_status="verifying",
+                    created_at=t0 + timedelta(minutes=1),
+                )
+                await _seed_execution_substate_journal(
+                    session,
+                    event_id,
+                    "waiting_writeback",
+                    created_at=enter_wb,
+                    version=1,
+                )
+                await _seed_execution_substate_journal(
+                    session,
+                    event_id,
+                    "none",
+                    created_at=leave_wb,
+                    version=2,
+                )
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="ReportAgent",
+                    started_at=done,
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        wall = trace.summary.total_duration_ms
+        active = trace.summary.active_duration_ms
+        assert wall is not None and active is not None
+        # Wall ≈ 22.5 min; active ≈ 2.5 min (excludes 20 min writeback idle).
+        assert wall >= 22 * 60 * 1000
+        assert active <= 3 * 60 * 1000
+        assert active < wall
+        assert wall - active >= 19 * 60 * 1000
+
+    @pytest.mark.asyncio
+    async def test_active_duration_excludes_approval_and_writeback_without_double_count(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Approval + writeback idle both deducted; overlapping union once (ISSUE-257)."""
+        event_id = _id("evt")
+        t0 = _SEED_NOW
+        enter_approval = t0 + timedelta(minutes=1)
+        leave_approval = enter_approval + timedelta(minutes=10)
+        enter_wb = leave_approval + timedelta(minutes=2)
+        leave_wb = enter_wb + timedelta(minutes=15)
+        done = leave_wb + timedelta(minutes=1)
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(session, event_id, started_at=t0)
+                await _seed_audit_log(
+                    session,
+                    event_id,
+                    from_status="planning_response",
+                    to_status="waiting_approval",
+                    created_at=enter_approval,
+                )
+                await _seed_audit_log(
+                    session,
+                    event_id,
+                    from_status="waiting_approval",
+                    to_status="executing_response",
+                    created_at=leave_approval,
+                )
+                await _seed_audit_log(
+                    session,
+                    event_id,
+                    from_status="executing_response",
+                    to_status="verifying",
+                    created_at=enter_wb - timedelta(seconds=30),
+                )
+                await _seed_execution_substate_journal(
+                    session,
+                    event_id,
+                    "waiting_writeback",
+                    created_at=enter_wb,
+                    version=1,
+                )
+                await _seed_execution_substate_journal(
+                    session,
+                    event_id,
+                    "none",
+                    created_at=leave_wb,
+                    version=2,
+                )
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="ReportAgent",
+                    started_at=done,
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        wall = trace.summary.total_duration_ms
+        active = trace.summary.active_duration_ms
+        assert wall is not None and active is not None
+        # Idle ≈ 10 + 15 = 25 min; wall ≈ 29 min; active ≈ 4 min.
+        assert wall - active >= 24 * 60 * 1000
+        assert wall - active <= 26 * 60 * 1000
+        assert active < wall
+
+    @pytest.mark.asyncio
+    async def test_open_writeback_journal_truncated_by_later_investigation(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Missing journal leave must not count later investigation as writeback idle."""
+        event_id = _id("evt")
+        t0 = _SEED_NOW
+        enter_wb = t0 + timedelta(minutes=1)
+        resume = enter_wb + timedelta(minutes=5)
+        later = resume + timedelta(minutes=30)
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(session, event_id, started_at=t0)
+                await _seed_audit_log(
+                    session,
+                    event_id,
+                    from_status="executing_response",
+                    to_status="verifying",
+                    created_at=t0 + timedelta(seconds=30),
+                )
+                await _seed_execution_substate_journal(
+                    session,
+                    event_id,
+                    "waiting_writeback",
+                    created_at=enter_wb,
+                    version=1,
+                )
+                # No leave journal row; investigation resumes anyway.
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="ReportAgent",
+                    started_at=resume,
+                )
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="VerifyAgent",
+                    started_at=later,
+                )
+
+        trace = await service.get_decision_trace(event_id)
+        wall = trace.summary.total_duration_ms
+        active = trace.summary.active_duration_ms
+        assert wall is not None and active is not None
+        assert wall == 36 * 60 * 1000
+        # Idle only enter_wb → resume (5 min); active = 31 min.
+        assert active == 31 * 60 * 1000
+
+    @pytest.mark.asyncio
+    async def test_journal_fetch_failure_adds_missing_source(
+        self,
+        service: DecisionTraceService,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        """Journal failure is visible via missing_sources; approval idle still works."""
+        event_id = _id("evt")
+        t0 = _SEED_NOW
+        enter_approval = t0 + timedelta(minutes=1)
+        leave_approval = enter_approval + timedelta(minutes=10)
+        done = leave_approval + timedelta(minutes=1)
+
+        async with session_factory() as session:
+            async with session.begin():
+                await _seed_security_event(session, event_id)
+                await _seed_agent_trace(session, event_id, started_at=t0)
+                await _seed_audit_log(
+                    session,
+                    event_id,
+                    from_status="planning_response",
+                    to_status="waiting_approval",
+                    created_at=enter_approval,
+                )
+                await _seed_audit_log(
+                    session,
+                    event_id,
+                    from_status="waiting_approval",
+                    to_status="executing_response",
+                    created_at=leave_approval,
+                )
+                await _seed_agent_trace(
+                    session,
+                    event_id,
+                    agent_name="ReportAgent",
+                    started_at=done,
+                )
+
+        service._fetch_execution_substate_journal = AsyncMock(  # type: ignore[method-assign]
+            side_effect=RuntimeError("journal unavailable")
+        )
+        trace = await service.get_decision_trace(event_id)
+        assert "execution_substate_journal" in trace.missing_sources
+        wall = trace.summary.total_duration_ms
+        active = trace.summary.active_duration_ms
+        assert wall is not None and active is not None
+        # Approval idle (10 min) still deducted without journal.
+        assert wall - active >= 9 * 60 * 1000
+
 
 class TestDecisionTraceService:
     """Unit-level tests for internal helpers."""
@@ -848,12 +1111,8 @@ class TestDecisionTraceService:
         # Idle only 1→5 minutes (4 min); active = 31 min.
         assert active == 31 * 60 * 1000
 
-    def test_algo_can_exclude_waiting_writeback_if_recorded_on_timeline(self) -> None:
-        """Algorithm recognizes waiting_writeback labels if present on audit timeline.
-
-        Production does not emit EventStatus waiting_writeback today; this locks
-        the helper behavior without claiming the writeback substate path works.
-        """
+    def test_writeback_idle_from_journal_not_fake_audit_status(self) -> None:
+        """Production path: deduct waiting_writeback via journal, not EventStatus audit."""
         t0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
         entries = [
             DecisionTraceEntry(
@@ -861,30 +1120,195 @@ class TestDecisionTraceService:
                 entry_type=DecisionTraceEntryType.STATE_TRANSITION,
                 timestamp=t0,
                 actor="system",
-                title="start",
+                title="enter verifying",
                 detail={"to_status": "verifying"},
+            ),
+            DecisionTraceEntry(
+                entry_id="dte-2",
+                entry_type=DecisionTraceEntryType.AGENT_EXECUTION,
+                timestamp=t0 + timedelta(minutes=12),
+                actor="ReportAgent",
+                title="done",
+            ),
+        ]
+        journal = [
+            (t0 + timedelta(minutes=1), {"_scalar": "waiting_writeback"}),
+            (t0 + timedelta(minutes=11), {"_scalar": "none"}),
+        ]
+        wall, active = _compute_timeline_durations(entries, substate_journal=journal)
+        assert wall == 12 * 60 * 1000
+        assert active == 2 * 60 * 1000
+        assert wall > active
+
+    def test_merge_intervals_unions_overlapping_approval_and_writeback(self) -> None:
+        t0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
+        merged = _merge_intervals(
+            [
+                (t0, t0 + timedelta(minutes=10)),
+                (t0 + timedelta(minutes=8), t0 + timedelta(minutes=20)),
+                (t0 + timedelta(minutes=30), t0 + timedelta(minutes=35)),
+            ]
+        )
+        assert merged == [
+            (t0, t0 + timedelta(minutes=20)),
+            (t0 + timedelta(minutes=30), t0 + timedelta(minutes=35)),
+        ]
+        assert _idle_ms_from_intervals(merged) == 25 * 60 * 1000
+
+    def test_writeback_journal_open_interval_truncated_by_resume(self) -> None:
+        t0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
+        intervals = _writeback_halt_intervals_from_journal(
+            [(t0 + timedelta(minutes=1), "waiting_writeback")],
+            last_ts=t0 + timedelta(minutes=40),
+            resume_timestamps=[t0 + timedelta(minutes=6)],
+        )
+        assert intervals == [(t0 + timedelta(minutes=1), t0 + timedelta(minutes=6))]
+
+    def test_action_tool_llm_during_open_writeback_do_not_truncate(self) -> None:
+        """ACTION/TOOL/LLM during wait are not investigation-resume signals."""
+        t0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
+        entries = [
+            DecisionTraceEntry(
+                entry_id="dte-1",
+                entry_type=DecisionTraceEntryType.STATE_TRANSITION,
+                timestamp=t0,
+                actor="system",
+                title="verifying",
+                detail={"to_status": "verifying"},
+            ),
+            DecisionTraceEntry(
+                entry_id="dte-2",
+                entry_type=DecisionTraceEntryType.ACTION_EXECUTION,
+                timestamp=t0 + timedelta(minutes=2),
+                actor="provider",
+                title="job update",
+            ),
+            DecisionTraceEntry(
+                entry_id="dte-3",
+                entry_type=DecisionTraceEntryType.TOOL_CALL,
+                timestamp=t0 + timedelta(minutes=3),
+                actor="tool",
+                title="noise",
+            ),
+            DecisionTraceEntry(
+                entry_id="dte-4",
+                entry_type=DecisionTraceEntryType.LLM_CALL,
+                timestamp=t0 + timedelta(minutes=4),
+                actor="llm",
+                title="noise",
+            ),
+            DecisionTraceEntry(
+                entry_id="dte-5",
+                entry_type=DecisionTraceEntryType.WRITEBACK,
+                timestamp=t0 + timedelta(minutes=5),
+                actor="system",
+                title="receipt",
+            ),
+            DecisionTraceEntry(
+                entry_id="dte-6",
+                entry_type=DecisionTraceEntryType.AGENT_EXECUTION,
+                timestamp=t0 + timedelta(minutes=20),
+                actor="ReportAgent",
+                title="resume",
+            ),
+        ]
+        journal = [(t0 + timedelta(minutes=1), {"_scalar": "waiting_writeback"})]
+        wall, active = _compute_timeline_durations(entries, substate_journal=journal)
+        assert wall == 20 * 60 * 1000
+        # Idle enter→agent resume (19m); ACTION/TOOL/LLM/WRITEBACK must not cut short.
+        assert active == 1 * 60 * 1000
+
+    def test_clip_intervals_to_wall_window(self) -> None:
+        t0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
+        first = t0
+        last = t0 + timedelta(minutes=10)
+        clipped = _clip_intervals_to_window(
+            [
+                (t0 - timedelta(minutes=5), t0 + timedelta(minutes=3)),
+                (t0 + timedelta(minutes=8), t0 + timedelta(minutes=20)),
+            ],
+            first_ts=first,
+            last_ts=last,
+        )
+        assert clipped == [
+            (t0, t0 + timedelta(minutes=3)),
+            (t0 + timedelta(minutes=8), last),
+        ]
+        entries = [
+            DecisionTraceEntry(
+                entry_id="dte-1",
+                entry_type=DecisionTraceEntryType.AGENT_EXECUTION,
+                timestamp=first,
+                actor="TriageAgent",
+                title="start",
+            ),
+            DecisionTraceEntry(
+                entry_id="dte-2",
+                entry_type=DecisionTraceEntryType.AGENT_EXECUTION,
+                timestamp=last,
+                actor="ReportAgent",
+                title="end",
+            ),
+        ]
+        # Journal idle entirely before the timeline must not zero-out active.
+        journal = [
+            (t0 - timedelta(minutes=30), "waiting_writeback"),
+            (t0 - timedelta(minutes=10), "none"),
+        ]
+        wall, active = _compute_timeline_durations(entries, substate_journal=journal)
+        assert wall == 10 * 60 * 1000
+        assert active == 10 * 60 * 1000
+
+    def test_approval_plus_writeback_union_in_compute(self) -> None:
+        t0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
+        entries = [
+            DecisionTraceEntry(
+                entry_id="dte-1",
+                entry_type=DecisionTraceEntryType.AGENT_EXECUTION,
+                timestamp=t0,
+                actor="TriageAgent",
+                title="start",
             ),
             DecisionTraceEntry(
                 entry_id="dte-2",
                 entry_type=DecisionTraceEntryType.STATE_TRANSITION,
                 timestamp=t0 + timedelta(minutes=1),
                 actor="system",
-                title="enter writeback wait label",
-                detail={"to_status": "waiting_writeback"},
+                title="enter approval",
+                detail={"to_status": "waiting_approval"},
             ),
             DecisionTraceEntry(
                 entry_id="dte-3",
                 entry_type=DecisionTraceEntryType.STATE_TRANSITION,
                 timestamp=t0 + timedelta(minutes=11),
                 actor="system",
-                title="leave",
+                title="leave approval",
+                detail={"to_status": "executing_response"},
+            ),
+            DecisionTraceEntry(
+                entry_id="dte-4",
+                entry_type=DecisionTraceEntryType.STATE_TRANSITION,
+                timestamp=t0 + timedelta(minutes=12),
+                actor="system",
+                title="verifying",
                 detail={"to_status": "verifying"},
             ),
+            DecisionTraceEntry(
+                entry_id="dte-5",
+                entry_type=DecisionTraceEntryType.AGENT_EXECUTION,
+                timestamp=t0 + timedelta(minutes=30),
+                actor="ReportAgent",
+                title="done",
+            ),
         ]
-        wall, active = _compute_timeline_durations(entries)
-        assert wall == 11 * 60 * 1000
-        assert active == 1 * 60 * 1000
-        assert wall > active
+        journal = [
+            (t0 + timedelta(minutes=13), "waiting_writeback"),
+            (t0 + timedelta(minutes=28), "none"),
+        ]
+        wall, active = _compute_timeline_durations(entries, substate_journal=journal)
+        assert wall == 30 * 60 * 1000
+        # Idle: approval 10m + writeback 15m = 25m; active = 5m.
+        assert active == 5 * 60 * 1000
 
     def test_compute_timeline_durations_without_halt_matches_wall(self) -> None:
         t0 = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
