@@ -456,10 +456,12 @@ async def test_dispatch_metadata_failure_prevents_enqueue(
 
 
 def test_celery_task_uses_locked_name_and_queue() -> None:
+    from app.core.celery_delivery import CELERY_REDELIVERY_MAX_RETRIES
+
     task = celery_app.tasks[tasks.TASK_NAME]
     assert task.name == "shadowtrace.run_investigation"
     assert task.acks_late is True
-    assert task.max_retries == 2
+    assert task.max_retries == CELERY_REDELIVERY_MAX_RETRIES
     assert task.retry_backoff is True
     assert task.soft_time_limit == 600
     route = celery_app.conf.task_routes.get(tasks.TASK_NAME)
@@ -745,7 +747,13 @@ def test_celery_retries_exhausted_marks_intent_retry(
 
     monkeypatch.setattr(tasks, "execute_investigation", _boom)
 
-    ctx = Context(id="task-exhaust", delivery_info={}, retries=2)
+    from app.core.celery_delivery import CELERY_REDELIVERY_MAX_RETRIES
+
+    ctx = Context(
+        id="task-exhaust",
+        delivery_info={},
+        retries=CELERY_REDELIVERY_MAX_RETRIES,
+    )
     tasks.run_investigation.request_stack.push(ctx)
     try:
         with pytest.raises(OperationalError):

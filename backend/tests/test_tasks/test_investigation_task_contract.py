@@ -146,8 +146,10 @@ async def test_test_doubles_accept_production_body_kwargs() -> None:
         include_response_execution=True,
         generate_report=False,
         owner_id="owner-body",
+        task_id="task-body",
         redelivered=True,
         lease_acquired=True,
+        request_headers={"x-redelivery-lookup-retries": 1},
     )
 
     assert captured == {
@@ -155,8 +157,10 @@ async def test_test_doubles_accept_production_body_kwargs() -> None:
         "include_response_execution": True,
         "generate_report": False,
         "owner_id": "owner-body",
+        "task_id": "task-body",
         "redelivered": True,
         "lease_acquired": True,
+        "request_headers": {"x-redelivery-lookup-retries": 1},
     }
 
 
@@ -170,14 +174,18 @@ async def test_test_doubles_accept_production_analysis_only_body_kwargs() -> Non
         "evt-analysis-contract",
         generate_report=False,
         owner_id="owner-analysis",
+        task_id="task-analysis",
         redelivered=True,
         lease_acquired=True,
+        request_headers=None,
     )
 
     assert captured == {
         "event_id": "evt-analysis-contract",
         "generate_report": False,
         "owner_id": "owner-analysis",
+        "task_id": "task-analysis",
         "redelivered": True,
         "lease_acquired": True,
+        "request_headers": None,
     }

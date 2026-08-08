@@ -13,6 +13,7 @@ from kombu.exceptions import OperationalError
 
 from app.core.celery_app import celery_app
 from app.core.celery_delivery import (
+    CELERY_REDELIVERY_MAX_RETRIES,
     DEFER_RETRY_HEADER,
     DEFER_RETRY_MAX_ATTEMPTS,
     LOOKUP_RETRY_HEADER,
@@ -329,7 +330,12 @@ def _celery_redelivery_retry(
         countdown,
         exc.attempt,
     )
-    raise task.retry(exc=exc, countdown=countdown, headers=headers) from exc
+    raise task.retry(
+        exc=exc,
+        countdown=countdown,
+        headers=headers,
+        max_retries=CELERY_REDELIVERY_MAX_RETRIES,
+    ) from exc
 
 
 async def execute_redelivery_resume(
@@ -388,10 +394,10 @@ async def _handle_redelivered_investigation(
     analysis_only: bool = False,
     generate_report: bool = True,
 ) -> dict[str, str] | None:
-    """Return a terminal skip payload or None when redelivery should continue."""
-    try:
-        decision, event_status = await evaluate_redelivered_investigation_decision(event_id)
-    except RedeliveryLookupRetry as exc:
+    """Return a terminal skip payload or resume result for broker redelivery."""
+    decision, event_status = await evaluate_redelivered_investigation_decision(event_id)
+
+    if decision is RedeliveryDecision.RETRY_LOOKUP:
         attempt = lookup_retry_count(request_headers) + 1
         if attempt >= LOOKUP_RETRY_MAX_ATTEMPTS:
             await record_redelivery_recovery_needed(
@@ -399,8 +405,9 @@ async def _handle_redelivered_investigation(
                 task_id=task_id,
                 reason="lookup_retry_exhausted",
             )
-            raise
-        _raise_lookup_retry(event_id, attempt=attempt, cause=exc.cause)
+            # Durable recovery recorded — stop retrying (ack this delivery).
+            return _skipped_delivery_result(event_id, reason="lookup_retry_exhausted")
+        _raise_lookup_retry(event_id, attempt=attempt)
 
     if decision is RedeliveryDecision.ACK_TERMINAL:
         logger.info(
@@ -424,21 +431,14 @@ async def _handle_redelivered_investigation(
                 task_id=task_id,
                 reason=handoff.reason or "defer_retry_exhausted",
             )
-            _raise_defer_retry(
+            return _skipped_delivery_result(
                 event_id,
                 reason=handoff.reason or "defer_retry_exhausted",
-                attempt=attempt,
             )
         _raise_defer_retry(
             event_id,
             reason=handoff.reason or "defer",
             attempt=attempt,
-        )
-
-    if handoff.action is RedeliveryHandoffAction.ACK_SKIP:
-        return _skipped_delivery_result(
-            event_id,
-            reason=handoff.reason or "redelivery_skip",
         )
 
     logger.info(
@@ -519,7 +519,7 @@ async def _run_investigation_body(
     name=TASK_NAME,
     bind=True,
     acks_late=True,
-    max_retries=2,
+    max_retries=CELERY_REDELIVERY_MAX_RETRIES,
     retry_backoff=True,
     soft_time_limit=600,
     queue=TASK_QUEUE,
@@ -852,7 +852,7 @@ async def dispatch_analysis_only_investigation(
     name=ANALYSIS_ONLY_TASK_NAME,
     bind=True,
     acks_late=True,
-    max_retries=2,
+    max_retries=CELERY_REDELIVERY_MAX_RETRIES,
     retry_backoff=True,
     soft_time_limit=600,
     queue=ANALYSIS_ONLY_TASK_QUEUE,

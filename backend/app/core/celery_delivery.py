@@ -28,26 +28,26 @@ RedeliverySkipReason = Literal["terminal_event"]
 # Celery states that require manual/event lookup rather than trusting task result.
 _UNKNOWN_LOOKUP_STATES: frozenset[str] = frozenset({"RETRY", "REVOKED"})
 
-# Event statuses that are safe to ACK on broker redelivery without re-running work.
+# Only CLOSED has no outbound edge — safe to ACK without further graph work.
 REDELIVERY_ACK_TERMINAL_STATUSES: frozenset[EventStatus] = frozenset(
     {
         EventStatus.CLOSED,
-        EventStatus.FAILED,
-        EventStatus.REPORTING,
-        EventStatus.CONTAINED,
     }
 )
 
 # Backward-compatible alias for tests that still reference the old name.
 REDELIVERY_TERMINAL_EVENT_STATUSES = REDELIVERY_ACK_TERMINAL_STATUSES
 
-# Intermediate statuses that require durable handoff / checkpoint resume.
+# Intermediate / unfinished statuses that require durable handoff / checkpoint resume.
 REDELIVERY_RESUME_STATUSES: frozenset[EventStatus] = frozenset(
     {
         EventStatus.WAITING_APPROVAL,
         EventStatus.EXECUTING_RESPONSE,
         EventStatus.VERIFYING,
         EventStatus.REPLANNING,
+        EventStatus.REPORTING,
+        EventStatus.CONTAINED,
+        EventStatus.FAILED,
     }
 )
 
@@ -57,9 +57,13 @@ LOOKUP_RETRY_BASE_SECONDS = 2.0
 DEFER_RETRY_BASE_SECONDS = 5.0
 LOOKUP_RETRY_HEADER = "x-redelivery-lookup-retries"
 DEFER_RETRY_HEADER = "x-redelivery-defer-retries"
+# Celery task max_retries must cover the higher redelivery policy budget.
+CELERY_REDELIVERY_MAX_RETRIES = max(LOOKUP_RETRY_MAX_ATTEMPTS, DEFER_RETRY_MAX_ATTEMPTS)
 
 REDELIVERY_RECOVERY_FLAG = "celery_redelivery_recovery_needed"
 REDELIVERY_RECOVERY_OPERATOR = "CeleryRedeliveryService"
+REDELIVERY_RESUME_CLAIM_PREFIX = "shadowtrace:redelivery:resume:"
+REDELIVERY_RESUME_CLAIM_TTL_S = 900
 
 
 class RedeliveryDecision(StrEnum):
@@ -75,7 +79,6 @@ class RedeliveryHandoffAction(StrEnum):
 
     RESUME = "resume"
     RETRY_DEFER = "retry_defer"
-    ACK_SKIP = "ack_skip"
 
 
 @dataclass(frozen=True)
@@ -163,13 +166,49 @@ def defer_retry_countdown(attempt: int) -> float:
     return base + random.uniform(0.0, base * 0.3)
 
 
+def _resume_claim_key(event_id: str) -> str:
+    return f"{REDELIVERY_RESUME_CLAIM_PREFIX}{event_id}"
+
+
+async def claim_redelivery_resume(event_id: str, *, task_id: str) -> bool:
+    """CAS fence: at most one Celery delivery may resume an event.
+
+    Uses Redis ``SET NX`` with the Celery ``task_id`` as the claim value. The
+    same delivery may re-enter (idempotent reclaim); a different ``task_id``
+    loses and must defer.
+    """
+    from app.api.v1.deps import _get_redis
+
+    normalized = (task_id or "").strip()
+    if not normalized:
+        return False
+    redis_client = _get_redis()
+    if redis_client is None or not await redis_client.ping():
+        logger.warning(
+            "redelivery resume claim store unavailable event=%s task=%s",
+            event_id,
+            normalized,
+        )
+        return False
+    redis = redis_client.get_client()
+    key = _resume_claim_key(event_id)
+    acquired = await redis.set(key, normalized, nx=True, ex=REDELIVERY_RESUME_CLAIM_TTL_S)
+    if acquired:
+        return True
+    current = await redis.get(key)
+    if current is None:
+        return False
+    decoded = current.decode("utf-8") if isinstance(current, bytes) else str(current)
+    return decoded == normalized
+
+
 async def checkpoint_exists_for_event(event_id: str) -> bool:
     """Return True when a durable LangGraph checkpoint exists for *event_id*."""
     from app.api.v1.deps import _get_redis
     from app.orchestration.checkpointer import checkpoint_key_for_event
 
     redis_client = _get_redis()
-    if not await redis_client.ping():
+    if redis_client is None or not await redis_client.ping():
         return False
     raw = await redis_client.get_client().get(checkpoint_key_for_event(event_id))
     return raw is not None
@@ -184,21 +223,19 @@ async def evaluate_redelivered_investigation_decision(
     try:
         event_service = await get_event_service()
         event = await event_service.get_event(event_id)
-    except DependencyUnavailableError as exc:
+    except DependencyUnavailableError:
         logger.warning(
             "redelivery lookup degraded for event=%s — will retry (no ack)",
             event_id,
         )
-        raise RedeliveryLookupRetry(event_id, attempt=0, cause=exc) from exc
-    except RedeliveryLookupRetry:
-        raise
-    except Exception as exc:
+        return RedeliveryDecision.RETRY_LOOKUP, None
+    except Exception:
         logger.warning(
             "redelivery lookup failed for event=%s — will retry (no ack)",
             event_id,
             exc_info=True,
         )
-        raise RedeliveryLookupRetry(event_id, attempt=0, cause=exc) from exc
+        return RedeliveryDecision.RETRY_LOOKUP, None
 
     if event is None:
         return RedeliveryDecision.RESUME_OR_DEFER, None
@@ -214,34 +251,38 @@ async def evaluate_redelivery_handoff(
     owner_id: str,
     event_status: EventStatus | None,
 ) -> RedeliveryHandoffVerdict:
-    """Verify durable handoff before acking an intermediate redelivery."""
+    """Verify durable handoff + exclusive resume claim before progressing."""
     from app.api.v1.deps import get_event_lease
 
-    del task_id  # stable owner_id already binds to Celery task delivery id
     lease = get_event_lease()
     current_owner = await lease.get_owner(event_id)
 
-    if current_owner == owner_id:
-        return RedeliveryHandoffVerdict(
-            RedeliveryHandoffAction.RESUME,
-            reason="lease_owned_by_delivery",
-            event_status=event_status,
-        )
-
-    if current_owner is not None:
+    if current_owner is not None and current_owner != owner_id:
         return RedeliveryHandoffVerdict(
             RedeliveryHandoffAction.RETRY_DEFER,
             reason="lease_held_by_other",
             event_status=event_status,
         )
 
-    if event_status in REDELIVERY_RESUME_STATUSES:
-        if await checkpoint_exists_for_event(event_id):
+    async def _resume_if_claimed(reason: str) -> RedeliveryHandoffVerdict:
+        if not await claim_redelivery_resume(event_id, task_id=task_id):
             return RedeliveryHandoffVerdict(
-                RedeliveryHandoffAction.RESUME,
-                reason="checkpoint_present",
+                RedeliveryHandoffAction.RETRY_DEFER,
+                reason="resume_claim_held_by_other",
                 event_status=event_status,
             )
+        return RedeliveryHandoffVerdict(
+            RedeliveryHandoffAction.RESUME,
+            reason=reason,
+            event_status=event_status,
+        )
+
+    if current_owner == owner_id:
+        return await _resume_if_claimed("lease_owned_by_delivery")
+
+    if event_status in REDELIVERY_RESUME_STATUSES:
+        if await checkpoint_exists_for_event(event_id):
+            return await _resume_if_claimed("checkpoint_present")
         return RedeliveryHandoffVerdict(
             RedeliveryHandoffAction.RETRY_DEFER,
             reason="checkpoint_missing",
@@ -258,11 +299,7 @@ async def evaluate_redelivery_handoff(
         )
 
     if acquired:
-        return RedeliveryHandoffVerdict(
-            RedeliveryHandoffAction.RESUME,
-            reason="lease_acquired",
-            event_status=event_status,
-        )
+        return await _resume_if_claimed("lease_acquired")
 
     return RedeliveryHandoffVerdict(
         RedeliveryHandoffAction.RETRY_DEFER,
@@ -329,7 +366,7 @@ async def record_redelivery_recovery_needed(
 
 
 # --------------------------------------------------------------------------- #
-# Legacy helpers — retained for incremental migration; prefer typed decision API.
+# Legacy helpers — prefer typed decision API. Lookup failures raise, not skip.
 # --------------------------------------------------------------------------- #
 
 
@@ -337,10 +374,9 @@ async def evaluate_redelivered_investigation_skip(
     event_id: str,
 ) -> tuple[bool, RedeliverySkipReason | None]:
     """Return whether broker redelivery must skip, and a stable skip reason."""
-    try:
-        decision, _status = await evaluate_redelivered_investigation_decision(event_id)
-    except RedeliveryLookupRetry:
-        raise
+    decision, _status = await evaluate_redelivered_investigation_decision(event_id)
+    if decision is RedeliveryDecision.RETRY_LOOKUP:
+        raise RedeliveryLookupRetry(event_id, attempt=0)
     if decision is RedeliveryDecision.ACK_TERMINAL:
         return True, "terminal_event"
     return False, None
@@ -353,6 +389,7 @@ async def should_skip_redelivered_investigation(event_id: str) -> bool:
 
 
 __all__ = [
+    "CELERY_REDELIVERY_MAX_RETRIES",
     "DEFER_RETRY_HEADER",
     "DEFER_RETRY_MAX_ATTEMPTS",
     "LOOKUP_RETRY_HEADER",
@@ -367,16 +404,16 @@ __all__ = [
     "RedeliveryHandoffAction",
     "RedeliveryHandoffVerdict",
     "RedeliveryLookupRetry",
-    "RedeliverySkipReason",
     "celery_task_owner_id",
     "checkpoint_exists_for_event",
-    "defer_retry_count",
+    "claim_redelivery_resume",
     "defer_retry_countdown",
+    "defer_retry_count",
     "evaluate_redelivered_investigation_decision",
     "evaluate_redelivered_investigation_skip",
     "evaluate_redelivery_handoff",
-    "lookup_retry_count",
     "lookup_retry_countdown",
+    "lookup_retry_count",
     "normalize_public_task_state",
     "record_redelivery_recovery_needed",
     "should_skip_redelivered_investigation",

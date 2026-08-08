@@ -362,6 +362,55 @@ def test_redelivery_lookup_degraded_triggers_retry_not_skip(
     assert calls["n"] == 0
 
 
+def test_redelivery_lookup_exhaustion_records_recovery_and_acks(
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.celery_delivery import LOOKUP_RETRY_HEADER, LOOKUP_RETRY_MAX_ATTEMPTS
+
+    recovery_calls: list[str] = []
+    execute_calls = {"n": 0}
+
+    async def _fail_service() -> None:
+        from app.core.errors import DependencyUnavailableError
+
+        raise DependencyUnavailableError(
+            message="postgres unavailable",
+            error_code="dependency_unavailable",
+            details={"dependency": "postgres"},
+        )
+
+    async def _fake_execute(event_id: str, **_kwargs: Any) -> dict[str, str]:
+        execute_calls["n"] += 1
+        return {"status": "completed", "event_id": event_id}
+
+    async def _record(event_id: str, *, task_id: str, reason: str) -> None:
+        recovery_calls.append(f"{event_id}:{task_id}:{reason}")
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_service", _fail_service)
+    monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
+    monkeypatch.setattr(tasks, "record_redelivery_recovery_needed", _record)
+
+    from celery.app.task import Context
+
+    ctx = Context(
+        id="task-lookup-exhaust",
+        delivery_info={"redelivered": True},
+        retries=LOOKUP_RETRY_MAX_ATTEMPTS,
+        headers={LOOKUP_RETRY_HEADER: LOOKUP_RETRY_MAX_ATTEMPTS - 1},
+    )
+    tasks.run_investigation.request_stack.push(ctx)
+    try:
+        result = tasks.run_investigation.run("evt-lookup-exhaust")
+    finally:
+        tasks.run_investigation.request_stack.pop()
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "lookup_retry_exhausted"
+    assert recovery_calls == ["evt-lookup-exhaust:task-lookup-exhaust:lookup_retry_exhausted"]
+    assert execute_calls["n"] == 0
+
+
 @pytest.mark.parametrize(
     "status",
     [
@@ -423,6 +472,10 @@ def test_redelivery_intermediate_states_attempt_resume_not_terminal_skip(
     monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
     monkeypatch.setattr(
         "app.core.celery_delivery.checkpoint_exists_for_event",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "app.core.celery_delivery.claim_redelivery_resume",
         AsyncMock(return_value=True),
     )
     monkeypatch.setattr(tasks, "execute_redelivery_resume", _fake_resume)

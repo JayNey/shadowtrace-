@@ -66,6 +66,29 @@ def test_lookup_retry_countdown_is_bounded() -> None:
     assert lookup_retry_countdown(10) <= 78.0
 
 
+def test_celery_redelivery_max_retries_covers_policy_budgets() -> None:
+    from app.core.celery_delivery import (
+        CELERY_REDELIVERY_MAX_RETRIES,
+        DEFER_RETRY_MAX_ATTEMPTS,
+        LOOKUP_RETRY_MAX_ATTEMPTS,
+    )
+    from app.services.degraded_flag_service import (
+        DEGRADED_FLAG_ALLOWLIST,
+        DEGRADED_FLAG_TRUSTED_CALLERS,
+    )
+    from app.tasks.investigation_tasks import (
+        run_analysis_only_investigation,
+        run_investigation,
+    )
+
+    assert CELERY_REDELIVERY_MAX_RETRIES >= LOOKUP_RETRY_MAX_ATTEMPTS
+    assert CELERY_REDELIVERY_MAX_RETRIES >= DEFER_RETRY_MAX_ATTEMPTS
+    assert run_investigation.max_retries == CELERY_REDELIVERY_MAX_RETRIES
+    assert run_analysis_only_investigation.max_retries == CELERY_REDELIVERY_MAX_RETRIES
+    assert "celery_redelivery_recovery_needed" in DEGRADED_FLAG_ALLOWLIST
+    assert "CeleryRedeliveryService" in DEGRADED_FLAG_TRUSTED_CALLERS
+
+
 @pytest.mark.parametrize(
     "status",
     sorted(REDELIVERY_ACK_TERMINAL_STATUSES, key=lambda item: item.value),
@@ -117,11 +140,22 @@ async def test_resume_or_defer_decision_for_new_event(
     assert reason is None
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        EventStatus.EXECUTING_RESPONSE,
+        EventStatus.VERIFYING,
+        EventStatus.REPORTING,
+        EventStatus.CONTAINED,
+        EventStatus.FAILED,
+    ],
+)
 @pytest.mark.asyncio
 async def test_intermediate_status_is_not_terminal_ack(
     monkeypatch: pytest.MonkeyPatch,
+    status: EventStatus,
 ) -> None:
-    event = _sample_event(event_id="evt-exec", status=EventStatus.EXECUTING_RESPONSE)
+    event = _sample_event(event_id=f"evt-{status.value}", status=status)
 
     class _EventService:
         async def get_event(self, _event_id: str) -> SecurityEvent:
@@ -131,13 +165,13 @@ async def test_intermediate_status_is_not_terminal_ack(
         "app.api.v1.deps.get_event_service",
         AsyncMock(return_value=_EventService()),
     )
-    decision, resolved = await evaluate_redelivered_investigation_decision("evt-exec")
+    decision, resolved = await evaluate_redelivered_investigation_decision(event.event_id)
     assert decision is RedeliveryDecision.RESUME_OR_DEFER
-    assert resolved is EventStatus.EXECUTING_RESPONSE
+    assert resolved is status
 
 
 @pytest.mark.asyncio
-async def test_lookup_degraded_raises_retry_not_skip(
+async def test_lookup_degraded_returns_retry_lookup_not_ack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _fail_service() -> None:
@@ -148,8 +182,9 @@ async def test_lookup_degraded_raises_retry_not_skip(
         )
 
     monkeypatch.setattr("app.api.v1.deps.get_event_service", _fail_service)
-    with pytest.raises(RedeliveryLookupRetry):
-        await evaluate_redelivered_investigation_decision("evt-degraded")
+    decision, status = await evaluate_redelivered_investigation_decision("evt-degraded")
+    assert decision is RedeliveryDecision.RETRY_LOOKUP
+    assert status is None
     with pytest.raises(RedeliveryLookupRetry):
         await should_skip_redelivered_investigation("evt-degraded")
 
@@ -168,6 +203,10 @@ async def test_handoff_resume_when_delivery_owns_lease(
             raise AssertionError("acquire should not run when owner matches")
 
     monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
+    monkeypatch.setattr(
+        "app.core.celery_delivery.claim_redelivery_resume",
+        AsyncMock(return_value=True),
+    )
     verdict = await evaluate_redelivery_handoff(
         "evt-handoff",
         task_id="task-handoff",
@@ -176,6 +215,34 @@ async def test_handoff_resume_when_delivery_owns_lease(
     )
     assert verdict.action is RedeliveryHandoffAction.RESUME
     assert verdict.reason == "lease_owned_by_delivery"
+
+
+@pytest.mark.asyncio
+async def test_handoff_defer_when_resume_claim_held_by_other(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner_id = celery_task_owner_id("task-a")
+
+    class _Lease:
+        async def get_owner(self, _event_id: str) -> str:
+            return owner_id
+
+        async def acquire(self, *_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("acquire should not run when owner matches")
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
+    monkeypatch.setattr(
+        "app.core.celery_delivery.claim_redelivery_resume",
+        AsyncMock(return_value=False),
+    )
+    verdict = await evaluate_redelivery_handoff(
+        "evt-claim",
+        task_id="task-a",
+        owner_id=owner_id,
+        event_status=EventStatus.VERIFYING,
+    )
+    assert verdict.action is RedeliveryHandoffAction.RETRY_DEFER
+    assert verdict.reason == "resume_claim_held_by_other"
 
 
 @pytest.mark.asyncio

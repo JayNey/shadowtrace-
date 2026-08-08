@@ -48,6 +48,8 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         "report_generation_failed",
         # ISSUE-254 durable event_context_snapshot merge failures
         "event_context_snapshot_merge_failed",
+        # ISSUE-275 Celery redelivery exhaustion / manual recovery
+        "celery_redelivery_recovery_needed",
     }
 )
 
@@ -75,6 +77,8 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "RiskAgent",
         # ISSUE-242 — report persistence failure observability
         "ReportAgent",
+        # ISSUE-275 — Celery redelivery exhaustion recovery signal
+        "CeleryRedeliveryService",
     }
 )
 
