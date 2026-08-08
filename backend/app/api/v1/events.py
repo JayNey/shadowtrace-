@@ -1949,6 +1949,8 @@ async def get_event_evidence(
         )
 
     evidence_output = EvidenceOutput.model_validate(raw_output)
+    from app.services.evidence_safe_projection import project_evidence_list_for_api
+
     query_summary: list[s.EvidenceQuerySummaryItem] = []
     if _try_get_session_factory() is not None:
         try:
@@ -1970,7 +1972,7 @@ async def get_event_evidence(
 
     return s.EventEvidenceResponse(
         event_id=event_id,
-        evidence_list=evidence_output.evidence_list,
+        evidence_list=project_evidence_list_for_api(evidence_output.evidence_list),
         gaps=[_gap_to_response(gap) for gap in evidence_output.gaps],
         collection_status=evidence_output.collection_status,
         success_sources=list(evidence_output.success_sources),

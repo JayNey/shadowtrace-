@@ -10,6 +10,10 @@ from app.models.evidence import Evidence
 from app.models.ids import new_evidence_id
 from app.models.source import SourceReference
 from app.models.tool_meta import ToolResult
+from app.services.evidence_safe_projection import (
+    EvidenceSanitizerError,
+    sanitize_evidence_raw_data,
+)
 
 # Fixed tool_name → EvidenceSource mapping (ISSUE-033 统一命名).
 TOOL_SOURCE_MAP: dict[str, EvidenceSource] = {
@@ -111,6 +115,13 @@ class EvidenceParser:
         related = self._related_entities(tool_name, record)
         source_ref = self._match_source_ref(record, references)
 
+        try:
+            safe_raw = sanitize_evidence_raw_data(tool_name, record)
+        except EvidenceSanitizerError as exc:
+            raise ValueError(
+                f"evidence raw_data sanitization failed for tool {tool_name!r}: {exc}"
+            ) from exc
+
         return Evidence(
             evidence_id=new_evidence_id(),
             event_id=event_id,
@@ -121,7 +132,7 @@ class EvidenceParser:
             timestamp=timestamp,
             related_entities=related,
             source_ref=source_ref,
-            raw_data=dict(record),
+            raw_data=safe_raw,
             mitre_technique=None,
             is_conflicting=bool(record.get("is_conflict_seed")),
         )

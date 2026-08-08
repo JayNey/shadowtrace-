@@ -28,6 +28,25 @@ class Evidence(BaseModel):
     is_conflicting: bool = False
 
 
+class EvidenceSafeProjection(BaseModel):
+    """Versioned API/working-memory safe view — never exposes domain raw_data (ISSUE-269)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = Field(default="1.0", min_length=1, max_length=16)
+    evidence_id: str
+    event_id: str
+    source: EvidenceSource
+    evidence_type: str
+    description: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    timestamp: datetime | None = None
+    related_entities: list[str] = Field(default_factory=list)
+    source_ref: SourceReference | None = None
+    mitre_technique: str | None = None
+    is_conflicting: bool = False
+
+
 class EvidenceConflict(BaseModel):
     """A detected contradiction between two or more pieces of evidence."""
 

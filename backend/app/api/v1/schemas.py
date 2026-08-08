@@ -40,7 +40,7 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
-from app.models.evidence import Evidence
+from app.models.evidence import Evidence, EvidenceSafeProjection
 from app.models.report import InvestigationReport, ReportSection
 
 # EventListItem / EventSummary live in app.models.security_event (ISSUE-094 §2)
@@ -373,7 +373,7 @@ class EventEvidenceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     event_id: str
-    evidence_list: list[Evidence] = Field(default_factory=list)
+    evidence_list: list[EvidenceSafeProjection] = Field(default_factory=list)
     gaps: list[EvidenceGapResponse] = Field(default_factory=list)
     collection_status: CollectionStatus
     success_sources: list[str] = Field(default_factory=list)

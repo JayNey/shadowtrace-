@@ -45,6 +45,10 @@ from app.models.entities import (
 )
 from app.models.enums import EvidenceSource, ToolCategory
 from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
+from app.services.evidence_safe_projection import (
+    EvidenceSanitizerError,
+    sanitize_evidence_for_persist,
+)
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.models.workflow import GLOBAL_EVIDENCE_TIMEOUT_S, SINGLE_SOURCE_TIMEOUT_S
 from app.services.evidence_projection import (
@@ -398,9 +402,10 @@ class InMemoryEvidenceRepository:
 
     async def upsert_batch(self, evidence_list: list[Evidence]) -> None:
         for item in evidence_list:
-            existing = self._rows.get(item.evidence_id)
-            if existing is None or item.confidence > existing.confidence:
-                self._rows[item.evidence_id] = item
+            safe_item = sanitize_evidence_for_persist(item)
+            existing = self._rows.get(safe_item.evidence_id)
+            if existing is None or safe_item.confidence > existing.confidence:
+                self._rows[safe_item.evidence_id] = safe_item
 
     async def list_by_event(self, event_id: str) -> list[Evidence]:
         return [row for row in self._rows.values() if row.event_id == event_id]
@@ -432,25 +437,26 @@ class SqlAlchemyEvidenceRepository:
         async with self._session_factory() as session:
             async with session.begin():
                 for item in evidence_list:
+                    safe_item = sanitize_evidence_for_persist(item)
                     values = {
-                        "evidence_id": item.evidence_id,
-                        "event_id": item.event_id,
-                        "source": item.source.value
-                        if isinstance(item.source, EvidenceSource)
-                        else str(item.source),
-                        "evidence_type": item.evidence_type,
-                        "description": item.description,
-                        "confidence": item.confidence,
-                        "timestamp": item.timestamp,
-                        "related_entities": list(item.related_entities),
+                        "evidence_id": safe_item.evidence_id,
+                        "event_id": safe_item.event_id,
+                        "source": safe_item.source.value
+                        if isinstance(safe_item.source, EvidenceSource)
+                        else str(safe_item.source),
+                        "evidence_type": safe_item.evidence_type,
+                        "description": safe_item.description,
+                        "confidence": safe_item.confidence,
+                        "timestamp": safe_item.timestamp,
+                        "related_entities": list(safe_item.related_entities),
                         "source_ref": (
-                            item.source_ref.model_dump(mode="json")
-                            if item.source_ref is not None
+                            safe_item.source_ref.model_dump(mode="json")
+                            if safe_item.source_ref is not None
                             else None
                         ),
-                        "raw_data": dict(item.raw_data),
-                        "mitre_technique": item.mitre_technique,
-                        "is_conflicting": item.is_conflicting,
+                        "raw_data": dict(safe_item.raw_data),
+                        "mitre_technique": safe_item.mitre_technique,
+                        "is_conflicting": safe_item.is_conflicting,
                     }
                     stmt = pg_insert(orm.Evidence).values(**values)
                     excluded = stmt.excluded
@@ -1075,11 +1081,40 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                 "dedupe_key": dedupe_key,
             }
 
-        parsed = self.parser.parse(
-            tool_name,
-            tool_result,
-            event_id=event_id,
-        )
+        try:
+            parsed = self.parser.parse(
+                tool_name,
+                tool_result,
+                event_id=event_id,
+            )
+        except (EvidenceSanitizerError, ValueError) as exc:
+            logger.warning(
+                "evidence parse/sanitize rejected tool=%s event=%s err=%s",
+                tool_name,
+                event_id,
+                exc,
+            )
+            return {
+                "tool_name": tool_name,
+                "source": source,
+                "parsed": [],
+                "gap": self._gap(
+                    event_id=event_id,
+                    source=source,
+                    reason="sanitization_failed",
+                    impact="source_unavailable",
+                    description=f"query {tool_name} record rejected by sanitizer",
+                    tool_name=tool_name,
+                    execution_time_ms=timing_ms,
+                    error="sanitization_failed",
+                ),
+                "failed": True,
+                "success": False,
+                "timing_ms": timing_ms,
+                "status_text": status_text,
+                "dedupe_key": dedupe_key,
+            }
+
         if not parsed:
             return {
                 "tool_name": tool_name,
