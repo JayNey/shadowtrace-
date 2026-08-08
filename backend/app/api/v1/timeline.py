@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends
 
 from app.api.v1.deps import _get_context_store, get_event_service
 from app.api.v1.errors import EventNotFoundError, ResourceNotFoundError
-from app.core.auth import CurrentPrincipal
+from app.core.auth import ReadPrincipal
 from app.models.agent_io import AttackStoryline
 from app.models.context import EventContext
 
@@ -26,7 +26,7 @@ class _ContextReader(Protocol):
 @router.get("/events/{event_id}/timeline", response_model=AttackStoryline)
 async def get_timeline(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     event_service: Annotated[_EventReader, Depends(get_event_service)],
     context_store: Annotated[_ContextReader, Depends(_get_context_store)],
 ) -> AttackStoryline:

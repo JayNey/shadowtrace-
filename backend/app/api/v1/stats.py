@@ -16,7 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1 import schemas as s
-from app.core.auth import CurrentPrincipal
+from app.core.auth import ReadPrincipal
 from app.core.errors import DependencyUnavailableError
 from app.db import models as orm
 from app.models.enums import ActionStatus, EventStatus, WritebackStatus
@@ -255,7 +255,7 @@ async def _aggregate_stats(session: AsyncSession) -> s.StatsResponse:
 
 
 @router.get("/stats", response_model=s.StatsResponse)
-async def get_stats(principal: CurrentPrincipal) -> s.StatsResponse:
+async def get_stats(principal: ReadPrincipal) -> s.StatsResponse:
     """Return SOC dashboard aggregations (ISSUE-085)."""
     _ = principal  # auth gate only
     sf = _try_get_session_factory()

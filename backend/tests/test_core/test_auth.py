@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app.core.auth import _filter_known_roles
+from app.core.auth import Principal, _filter_known_roles
 
 
 def test_filter_known_roles_keeps_valid_entries() -> None:
@@ -27,3 +27,11 @@ def test_filter_known_roles_normalizes_case() -> None:
         "admin",
         "approver",
     ]
+
+
+def test_has_read_access_requires_known_role() -> None:
+    assert Principal(subject="a", roles=["analyst"]).has_read_access()
+    assert Principal(subject="a", roles=["admin"]).has_read_access()
+    assert not Principal(subject="a", roles=[]).has_read_access()
+    assert not Principal(subject="a", roles=["viewer"]).has_read_access()
+    assert not Principal(subject="a", roles=["superuser"]).has_read_access()

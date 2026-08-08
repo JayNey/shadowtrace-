@@ -5,13 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.v1 import schemas as s
-from app.core.auth import CurrentPrincipal
+from app.core.auth import ReadPrincipal
 
 router = APIRouter(tags=["connectors"])
 
 
 @router.get("/connectors", response_model=s.ConnectorsResponse)
-async def list_connectors(principal: CurrentPrincipal) -> s.ConnectorsResponse:
+async def list_connectors(principal: ReadPrincipal) -> s.ConnectorsResponse:
     return s.ConnectorsResponse(
         items=[
             s.ConnectorPublic(

@@ -184,7 +184,17 @@ def test_trusted_proxy_strips_unknown_roles(
     )
     assert mixed.status_code == 200
 
-    unknown_only = client.post(
+    unknown_only = client.get(
+        "/api/v1/events",
+        headers={
+            "X-Auth-Subject": "proxied-user",
+            "X-Auth-Roles": "superuser,root",
+        },
+    )
+    assert unknown_only.status_code == 403
+    assert unknown_only.json()["error_code"] == "forbidden"
+
+    unknown_only_post = client.post(
         "/api/v1/events",
         headers={
             "X-Auth-Subject": "proxied-user",
@@ -197,8 +207,8 @@ def test_trusted_proxy_strips_unknown_roles(
             "severity": "high",
         },
     )
-    assert unknown_only.status_code == 403
-    assert unknown_only.json()["error_code"] == "forbidden"
+    assert unknown_only_post.status_code == 403
+    assert unknown_only_post.json()["error_code"] == "forbidden"
 
 
 def test_trusted_proxy_accepts_case_insensitive_roles(

@@ -15,7 +15,7 @@ from app.api.v1.deps import (
     get_event_service,
 )
 from app.api.v1.errors import EventNotFoundError
-from app.core.auth import CurrentPrincipal
+from app.core.auth import ReadPrincipal
 from app.core.errors import DependencyUnavailableError
 from app.db.orm.graph import GraphEdgeORM, GraphNodeORM
 from app.models.agent_io import (
@@ -122,7 +122,7 @@ def _get_graph_reader() -> GraphRepository:
 @router.get("/events/{event_id}/graph", response_model=GraphOutput)
 async def get_graph(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     event_service: Annotated[_EventReader, Depends(get_event_service)],
     graph_reader: Annotated[_GraphReader, Depends(_get_graph_reader)],
     attack_paths: Annotated[_AttackPathFinder, Depends(get_attack_path_service)],

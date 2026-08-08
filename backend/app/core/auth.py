@@ -40,6 +40,9 @@ GLOBAL_BROADCAST_ROLES = (
     ROLE_ADMIN,
 )
 
+# Any known role grants SOC read access; empty/unknown-only roles are unauthorized (ISSUE-268).
+READ_ROLES = ALL_ROLES
+
 
 class Principal(BaseModel):
     """Authenticated caller identity."""
@@ -52,6 +55,10 @@ class Principal(BaseModel):
     def has_any_role(self, roles: Iterable[str]) -> bool:
         wanted = set(roles)
         return bool(wanted & set(self.roles)) or ROLE_ADMIN in self.roles
+
+    def has_read_access(self) -> bool:
+        """True when the principal holds at least one known read role (ISSUE-268)."""
+        return bool(set(self.roles) & READ_ROLES)
 
 
 class AuthenticationError(Exception):
@@ -84,7 +91,7 @@ def _dev_token_registry() -> dict[str, Principal]:
         registry[token] = Principal(
             subject=spec.get("subject", token),
             display_name=spec.get("display_name", ""),
-            roles=list(spec.get("roles", [])),
+            roles=_filter_known_roles(list(spec.get("roles", []))),
             tenant_id=spec.get("tenant_id"),
         )
     return registry
@@ -255,6 +262,23 @@ async def get_principal(request: Request) -> Principal:
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
 
 
+async def require_read_access(principal: CurrentPrincipal) -> Principal:
+    """Enforce fail-closed read authorization for sensitive REST GET (ISSUE-268).
+
+    Authenticated principals with zero known roles (empty header, unknown-only
+    roles after filtering, or dev token with no valid roles) receive 403 before
+    any route handler or store access runs.
+    """
+    if not principal.has_read_access():
+        raise AuthorizationError(READ_ROLES)
+    return principal
+
+
+require_read_access.__shadowtrace_read_guard__ = True  # type: ignore[attr-defined]
+
+ReadPrincipal = Annotated[Principal, Depends(require_read_access)]
+
+
 def require_roles(*roles: str) -> object:
     """Return a dependency enforcing that the principal has one of ``roles``.
 
@@ -266,4 +290,5 @@ def require_roles(*roles: str) -> object:
             raise AuthorizationError(roles)
         return principal
 
+    _dep.__shadowtrace_read_guard__ = True  # type: ignore[attr-defined]
     return Depends(_dep)

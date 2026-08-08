@@ -40,8 +40,8 @@ from app.core.auth import (
     ROLE_ANALYST,
     ROLE_DISPOSITION_OPERATOR,
     AuthorizationError,
-    CurrentPrincipal,
     Principal,
+    ReadPrincipal,
     require_roles,
 )
 from app.core.config import get_settings
@@ -519,7 +519,7 @@ async def create_event(
 
 @router.get("/events", response_model=s.EventListResponse)
 async def list_events(
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     page: int = 1,
     page_size: int = 20,
     status: EventStatus | None = None,
@@ -700,7 +700,7 @@ async def _load_detection_context_projection_error(
 @router.get("/events/{event_id}", response_model=s.EventDetailResponse)
 async def get_event(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     event_service: EventService = Depends(get_event_service),
 ) -> s.EventDetailResponse:
     event = await event_service.get_event(event_id)
@@ -1520,7 +1520,7 @@ REPORT_GENERATION_ALLOWED_STATUSES: frozenset[EventStatus] = frozenset(
 @router.get("/events/{event_id}/report", response_model=s.ReportResponse)
 async def get_report(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     event_service: EventService = Depends(get_event_service),
 ) -> s.ReportResponse:
     event = await event_service.get_event(event_id)
@@ -1712,7 +1712,7 @@ async def generate_report(
 @router.get("/events/{event_id}/traces", response_model=s.TracesResponse)
 async def get_traces(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     page: int = 1,
     page_size: int = 20,
     event_service: EventService = Depends(get_event_service),
@@ -1752,7 +1752,7 @@ async def get_traces(
 @router.get("/events/{event_id}/audit-logs", response_model=s.AuditLogsResponse)
 async def get_audit_logs(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     page: int = 1,
     page_size: int = 20,
     event_service: EventService = Depends(get_event_service),
@@ -1793,7 +1793,7 @@ async def get_audit_logs(
 @router.get("/events/{event_id}/tool-calls", response_model=s.ToolCallsResponse)
 async def get_event_tool_calls(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     page: int = 1,
     page_size: int = 20,
     event_service: EventService = Depends(get_event_service),
@@ -1819,7 +1819,7 @@ async def get_event_tool_calls(
 @router.get("/events/{event_id}/actions", response_model=s.ActionListResponse)
 async def get_actions(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     page: int = 1,
     page_size: int = 20,
     status: ActionStatus | None = None,
@@ -1856,7 +1856,7 @@ async def get_actions(
 
 @router.get("/tool-calls", response_model=s.ToolCallsResponse)
 async def list_tool_calls(
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     page: int = 1,
     page_size: int = 20,
     tool_name: str | None = None,
@@ -1920,7 +1920,7 @@ def _query_summary_from_agent_traces(rows: list[Any]) -> list[s.EvidenceQuerySum
 @router.get("/events/{event_id}/evidence", response_model=s.EventEvidenceResponse)
 async def get_event_evidence(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     context_store: Annotated[Any, Depends(_get_context_store)],
     event_service: EventService = Depends(get_event_service),
 ) -> s.EventEvidenceResponse:
@@ -1989,7 +1989,7 @@ async def get_event_evidence(
 @router.get("/events/{event_id}/decision-trace", response_model=s.DecisionTraceResponse)
 async def get_decision_trace(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     entry_type: Annotated[list[str] | None, Query()] = None,
     page: int = 1,
     page_size: int = 50,

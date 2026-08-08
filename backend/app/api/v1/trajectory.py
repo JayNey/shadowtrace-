@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api.v1.deps import get_event_service
 from app.api.v1.errors import EventNotFoundError
-from app.core.auth import CurrentPrincipal
+from app.core.auth import ReadPrincipal
 from app.models.trajectory import TrajectoryReport
 from app.services.trajectory_analyzer import TrajectoryAnalyzer
 
@@ -45,7 +45,7 @@ def _try_get_session_factory() -> async_sessionmaker[AsyncSession] | None:
 )
 async def get_trajectory(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     event_service: EventService = Depends(get_event_service),
 ) -> TrajectoryReport:
     """Return structured trajectory quality metrics for *event_id*."""

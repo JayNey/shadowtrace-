@@ -14,7 +14,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Query
 
 from app.api.v1.deps import get_search_service
-from app.core.auth import CurrentPrincipal
+from app.core.auth import ReadPrincipal
 from app.models.search import SearchResponse
 from app.services.search_service import SearchService
 
@@ -33,7 +33,7 @@ async def search(
             description="Search query string.",
         ),
     ],
-    _principal: CurrentPrincipal,
+    _principal: ReadPrincipal,
     search_service: Annotated[SearchService, Depends(get_search_service)],
     scope: Annotated[
         str,

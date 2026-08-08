@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.api.v1 import schemas as s
 from app.api.v1.deps import _get_session_factory, get_event_service
 from app.api.v1.errors import ResourceNotFoundError
-from app.core.auth import ROLE_ANALYST, CurrentPrincipal, Principal, require_roles
+from app.core.auth import ROLE_ANALYST, Principal, ReadPrincipal, require_roles
 from app.core.errors import DependencyUnavailableError, ValidationError
 from app.db import models as orm
 from app.models.enums import EventType, Severity, SourceDisposition, SourceObjectKind
@@ -122,7 +122,7 @@ async def ingest_source_record(
 @router.get("/source-records/{source_record_id}", response_model=s.SourceRecordResponse)
 async def get_source_record(
     source_record_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     session_factory: Annotated[async_sessionmaker[AsyncSession], Depends(_get_session_factory)],
 ) -> s.SourceRecordResponse:
     """Look up a persisted source object; keep ISSUE-004 fixture id for contracts."""

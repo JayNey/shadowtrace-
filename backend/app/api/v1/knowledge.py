@@ -8,14 +8,14 @@ from fastapi import APIRouter
 
 from app.api.v1 import schemas as s
 from app.api.v1.deps import MemoryGovernanceDep
-from app.core.auth import ROLE_ANALYST, ROLE_APPROVER, CurrentPrincipal, Principal, require_roles
+from app.core.auth import ROLE_ANALYST, ROLE_APPROVER, Principal, ReadPrincipal, require_roles
 
 router = APIRouter(tags=["knowledge"])
 
 
 @router.get("/knowledge", response_model=s.KnowledgeResponse)
 async def list_knowledge(
-    principal: CurrentPrincipal, page: int = 1, page_size: int = 20
+    principal: ReadPrincipal, page: int = 1, page_size: int = 20
 ) -> s.KnowledgeResponse:
     return s.KnowledgeResponse(total=0, page=page, page_size=page_size, items=[])
 

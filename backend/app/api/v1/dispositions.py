@@ -15,8 +15,8 @@ from app.api.v1.deps import DispositionSyncDep
 from app.core.auth import (
     ROLE_ADMIN,
     ROLE_DISPOSITION_OPERATOR,
-    CurrentPrincipal,
     Principal,
+    ReadPrincipal,
     require_roles,
 )
 from app.models.enums import ConfirmationEvidence, WritebackStatus
@@ -27,7 +27,7 @@ router = APIRouter(tags=["dispositions"])
 @router.get("/events/{event_id}/dispositions", response_model=s.DispositionListResponse)
 async def list_event_dispositions(
     event_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     sync: DispositionSyncDep,
 ) -> s.DispositionListResponse:
     items = await sync.list_event_dispositions(event_id)
@@ -43,7 +43,7 @@ async def list_event_dispositions(
 @router.get("/dispositions/{disposition_id}", response_model=s.DispositionResponse)
 async def get_disposition(
     disposition_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     sync: DispositionSyncDep,
 ) -> s.DispositionResponse:
     command, status = await sync.get_disposition(disposition_id)
@@ -53,7 +53,7 @@ async def get_disposition(
 @router.get("/writebacks/{writeback_id}", response_model=s.WritebackResponse)
 async def get_writeback(
     writeback_id: str,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     sync: DispositionSyncDep,
 ) -> s.WritebackResponse:
     record, receipt = await sync.get_writeback(writeback_id)

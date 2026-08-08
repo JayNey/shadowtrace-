@@ -5,13 +5,13 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api.v1 import schemas as s
-from app.core.auth import CurrentPrincipal
+from app.core.auth import ReadPrincipal
 
 router = APIRouter(tags=["tools"])
 
 
 @router.get("/tools", response_model=s.ToolsResponse)
-async def list_tools(principal: CurrentPrincipal) -> s.ToolsResponse:
+async def list_tools(principal: ReadPrincipal) -> s.ToolsResponse:
     return s.ToolsResponse(
         items=[
             s.ToolMetaItem(
