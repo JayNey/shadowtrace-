@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from app.core.sanitization import redact_sensitive_text
 from app.models.enums import EvidenceSource
 from app.models.evidence import Evidence
 from app.models.ids import new_evidence_id
@@ -108,19 +109,26 @@ class EvidenceParser:
         references: dict[str, SourceReference],
         default_confidence: float,
     ) -> Evidence:
-        timestamp = parse_timestamp(record.get("logged_at") or record.get("timestamp"))
-        evidence_type = self._evidence_type(tool_name, record)
-        description = self._description(tool_name, record, timestamp)
-        confidence = self._confidence(record, default_confidence)
-        related = self._related_entities(tool_name, record)
-        source_ref = self._match_source_ref(record, references)
-
         try:
             safe_raw = sanitize_evidence_raw_data(tool_name, record)
         except EvidenceSanitizerError as exc:
             raise ValueError(
                 f"evidence raw_data sanitization failed for tool {tool_name!r}: {exc}"
             ) from exc
+
+        # Build human-facing fields from the sanitized record only so secrets
+        # never land in description / related_entities (ISSUE-269 / ID-SEC-003).
+        timestamp = parse_timestamp(safe_raw.get("logged_at") or safe_raw.get("timestamp"))
+        evidence_type = self._evidence_type(tool_name, safe_raw)
+        description = redact_sensitive_text(
+            self._description(tool_name, safe_raw, timestamp)
+        )
+        confidence = self._confidence(safe_raw, default_confidence)
+        related = [
+            redact_sensitive_text(item)
+            for item in self._related_entities(tool_name, safe_raw)
+        ]
+        source_ref = self._match_source_ref(safe_raw, references)
 
         return Evidence(
             evidence_id=new_evidence_id(),
@@ -134,7 +142,7 @@ class EvidenceParser:
             source_ref=source_ref,
             raw_data=safe_raw,
             mitre_technique=None,
-            is_conflicting=bool(record.get("is_conflict_seed")),
+            is_conflicting=bool(safe_raw.get("is_conflict_seed")),
         )
 
     @staticmethod

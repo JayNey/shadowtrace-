@@ -73,7 +73,8 @@ _SCOPE_CONFIG: dict[str, dict[str, Any]] = {
         "fallback_table_name": "evidence",
         "orm_model": orm.Evidence,
         "text_cols": ["source", "evidence_type", "description", "mitre_technique"],
-        "jsonb_cols": ["raw_data", "related_entities"],
+        # ISSUE-269: never ILIKE against raw_data (secret side-channel / legacy blobs).
+        "jsonb_cols": ["related_entities"],
         "doc_id_col": "evidence_id",
         "event_id_col": "event_id",
         "timestamp_col": "created_at",

@@ -293,7 +293,9 @@ export interface Evidence {
   timestamp: string | null;
   related_entities?: string[];
   source_ref?: SourceReference | null;
-  raw_data: Record<string, unknown>;
+  /** Removed from ordinary API responses (ISSUE-269); kept optional for legacy clients. */
+  raw_data?: Record<string, unknown>;
+  schema_version?: string;
   mitre_technique?: string | null;
   is_conflicting: boolean;
 }

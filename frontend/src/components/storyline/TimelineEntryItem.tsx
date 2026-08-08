@@ -114,21 +114,15 @@ export default function TimelineEntryItem({
                 <Typography.Paragraph style={{ margin: "6px 0" }}>
                   {evidence.description}
                 </Typography.Paragraph>
-                <pre
-                  style={{
-                    margin: 0,
-                    overflow: "auto",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                    fontSize: 12,
-                  }}
-                >
-                  {JSON.stringify(evidence.raw_data, null, 2)}
-                </pre>
+                {evidence.related_entities && evidence.related_entities.length > 0 ? (
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    关联实体：{evidence.related_entities.join(", ")}
+                  </Typography.Text>
+                ) : null}
               </>
             ) : (
               <Typography.Text type="secondary">
-                未找到关联证据原文
+                未找到关联证据
               </Typography.Text>
             )}
           </div>

@@ -5486,7 +5486,7 @@
           },
           "evidence_list": {
             "items": {
-              "$ref": "#/components/schemas/Evidence"
+              "$ref": "#/components/schemas/EvidenceSafeProjection"
             },
             "type": "array",
             "title": "Evidence List"
@@ -5881,96 +5881,6 @@
         "title": "EventType",
         "description": "Supported security event types (intro §1); extensible via scenario packs."
       },
-      "Evidence": {
-        "properties": {
-          "evidence_id": {
-            "type": "string",
-            "title": "Evidence Id"
-          },
-          "event_id": {
-            "type": "string",
-            "title": "Event Id"
-          },
-          "source": {
-            "$ref": "#/components/schemas/EvidenceSource"
-          },
-          "evidence_type": {
-            "type": "string",
-            "title": "Evidence Type"
-          },
-          "description": {
-            "type": "string",
-            "title": "Description"
-          },
-          "confidence": {
-            "type": "number",
-            "maximum": 1.0,
-            "minimum": 0.0,
-            "title": "Confidence"
-          },
-          "timestamp": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Timestamp"
-          },
-          "related_entities": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Related Entities"
-          },
-          "source_ref": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SourceReference"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "raw_data": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Raw Data"
-          },
-          "mitre_technique": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Mitre Technique"
-          },
-          "is_conflicting": {
-            "type": "boolean",
-            "title": "Is Conflicting",
-            "default": false
-          }
-        },
-        "additionalProperties": false,
-        "type": "object",
-        "required": [
-          "evidence_id",
-          "event_id",
-          "source",
-          "evidence_type",
-          "description",
-          "confidence"
-        ],
-        "title": "Evidence"
-      },
       "EvidenceGapResponse": {
         "properties": {
           "event_id": {
@@ -6068,6 +5978,99 @@
         ],
         "title": "EvidenceQuerySummaryItem",
         "description": "Per-tool evidence collection summary for observability."
+      },
+      "EvidenceSafeProjection": {
+        "properties": {
+          "schema_version": {
+            "type": "string",
+            "maxLength": 16,
+            "minLength": 1,
+            "title": "Schema Version",
+            "default": "1.0"
+          },
+          "evidence_id": {
+            "type": "string",
+            "title": "Evidence Id"
+          },
+          "event_id": {
+            "type": "string",
+            "title": "Event Id"
+          },
+          "source": {
+            "$ref": "#/components/schemas/EvidenceSource"
+          },
+          "evidence_type": {
+            "type": "string",
+            "title": "Evidence Type"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "confidence": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          },
+          "related_entities": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Related Entities"
+          },
+          "source_ref": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceReference"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mitre_technique": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mitre Technique"
+          },
+          "is_conflicting": {
+            "type": "boolean",
+            "title": "Is Conflicting",
+            "default": false
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "evidence_id",
+          "event_id",
+          "source",
+          "evidence_type",
+          "description",
+          "confidence"
+        ],
+        "title": "EvidenceSafeProjection",
+        "description": "Versioned API/working-memory safe view — never exposes domain raw_data (ISSUE-269)."
       },
       "EvidenceSource": {
         "type": "string",

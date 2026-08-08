@@ -199,18 +199,20 @@ def _sanitize_tree(
             if is_sensitive_key(key):
                 cleaned[key] = REDACTED
                 continue
+            # Nested mappings stay under the same allowlist (ISSUE-269): parents
+            # like ``result`` must not re-open an unconstrained key space.
             cleaned[key] = _sanitize_tree(
                 item,
                 depth=depth + 1,
                 budget=budget,
-                enforce_allowlist=False,
+                enforce_allowlist=True,
             )
         budget.consume_bytes(cleaned)
         return cleaned
 
     if isinstance(value, list | tuple):
         cleaned_list = [
-            _sanitize_tree(item, depth=depth + 1, budget=budget, enforce_allowlist=False)
+            _sanitize_tree(item, depth=depth + 1, budget=budget, enforce_allowlist=True)
             for item in value
         ]
         budget.consume_bytes(cleaned_list)
@@ -218,7 +220,7 @@ def _sanitize_tree(
 
     if isinstance(value, set | frozenset):
         cleaned_set = [
-            _sanitize_tree(item, depth=depth + 1, budget=budget, enforce_allowlist=False)
+            _sanitize_tree(item, depth=depth + 1, budget=budget, enforce_allowlist=True)
             for item in value
         ]
         budget.consume_bytes(cleaned_set)
@@ -283,12 +285,24 @@ def project_evidence_list_for_api(evidence_list: list[Evidence]) -> list[Evidenc
 
 
 def sanitize_evidence_for_persist(item: Evidence) -> Evidence:
-    """Defense-in-depth: re-sanitize raw_data on the Evidence aggregate before DB upsert."""
+    """Defense-in-depth: re-sanitize raw_data and human-facing fields before DB upsert."""
     raw = item.raw_data if isinstance(item.raw_data, dict) else {}
     sanitized_raw = sanitize_evidence_raw_data("persist", raw, enforce_allowlist=True)
-    if sanitized_raw == raw:
+    description = _redact_pii_text(item.description)
+    related = [_redact_pii_text(str(v)) for v in item.related_entities]
+    if (
+        sanitized_raw == raw
+        and description == item.description
+        and related == list(item.related_entities)
+    ):
         return item
-    return item.model_copy(update={"raw_data": sanitized_raw})
+    return item.model_copy(
+        update={
+            "raw_data": sanitized_raw,
+            "description": description,
+            "related_entities": related,
+        }
+    )
 
 
 __all__ = [

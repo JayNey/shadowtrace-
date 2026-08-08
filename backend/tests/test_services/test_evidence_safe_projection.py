@@ -86,15 +86,54 @@ def test_sanitize_redacts_pii_in_string_values() -> None:
 
 
 def test_sanitize_fail_closed_on_depth_budget() -> None:
-    record: dict[str, Any] = {"note": {}}
-    current = record["note"]
+    # Nest using an allowlisted key so depth policy is reached (ISSUE-269).
+    record: dict[str, Any] = {"result": {}}
+    current = record["result"]
     assert isinstance(current, dict)
     for _ in range(30):
         deeper: dict[str, Any] = {}
-        current["child"] = deeper
+        current["result"] = deeper
         current = deeper
     with pytest.raises(EvidenceSanitizerError, match="depth"):
         sanitize_evidence_raw_data("query_account_login", record)
+
+
+def test_sanitize_fail_closed_on_payload_budget() -> None:
+    record = _login_record(note="x" * (40_000))
+    with pytest.raises(EvidenceSanitizerError, match="payload"):
+        sanitize_evidence_raw_data("query_account_login", record)
+
+
+def test_sanitize_strips_unknown_nested_keys_under_allowed_parent() -> None:
+    record = _login_record(result={"account": "ops-user", "sid": "deadbeef-session", "token": "nope"})
+    cleaned = sanitize_evidence_raw_data("query_account_login", record)
+    assert cleaned["result"]["account"] == "ops-user"
+    assert "sid" not in cleaned["result"]
+    assert "token" not in cleaned["result"]
+
+
+def test_parser_redacts_secrets_in_description_and_related_entities() -> None:
+    parser = EvidenceParser()
+    tool_result = ToolResult(
+        call_id="call-desc-sidechannel",
+        tool_name="query_account_login",
+        provider_name="evidence_projection",
+        status=ToolResultStatus.SUCCESS,
+        confidence=0.8,
+        data={
+            "records": [
+                _login_record(account="Bearer leak-token-999"),
+            ],
+            "source_references": [],
+        },
+        execution_time_ms=3,
+    )
+    rows = parser.parse("query_account_login", tool_result, event_id="evt-sec-desc")
+    assert len(rows) == 1
+    assert "leak-token-999" not in rows[0].description
+    assert all("leak-token-999" not in item for item in rows[0].related_entities)
+    assert "leak-token-999" not in str(rows[0].raw_data)
+    assert "[REDACTED]" in rows[0].description or "Bearer" not in rows[0].description
 
 
 def test_parser_persists_sanitized_raw_data_not_full_provider_record() -> None:
@@ -145,13 +184,16 @@ def test_persist_re_sanitizes_defense_in_depth() -> None:
         event_id="evt-2",
         source=EvidenceSource.IDENTITY,
         evidence_type="login",
-        description="test",
+        description="账号 Bearer leak-token-persist 登录",
         confidence=0.5,
+        related_entities=["Bearer leak-token-persist"],
         raw_data={"account": "ops", "Authorization": "Bearer leak"},
     )
     clean = sanitize_evidence_for_persist(dirty)
     assert "Authorization" not in clean.raw_data
     assert clean.raw_data["account"] == "ops"
+    assert "leak-token-persist" not in clean.description
+    assert all("leak-token-persist" not in item for item in clean.related_entities)
 
 
 class _EventService:
