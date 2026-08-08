@@ -145,7 +145,9 @@ def export_core_schemas(out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     for name, model in sorted(MODEL_REGISTRY.items()):
-        schema = model.model_json_schema()
+        # ISSUE-265: serialization mode is the single canonical export (computed
+        # fields such as InvestigationReport.degraded appear in committed artifacts).
+        schema = model.model_json_schema(mode="serialization")
         path = out_dir / f"{name}.json"
         path.write_text(json.dumps(schema, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         written.append(path)

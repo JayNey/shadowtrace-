@@ -89,6 +89,12 @@ _REQUIRED_DOCUMENTED_CODES: frozenset[str] = frozenset(
         "idempotency_key_reuse",
         "adapter_not_found",
         "adapter_validation_error",
+        # ISSUE-212 / ISSUE-265 — report quality gate failures
+        "report_generation_failed",
+        "report_quality_incomplete",
+        "report_quality_conflict",
+        "report_prerequisites_missing",
+        "report_prerequisites_invalid",
     }
 )
 
@@ -223,6 +229,23 @@ def test_writeback_retry_rules() -> None:
     wb = ToolExecutionError("wb", error_code="writeback_failed")
     assert wb.category is ErrorCategory.TOOL
     assert is_retryable(wb) is False
+
+
+@pytest.mark.parametrize(
+    ("code", "category"),
+    [
+        ("report_generation_failed", ErrorCategory.LLM),
+        ("report_quality_incomplete", ErrorCategory.USER_INPUT),
+        ("report_quality_conflict", ErrorCategory.PERMANENT),
+        ("report_prerequisites_missing", ErrorCategory.USER_INPUT),
+        ("report_prerequisites_invalid", ErrorCategory.USER_INPUT),
+    ],
+)
+def test_report_error_codes_are_registered(
+    code: str,
+    category: ErrorCategory,
+) -> None:
+    assert ERROR_CODE_REGISTRY[code] is category
 
 
 def test_registry_covers_documented_codes() -> None:

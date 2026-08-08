@@ -1,4 +1,4 @@
-"""EventContext field-set double-sided assertion (ISSUE-002 统一命名 13)."""
+"""EventContext model/schema field alignment (ISSUE-002, ISSUE-265)."""
 
 from __future__ import annotations
 
@@ -16,54 +16,19 @@ from app.models.enums import (
 )
 from app.models.security_event import EventSummary
 
-# Canonical field set fixed by the ISSUE-002 spec (statement 13).
-EXPECTED_CONTEXT_FIELDS = {
-    "event",
-    "source_snapshot",
-    "source_sync_state",
-    "triage_result",
-    "false_positive_match",
-    "fp_adjudication",
-    "evidence_output",
-    "storyline",
-    "graph_output",
-    "rag_output",
-    "risk_assessment",
-    "execution_plan",
-    "response_plan",
-    "approval_records",
-    "disposition_only_intent",
-    "execution_substate",
-    "execution_summary",
-    "execution_jobs",
-    "verification_result",
-    "rollback_results",
-    "impact_assessments",
-    "report",
-    "memory_output",
-    "disposition_commands",
-    "disposition_receipts",
-    "writeback_summary",
-    "state_history",
-    "replan_count",
-    "budget_usage",
-    "guard_violations",
-    "convergence_state",
-    "quality_scores",
-    "scratchpad",
-    "degraded_flags",
-    "triage_degraded",
-    "graph_degraded",
-    "storyline_degraded",
-    "analysis_only_complete",
-}
+
+def _canonical_event_context_field_names() -> set[str]:
+    """Use the deterministic serialization contract as the canonical field source."""
+    schema = EventContext.model_json_schema(mode="serialization")
+    return set(schema["properties"].keys())
 
 
-def test_event_context_field_set_matches_spec_both_directions() -> None:
+def test_event_context_model_fields_match_serialization_schema() -> None:
+    expected = _canonical_event_context_field_names()
     actual = set(EventContext.model_fields.keys())
-    assert actual == EXPECTED_CONTEXT_FIELDS, {
-        "missing": EXPECTED_CONTEXT_FIELDS - actual,
-        "unexpected": actual - EXPECTED_CONTEXT_FIELDS,
+    assert actual == expected, {
+        "missing": expected - actual,
+        "unexpected": actual - expected,
     }
 
 

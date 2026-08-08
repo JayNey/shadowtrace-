@@ -41,6 +41,12 @@
           "minimum": 1,
           "title": "Vector Revision",
           "type": "integer"
+        },
+        "idempotency_key": {
+          "description": "Unique upsert key exported to contract consumers (#634).",
+          "readOnly": true,
+          "title": "Idempotency Key",
+          "type": "string"
         }
       },
       "required": [
@@ -49,7 +55,8 @@
         "object_id",
         "release_id",
         "embedding_release_id",
-        "content_hash"
+        "content_hash",
+        "idempotency_key"
       ],
       "title": "VectorRecordIdentity",
       "type": "object"

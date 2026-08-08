@@ -183,6 +183,20 @@
       "title": "Failed Writebacks",
       "type": "array"
     },
+    "recoverable_writeback_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Recoverable Writeback Ids",
+      "type": "array"
+    },
+    "pending_writeback_action_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Pending Writeback Action Ids",
+      "type": "array"
+    },
     "blocked_writebacks": {
       "items": {
         "type": "string"
