@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -31,6 +32,8 @@ from app.orchestration.writeback_recovery_handler import (
     WritebackRecoveryAction,
     WritebackRecoveryHandler,
     WritebackState,
+    resolve_pending_action_writebacks,
+    resolve_writeback_statuses,
     writeback_recovery_graph_node,
 )
 
@@ -437,8 +440,123 @@ class TestWritebackRecoveryGraphNode:
         assert result["execution_substate"] == ExecutionSubstate.WAITING_WRITEBACK.value
         assert result["verify_pending_writeback_action_ids"] == ["act-pending-001"]
 
+    async def test_pending_action_refreshes_to_real_writeback_before_recovery(self):
+        """An active outbox promotes act-* to wbk-* without calling APIs with act-*."""
+        sync = FakeDispositionSync()
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+            disposition_sync=sync,
+        )
+
+        async def _resolve(
+            event_id: str,
+            action_ids: list[str],
+        ) -> dict[str, list[tuple[str, str | None]]]:
+            assert event_id == "evt-test-wb-001"
+            assert action_ids == ["act-pending-001"]
+            return {"act-pending-001": [("wbk-created-001", "pending")]}
+
+        state = _base_state(
+            verify_need_writeback_recovery=True,
+            verify_failed_writebacks=[],
+            verify_recoverable_writeback_ids=[],
+            verify_pending_writeback_action_ids=["act-pending-001"],
+        )
+        result = await writeback_recovery_graph_node(
+            state,
+            handler=handler,
+            pending_action_resolver=_resolve,
+        )
+
+        assert result["halted"] is True
+        assert result["verify_recoverable_writeback_ids"] == ["wbk-created-001"]
+        assert result["verify_pending_writeback_action_ids"] == []
+        assert result["verify_writeback_status_map"] == {"wbk-created-001": "pending"}
+        assert sync.lookups == []
+        assert sync.retries == []
+
+    async def test_database_resolver_returns_action_writeback_status_mapping(self):
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        result = MagicMock()
+        result.all.return_value = [
+            ("act-pending-001", "wbk-created-001", "pending"),
+            ("act-pending-001", "wbk-created-002", None),
+        ]
+        session.execute.return_value = result
+        session_factory = MagicMock(return_value=session)
+
+        resolved = await resolve_pending_action_writebacks(
+            session_factory,  # type: ignore[arg-type]
+            "evt-test-wb-001",
+            ["act-pending-001"],
+        )
+
+        assert resolved == {
+            "act-pending-001": [
+                ("wbk-created-001", "pending"),
+                ("wbk-created-002", None),
+            ]
+        }
+        session.execute.assert_awaited_once()
+
+    async def test_database_resolver_returns_current_writeback_statuses(self):
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        result = MagicMock()
+        result.all.return_value = [
+            ("wbk-created-001", "confirmed"),
+            ("wbk-created-002", None),
+        ]
+        session.execute.return_value = result
+        session_factory = MagicMock(return_value=session)
+
+        resolved = await resolve_writeback_statuses(
+            session_factory,  # type: ignore[arg-type]
+            "evt-test-wb-001",
+            ["wbk-created-001", "wbk-created-002"],
+        )
+
+        assert resolved == {
+            "wbk-created-001": "confirmed",
+            "wbk-created-002": None,
+        }
+
+    async def test_wait_resume_refreshes_confirmed_status_and_converges(self):
+        handler = WritebackRecoveryHandler(
+            state_machine=FakeStateMachine(),
+            runtime=FakeRuntime(),
+        )
+        initial = _base_state(
+            verify_recoverable_writeback_ids=["wbk-pending-001"],
+            verify_failed_writebacks=["wbk-pending-001"],
+            verify_writeback_status_map={"wbk-pending-001": "pending"},
+        )
+        waiting = await writeback_recovery_graph_node(initial, handler=handler)
+        assert waiting["verify_recoverable_writeback_ids"] == ["wbk-pending-001"]
+
+        async def _confirmed(
+            event_id: str,
+            writeback_ids: list[str],
+        ) -> dict[str, str | None]:
+            assert event_id == "evt-test-wb-001"
+            assert writeback_ids == ["wbk-pending-001"]
+            return {"wbk-pending-001": "confirmed"}
+
+        resumed = await writeback_recovery_graph_node(
+            {**initial, **waiting, "halted": False},
+            handler=handler,
+            writeback_status_resolver=_confirmed,
+        )
+
+        assert resumed["verify_need_writeback_recovery"] is False
+        assert resumed["verify_recoverable_writeback_ids"] == []
+        assert resumed["verify_need_manual_resolution"] is False
+        assert resumed["execution_substate"] == ExecutionSubstate.NONE.value
+
     async def test_wait_sets_halted(self):
-        """WAIT action → halted=True for graph pause."""
+        """WAIT action keeps the current ID across receipt-triggered resumes."""
         handler = WritebackRecoveryHandler(
             state_machine=FakeStateMachine(),
             runtime=FakeRuntime(),
@@ -449,6 +567,15 @@ class TestWritebackRecoveryGraphNode:
         )
         result = await writeback_recovery_graph_node(state, handler=handler)
         assert result["halted"] is True
+        assert result["verify_recoverable_writeback_ids"] == ["wbk-001"]
+
+        resumed = await writeback_recovery_graph_node(
+            {**state, **result, "halted": False},
+            handler=handler,
+        )
+        assert resumed["halted"] is True
+        assert resumed["verify_need_manual_resolution"] is False
+        assert resumed["verify_recoverable_writeback_ids"] == ["wbk-001"]
 
     async def test_escalated_sets_manual(self):
         """Escalated writeback → need_manual_resolution=True."""
@@ -737,12 +864,10 @@ class TestRouteAfterVerifyHaltDetection:
 
 
 class TestMultipleWritebackProcessing:
-    """Verify writeback_recovery_graph_node correctly advances through
-    multiple failed writebacks without head-of-line blocking."""
+    """Verify terminal targets advance while non-terminal WAIT targets remain."""
 
-    async def test_multiple_writebacks_head_wait_tail_processed(self):
-        """When first writeback is WAIT (PENDING), it's popped from the list
-        so the next writeback can be processed on resume."""
+    async def test_multiple_writebacks_head_wait_is_retained(self):
+        """WAIT is non-terminal and must not discard the current writeback."""
         handler = WritebackRecoveryHandler(
             state_machine=FakeStateMachine(),
             runtime=FakeRuntime(),
@@ -755,10 +880,7 @@ class TestMultipleWritebackProcessing:
         )
         result = await writeback_recovery_graph_node(state, handler=handler)
 
-        # wbk-001 should be popped; wbk-002 remains for next cycle
-        assert result["verify_failed_writebacks"] == ["wbk-002"], (
-            f"WAIT should pop the processed head, got {result.get('verify_failed_writebacks')}"
-        )
+        assert result["verify_failed_writebacks"] == ["wbk-001", "wbk-002"]
         assert result["halted"] is True
 
     async def test_multiple_writebacks_head_escalated_tail_processed(self):
@@ -820,37 +942,6 @@ class TestMultipleWritebackProcessing:
         assert result["verify_failed_writebacks"] == []
         assert result["verify_need_writeback_recovery"] is False
         assert result["execution_substate"] == ExecutionSubstate.NONE.value
-        """When processing multiple WAIT writebacks sequentially, each call
-        pops the head until the list is empty."""
-        handler = WritebackRecoveryHandler(
-            state_machine=FakeStateMachine(),
-            runtime=FakeRuntime(),
-        )
-
-        # Start with three PENDING writebacks
-        state1 = _base_state(
-            verify_failed_writebacks=["wbk-001", "wbk-002", "wbk-003"],
-            verify_writeback_status="pending",
-        )
-        result1 = await writeback_recovery_graph_node(state1, handler=handler)
-        assert result1["verify_failed_writebacks"] == ["wbk-002", "wbk-003"]
-        assert result1["halted"] is True
-
-        # On resume (simulated), process the next one
-        state2 = _base_state(
-            verify_failed_writebacks=["wbk-002", "wbk-003"],
-            verify_writeback_status="pending",
-        )
-        result2 = await writeback_recovery_graph_node(state2, handler=handler)
-        assert result2["verify_failed_writebacks"] == ["wbk-003"]
-
-        # Last one
-        state3 = _base_state(
-            verify_failed_writebacks=["wbk-003"],
-            verify_writeback_status="pending",
-        )
-        result3 = await writeback_recovery_graph_node(state3, handler=handler)
-        assert result3["verify_failed_writebacks"] == []
 
     # ── Tests: LOOKUP/RETRY halt prevention (Should-Fix #2) ───────────────────────
 

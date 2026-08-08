@@ -201,9 +201,7 @@ async def _reconcile_verify_resume_patch(
     outbox_rows = await _active_outbox_writeback_rows(session_factory, event_id)
     wb_statuses = [status for _intent, status in outbox_rows]
     writebacks_resolved = (
-        not recoverable_writebacks
-        and not pending_actions
-        and _all_writebacks_resolved(wb_statuses)
+        not recoverable_writebacks and not pending_actions and _all_writebacks_resolved(wb_statuses)
     )
     disposition_policy = values.get("disposition_policy")
 
@@ -217,7 +215,7 @@ async def _reconcile_verify_resume_patch(
     if (
         need_manual
         and not legitimate_manual
-        and         _can_clear_manual_resolution(
+        and _can_clear_manual_resolution(
             degraded_flags=degraded_flags,
             rows=outbox_rows,
             failed_writebacks=recoverable_writebacks,

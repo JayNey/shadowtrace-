@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Coroutine, Mapping
+from functools import partial
 from typing import Any, Protocol, cast
 
 from langchain_core.runnables import RunnableConfig
@@ -58,6 +59,8 @@ from app.orchestration.replan_handler import (
 from app.orchestration.triage_input_builder import build_triage_agent_input
 from app.orchestration.writeback_recovery_handler import (
     WritebackRecoveryHandler,
+    resolve_pending_action_writebacks,
+    resolve_writeback_statuses,
     writeback_recovery_graph_node,
 )
 from app.services.agent_task_coordinator import (
@@ -675,6 +678,24 @@ def _resolve_verify_writeback_statuses(
     return statuses or None
 
 
+def _verification_result_state_update(
+    verification_result: VerificationResult,
+) -> dict[str, Any]:
+    """Project VerifyAgent output into the graph recovery contract."""
+    return {
+        "verify_need_action_replan": verification_result.need_action_replan,
+        "verify_need_writeback_recovery": verification_result.need_writeback_recovery,
+        "verify_need_manual_resolution": verification_result.need_manual_resolution,
+        "verify_failed_actions": verification_result.failed_actions,
+        "verify_failed_writebacks": verification_result.failed_writebacks,
+        "verify_recoverable_writeback_ids": verification_result.recoverable_writeback_ids,
+        "verify_pending_writeback_action_ids": verification_result.pending_writeback_action_ids,
+        "verify_writeback_status": _resolve_verify_writeback_status(verification_result),
+        "verify_writeback_status_map": _resolve_verify_writeback_statuses(verification_result),
+        "verify_has_partial_success": verification_result.overall_status.value == "partial",
+    }
+
+
 def _plan_revision_from_state(state: InvestigationState) -> int:
     execution_plan = state.get("execution_plan") or {}
     revision = execution_plan.get("revision")
@@ -731,6 +752,17 @@ def build_investigation_graph(
         runtime=runtime,
         disposition_sync=services.get("disposition_sync"),
         lookup_poll_interval_s=get_settings().writeback_lookup_poll_interval_s,
+    )
+    _session_factory = services.get("session_factory")
+    _pending_action_resolver = (
+        partial(resolve_pending_action_writebacks, _session_factory)
+        if _session_factory is not None
+        else None
+    )
+    _writeback_status_resolver = (
+        partial(resolve_writeback_statuses, _session_factory)
+        if _session_factory is not None
+        else None
     )
     _convergence_guard = services.get("convergence_guard")
 
@@ -1682,18 +1714,7 @@ def build_investigation_graph(
             )
 
         # Extract routing flags from VerificationResult.
-        update: dict[str, Any] = {
-            "verify_need_action_replan": verification_result.need_action_replan,
-            "verify_need_writeback_recovery": verification_result.need_writeback_recovery,
-            "verify_need_manual_resolution": verification_result.need_manual_resolution,
-            "verify_failed_actions": verification_result.failed_actions,
-            "verify_failed_writebacks": verification_result.failed_writebacks,
-            "verify_recoverable_writeback_ids": verification_result.recoverable_writeback_ids,
-            "verify_pending_writeback_action_ids": verification_result.pending_writeback_action_ids,
-            "verify_writeback_status": _resolve_verify_writeback_status(verification_result),
-            "verify_writeback_status_map": _resolve_verify_writeback_statuses(verification_result),
-            "verify_has_partial_success": verification_result.overall_status.value == "partial",
-        }
+        update = _verification_result_state_update(verification_result)
 
         # Should-Fix: when execution_ok is False but VerifyAgent didn't report
         # any specific failures, the execution layer itself failed without a
@@ -1766,6 +1787,8 @@ def build_investigation_graph(
         return await writeback_recovery_graph_node(
             state,
             handler=_wb_handler,
+            pending_action_resolver=_pending_action_resolver,
+            writeback_status_resolver=_writeback_status_resolver,
         )
 
     async def report_node(state: InvestigationState) -> InvestigationState:

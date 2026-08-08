@@ -55,6 +55,11 @@ from app.models.enums import (
 from app.models.execution import ActionExecutionJob
 from app.models.ids import new_action_id, new_job_id
 from app.models.tool_meta import ToolResult, ToolResultStatus
+from app.orchestration.workflow_graph import _verification_result_state_update
+from app.orchestration.writeback_recovery_handler import (
+    WritebackRecoveryHandler,
+    writeback_recovery_graph_node,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -4603,6 +4608,23 @@ class TestShouldFixRegression:
         assert action.action_id in result.pending_writeback_action_ids
         assert not result.recoverable_writeback_ids
         assert not result.failed_writebacks
+
+        runtime = MagicMock()
+        runtime.set_execution_substate = AsyncMock()
+        recovery_state = {
+            "event_id": action.event_id,
+            **_verification_result_state_update(result),
+        }
+        recovery = await writeback_recovery_graph_node(
+            recovery_state,  # type: ignore[arg-type]
+            handler=WritebackRecoveryHandler(
+                state_machine=MagicMock(),
+                runtime=runtime,
+            ),
+        )
+        assert recovery["halted"] is True
+        assert recovery["verify_pending_writeback_action_ids"] == [action.action_id]
+        assert recovery["verify_recoverable_writeback_ids"] == []
 
     async def test_writeback_status_none_with_outbox_routes_recovery(self):
         """SF-1 counter-case: When wb_status=None but outbox records DO exist,
