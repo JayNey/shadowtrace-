@@ -47,6 +47,7 @@ _rollback_service: Any = None  # RollbackService
 _adapter_registry: Any = None  # DispositionAdapterRegistry
 _workflow_runtime: Any = None  # WorkflowRuntimeService
 _event_disposition: Any = None  # EventDispositionService
+_disposition_source: Any = None  # DispositionSourceService
 _opensearch_client: Any = None  # OpenSearchClient
 _search_service: Any = None  # SearchService
 _tool_call_log: Any = None  # ToolCallLogService
@@ -509,6 +510,20 @@ async def get_event_disposition_service() -> Any:
     return _event_disposition
 
 
+async def get_disposition_source_service() -> Any:
+    """Disposition source selection + readiness recheck (ISSUE-280)."""
+    global _disposition_source
+    if _disposition_source is None:
+        from app.services.disposition_source_service import DispositionSourceService
+
+        _disposition_source = DispositionSourceService(
+            _get_session_factory(),
+            event_service=await get_event_service(),
+            adapter_registry=_get_adapter_registry(),
+        )
+    return _disposition_source
+
+
 async def _build_production_investigation_graph(
     *,
     planner_agent: Any,
@@ -731,6 +746,7 @@ async def shutdown_neo4j_client() -> None:
 
 
 DispositionSyncDep = Annotated[Any, Depends(get_disposition_sync)]
+DispositionSourceDep = Annotated[Any, Depends(get_disposition_source_service)]
 ActionExecutionDep = Annotated[Any, Depends(get_action_execution)]
 RollbackServiceDep = Annotated[Any, Depends(get_rollback_service)]
 
@@ -1167,7 +1183,7 @@ def reset_loop_bound_redis_resources() -> None:
     global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
     global _behavior_observation_service
     global _disposition_sync, _action_execution, _manual_resolution, _rollback_service
-    global _adapter_registry, _workflow_runtime, _event_disposition
+    global _adapter_registry, _workflow_runtime, _event_disposition, _disposition_source
     global _impact_assessment_service
     global _tool_call_grant_service, _agent_task_service
     global _memory_governance, _knowledge_query_service, _detection_governance
@@ -1198,6 +1214,7 @@ def reset_loop_bound_redis_resources() -> None:
     _adapter_registry = None
     _workflow_runtime = None
     _event_disposition = None
+    _disposition_source = None
     _tool_call_grant_service = None
     _agent_task_service = None
     _memory_governance = None
@@ -1229,7 +1246,7 @@ def reset_deps() -> None:
     global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
     global _behavior_observation_service
     global _disposition_sync, _action_execution, _manual_resolution, _rollback_service
-    global _adapter_registry, _workflow_runtime, _event_disposition
+    global _adapter_registry, _workflow_runtime, _event_disposition, _disposition_source
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
     global _graph_sync_service, _neo4j_client
