@@ -103,7 +103,10 @@ class RedisClient:
         return loop is not None and bound is not loop
 
     def _drop_resources_sync(self) -> None:
-        """Drop loop-bound resources without awaiting (loop may already be closed)."""
+        """Drop loop-bound resources without awaiting (loop may already be closed).
+
+        Async cleanup happens in ``_retire_resources`` / ``rebind_to_current_loop``.
+        """
         self._client = None
         self._pool = None
         self._bound_loop = None
@@ -145,12 +148,12 @@ class RedisClient:
         return self._ensure_client()
 
     async def rebind_to_current_loop(self) -> None:
-        """Force-retire the current client and bind a fresh one to this loop."""
+        """Force-retire the current client and bind a fresh one to this loop.
+
+        Always rebuilds — callers invoke this after a confirmed loop error, so
+        tracking that still looks healthy must not skip retirement.
+        """
         loop = self._running_loop()
-        if not self._needs_rebind(loop) and self._client is not None:
-            if loop is not None and self._bound_loop is None:
-                self._bound_loop = loop
-            return
         logger.info("RedisClient explicit rebind_to_current_loop")
         await self._retire_resources()
         self._rebuild()

@@ -164,6 +164,9 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
             available = False
         if not available:
             saver._enable_memory_fallback("Redis checkpoint unavailable")
+        else:
+            # Clear sticky process gauge left by prior savers that Strategy B discarded.
+            set_checkpoint_memory_fallback(False)
         _register_checkpointer(saver)
         return saver
 
@@ -378,7 +381,7 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
                 )
             else:
                 self._enable_memory_fallback("Redis checkpoint delete failed", exc_info=True)
-            raise
+            # Memory thread already deleted; align with persist/hydrate (no re-raise).
 
     def _export(self, thread_id: str) -> bytes | None:
         if thread_id not in self._memory.storage:

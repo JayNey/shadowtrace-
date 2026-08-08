@@ -1074,11 +1074,13 @@ def reset_loop_bound_redis_resources() -> None:
     global _tool_call_grant_service, _agent_task_service
     global _memory_governance, _detection_governance, _detection_promotion
     global _detection_context_projector, _detection_context_service
+    global _decision_record_service
 
     client = _redis_client
     _redis_client = None
     _context_store = None
     _degraded_flags = None
+    _decision_record_service = None
     _event_service = None
     _state_machine = None
     _event_bus = None

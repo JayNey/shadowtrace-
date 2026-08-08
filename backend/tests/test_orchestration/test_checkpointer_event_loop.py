@@ -250,6 +250,8 @@ def test_release_celery_resources_clears_redis_singleton(monkeypatch: pytest.Mon
     deps._event_lease = object()
     deps._context_store = object()
     deps._event_bus = object()
+    deps._decision_record_service = object()
+    deps._degraded_flags = object()
 
     stack_mock = MagicMock()
     retrieval_mock = MagicMock()
@@ -285,3 +287,123 @@ def test_release_celery_resources_clears_redis_singleton(monkeypatch: pytest.Mon
     assert deps._event_lease is None
     assert deps._context_store is None
     assert deps._event_bus is None
+    assert deps._decision_record_service is None
+    assert deps._degraded_flags is None
+
+
+@pytest.mark.asyncio
+async def test_rebind_to_current_loop_force_rebuilds_even_when_needs_rebind_false() -> None:
+    """Explicit rebind must rebuild even when loop tracking still looks healthy."""
+    client = RedisClient(url=REDIS_URL, max_connections=2)
+    try:
+        first = client.get_client()
+        assert client._needs_rebind(asyncio.get_running_loop()) is False
+        await client.rebind_to_current_loop()
+        second = client.get_client()
+        assert first is not second
+        assert client._pool is not None
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_hydrate_recovers_from_event_loop_error_without_sticky_fallback() -> None:
+    """Closed-loop hydrate errors rebind + retry; must not stick memory_fallback."""
+
+    class _LoopAwareStore:
+        def __init__(self) -> None:
+            self.values: dict[str, bytes] = {}
+            self.get_calls = 0
+
+        async def get(self, key: str) -> bytes | None:
+            self.get_calls += 1
+            if self.get_calls == 1:
+                raise RuntimeError("Event loop is closed")
+            return self.values.get(key)
+
+        async def set(self, key: str, value: bytes, *, ex: int | None = None) -> None:
+            del ex
+            self.values[key] = value
+
+        async def delete(self, key: str) -> None:
+            self.values.pop(key, None)
+
+    class _LoopAwareRedis:
+        def __init__(self) -> None:
+            self.store = _LoopAwareStore()
+            self.rebinds = 0
+
+        async def ping(self) -> bool:
+            return True
+
+        def get_client(self) -> _LoopAwareStore:
+            return self.store
+
+        async def rebind_to_current_loop(self) -> None:
+            self.rebinds += 1
+
+    redis = _LoopAwareRedis()
+    seed = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    seed._memory.storage["evt-loop-hydrate"] = {}
+    await seed._persist("evt-loop-hydrate")
+    assert checkpoint_key_for_event("evt-loop-hydrate") in redis.store.values
+
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    await saver._hydrate("evt-loop-hydrate")
+
+    assert saver.memory_fallback is False
+    assert redis.rebinds >= 1
+    assert "evt-loop-hydrate" in saver._memory.storage
+
+
+@pytest.mark.asyncio
+async def test_new_checkpointer_clears_process_fallback_gauge_after_prior_fallback() -> None:
+    from app.core.metrics import set_checkpoint_memory_fallback
+
+    class _OkRedis:
+        async def ping(self) -> bool:
+            return True
+
+        def get_client(self) -> Any:
+            raise AssertionError("unused")
+
+    set_checkpoint_memory_fallback(True)
+    assert checkpoint_health_snapshot()["memory_fallback"] is True
+    saver = await RedisCheckpointer.create(_OkRedis())  # type: ignore[arg-type]
+    assert saver.memory_fallback is False
+    assert checkpoint_health_snapshot()["memory_fallback"] is False
+
+
+@pytest.mark.skipif(not _redis_reachable(), reason="Redis not reachable")
+def test_checkpointer_survives_consecutive_asyncio_run_without_strategy_b_release() -> None:
+    """Defense-in-depth: same RedisClient + saver across loops without Strategy B."""
+    redis = RedisClient(url=REDIS_URL, max_connections=2)
+    event_id = "evt-issue252-no-release"
+
+    async def _persist_round() -> None:
+        saver = await RedisCheckpointer.create(redis)
+        assert saver.memory_fallback is False
+        config = _config(event_id)
+        saver._memory.put(
+            config,
+            _empty_checkpoint(),  # type: ignore[arg-type]
+            {},  # type: ignore[arg-type]
+            {},
+        )
+        await saver._persist(event_id)
+        assert saver.memory_fallback is False
+
+    async def _hydrate_round() -> None:
+        saver = await RedisCheckpointer.create(redis)
+        assert saver.memory_fallback is False
+        await saver._hydrate(event_id)
+        assert saver.memory_fallback is False
+        assert event_id in saver._memory.storage
+
+    try:
+        asyncio.run(_persist_round())
+        asyncio.run(_hydrate_round())
+        health = get_checkpoint_health()
+        assert health["memory_fallback"] is False
+    finally:
+        asyncio.run(redis.aclose())
