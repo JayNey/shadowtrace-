@@ -39,6 +39,7 @@ from app.models.enums import (
 )
 from app.models.source import SourceReference
 from app.services.execution_job_query_service import (
+    DEMO_FIXTURE_TENANT_ID,
     ExecutionJobQueryService,
     project_execution_job_response,
 )
@@ -301,26 +302,40 @@ async def test_query_service_tenant_mismatch_is_not_found(
         await service.get_execution_job(job_id, principal=principal)
 
 
+class _BrokenSession:
+    """Session stub that fails on first ORM get after read-only begin."""
+
+    def begin(self) -> _BrokenSession:
+        return self
+
+    async def execute(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def get(self, *_args: Any, **_kwargs: Any) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        raise OperationalError("SELECT 1", {}, Exception("db down"))
+
+    async def __aenter__(self) -> _BrokenSession:
+        return self
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+class _BrokenFactory:
+    def __call__(self) -> _BrokenSession:
+        return _BrokenSession()
+
+
 @pytest.mark.asyncio
 async def test_query_service_db_error_does_not_fallback_to_fixture() -> None:
-    from sqlalchemy.exc import OperationalError
-
-    class _BrokenSession:
-        async def get(self, *_args: Any, **_kwargs: Any) -> None:
-            raise OperationalError("SELECT 1", {}, Exception("db down"))
-
-        async def __aenter__(self) -> _BrokenSession:
-            return self
-
-        async def __aexit__(self, *_args: Any) -> None:
-            return None
-
-    class _BrokenFactory:
-        def __call__(self) -> _BrokenSession:
-            return _BrokenSession()
-
     service = ExecutionJobQueryService(_BrokenFactory(), fixture_enabled=True)  # type: ignore[arg-type]
-    principal = Principal(subject="analyst-1", roles=["analyst"])
+    principal = Principal(
+        subject="analyst-1",
+        roles=["analyst"],
+        tenant_id=DEMO_FIXTURE_TENANT_ID,
+    )
 
     with pytest.raises(DependencyUnavailableError, match="execution job store unavailable"):
         await service.get_execution_job("job-0a1b2c3d", principal=principal)
@@ -334,13 +349,30 @@ async def test_fixture_only_when_explicitly_enabled(
 ) -> None:
     disabled = ExecutionJobQueryService(session_factory, fixture_enabled=False)
     enabled = ExecutionJobQueryService(session_factory, fixture_enabled=True)
-    principal = Principal(subject="analyst-1", roles=["analyst"])
+    principal = Principal(
+        subject="analyst-1",
+        roles=["analyst"],
+        tenant_id=DEMO_FIXTURE_TENANT_ID,
+    )
 
     with pytest.raises(ResourceNotFoundError):
         await disabled.get_execution_job("job-0a1b2c3d", principal=principal)
 
     fixture = await enabled.get_execution_job("job-0a1b2c3d", principal=principal)
     assert fixture.status == "partial_success"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_fixture_requires_tenant_scope(
+    session_factory: async_sessionmaker[AsyncSession],
+    clean_state: None,
+) -> None:
+    enabled = ExecutionJobQueryService(session_factory, fixture_enabled=True)
+    principal = Principal(subject="analyst-1", roles=["analyst"], tenant_id="other-tenant")
+
+    with pytest.raises(ResourceNotFoundError):
+        await enabled.get_execution_job("job-0a1b2c3d", principal=principal)
 
 
 def test_production_rejects_execution_job_fixture_flag(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -393,3 +425,215 @@ def test_api_zero_role_is_forbidden() -> None:
         assert resp.json()["error_code"] == "forbidden"
     finally:
         app.dependency_overrides.pop(_real_get_execution_job_query, None)
+
+
+def test_api_db_error_returns_503_not_fixture() -> None:
+    from app.api.v1.deps import get_execution_job_query_service as _real_get_execution_job_query
+
+    class _FailingQuery:
+        async def get_execution_job(self, job_id: str, *, principal: Principal) -> Any:
+            raise DependencyUnavailableError(
+                "execution job store unavailable",
+                details={"job_id": job_id, "dependency": "postgresql"},
+            )
+
+    async def _failing() -> _FailingQuery:
+        return _FailingQuery()
+
+    app.dependency_overrides[_real_get_execution_job_query] = _failing
+    try:
+        client = TestClient(app)
+        resp = client.get("/api/v1/execution-jobs/job-0a1b2c3d", headers=_hdr("analyst"))
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["error_code"] == "dependency_unavailable"
+        assert "provider_secret" not in resp.text
+    finally:
+        app.dependency_overrides.pop(_real_get_execution_job_query, None)
+
+
+@pytest.mark.asyncio
+async def test_binding_allows_unset_execution_job_pointer() -> None:
+    """action/event match is authoritative; unset execution_job_id is a write race."""
+    from datetime import UTC, datetime
+
+    event_id = "evt-bind-unset"
+    action_id = "act-bind-unset"
+    job_id = "job-bind-unset"
+    job = orm.ActionExecutionJob(
+        job_id=job_id,
+        event_id=event_id,
+        action_id=action_id,
+        provider_name="mock_tool_provider",
+        idempotency_key=f"idem-{job_id}",
+        status=ExecutionJobStatus.SUCCESS.value,
+        attempt=1,
+        raw_result={},
+    )
+    action = orm.Action(
+        action_id=action_id,
+        event_id=event_id,
+        plan_revision=1,
+        action_fingerprint=f"fp-{action_id}",
+        action_category=ActionCategory.RESPONSE.value,
+        action_name="block ip",
+        tool_name="block_ip",
+        action_level=ActionLevel.L2.value,
+        execution_owner=ExecutionOwner.DIRECT_TOOL.value,
+        execution_phase=ActionExecutionPhase.IMMEDIATE.value,
+        status=ActionStatus.SUCCESS.value,
+        target_type="ip",
+        target="203.0.113.9",
+        parameters={},
+        writeback_required=False,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.READY.value,
+        execution_job_id=None,
+        idempotency_key=f"idem-{action_id}",
+    )
+    event = orm.SecurityEvent(
+        event_id=event_id,
+        event_type=EventType.MALICIOUS_PROCESS.value,
+        title="bind",
+        status="executing",
+        severity=Severity.HIGH.value,
+        final_verdict=FinalVerdict.NONE.value,
+        creation_source_ref=_source_ref(tenant_id="tenant-a"),
+        source_reference_snapshots=[_source_ref(tenant_id="tenant-a")],
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+
+    class _Session:
+        def begin(self) -> _Session:
+            return self
+
+        async def execute(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def get(self, model: Any, key: Any) -> Any:
+            if model is orm.ActionExecutionJob and key == job_id:
+                return job
+            if model is orm.Action and key == action_id:
+                return action
+            if model is orm.SecurityEvent and key == event_id:
+                return event
+            return None
+
+        async def scalars(self, *_args: Any, **_kwargs: Any) -> Any:
+            class _Result:
+                def __iter__(self) -> Any:
+                    return iter(())
+
+            return _Result()
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class _Factory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+    service = ExecutionJobQueryService(_Factory(), fixture_enabled=False)  # type: ignore[arg-type]
+    principal = Principal(subject="analyst-1", roles=["analyst"], tenant_id="tenant-a")
+    response = await service.get_execution_job(job_id, principal=principal)
+    assert response.job_id == job_id
+    assert response.event_id == event_id
+
+
+@pytest.mark.asyncio
+async def test_binding_rejects_conflicting_execution_job_pointer() -> None:
+    event_id = "evt-bind-conflict"
+    action_id = "act-bind-conflict"
+    job_id = "job-bind-conflict"
+    job = orm.ActionExecutionJob(
+        job_id=job_id,
+        event_id=event_id,
+        action_id=action_id,
+        provider_name="mock_tool_provider",
+        idempotency_key=f"idem-{job_id}",
+        status=ExecutionJobStatus.SUCCESS.value,
+        attempt=1,
+        raw_result={},
+    )
+    action = orm.Action(
+        action_id=action_id,
+        event_id=event_id,
+        plan_revision=1,
+        action_fingerprint=f"fp-{action_id}",
+        action_category=ActionCategory.RESPONSE.value,
+        action_name="block ip",
+        tool_name="block_ip",
+        action_level=ActionLevel.L2.value,
+        execution_owner=ExecutionOwner.DIRECT_TOOL.value,
+        execution_phase=ActionExecutionPhase.IMMEDIATE.value,
+        status=ActionStatus.SUCCESS.value,
+        target_type="ip",
+        target="203.0.113.9",
+        parameters={},
+        writeback_required=False,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.READY.value,
+        execution_job_id="job-other",
+        idempotency_key=f"idem-{action_id}",
+    )
+
+    class _Session:
+        def begin(self) -> _Session:
+            return self
+
+        async def execute(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def get(self, model: Any, key: Any) -> Any:
+            if model is orm.ActionExecutionJob and key == job_id:
+                return job
+            if model is orm.Action and key == action_id:
+                return action
+            return None
+
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class _Factory:
+        def __call__(self) -> _Session:
+            return _Session()
+
+    service = ExecutionJobQueryService(_Factory(), fixture_enabled=False)  # type: ignore[arg-type]
+    principal = Principal(subject="analyst-1", roles=["analyst"], tenant_id="tenant-a")
+    with pytest.raises(ResourceNotFoundError):
+        await service.get_execution_job(job_id, principal=principal)
+
+
+def test_project_sanitizes_unsafe_target_code_and_message() -> None:
+    job_row = orm.ActionExecutionJob(
+        job_id="job-safe",
+        event_id="evt-safe",
+        action_id="act-safe",
+        provider_name="mock_tool_provider",
+        idempotency_key="idem-safe",
+        status=ExecutionJobStatus.SUCCESS.value,
+        attempt=1,
+        raw_result={},
+    )
+    target_rows = [
+        orm.ActionTargetResult(
+            job_id="job-safe",
+            canonical_target="ip:203.0.113.9",
+            status="failed",
+            code="api_key=sk-abcdefghijklmnopqrstuvwxyz",
+            message="Bearer sk-abcdefghijklmnopqrstuvwxyz012345",
+            raw_result={},
+        )
+    ]
+    response = project_execution_job_response(job_row, target_rows)
+    blob = json.dumps(response.model_dump(mode="json"))
+    assert "sk-abcdefghijklmnopqrstuvwxyz" not in blob
+    assert response.target_results[0]["code"] == "message_truncated"
+    assert response.target_results[0]["message"] == "message_truncated"
