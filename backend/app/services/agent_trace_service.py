@@ -412,7 +412,8 @@ def _synthesize_from_typed_fields(agent_name: str | None, data: dict[str, Any]) 
         similar = data.get("similar_cases") or []
         playbooks = data.get("playbook_refs") or []
         citations = data.get("citations") or []
-        fp = data.get("fp_similarity") if isinstance(data.get("fp_similarity"), Mapping) else {}
+        raw_fp = data.get("fp_similarity")
+        fp: Mapping[Any, Any] = raw_fp if isinstance(raw_fp, Mapping) else {}
         technique_ids: list[str] = []
         if isinstance(techniques, list):
             for item in techniques[:3]:

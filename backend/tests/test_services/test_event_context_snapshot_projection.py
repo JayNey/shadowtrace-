@@ -11,7 +11,7 @@ from app.models.agent_io import (
     StorylineGeneratedBy,
     StorylineGroundingStatus,
 )
-from app.models.enums import EvidenceSource
+from app.models.enums import EvidenceSource, ExecutionSubstate
 from app.models.evidence import EvidenceGap
 from app.services.event_context_snapshot_projection import (
     SNAPSHOT_SUMMARY_KEYS,
@@ -128,6 +128,26 @@ def test_storyline_summary_from_dict_drops_heavy_fields() -> None:
     assert summary["claim_ref_count"] == 1
     assert "phases" not in summary
     assert "prompt" not in summary
+
+
+def test_dict_projection_preserves_enum_values_at_type_boundaries() -> None:
+    evidence = build_evidence_snapshot_summary({"collection_status": CollectionStatus.COMPLETED})
+    storyline = build_storyline_snapshot_summary(
+        {
+            "grounding_status": StorylineGroundingStatus.EVIDENCE_GROUNDED,
+            "generated_by": StorylineGeneratedBy.RULE,
+        }
+    )
+    projected = project_snapshot_for_api(
+        {"execution_substate": ExecutionSubstate.WAITING_WRITEBACK}
+    )
+
+    assert evidence["collection_status"] == CollectionStatus.COMPLETED.value
+    assert storyline["grounding_status"] == StorylineGroundingStatus.EVIDENCE_GROUNDED.value
+    assert storyline["generated_by"] == StorylineGeneratedBy.RULE.value
+    assert projected == {
+        "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+    }
 
 
 def test_merge_report_generated_into_snapshot() -> None:

@@ -242,6 +242,26 @@ def test_decision_basis_synthesizes_rag_agent_empty_retrieval_brief() -> None:
     assert "summary_unavailable" not in basis
 
 
+@pytest.mark.parametrize("fp_similarity", [None, ["invalid-shape"]])
+def test_decision_basis_rag_agent_ignores_non_mapping_fp_similarity(
+    fp_similarity: object,
+) -> None:
+    basis = TraceProjection.decision_basis(
+        {
+            "attack_techniques": [],
+            "fp_similarity": fp_similarity,
+            "similar_cases": [],
+            "playbook_refs": [],
+            "citations": [],
+        },
+        agent_name="rag_agent",
+    )
+
+    assert "techniques=0" in basis["structured_conclusion"]
+    assert "fp_max=" not in basis["structured_conclusion"]
+    assert "summary_unavailable" not in basis
+
+
 def test_decision_basis_synthesizes_graph_agent_brief() -> None:
     """ISSUE-255: graph_agent structure counts → brief; GraphSummary narrative ignored."""
     basis = TraceProjection.decision_basis(
