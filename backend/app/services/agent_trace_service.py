@@ -497,10 +497,8 @@ def _synthesize_from_typed_fields(agent_name: str | None, data: dict[str, Any]) 
             wb_text = _safe_scalar_text(writeback_required)
             if wb_text:
                 parts.append(f"writeback_required={wb_text}")
-        if not parts and data.get("success") is not None:
-            success_text = _safe_scalar_text(data.get("success"))
-            if success_text:
-                parts.append(f"success={success_text}")
+        # Do not synthesize from AgentOutput.success alone — that masks missing
+        # InvestigationResult projection and violates summary_unavailable semantics.
         if data.get("degraded") or (isinstance(nested, Mapping) and nested.get("degraded")):
             parts.append("degraded=true")
         return _join_kv(parts)

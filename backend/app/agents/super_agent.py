@@ -516,7 +516,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
 
         ISSUE-255: attach a typed InvestigationResult projection in
         ``AgentOutput.data`` so agent_trace can synthesize a structured brief
-        without restoring CoT.
+        without restoring CoT. When projection fails, leave ``data`` empty so
+        agent_trace emits ``summary_unavailable`` instead of a fake brief.
         """
         await self.investigate(input.event_id, publish_lifecycle=False)
         typed_data: dict[str, Any] = {}

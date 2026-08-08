@@ -293,6 +293,22 @@ def test_decision_basis_synthesizes_super_agent_brief_from_nested_data() -> None
     assert "CoT must not win" not in str(basis)
 
 
+def test_decision_basis_super_agent_empty_data_sets_summary_unavailable() -> None:
+    """ISSUE-255: missing InvestigationResult must not fake a success=true brief."""
+    basis = TraceProjection.decision_basis(
+        {
+            "agent_name": "super_agent",
+            "success": True,
+            "degraded": False,
+            "data": {},
+        },
+        agent_name="super_agent",
+    )
+    assert basis.get("structured_conclusion") in ("", None)
+    assert basis.get("summary_unavailable") == "no_typed_decision_fields"
+    assert "success=true" not in str(basis)
+
+
 def test_decision_basis_synthesizes_memory_agent_brief() -> None:
     basis = TraceProjection.decision_basis(
         {
