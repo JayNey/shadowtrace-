@@ -37,6 +37,7 @@ frontend/playwright-report/
 
 # Local / temp
 tmp/
+.worktrees/
 *.local
 .env.local
 .github_token

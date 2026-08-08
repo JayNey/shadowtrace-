@@ -371,7 +371,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         # 3. Phase 2 — terminal writeback activation & verification.
         (
             phase2_results,
-            phase2_failed_wb,
+            phase2_recoverable_wb,
+            phase2_pending_actions,
             phase2_blocked_wb,
             overall_status,
             need_wb_recovery,
@@ -389,12 +390,33 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         # 4. Assemble final result.
         all_results = phase1_results + phase2_results
         failed_actions = list(phase1_failed)
-        failed_writebacks = list(phase2_failed_wb)
+        recoverable_writeback_ids = list(phase2_recoverable_wb)
+        pending_writeback_action_ids = list(phase2_pending_actions)
+        failed_writebacks = list(recoverable_writeback_ids)
         blocked_writebacks = list(phase2_blocked_wb)
 
         need_action_replan = phase1_need_replan
         need_writeback_recovery = need_wb_recovery
         need_manual_resolution = phase1_need_manual or need_manual
+
+        if (
+            need_writeback_recovery
+            and not recoverable_writeback_ids
+            and not pending_writeback_action_ids
+        ):
+            logger.error(
+                "VerifyAgent invariant violated: need_writeback_recovery=true "
+                "but no recoverable writeback IDs or pending action IDs "
+                "event=%s",
+                event_id,
+            )
+            need_manual_resolution = True
+            need_writeback_recovery = False
+            if overall_status in (
+                VerificationOverallStatus.SUCCESS,
+                VerificationOverallStatus.WAITING,
+            ):
+                overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
 
         # ── Systemic tool unavailability check (PR#7 Blocker #2) ──────────
         # When ALL Phase 1 actions are UNVERIFIABLE with zero FAILED, the
@@ -441,6 +463,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             overall_status=overall_status,
             failed_actions=failed_actions,
             failed_writebacks=failed_writebacks,
+            recoverable_writeback_ids=recoverable_writeback_ids,
+            pending_writeback_action_ids=pending_writeback_action_ids,
             blocked_writebacks=blocked_writebacks,
             need_action_replan=need_action_replan,
             need_writeback_recovery=need_writeback_recovery,
@@ -848,6 +872,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         list[VerificationActionResult],
         set[str],
         set[str],
+        set[str],
         VerificationOverallStatus,
         bool,  # need_writeback_recovery
         bool,  # need_manual_resolution
@@ -862,7 +887,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         (overall ``waiting``), never to overall success.
         """
         results: list[VerificationActionResult] = []
-        failed_wb: set[str] = set()
+        recoverable_wb: set[str] = set()
+        pending_action_ids: set[str] = set()
         blocked_wb: set[str] = set()
         need_wb_recovery = False
         need_manual = False
@@ -886,12 +912,28 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 overall_status = VerificationOverallStatus.PARTIAL
             elif phase1_need_manual:
                 overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
-            return results, failed_wb, blocked_wb, overall_status, need_wb_recovery, need_manual
+            return (
+                results,
+                recoverable_wb,
+                pending_action_ids,
+                blocked_wb,
+                overall_status,
+                need_wb_recovery,
+                need_manual,
+            )
 
         # If disposition is not required, no writeback to verify.
         if disposition_policy == DispositionPolicy.NOT_REQUIRED:
             logger.info("Phase 2 skipped: disposition_policy=not_required event=%s", event_id)
-            return results, failed_wb, blocked_wb, overall_status, need_wb_recovery, need_manual
+            return (
+                results,
+                recoverable_wb,
+                pending_action_ids,
+                blocked_wb,
+                overall_status,
+                need_wb_recovery,
+                need_manual,
+            )
 
         # disposition_policy is None → unknown; the event's disposition
         # requirement cannot be determined.  Escalate to manual resolution
@@ -903,7 +945,15 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             )
             need_manual = True
             overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
-            return results, failed_wb, blocked_wb, overall_status, need_wb_recovery, need_manual
+            return (
+                results,
+                recoverable_wb,
+                pending_action_ids,
+                blocked_wb,
+                overall_status,
+                need_wb_recovery,
+                need_manual,
+            )
 
         # disposition_policy is REQUIRED (NOT_REQUIRED and None are
         # already handled above):
@@ -1003,7 +1053,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 outbox_map=outbox_map,
             )
             results = wb_eval["results"]
-            failed_wb = wb_eval["failed_wb"]
+            recoverable_wb = wb_eval["recoverable_wb"]
+            pending_action_ids = wb_eval["pending_action_ids"]
             blocked_wb = wb_eval["blocked_wb"]
             need_wb_recovery = wb_eval["need_recovery"]
             need_manual_from_wb = wb_eval["need_manual"]
@@ -1021,7 +1072,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 blocked_wb.update(terminal_wb_eval["blocked_wb"])
             if terminal_wb_eval["need_recovery"]:
                 need_wb_recovery = need_wb_recovery or terminal_wb_eval["need_recovery"]
-                failed_wb.update(terminal_wb_eval["failed_wb"])
+                recoverable_wb.update(terminal_wb_eval["recoverable_wb"])
+                pending_action_ids.update(terminal_wb_eval["pending_action_ids"])
 
             # Evaluate writeback recovery first (lower priority), then
             # manual resolution (higher priority).  When both the main
@@ -1039,14 +1091,29 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     VerificationOverallStatus.WAITING,
                 ):
                     overall_status = VerificationOverallStatus.MANUAL_RESOLUTION
-            if failed_wb:
+            has_failed_partial_writeback = any(
+                item.writeback_status in (WritebackStatus.FAILED, WritebackStatus.PARTIAL)
+                for item in results
+                if item.verification_phase == VerificationPhase.DISPOSITION
+                and item.writeback_ids
+                and any(wb_id in recoverable_wb for wb_id in item.writeback_ids)
+            )
+            if has_failed_partial_writeback:
                 if overall_status not in (
                     VerificationOverallStatus.MANUAL_RESOLUTION,
                     VerificationOverallStatus.FAILED,
                 ):
                     overall_status = VerificationOverallStatus.PARTIAL
 
-        return results, failed_wb, blocked_wb, overall_status, need_wb_recovery, need_manual
+        return (
+            results,
+            recoverable_wb,
+            pending_action_ids,
+            blocked_wb,
+            overall_status,
+            need_wb_recovery,
+            need_manual,
+        )
 
     async def _evaluate_writeback_statuses(
         self,
@@ -1057,7 +1124,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
     ) -> dict[str, Any]:
         """Evaluate writeback status for every applicable required action."""
         results: list[VerificationActionResult] = []
-        failed_wb: set[str] = set()
+        recoverable_wb: set[str] = set()
+        pending_action_ids: set[str] = set()
         blocked_wb: set[str] = set()
         need_recovery = False
         need_manual = False
@@ -1239,8 +1307,12 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             else:
                 # Recovery path: PENDING / SENDING / ACCEPTED / PARTIAL / FAILED
                 need_recovery = True
-                if wb_status in (WritebackStatus.FAILED, WritebackStatus.PARTIAL):
-                    failed_wb.add(action.action_id)
+                self._track_writeback_recovery_targets(
+                    recoverable_wb=recoverable_wb,
+                    pending_action_ids=pending_action_ids,
+                    wb_ids=wb_ids,
+                    action_id=action.action_id,
+                )
                 results.append(
                     VerificationActionResult(
                         action_id=action.action_id,
@@ -1257,7 +1329,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
         return {
             "results": results,
-            "failed_wb": failed_wb,
+            "recoverable_wb": recoverable_wb,
+            "pending_action_ids": pending_action_ids,
             "blocked_wb": blocked_wb,
             "need_recovery": need_recovery,
             "need_manual": need_manual,
@@ -1506,6 +1579,24 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         return action.writeback_status, None
 
     @staticmethod
+    def _track_writeback_recovery_targets(
+        *,
+        recoverable_wb: set[str],
+        pending_action_ids: set[str],
+        wb_ids: list[str],
+        action_id: str,
+    ) -> None:
+        """Route recovery targets by ID kind (ISSUE-259).
+
+        Real outbox writeback IDs are recoverable; actions still awaiting
+        DispositionSync outbox creation stay action-scoped pending.
+        """
+        if wb_ids:
+            recoverable_wb.update(wb_ids)
+        else:
+            pending_action_ids.add(action_id)
+
+    @staticmethod
     def _adjust_routing_for_weak_evidence(
         *,
         confirmed: bool,
@@ -1552,9 +1643,11 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         """
         failed_wb_set: set[str] = set()
         blocked_wb_set: set[str] = set()
+        pending_action_ids: set[str] = set()
         empty: dict[str, Any] = {
             "results": [],
-            "failed_wb": failed_wb_set,
+            "recoverable_wb": failed_wb_set,
+            "pending_action_ids": pending_action_ids,
             "blocked_wb": blocked_wb_set,
             "need_recovery": False,
             "need_manual": False,
@@ -1614,6 +1707,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         event_id,
                     )
                     empty["need_recovery"] = True
+                    failed_wb_set.add(terminal_wb_id)
                     return empty
 
                 # Map the receipt status string to a WritebackStatus enum value.
@@ -1669,8 +1763,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         blocked_wb_set.add(terminal_wb_id)
                     elif rec:
                         empty["need_recovery"] = True
-                        if wb_status in (WritebackStatus.FAILED, WritebackStatus.PARTIAL):
-                            failed_wb_set.add(terminal_wb_id)
+                        failed_wb_set.add(terminal_wb_id)
 
                 return empty
         except Exception as exc:

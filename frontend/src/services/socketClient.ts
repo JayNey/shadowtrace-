@@ -5,6 +5,7 @@ import type { SocketEvent, SocketEventEnvelope } from "../types/socket";
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL ?? "http://localhost:8000";
 const EVENTS_NAMESPACE = "/events";
+const DEV_AUTH_TOKEN = import.meta.env.VITE_DEV_AUTH_TOKEN?.trim() ?? "";
 
 type EventHandler = (event: SocketEvent) => void;
 
@@ -28,6 +29,7 @@ class SocketClient {
       if (!this.socket) {
         this.socket = io(`${SOCKET_URL}${EVENTS_NAMESPACE}`, {
           transports: ["websocket", "polling"],
+          auth: DEV_AUTH_TOKEN ? { token: DEV_AUTH_TOKEN } : undefined,
           reconnection: true,
           reconnectionDelay: 1000,
           reconnectionAttempts: 10,

@@ -27,12 +27,15 @@ import jsonschema
 import socketio
 from fastapi import FastAPI
 
+from app.core.config import get_settings
 from app.core.event_bus import SOCKET_MESSAGE_TYPES, sanitize_payload
 from app.core.redis_client import RedisClient
 from app.core.socketio_events import (
     GLOBAL_ROOM,
     SOCKETIO_NAMESPACE,
+    SocketIOSessionRegistry,
     _event_room,
+    disconnect_invalid_sessions,
     register_handlers,
 )
 
@@ -50,6 +53,7 @@ _SCHEMA_PATH = (
 )
 _RECONNECT_DELAY_S = 2.0
 _RECOVERY_DELAY_S = 30.0
+_SESSION_VALIDATION_INTERVAL_S = 30.0
 _SEQUENCE_TTL_S = 60 * 60 * 24 * 30  # 30 days
 _MAX_CONSECUTIVE_FAILURES = 5
 
@@ -80,17 +84,22 @@ class SocketIOManager:
 
     def __init__(self, redis: RedisClient) -> None:
         self._redis = redis
+        self._sessions = SocketIOSessionRegistry()
+        settings = get_settings()
         self._sio = socketio.AsyncServer(
             async_mode="asgi",
-            cors_allowed_origins="*",
+            cors_allowed_origins=settings.resolved_socketio_cors_origins(),
+            cors_credentials=True,
             logger=False,
         )
         self._listener_task: asyncio.Task[None] | None = None
+        self._session_validator_task: asyncio.Task[None] | None = None
+        self._session_validation_lock = asyncio.Lock()
         self._stopping = False
         self._consecutive_failures = 0
         self._bridge_degraded = False
 
-        register_handlers(self._sio)
+        register_handlers(self._sio, sessions=self._sessions)
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -133,12 +142,19 @@ class SocketIOManager:
 
         Safe to call multiple times — subsequent calls are no-ops.
         """
-        if self._listener_task is not None and not self._listener_task.done():
+        listener_running = self._listener_task is not None and not self._listener_task.done()
+        validator_running = (
+            self._session_validator_task is not None and not self._session_validator_task.done()
+        )
+        if listener_running and validator_running:
             return
         self._stopping = False
         self._consecutive_failures = 0
         self._bridge_degraded = False
-        self._listener_task = asyncio.create_task(self._listen())
+        if not listener_running:
+            self._listener_task = asyncio.create_task(self._listen())
+        if not validator_running:
+            self._session_validator_task = asyncio.create_task(self._validate_sessions())
         logger.info("SocketIOManager background listener started")
 
     async def stop(self) -> None:
@@ -151,16 +167,45 @@ class SocketIOManager:
             except asyncio.CancelledError:
                 pass
             self._listener_task = None
+        if self._session_validator_task is not None and not self._session_validator_task.done():
+            self._session_validator_task.cancel()
+            try:
+                await self._session_validator_task
+            except asyncio.CancelledError:
+                pass
+            self._session_validator_task = None
         try:
             await self._sio.disconnect()
         except Exception:
             logger.warning("SocketIOManager disconnect raised", exc_info=True)
+        # Handlers close over this registry, so clear it without replacing it.
+        self._sessions.clear()
         self._bridge_degraded = False
         logger.info("SocketIOManager stopped")
 
     # ------------------------------------------------------------------ #
     # Background listener
     # ------------------------------------------------------------------ #
+
+    async def _validate_sessions(self) -> None:
+        """Periodically revoke bearer sessions even when no messages are published."""
+        while not self._stopping:
+            try:
+                await asyncio.sleep(_SESSION_VALIDATION_INTERVAL_S)
+                if not await self._disconnect_invalid_sessions():
+                    logger.error("SocketIOManager periodic revoked-session cleanup incomplete")
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.warning(
+                    "SocketIOManager periodic session validation failed",
+                    exc_info=True,
+                )
+
+    async def _disconnect_invalid_sessions(self) -> bool:
+        """Serialize periodic and pre-broadcast session cleanup."""
+        async with self._session_validation_lock:
+            return await disconnect_invalid_sessions(self._sio, self._sessions)
 
     async def _listen(self) -> None:
         """PSUBSCRIBE ``shadowtrace:events:*`` and bridge to Socket.IO rooms.
@@ -344,9 +389,15 @@ class SocketIOManager:
             )
             return
 
-        # Subscribed detail clients leave ``global`` on subscribe, so they
-        # receive once via ``event:{event_id}``; dashboard clients stay in
-        # ``global`` only and receive once via the global emit.
+        if not await self._disconnect_invalid_sessions():
+            logger.error(
+                "SocketIOManager revoked-session cleanup failed event_id=%s — broadcast dropped",
+                event_id,
+            )
+            return
+
+        # Authorized delivery: clients only receive messages for rooms they joined
+        # after handshake auth and subscribe / join_global checks (ISSUE-258).
         event_room = _event_room(event_id)
         results = await asyncio.gather(
             self._sio.emit(

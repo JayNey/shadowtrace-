@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable
-from typing import Annotated
+from collections.abc import Iterable, Mapping
+from typing import Annotated, Any
 
 from fastapi import Depends, Request
 from pydantic import BaseModel, Field
@@ -31,6 +31,14 @@ ROLE_DISPOSITION_OPERATOR = "disposition_operator"
 ROLE_ADMIN = "admin"
 
 ALL_ROLES = frozenset({ROLE_ANALYST, ROLE_APPROVER, ROLE_DISPOSITION_OPERATOR, ROLE_ADMIN})
+
+# Roles permitted to receive SOC / dashboard global Socket.IO broadcasts (ISSUE-258).
+GLOBAL_BROADCAST_ROLES = (
+    ROLE_ANALYST,
+    ROLE_APPROVER,
+    ROLE_DISPOSITION_OPERATOR,
+    ROLE_ADMIN,
+)
 
 
 class Principal(BaseModel):
@@ -99,44 +107,149 @@ def _proxy_allowlist() -> set[str]:
     return set(get_settings().trusted_proxy_allowlist_hosts())
 
 
-def _principal_from_trusted_proxy(request: Request) -> Principal | None:
+def _normalize_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Return a lowercase-key header map for shared REST / Socket.IO resolution."""
+    return {key.lower(): value for key, value in headers.items()}
+
+
+def _header(headers: Mapping[str, str], name: str, default: str = "") -> str:
+    value = headers.get(name.lower(), default)
+    return value if isinstance(value, str) else default
+
+
+def _principal_from_trusted_proxy_headers(
+    headers: Mapping[str, str],
+    client_host: str,
+) -> Principal | None:
     settings = get_settings()
     if not settings.trusted_auth_proxy_enabled:
         return None
-    client_host = request.client.host if request.client else ""
     if client_host not in _proxy_allowlist():
         return None
-    subject = request.headers.get("X-Auth-Subject")
+    subject = _header(headers, "X-Auth-Subject")
     if not subject:
         return None
-    roles_header = request.headers.get("X-Auth-Roles", "")
+    roles_header = _header(headers, "X-Auth-Roles")
     roles = _filter_known_roles([r.strip() for r in roles_header.split(",") if r.strip()])
-    tenant_id = request.headers.get("X-Auth-Tenant-Id")
-    tenant_id = tenant_id.strip() if isinstance(tenant_id, str) and tenant_id.strip() else None
+    tenant_raw = _header(headers, "X-Auth-Tenant-Id")
+    tenant_id = tenant_raw.strip() if tenant_raw.strip() else None
     return Principal(
         subject=subject,
-        display_name=request.headers.get("X-Auth-Display-Name", ""),
+        display_name=_header(headers, "X-Auth-Display-Name"),
         roles=roles,
         tenant_id=tenant_id,
     )
 
 
-def _principal_from_dev_token(request: Request) -> Principal | None:
+def _principal_from_dev_token_headers(headers: Mapping[str, str]) -> Principal | None:
     if _is_production():
         return None  # dev identities are rejected in production
-    auth = request.headers.get("Authorization", "")
+    auth = _header(headers, "Authorization")
     if not auth.lower().startswith("bearer "):
         return None
     token = auth[len("bearer ") :].strip()
     return _dev_token_registry().get(token)
 
 
-async def get_principal(request: Request) -> Principal:
-    """Resolve the authenticated principal or raise ``AuthenticationError``."""
-    principal = _principal_from_trusted_proxy(request) or _principal_from_dev_token(request)
+def resolve_principal(
+    *,
+    headers: Mapping[str, str],
+    client_host: str = "",
+) -> Principal:
+    """Resolve an authenticated principal or raise ``AuthenticationError``.
+
+    Shared by REST dependencies and the Socket.IO handshake (ISSUE-258).
+    """
+    normalized = _normalize_headers(headers)
+    principal = _principal_from_trusted_proxy_headers(
+        normalized,
+        client_host,
+    ) or _principal_from_dev_token_headers(normalized)
     if principal is None:
         raise AuthenticationError("no valid credentials")
     return principal
+
+
+def can_join_global_broadcast(principal: Principal) -> bool:
+    """Return whether *principal* may enter the Socket.IO ``global`` room."""
+    return principal.has_any_role(GLOBAL_BROADCAST_ROLES)
+
+
+def headers_from_socketio_environ(
+    environ: Mapping[str, Any],
+    auth: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Build HTTP-style headers from an Engine.IO environ + optional auth payload."""
+    headers: dict[str, str] = {}
+    for key, value in environ.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if key.startswith("HTTP_"):
+            header_name = "-".join(part.capitalize() for part in key[5:].split("_"))
+            headers[header_name] = value
+
+    scope = environ.get("asgi.scope") or environ.get("scope")
+    if isinstance(scope, dict):
+        raw_headers = scope.get("headers")
+        if isinstance(raw_headers, list):
+            for item in raw_headers:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    continue
+                name_raw, value_raw = item
+                name = name_raw.decode("latin-1") if isinstance(name_raw, bytes) else str(name_raw)
+                value = (
+                    value_raw.decode("latin-1") if isinstance(value_raw, bytes) else str(value_raw)
+                )
+                headers[name] = value
+
+    if isinstance(auth, dict):
+        token = auth.get("token")
+        if isinstance(token, str) and token.strip():
+            headers.setdefault("Authorization", f"Bearer {token.strip()}")
+
+    return headers
+
+
+def client_host_from_socketio_environ(environ: Mapping[str, Any]) -> str:
+    """Return the direct peer address for trusted-proxy handshake validation.
+
+    Forwarded headers are intentionally ignored: they describe the original
+    client and are attacker-controlled when the backend is reached directly.
+    The trusted-proxy allowlist must match the direct network peer, exactly as
+    the REST authentication dependency uses ``request.client.host``.
+    """
+    remote = environ.get("REMOTE_ADDR")
+    if isinstance(remote, str) and remote.strip():
+        return remote.strip()
+
+    scope = environ.get("asgi.scope") or environ.get("scope")
+    if isinstance(scope, dict):
+        client = scope.get("client")
+        if isinstance(client, (list, tuple)) and client and isinstance(client[0], str):
+            return client[0]
+    return ""
+
+
+def resolve_principal_from_socketio_handshake(
+    environ: Mapping[str, Any],
+    auth: dict[str, Any] | None = None,
+) -> Principal:
+    """Resolve principal from a Socket.IO connect handshake."""
+    headers = headers_from_socketio_environ(environ, auth)
+    client_host = client_host_from_socketio_environ(environ)
+    return resolve_principal(headers=headers, client_host=client_host)
+
+
+def authorization_fingerprint(headers: Mapping[str, str]) -> str | None:
+    """Stable fingerprint for re-validating bearer-token sessions."""
+    auth = _header(_normalize_headers(headers), "Authorization")
+    return auth.strip() if auth.strip() else None
+
+
+async def get_principal(request: Request) -> Principal:
+    """Resolve the authenticated principal or raise ``AuthenticationError``."""
+    client_host = request.client.host if request.client else ""
+    return resolve_principal(headers=request.headers, client_host=client_host)
 
 
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]

@@ -31,26 +31,41 @@ from __future__ import annotations
 import asyncio  # used for jittered backoff sleep in RETRY path (asyncio.sleep)
 import logging
 import random
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, NoReturn, Protocol, cast
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import (
     ShadowTraceError,
     WritebackManualResolutionRequiredError,
     WritebackRecoveryExhaustedError,
 )
+from app.db import models as orm
 from app.models.enums import (
     EventStatus,
     ExecutionSubstate,
     WritebackReadiness,
     WritebackStatus,
 )
+from app.models.ids import is_action_id, is_writeback_id
 from app.models.workflow import WRITEBACK_MAX_RETRIES
 from app.orchestration.graph_state import InvestigationState
 from app.orchestration.ports import StateMachinePort
 
 logger = logging.getLogger(__name__)
+
+PendingActionResolver = Callable[
+    [str, list[str]],
+    Awaitable[dict[str, list[tuple[str, str | None]]]],
+]
+WritebackStatusResolver = Callable[
+    [str, list[str]],
+    Awaitable[dict[str, str | None]],
+]
 
 _WR_OPERATOR = "WritebackRecoveryHandler"
 
@@ -683,6 +698,220 @@ class WritebackRecoveryHandler:
 
 
 # --------------------------------------------------------------------------- #
+# Recovery target normalization (ISSUE-259)
+# --------------------------------------------------------------------------- #
+
+
+def _normalize_recovery_targets(
+    state: InvestigationState,
+) -> tuple[list[str], list[str], bool]:
+    """Return recoverable writeback IDs, pending action IDs, and recovery flag.
+
+    Legacy checkpoints may still store action IDs in ``verify_failed_writebacks``.
+    Only migrate entries whose ID type is provable via prefix.
+    """
+    need_recovery = bool(state.get("verify_need_writeback_recovery"))
+    recoverable = list(state.get("verify_recoverable_writeback_ids") or [])
+    pending = list(state.get("verify_pending_writeback_action_ids") or [])
+    legacy_failed = list(state.get("verify_failed_writebacks") or [])
+
+    if not recoverable and not pending and legacy_failed:
+        for item in legacy_failed:
+            if is_writeback_id(item):
+                if item not in recoverable:
+                    recoverable.append(item)
+            elif is_action_id(item):
+                if item not in pending:
+                    pending.append(item)
+            else:
+                logger.warning(
+                    "writeback_recovery: unprovable legacy recovery id=%s event=%s",
+                    item,
+                    state.get("event_id"),
+                )
+    elif not recoverable and legacy_failed:
+        for item in legacy_failed:
+            if is_writeback_id(item) and item not in recoverable:
+                recoverable.append(item)
+
+    return recoverable, pending, need_recovery
+
+
+async def resolve_pending_action_writebacks(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    action_ids: list[str],
+) -> dict[str, list[tuple[str, str | None]]]:
+    """Resolve pending actions to active outbox writeback IDs and statuses."""
+    if not action_ids:
+        return {}
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(
+                    orm.DispositionOutbox.action_id,
+                    orm.DispositionOutbox.writeback_id,
+                    orm.DispositionOutbox.latest_writeback_status,
+                ).where(
+                    orm.DispositionOutbox.event_id == event_id,
+                    orm.DispositionOutbox.action_id.in_(action_ids),
+                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                )
+            )
+        ).all()
+
+    resolved: dict[str, list[tuple[str, str | None]]] = {}
+    for action_id, writeback_id, status in rows:
+        resolved.setdefault(str(action_id), []).append(
+            (str(writeback_id), str(status) if status is not None else None)
+        )
+    return resolved
+
+
+async def resolve_writeback_statuses(
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    writeback_ids: list[str],
+) -> dict[str, str | None]:
+    """Read current statuses for active recoverable outbox rows."""
+    if not writeback_ids:
+        return {}
+
+    async with session_factory() as session:
+        rows = (
+            await session.execute(
+                select(
+                    orm.DispositionOutbox.writeback_id,
+                    orm.DispositionOutbox.latest_writeback_status,
+                ).where(
+                    orm.DispositionOutbox.event_id == event_id,
+                    orm.DispositionOutbox.writeback_id.in_(writeback_ids),
+                    orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                )
+            )
+        ).all()
+
+    return {
+        str(writeback_id): str(status) if status is not None else None
+        for writeback_id, status in rows
+    }
+
+
+async def _refresh_pending_action_targets(
+    *,
+    event_id: str,
+    recoverable_writebacks: list[str],
+    pending_actions: list[str],
+    status_map: dict[str, str],
+    resolver: PendingActionResolver | None,
+) -> tuple[list[str], list[str], dict[str, str]]:
+    """Promote pending actions only after a real active outbox row exists."""
+    if not pending_actions or resolver is None:
+        return recoverable_writebacks, pending_actions, status_map
+
+    try:
+        resolved = await resolver(event_id, pending_actions)
+    except Exception:
+        logger.warning(
+            "writeback_recovery: pending action outbox refresh failed event=%s",
+            event_id,
+            exc_info=True,
+        )
+        return recoverable_writebacks, pending_actions, status_map
+
+    refreshed_writebacks = list(recoverable_writebacks)
+    remaining_actions: list[str] = []
+    refreshed_statuses = dict(status_map)
+    for action_id in pending_actions:
+        valid_targets = [
+            (writeback_id, status)
+            for writeback_id, status in resolved.get(action_id, [])
+            if is_writeback_id(writeback_id)
+        ]
+        if not valid_targets:
+            remaining_actions.append(action_id)
+            continue
+        for writeback_id, status in valid_targets:
+            if writeback_id not in refreshed_writebacks:
+                refreshed_writebacks.append(writeback_id)
+            refreshed_statuses[writeback_id] = status or WritebackStatus.UNKNOWN.value
+
+    return refreshed_writebacks, remaining_actions, refreshed_statuses
+
+
+async def _refresh_recoverable_statuses(
+    *,
+    event_id: str,
+    recoverable_writebacks: list[str],
+    status_map: dict[str, str],
+    resolver: WritebackStatusResolver | None,
+) -> dict[str, str]:
+    """Refresh retained WAIT targets so receipt-triggered resumes can converge."""
+    if not recoverable_writebacks or resolver is None:
+        return status_map
+    try:
+        resolved = await resolver(event_id, recoverable_writebacks)
+    except Exception:
+        logger.warning(
+            "writeback_recovery: writeback status refresh failed event=%s",
+            event_id,
+            exc_info=True,
+        )
+        return status_map
+
+    refreshed = dict(status_map)
+    for writeback_id in recoverable_writebacks:
+        if writeback_id in resolved:
+            refreshed[writeback_id] = resolved[writeback_id] or WritebackStatus.UNKNOWN.value
+    return refreshed
+
+
+def _recovery_invariant_failure_patch(event_id: str) -> InvestigationState:
+    """Structured escalation when recovery is requested without any target."""
+    logger.error(
+        "writeback_recovery_node: invariant failure — need_writeback_recovery=true "
+        "but no recoverable writeback IDs or pending action IDs event=%s",
+        event_id,
+    )
+    return cast(
+        InvestigationState,
+        {
+            "verify_need_writeback_recovery": False,
+            "verify_need_action_replan": False,
+            "verify_need_manual_resolution": True,
+            "verify_recoverable_writeback_ids": [],
+            "verify_pending_writeback_action_ids": [],
+            "verify_failed_writebacks": [],
+            "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+            "error": "writeback_recovery_invariant_no_targets",
+            "writeback_lookup_count": 0,
+            "writeback_retry_count": 0,
+        },
+    )
+
+
+def _pending_action_wait_patch(
+    *,
+    pending_actions: list[str],
+) -> InvestigationState:
+    """Action-scoped wait — no writeback API until outbox IDs exist."""
+    return cast(
+        InvestigationState,
+        {
+            "verify_need_writeback_recovery": True,
+            "verify_need_action_replan": False,
+            "verify_need_manual_resolution": False,
+            "verify_recoverable_writeback_ids": [],
+            "verify_pending_writeback_action_ids": pending_actions,
+            "verify_failed_writebacks": [],
+            "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
+            "halted": True,
+        },
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Graph-node helper
 # --------------------------------------------------------------------------- #
 
@@ -691,14 +920,14 @@ async def writeback_recovery_graph_node(
     state: InvestigationState,
     *,
     handler: WritebackRecoveryHandler,
+    pending_action_resolver: PendingActionResolver | None = None,
+    writeback_status_resolver: WritebackStatusResolver | None = None,
 ) -> InvestigationState:
     """Graph node entry point for writeback recovery (replaces placeholder).
 
-    Evaluates the current writeback state from ``verify_failed_writebacks``
-    and executes the appropriate recovery action.  After this node, the graph
-    conditional edge from ``route_after_verify`` routes either back to
-    ``approval_wait_node`` (to wait for receipt) or to ``manual_hold_node``
-    (for manual resolution).
+    Evaluates typed recoverable writeback IDs and refreshes pending action IDs
+    from active outbox rows before executing a recovery action.  After this
+    node, ``route_after_verify`` routes to recovery wait, manual hold, or report.
 
     Returns
     -------
@@ -709,21 +938,49 @@ async def writeback_recovery_graph_node(
     if not raw_event_id:
         raise ValueError("InvestigationState missing required field: event_id")
     event_id = str(raw_event_id)
-    failed_writebacks: list[str] = list(state.get("verify_failed_writebacks") or [])
+    recoverable_writebacks, pending_actions, need_recovery = _normalize_recovery_targets(state)
+    raw_status_map = state.get("verify_writeback_status_map")
+    status_map = dict(raw_status_map) if isinstance(raw_status_map, dict) else {}
+    recoverable_writebacks, pending_actions, status_map = await _refresh_pending_action_targets(
+        event_id=event_id,
+        recoverable_writebacks=recoverable_writebacks,
+        pending_actions=pending_actions,
+        status_map=status_map,
+        resolver=pending_action_resolver,
+    )
+    status_map = await _refresh_recoverable_statuses(
+        event_id=event_id,
+        recoverable_writebacks=recoverable_writebacks,
+        status_map=status_map,
+        resolver=writeback_status_resolver,
+    )
 
-    if not failed_writebacks:
-        logger.debug("writeback_recovery_node: no failed writebacks for event=%s", event_id)
+    if not recoverable_writebacks:
+        if pending_actions:
+            logger.info(
+                "writeback_recovery_node: action-scoped wait pending_actions=%s event=%s",
+                pending_actions,
+                event_id,
+            )
+            return _pending_action_wait_patch(pending_actions=pending_actions)
+        if need_recovery:
+            return _recovery_invariant_failure_patch(event_id)
+        logger.debug("writeback_recovery_node: no recovery targets for event=%s", event_id)
         return cast(
             InvestigationState,
             {
                 "verify_need_writeback_recovery": False,
                 "verify_need_action_replan": False,
                 "verify_need_manual_resolution": False,
+                "verify_recoverable_writeback_ids": [],
+                "verify_pending_writeback_action_ids": [],
                 "execution_substate": ExecutionSubstate.NONE.value,
                 "writeback_lookup_count": 0,
                 "writeback_retry_count": 0,
             },
         )
+
+    failed_writebacks: list[str] = recoverable_writebacks
 
     # Process the first failed writeback; others are handled in subsequent
     # verify cycles.
@@ -733,11 +990,10 @@ async def writeback_recovery_graph_node(
     # projection and must never be reused for a later writeback with a
     # different status (heterogeneous UNKNOWN + CONFLICT would otherwise be
     # misrouted).
-    status_map = state.get("verify_writeback_status_map")
-    mapped_status = status_map.get(wb_id) if isinstance(status_map, dict) else None
+    mapped_status = status_map.get(wb_id)
     if mapped_status is not None:
         wb_status: str | None = mapped_status
-    elif isinstance(status_map, dict):
+    elif raw_status_map is not None or status_map:
         # Map exists (new state) but this writeback has no entry — a data
         # gap.  Never borrow another writeback's scalar status: route to a
         # conservative LOOKUP (None → lookup) instead of misrouting.
@@ -785,6 +1041,7 @@ async def writeback_recovery_graph_node(
         # status routing is handled by ISSUE-170's
         # ``verify_writeback_status_map``; lookup/retry counters remain
         # per-cycle scalars (out of scope for ISSUE-170).
+        remaining_recoverable = failed_writebacks[1:]
         return cast(
             InvestigationState,
             {
@@ -792,13 +1049,19 @@ async def writeback_recovery_graph_node(
                 "verify_need_action_replan": False,
                 "verify_need_manual_resolution": True,
                 "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
-                "verify_failed_writebacks": failed_writebacks[1:],
+                "verify_recoverable_writeback_ids": remaining_recoverable,
+                "verify_pending_writeback_action_ids": pending_actions,
+                "verify_failed_writebacks": remaining_recoverable,
+                "verify_writeback_status_map": status_map or None,
                 "writeback_lookup_count": 0,
                 "writeback_retry_count": 0,
             },
         )
 
     if result.action is WritebackRecoveryAction.WAIT:
+        # WAIT is non-terminal: retain the current writeback so a receipt-triggered
+        # resume can re-evaluate the same real outbox ID.
+        remaining_recoverable = failed_writebacks
         return cast(
             InvestigationState,
             {
@@ -807,7 +1070,10 @@ async def writeback_recovery_graph_node(
                 "verify_need_manual_resolution": False,
                 "execution_substate": ExecutionSubstate.WAITING_WRITEBACK.value,
                 "halted": True,
-                "verify_failed_writebacks": failed_writebacks[1:],
+                "verify_recoverable_writeback_ids": remaining_recoverable,
+                "verify_pending_writeback_action_ids": pending_actions,
+                "verify_failed_writebacks": remaining_recoverable,
+                "verify_writeback_status_map": status_map or None,
                 "writeback_lookup_count": wb_state.lookup_count,
                 "writeback_retry_count": wb_state.retry_count,
             },
@@ -816,14 +1082,19 @@ async def writeback_recovery_graph_node(
     # LOOKUP / RETRY: stay in recovery until resolved.
     # NOOP / MANUAL: terminal for this writeback; pop it and check
     # whether more failed_writebacks remain.
-    remaining = (
+    remaining_recoverable = (
         failed_writebacks[1:]
         if result.action in (WritebackRecoveryAction.NOOP, WritebackRecoveryAction.MANUAL)
         else failed_writebacks
     )
-    still_recovering = len(remaining) > 0 or result.action in (
-        WritebackRecoveryAction.LOOKUP,
-        WritebackRecoveryAction.RETRY,
+    still_recovering = (
+        len(remaining_recoverable) > 0
+        or bool(pending_actions)
+        or result.action
+        in (
+            WritebackRecoveryAction.LOOKUP,
+            WritebackRecoveryAction.RETRY,
+        )
     )
     return cast(
         InvestigationState,
@@ -837,7 +1108,10 @@ async def writeback_recovery_graph_node(
                 else ExecutionSubstate.NONE.value
             ),
             "halted": False,
-            "verify_failed_writebacks": remaining,
+            "verify_recoverable_writeback_ids": remaining_recoverable,
+            "verify_pending_writeback_action_ids": pending_actions,
+            "verify_failed_writebacks": remaining_recoverable,
+            "verify_writeback_status_map": status_map or None,
             "writeback_lookup_count": wb_state.lookup_count,
             "writeback_retry_count": wb_state.retry_count,
         },
@@ -850,5 +1124,7 @@ __all__ = [
     "WritebackRecoveryHandler",
     "WritebackRecoveryResult",
     "WritebackState",
+    "resolve_pending_action_writebacks",
+    "resolve_writeback_statuses",
     "writeback_recovery_graph_node",
 ]

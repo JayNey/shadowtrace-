@@ -536,6 +536,12 @@ class VerificationResult(BaseModel):
     overall_status: VerificationOverallStatus
     failed_actions: list[str] = Field(default_factory=list)
     failed_writebacks: list[str] = Field(default_factory=list)
+    # ISSUE-259: split recovery targets by ID kind.  ``recoverable_writeback_ids``
+    # holds real wbk-* outbox IDs for WritebackRecoveryHandler; actions still
+    # waiting for DispositionSync outbox creation use ``pending_writeback_action_ids``.
+    # ``failed_writebacks`` mirrors recoverable IDs for backward-compatible readers.
+    recoverable_writeback_ids: list[str] = Field(default_factory=list)
+    pending_writeback_action_ids: list[str] = Field(default_factory=list)
     blocked_writebacks: list[str] = Field(default_factory=list)
     need_action_replan: bool = False
     need_writeback_recovery: bool = False

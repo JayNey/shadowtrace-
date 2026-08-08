@@ -189,6 +189,10 @@ async def _reconcile_verify_resume_patch(
     need_writeback = bool(values.get("verify_need_writeback_recovery"))
     need_manual = bool(values.get("verify_need_manual_resolution"))
     failed_writebacks = list(values.get("verify_failed_writebacks") or [])
+    recoverable_writebacks = list(
+        values.get("verify_recoverable_writeback_ids") or failed_writebacks
+    )
+    pending_actions = list(values.get("verify_pending_writeback_action_ids") or [])
     if not (need_writeback or need_manual or values.get("halted")):
         return patch
 
@@ -196,12 +200,16 @@ async def _reconcile_verify_resume_patch(
     legitimate_manual = _has_legitimate_manual_hold(degraded_flags)
     outbox_rows = await _active_outbox_writeback_rows(session_factory, event_id)
     wb_statuses = [status for _intent, status in outbox_rows]
-    writebacks_resolved = not failed_writebacks and _all_writebacks_resolved(wb_statuses)
+    writebacks_resolved = (
+        not recoverable_writebacks and not pending_actions and _all_writebacks_resolved(wb_statuses)
+    )
     disposition_policy = values.get("disposition_policy")
 
     if need_writeback and writebacks_resolved:
         patch["verify_need_writeback_recovery"] = False
         patch["verify_failed_writebacks"] = []
+        patch["verify_recoverable_writeback_ids"] = []
+        patch["verify_pending_writeback_action_ids"] = []
         patch["execution_substate"] = ExecutionSubstate.NONE.value
 
     if (
@@ -210,7 +218,7 @@ async def _reconcile_verify_resume_patch(
         and _can_clear_manual_resolution(
             degraded_flags=degraded_flags,
             rows=outbox_rows,
-            failed_writebacks=failed_writebacks,
+            failed_writebacks=recoverable_writebacks,
             disposition_policy=disposition_policy,
         )
     ):

@@ -94,6 +94,20 @@ def new_writeback_id() -> str:
     return f"wbk-{_rand_hex()}"
 
 
+_ACTION_ID_PREFIX = "act-"
+_WRITEBACK_ID_PREFIX = "wbk-"
+
+
+def is_action_id(value: str) -> bool:
+    """Return True when *value* uses the canonical action ID prefix."""
+    return isinstance(value, str) and value.startswith(_ACTION_ID_PREFIX)
+
+
+def is_writeback_id(value: str) -> bool:
+    """Return True when *value* uses the canonical writeback ID prefix."""
+    return isinstance(value, str) and value.startswith(_WRITEBACK_ID_PREFIX)
+
+
 def new_trace_id() -> str:
     return f"trc-{_rand_hex()}"
 

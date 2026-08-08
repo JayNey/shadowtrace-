@@ -378,6 +378,7 @@ def _enrich_agent_output(
         results = output_data.get("results") or []
         failed_actions = output_data.get("failed_actions") or []
         failed_writebacks = output_data.get("failed_writebacks") or []
+        recoverable_writebacks = output_data.get("recoverable_writeback_ids") or failed_writebacks
         blocked_writebacks = output_data.get("blocked_writebacks") or []
 
         if output_data.get("need_manual_resolution"):
@@ -416,14 +417,24 @@ def _enrich_agent_output(
                 for item in results[:50]
                 if isinstance(item, dict) and item.get("action_id")
             ]
-        if isinstance(failed_writebacks, list) and failed_writebacks:
+        if isinstance(recoverable_writebacks, list) and recoverable_writebacks:
             enriched.setdefault(
                 "gap_refs",
                 [
-                    {"source": "writeback", "reason": str(action_id)}
-                    for action_id in failed_writebacks[:20]
+                    {"source": "writeback", "reason": str(writeback_id)}
+                    for writeback_id in recoverable_writebacks[:20]
                 ],
             )
+        pending_actions = output_data.get("pending_writeback_action_ids") or []
+        if isinstance(pending_actions, list) and pending_actions:
+            enriched.setdefault("gap_refs", [])
+            if isinstance(enriched["gap_refs"], list):
+                enriched["gap_refs"].extend(
+                    [
+                        {"source": "writeback_pending", "reason": str(action_id)}
+                        for action_id in pending_actions[:20]
+                    ]
+                )
         if isinstance(blocked_writebacks, list) and blocked_writebacks:
             enriched.setdefault("gap_refs", [])
             if isinstance(enriched["gap_refs"], list):
