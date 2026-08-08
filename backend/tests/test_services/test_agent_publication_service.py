@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import asyncio
 from typing import Any
 from uuid import uuid4
 
@@ -162,6 +162,10 @@ def _risk_assessment(*, reasoning: str = "supported by evidence") -> RiskAssessm
     )
 
 
+def _pass_guard() -> OutputGuard:
+    return OutputGuard(mode=GuardrailMode.ENFORCE)
+
+
 @pytest.mark.asyncio
 async def test_guard_block_leaves_risk_durable_state_unchanged() -> None:
     guard = OutputGuard(mode=GuardrailMode.ENFORCE)
@@ -243,6 +247,7 @@ async def test_approved_risk_publication_projects_after_guard() -> None:
     event_id = f"evt-risk-ok-{uuid4().hex[:8]}"
     agent = RiskAgent(
         working_memory=wm,
+        output_guard=_pass_guard(),
         event_service=event_service,
         publication_service=publisher,
     )
@@ -259,6 +264,29 @@ async def test_approved_risk_publication_projects_after_guard() -> None:
 
 
 @pytest.mark.asyncio
+async def test_publication_auto_installs_enforce_guard_when_omitted() -> None:
+    event_service = _RecordingEventService()
+    wm = _FakeWorkingMemory()
+    publisher = AgentPublicationService(event_service)
+    event_id = f"evt-risk-autoguard-{uuid4().hex[:8]}"
+    agent = RiskAgent(
+        working_memory=wm,
+        event_service=event_service,
+        publication_service=publisher,
+    )
+    assert agent.output_guard is not None
+    assert agent.output_guard.mode is GuardrailMode.ENFORCE
+    await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_triage(),
+            evidence_output=_evidence(event_id),
+        )
+    )
+    assert len(event_service.risk_publications) == 1
+
+
+@pytest.mark.asyncio
 async def test_publication_failure_leaves_wm_unprojected() -> None:
     event_service = _RecordingEventService(fail_publish=True)
     wm = _FakeWorkingMemory()
@@ -266,6 +294,7 @@ async def test_publication_failure_leaves_wm_unprojected() -> None:
     event_id = f"evt-risk-fail-{uuid4().hex[:8]}"
     agent = RiskAgent(
         working_memory=wm,
+        output_guard=_pass_guard(),
         event_service=event_service,
         publication_service=publisher,
     )
@@ -285,9 +314,129 @@ def test_agent_durable_writer_fence_blocks_risk_agent_without_token() -> None:
         assert_guard_approved_publication(operator="RiskAgent", publication=None)
 
 
+def test_guard_approved_token_requires_proposal_digest() -> None:
+    with pytest.raises(GuardrailViolationError, match="proposal_digest"):
+        GuardApprovedPublication.issue(
+            agent_name="risk_agent",
+            event_id="evt-1",
+            proposal_digest="",
+        )
+
+
 def test_guard_approved_token_allows_risk_agent_operator() -> None:
-    token = GuardApprovedPublication.issue(agent_name="risk_agent", event_id="evt-1")
+    assessment = _risk_assessment()
+    token = GuardApprovedPublication.issue(
+        agent_name="risk_agent",
+        event_id="evt-1",
+        proposal_digest=GuardApprovedPublication.digest_model(assessment),
+    )
     assert_guard_approved_publication(operator="RiskAgent", publication=token)
+
+
+@pytest.mark.asyncio
+async def test_publication_rejects_digest_mismatch() -> None:
+    event_service = _RecordingEventService()
+    publisher = AgentPublicationService(event_service)
+    assessment = _risk_assessment()
+    other = assessment.model_copy(update={"risk_score": 10})
+    token = GuardApprovedPublication.issue(
+        agent_name="risk_agent",
+        event_id="evt-digest",
+        proposal_digest=GuardApprovedPublication.digest_model(other),
+    )
+    with pytest.raises(GuardrailViolationError, match="digest mismatch"):
+        await publisher.publish_risk_assessment(
+            event_id="evt-digest",
+            assessment=assessment,
+            verdict=FinalVerdict.NONE,
+            triage=_triage(),
+            working_memory=None,
+            publication=token,
+        )
+    assert event_service.risk_publications == []
+
+
+@pytest.mark.asyncio
+async def test_shared_risk_agent_last_verdict_does_not_cross_contaminate_publish() -> None:
+    """Shared singleton RiskAgent must publish from guard-approved assessment, not last_verdict."""
+    event_service = _RecordingEventService()
+    wm = _FakeWorkingMemory()
+    publisher = AgentPublicationService(event_service)
+    agent = RiskAgent(
+        working_memory=wm,
+        output_guard=_pass_guard(),
+        event_service=event_service,
+        publication_service=publisher,
+    )
+
+    event_a = f"evt-race-a-{uuid4().hex[:8]}"
+    event_b = f"evt-race-b-{uuid4().hex[:8]}"
+    await wm.write(
+        event_a,
+        "fp_adjudication",
+        {"recommendation": "close_as_fp", "reason": "known benign"},
+    )
+
+    # Overlap: pause A at publication-verdict resolve so B can overwrite
+    # shared last_verdict before A finishes publish (legacy race).
+    original_resolve = agent._resolve_publication_verdict
+    gate = asyncio.Event()
+    a_entered = asyncio.Event()
+
+    async def _gated_resolve(input: RiskAgentInput, assessment: RiskAssessment) -> FinalVerdict:
+        if input.event_id == event_a:
+            a_entered.set()
+            await gate.wait()
+        return await original_resolve(input, assessment)
+
+    agent._resolve_publication_verdict = _gated_resolve  # type: ignore[method-assign]
+
+    task_a = asyncio.create_task(
+        agent.execute(
+            RiskAgentInput(
+                event_id=event_a,
+                triage_result=_triage(),
+                evidence_output=_evidence(event_a),
+            )
+        )
+    )
+    await a_entered.wait()
+    await agent.execute(
+        RiskAgentInput(
+            event_id=event_b,
+            triage_result=_triage(),
+            evidence_output=_evidence(event_b),
+        )
+    )
+    gate.set()
+    await task_a
+
+    pubs = {p["event_id"]: p["verdict"] for p in event_service.risk_publications}
+    assert event_a in pubs and event_b in pubs
+    assert pubs[event_a] == FinalVerdict.FALSE_POSITIVE
+    assert pubs[event_b] != FinalVerdict.FALSE_POSITIVE
+
+
+@pytest.mark.asyncio
+async def test_warn_only_mode_still_publishes_after_guard() -> None:
+    event_service = _RecordingEventService()
+    wm = _FakeWorkingMemory()
+    publisher = AgentPublicationService(event_service)
+    event_id = f"evt-warn-{uuid4().hex[:8]}"
+    agent = RiskAgent(
+        working_memory=wm,
+        output_guard=OutputGuard(mode=GuardrailMode.WARN_ONLY),
+        event_service=event_service,
+        publication_service=publisher,
+    )
+    await agent.execute(
+        RiskAgentInput(
+            event_id=event_id,
+            triage_result=_triage(),
+            evidence_output=_evidence(event_id),
+        )
+    )
+    assert len(event_service.risk_publications) == 1
 
 
 @pytest.mark.asyncio
@@ -309,6 +458,7 @@ async def test_report_publication_emits_report_generated() -> None:
     await wm.write(event_id, "triage_result", _triage().model_dump(mode="json"))
     agent = ReportAgent(
         working_memory=wm,
+        output_guard=_pass_guard(),
         event_service=event_service,
         publication_service=publisher,
     )
@@ -324,3 +474,20 @@ async def test_report_publication_emits_report_generated() -> None:
     assert await wm.read(event_id, "report") is not None
     assert any(item[1] == "report_generated" for item in bus_events)
     assert store.values.get((event_id, "report_generated")) is True
+
+
+@pytest.mark.asyncio
+async def test_retired_report_persist_helpers_are_fenced() -> None:
+    agent = ReportAgent()
+    report = InvestigationReport(
+        report_id=report_id_for_event("evt-retired"),
+        event_id="evt-retired",
+        title="t",
+        summary="s",
+        sections=[],
+        final_verdict=FinalVerdict.NONE,
+        risk_score=1,
+        severity=Severity.LOW,
+    )
+    with pytest.raises(RuntimeError, match="retired"):
+        await agent._persist_report(report)

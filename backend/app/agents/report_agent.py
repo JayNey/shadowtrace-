@@ -125,6 +125,15 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         scenario_id: str | None = None,
         llm_timeout_seconds: float = LLM_TIMEOUT_SECONDS,
     ) -> None:
+        # Durable publish without a guard is forbidden (ISSUE-270). When callers
+        # wire event_service / publication_service but omit output_guard, install
+        # a default ENFORCE guard so ``_apply_guardrails`` cannot no-op.
+        if output_guard is None and (
+            publication_service is not None or event_service is not None
+        ):
+            from app.core.guardrails import OutputGuard
+
+            output_guard = OutputGuard()
         super().__init__(
             llm_client=llm_client,
             tool_executor=tool_executor,
@@ -335,6 +344,10 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             raise RuntimeError(
                 "ReportAgent.persist_report=True requires AgentPublicationService"
             )
+        if self.output_guard is None:
+            raise RuntimeError(
+                "ReportAgent publication requires OutputGuard (ISSUE-270 fail-closed)"
+            )
         plan_revision = 1
         if input.response_plan is not None and input.response_plan.actions:
             plan_revision = max(a.plan_revision for a in input.response_plan.actions)
@@ -343,6 +356,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         token = GuardApprovedPublication.issue(
             agent_name=self.agent_name,
             event_id=input.event_id,
+            proposal_digest=GuardApprovedPublication.digest_model(output),
         )
         return await publisher.publish_report(
             event_id=input.event_id,
@@ -775,89 +789,31 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         return snapshot
 
     async def _write_context(self, event_id: str, report: InvestigationReport) -> None:
-        if self.working_memory is None:
-            return
-        try:
-            await self.working_memory.write(
-                event_id,
-                "report",
-                report.model_dump(mode="json"),
-            )
-        except Exception:
-            logger.warning(
-                "failed to write report to working memory event=%s",
-                event_id,
-                exc_info=True,
-            )
+        raise RuntimeError(
+            "ReportAgent._write_context is retired; use AgentPublicationService "
+            "after OutputGuard (ISSUE-270)"
+        )
 
     async def _persist_report(self, report: InvestigationReport) -> None:
-        if self.event_service is None:
-            raise RuntimeError(
-                "ReportAgent.persist_report=True requires event_service.upsert_report"
-            )
-        upsert = getattr(self.event_service, "upsert_report", None)
-        if upsert is None:
-            raise RuntimeError(
-                "event_service lacks upsert_report; cannot persist investigation report"
-            )
-        try:
-            persisted = await upsert(report)
-            if isinstance(persisted, InvestigationReport):
-                report.version = persisted.version
-                report.updated_at = persisted.updated_at or report.updated_at
-                report.sections = persisted.sections
-        except Exception:
-            logger.warning(
-                "failed to upsert report event=%s report_id=%s",
-                report.event_id,
-                report.report_id,
-                exc_info=True,
-            )
-            raise
+        raise RuntimeError(
+            "ReportAgent._persist_report is retired; use AgentPublicationService "
+            "after OutputGuard (ISSUE-270)"
+        )
 
     async def _record_generate_report_action(self, input: ReportAgentInput) -> None:
-        if self.event_service is None:
-            return
-        upsert = getattr(self.event_service, "upsert_generate_report_action", None)
-        if upsert is None:
-            logger.debug("event_service lacks upsert_generate_report_action; skip")
-            return
-        plan_revision = 1
-        if input.response_plan is not None and input.response_plan.actions:
-            plan_revision = max(a.plan_revision for a in input.response_plan.actions)
-        try:
-            await upsert(input.event_id, plan_revision=plan_revision)
-        except Exception:
-            logger.warning(
-                "failed to upsert generate_report action event=%s",
-                input.event_id,
-                exc_info=True,
-            )
+        raise RuntimeError(
+            "ReportAgent._record_generate_report_action is retired; use "
+            "AgentPublicationService after OutputGuard (ISSUE-270)"
+        )
 
     async def _publish_report_generated(
         self,
         report: InvestigationReport,
     ) -> None:
-        if self.event_bus is None:
-            return
-        try:
-            payload: dict[str, Any] = {
-                "report_id": report.report_id,
-                "sections": len(report.sections),
-            }
-            if report.generated_at is not None:
-                payload["generated_at"] = report.generated_at.isoformat()
-            await self.event_bus.publish_event(
-                report.event_id,
-                "report_generated",
-                payload,
-            )
-        except Exception:
-            logger.warning(
-                "event_bus report_generated failed event=%s",
-                report.event_id,
-                exc_info=True,
-            )
+        raise RuntimeError(
+            "ReportAgent._publish_report_generated is retired; use "
+            "AgentPublicationService after OutputGuard (ISSUE-270)"
+        )
 
 
 def generate_report_action_fingerprint(event_id: str, plan_revision: int) -> str:

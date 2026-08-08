@@ -35,20 +35,55 @@ _AGENT_PUBLICATION_OPERATORS = frozenset({"RiskAgent", "ReportAgent"})
 
 @dataclass(frozen=True, slots=True)
 class GuardApprovedPublication:
-    """Opaque capability token issued only after OutputGuard approval."""
+    """Opaque capability token issued only after OutputGuard approval.
+
+    ``proposal_digest`` binds the token to the exact guard-approved payload so a
+    self-minted or reused token cannot publish a different proposal (ISSUE-270).
+    """
 
     agent_name: str
     event_id: str
+    proposal_digest: str
     _secret: object = field(default=_PUBLICATION_SECRET, repr=False)
 
-    @classmethod
-    def issue(cls, *, agent_name: str, event_id: str) -> GuardApprovedPublication:
-        return cls(agent_name=agent_name, event_id=event_id)
+    @staticmethod
+    def digest_model(value: Any) -> str:
+        if hasattr(value, "model_dump"):
+            payload = value.model_dump(mode="json")
+        elif isinstance(value, dict):
+            payload = value
+        else:
+            payload = {"repr": repr(value)}
+        encoded = __import__("orjson").dumps(payload, option=__import__("orjson").OPT_SORT_KEYS)
+        return hashlib.sha256(encoded).hexdigest()
 
-    def verify(self) -> None:
+    @classmethod
+    def issue(
+        cls,
+        *,
+        agent_name: str,
+        event_id: str,
+        proposal_digest: str,
+    ) -> GuardApprovedPublication:
+        digest = (proposal_digest or "").strip()
+        if not digest:
+            raise GuardrailViolationError(
+                "publication token requires proposal_digest",
+                error_code="guardrail_violation",
+                details={"agent_name": agent_name, "event_id": event_id},
+            )
+        return cls(agent_name=agent_name, event_id=event_id, proposal_digest=digest)
+
+    def verify(self, *, proposal_digest: str | None = None) -> None:
         if self._secret is not _PUBLICATION_SECRET:
             raise GuardrailViolationError(
                 "invalid guard-approved publication token",
+                error_code="guardrail_violation",
+                details={"agent_name": self.agent_name, "event_id": self.event_id},
+            )
+        if proposal_digest is not None and proposal_digest != self.proposal_digest:
+            raise GuardrailViolationError(
+                "publication token digest mismatch",
                 error_code="guardrail_violation",
                 details={"agent_name": self.agent_name, "event_id": self.event_id},
             )
@@ -118,7 +153,6 @@ class AgentPublicationService:
         working_memory: BoundWorkingMemory | None,
         publication: GuardApprovedPublication,
     ) -> RiskAssessment:
-        publication.verify()
         if publication.event_id != event_id or publication.agent_name != "risk_agent":
             raise GuardrailViolationError(
                 "publication token scope mismatch for risk_agent",
@@ -131,6 +165,7 @@ class AgentPublicationService:
             )
 
         canonical = _revalidate_model(RiskAssessment, assessment)
+        publication.verify(proposal_digest=GuardApprovedPublication.digest_model(canonical))
         changed, result, summary = await self._event_service.publish_risk_assessment(
             event_id,
             assessment=canonical,
@@ -186,7 +221,6 @@ class AgentPublicationService:
         plan_revision: int = 1,
         persist_report: bool = True,
     ) -> InvestigationReport:
-        publication.verify()
         if publication.event_id != event_id or publication.agent_name != "report_agent":
             raise GuardrailViolationError(
                 "publication token scope mismatch for report_agent",
@@ -199,6 +233,7 @@ class AgentPublicationService:
             )
 
         canonical = _revalidate_model(InvestigationReport, report)
+        publication.verify(proposal_digest=GuardApprovedPublication.digest_model(canonical))
         if not persist_report:
             return canonical
 

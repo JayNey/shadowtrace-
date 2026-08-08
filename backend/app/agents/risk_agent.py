@@ -68,6 +68,15 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         scenario_id: str | None = None,
         degraded_flags: Any | None = None,
     ) -> None:
+        # Durable publish without a guard is forbidden (ISSUE-270). When callers
+        # wire event_service / publication_service but omit output_guard, install
+        # a default ENFORCE guard so ``_apply_guardrails`` cannot no-op.
+        if output_guard is None and (
+            publication_service is not None or event_service is not None
+        ):
+            from app.core.guardrails import OutputGuard
+
+            output_guard = OutputGuard()
         super().__init__(
             llm_client=llm_client,
             tool_executor=tool_executor,
@@ -202,8 +211,35 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             reason_codes.append(EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT)
 
         assessment = provisional.model_copy(update={"verdict_reason_codes": reason_codes})
+        # Compatibility for unit tests that inspect the last resolved verdict.
+        # Publication must not read this field — shared singleton agents race
+        # across await points (ISSUE-270).
         self.last_verdict = verdict
         return assessment
+
+    async def _resolve_publication_verdict(
+        self,
+        input: RiskAgentInput,
+        assessment: RiskAssessment,
+    ) -> FinalVerdict:
+        """Resolve verdict from the *guard-approved* assessment (not instance state)."""
+        if EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT in (
+            assessment.verdict_reason_codes or []
+        ):
+            return FinalVerdict.NONE
+
+        fp_match = await self._read_optional(input.event_id, "false_positive_match")
+        fp_adjudication = await self._read_optional(input.event_id, "fp_adjudication")
+        if not isinstance(fp_match, dict):
+            fp_match = None
+        if not isinstance(fp_adjudication, dict):
+            fp_adjudication = None
+        return self.verdict_resolver.resolve(
+            assessment,
+            false_positive_match=fp_match,
+            rag_output=input.rag_output,
+            fp_adjudication=fp_adjudication,
+        )
 
     async def _publish_approved_output(
         self,
@@ -213,12 +249,17 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         publisher = self._resolve_publication_service()
         if publisher is None:
             return output
-        verdict = self.last_verdict or FinalVerdict.NONE
+        if self.output_guard is None:
+            raise RuntimeError(
+                "RiskAgent publication requires OutputGuard (ISSUE-270 fail-closed)"
+            )
+        verdict = await self._resolve_publication_verdict(input, output)
         from app.services.agent_publication_service import GuardApprovedPublication
 
         token = GuardApprovedPublication.issue(
             agent_name=self.agent_name,
             event_id=input.event_id,
+            proposal_digest=GuardApprovedPublication.digest_model(output),
         )
         return await publisher.publish_risk_assessment(
             event_id=input.event_id,

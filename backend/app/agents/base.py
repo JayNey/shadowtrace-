@@ -20,6 +20,7 @@ from typing import Any, Generic, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.errors import GuardrailViolationError
 from app.core.sanitization import redact_sensitive_text
 from app.core.telemetry import traced_operation
 from app.models.agent_io import AGENT_INPUT_BY_NAME, AgentInput, AgentName
@@ -279,8 +280,14 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
         if isinstance(output, BaseModel) and isinstance(sanitized, dict):
             try:
                 return type(output).model_validate(sanitized)
-            except Exception:
-                return output
+            except Exception as exc:
+                # Fail-closed: never publish the pre-sanitize proposal when the
+                # guard returned a sanitized payload we cannot re-hydrate.
+                raise GuardrailViolationError(
+                    "sanitized proposal failed schema re-validation",
+                    error_code="guardrail_violation",
+                    details={"agent_name": self.agent_name},
+                ) from exc
         return output
 
     async def _build_guard_context(self, input: TIn | None) -> dict[str, Any]:
