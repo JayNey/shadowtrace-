@@ -70,7 +70,7 @@
         }
       ],
       "default": null,
-      "description": "Effective investigation duration (ms): wall-clock span minus halt gaps inferred from EventStatus-level STATE_TRANSITION to_status values (primarily waiting_approval). ExecutionSubstate waiting_writeback is not an EventStatus and is not deducted unless recorded on the audit timeline. Use this for ops/eval '调查耗时' displays.",
+      "description": "Effective investigation duration (ms): wall-clock span minus the union of (1) EventStatus WAITING_* halt gaps from STATE_TRANSITION to_status (primarily waiting_approval) and (2) ExecutionSubstate waiting_writeback gaps from EventContextJournal execution_substate changes (ISSUE-257). Overlapping gaps are merged once. Use this for ops/eval '调查耗时' displays.",
       "title": "Active Duration Ms"
     }
   },

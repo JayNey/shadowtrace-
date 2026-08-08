@@ -37,16 +37,33 @@ _ENTRY_TYPE_ORDER: dict[DecisionTraceEntryType, int] = {
     DecisionTraceEntryType.WRITEBACK: 7,
 }
 
-# Halt / idle statuses excluded from active_duration_ms (ISSUE-253).
-# Production EventAuditLog STATE_TRANSITION.to_status uses EventStatus values;
-# today that reliably covers waiting_approval. waiting_writeback is an
-# ExecutionSubstate and is NOT written as EventStatus — keep it recognized if
-# ever recorded, but do not claim production writeback idle is deducted.
+# Halt / idle EventStatus labels excluded from active_duration_ms (ISSUE-253).
+# Production EventAuditLog STATE_TRANSITION.to_status uses EventStatus values and
+# reliably covers waiting_approval. waiting_writeback is an ExecutionSubstate
+# (VERIFYING checkpoint), not EventStatus — production writeback idle is deducted
+# from EventContextJournal execution_substate rows (ISSUE-257 / plan B). Keep the
+# label recognized on the audit timeline only for defensive union-merge.
 _HALT_STATUSES: frozenset[str] = frozenset(
     {
         "waiting_approval",
         "waiting_execution",
         "waiting_writeback",
+    }
+)
+
+# Journal-backed ExecutionSubstate idle deducted from active_duration_ms (ISSUE-257).
+_WRITEBACK_SUBSTATE = "waiting_writeback"
+
+# Timeline entry types that prove investigation resumed after an open writeback wait
+# when the journal leave event is missing. WRITEBACK/DISPOSITION receipts may arrive
+# during the wait itself and must not truncate idle early.
+_WRITEBACK_IDLE_TRUNCATE_TYPES: frozenset[DecisionTraceEntryType] = frozenset(
+    {
+        DecisionTraceEntryType.AGENT_EXECUTION,
+        DecisionTraceEntryType.TOOL_CALL,
+        DecisionTraceEntryType.LLM_CALL,
+        DecisionTraceEntryType.APPROVAL,
+        DecisionTraceEntryType.ACTION_EXECUTION,
     }
 )
 
@@ -537,28 +554,49 @@ def _ms_between(start: datetime, end: datetime) -> int:
     return max(0, int((end - start).total_seconds() * 1000))
 
 
-def _compute_timeline_durations(
+def _unwrap_journal_scalar(value: Any) -> Any:
+    """Mirror context_service.unwrap_journal_value for scalar journal payloads."""
+    if isinstance(value, dict) and set(value.keys()) == {"_scalar"}:
+        return value["_scalar"]
+    return value
+
+
+def _normalize_substate(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _merge_intervals(
+    intervals: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    """Union-merge overlapping/adjacent ``[start, end)`` intervals."""
+    usable = sorted((start, end) for start, end in intervals if end > start)
+    if not usable:
+        return []
+    merged: list[tuple[datetime, datetime]] = [usable[0]]
+    for start, end in usable[1:]:
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end:
+            if end > prev_end:
+                merged[-1] = (prev_start, end)
+            continue
+        merged.append((start, end))
+    return merged
+
+
+def _idle_ms_from_intervals(intervals: list[tuple[datetime, datetime]]) -> int:
+    return sum(_ms_between(start, end) for start, end in _merge_intervals(intervals))
+
+
+def _status_halt_intervals(
     entries: list[DecisionTraceEntry],
-) -> tuple[int | None, int | None]:
-    """Return ``(total_duration_ms, active_duration_ms)`` for a sorted timeline.
-
-    * ``total_duration_ms`` — wall clock ``last_ts - first_ts`` (unchanged semantics).
-    * ``active_duration_ms`` — wall clock minus contiguous halt intervals inferred
-      from ``STATE_TRANSITION`` entries whose ``to_status`` is WAITING_*
-      (production: primarily ``waiting_approval``).
-
-    Open halt at end of timeline counts through ``last_ts``, unless a later
-    non-transition entry shows activity (missing exit transition must not treat
-    subsequent work as idle).
-    """
-    if not entries:
-        return None, None
-
-    first_ts = entries[0].timestamp
-    last_ts = entries[-1].timestamp
-    total_ms = _ms_between(first_ts, last_ts)
-
-    idle_ms = 0
+    *,
+    last_ts: datetime,
+) -> list[tuple[datetime, datetime]]:
+    """Infer EventStatus WAITING_* halt intervals from STATE_TRANSITION timeline."""
+    intervals: list[tuple[datetime, datetime]] = []
     halt_started: datetime | None = None
     for entry in entries:
         if entry.entry_type is DecisionTraceEntryType.STATE_TRANSITION:
@@ -569,19 +607,111 @@ def _compute_timeline_durations(
             if in_halt and halt_started is None:
                 halt_started = entry.timestamp
             elif not in_halt and halt_started is not None:
-                idle_ms += _ms_between(halt_started, entry.timestamp)
+                intervals.append((halt_started, entry.timestamp))
                 halt_started = None
             continue
 
         # Missing exit transition: truncate idle at first subsequent activity.
         if halt_started is not None:
-            idle_ms += _ms_between(halt_started, entry.timestamp)
+            intervals.append((halt_started, entry.timestamp))
             halt_started = None
 
     if halt_started is not None:
-        idle_ms += _ms_between(halt_started, last_ts)
+        intervals.append((halt_started, last_ts))
+    return intervals
 
-    # Clamp: never report active above wall, and never negative.
+
+def _writeback_halt_intervals_from_journal(
+    journal_points: list[tuple[datetime, object]],
+    *,
+    last_ts: datetime,
+    resume_timestamps: list[datetime],
+) -> list[tuple[datetime, datetime]]:
+    """Derive ``waiting_writeback`` idle intervals from execution_substate journal.
+
+    ``journal_points`` are ``(created_at, raw_or_scalar_value)`` ordered by version.
+    Open intervals (missing leave) are truncated at the first subsequent
+    investigation activity timestamp, else ``last_ts``.
+    """
+    intervals: list[tuple[datetime, datetime]] = []
+    halt_started: datetime | None = None
+    for created_at, raw_value in journal_points:
+        substate = _normalize_substate(_unwrap_journal_scalar(raw_value))
+        if substate is None:
+            continue
+        in_writeback = substate == _WRITEBACK_SUBSTATE
+        if in_writeback and halt_started is None:
+            halt_started = created_at
+        elif not in_writeback and halt_started is not None:
+            intervals.append((halt_started, created_at))
+            halt_started = None
+
+    if halt_started is not None:
+        end = last_ts
+        for ts in resume_timestamps:
+            if ts > halt_started:
+                end = ts
+                break
+        intervals.append((halt_started, end))
+    return intervals
+
+
+def _resume_timestamps_after_writeback(
+    entries: list[DecisionTraceEntry],
+) -> list[datetime]:
+    """Timestamps that prove investigation work resumed after writeback idle."""
+    stamps: list[datetime] = []
+    for entry in entries:
+        if entry.entry_type in _WRITEBACK_IDLE_TRUNCATE_TYPES:
+            stamps.append(entry.timestamp)
+            continue
+        if entry.entry_type is DecisionTraceEntryType.STATE_TRANSITION:
+            to_status = entry.detail.get("to_status")
+            # Leaving VERIFYING (or any non-halt EventStatus) ends writeback idle
+            # even when the journal leave row is missing.
+            if to_status is not None and not _is_halt_status(to_status):
+                stamps.append(entry.timestamp)
+    stamps.sort()
+    return stamps
+
+
+def _compute_timeline_durations(
+    entries: list[DecisionTraceEntry],
+    *,
+    substate_journal: list[tuple[datetime, object]] | None = None,
+) -> tuple[int | None, int | None]:
+    """Return ``(total_duration_ms, active_duration_ms)`` for a sorted timeline.
+
+    * ``total_duration_ms`` — wall clock ``last_ts - first_ts`` (unchanged semantics).
+    * ``active_duration_ms`` — wall clock minus the union of:
+      - EventStatus WAITING_* halt intervals from ``STATE_TRANSITION.to_status``
+        (production: primarily ``waiting_approval``), and
+      - ExecutionSubstate ``waiting_writeback`` intervals from
+        ``EventContextJournal`` (ISSUE-257 plan B).
+
+    Open halt at end of timeline counts through ``last_ts``, unless a later
+    non-idle activity shows work resumed (missing exit must not treat subsequent
+    investigation as idle). Overlapping approval/writeback gaps are union-merged
+    so idle is never double-counted.
+    """
+    if not entries:
+        return None, None
+
+    first_ts = entries[0].timestamp
+    last_ts = entries[-1].timestamp
+    total_ms = _ms_between(first_ts, last_ts)
+
+    intervals = _status_halt_intervals(entries, last_ts=last_ts)
+    if substate_journal:
+        intervals.extend(
+            _writeback_halt_intervals_from_journal(
+                substate_journal,
+                last_ts=last_ts,
+                resume_timestamps=_resume_timestamps_after_writeback(entries),
+            )
+        )
+
+    idle_ms = _idle_ms_from_intervals(intervals)
     if idle_ms > total_ms:
         idle_ms = total_ms
     active_ms = total_ms - idle_ms
@@ -607,6 +737,7 @@ class DecisionTraceService:
         """
         all_entries: list[DecisionTraceEntry] = []
         missing: list[str] = []
+        substate_journal: list[tuple[datetime, object]] = []
 
         async with self._session_factory() as session:
             # 1. Agent traces
@@ -675,11 +806,26 @@ class DecisionTraceService:
                 logger.warning("Failed to fetch writebacks for %s: %s", event_id, exc)
                 missing.append("disposition_receipt")
 
+            # 9. execution_substate journal (duration-only; not a timeline source)
+            try:
+                journal_rows = await self._fetch_execution_substate_journal(session, event_id)
+                substate_journal = [(row.created_at, row.value) for row in journal_rows]
+            except Exception as exc:
+                # Fail-soft: approval idle still deducted; writeback idle omitted.
+                logger.warning(
+                    "Failed to fetch execution_substate journal for %s: %s",
+                    event_id,
+                    exc,
+                )
+
         # Sort: timestamp ascending, then entry_type order, then entry_id.
         all_entries.sort(key=_sort_key)
 
         summary = self._compute_summary(all_entries)
-        total_ms, active_ms = _compute_timeline_durations(all_entries)
+        total_ms, active_ms = _compute_timeline_durations(
+            all_entries,
+            substate_journal=substate_journal,
+        )
         summary.total_duration_ms = total_ms
         summary.active_duration_ms = active_ms
 
@@ -773,6 +919,23 @@ class DecisionTraceService:
                 )
             )
             .order_by(orm.DispositionReceipt.confirmed_at.asc().nulls_last())
+        )
+        return list(rows)
+
+    async def _fetch_execution_substate_journal(
+        self, session: AsyncSession, event_id: str
+    ) -> list[orm.EventContextJournal]:
+        """Authoritative execution_substate change trail (ISSUE-257 writeback idle)."""
+        rows = await session.scalars(
+            select(orm.EventContextJournal)
+            .where(
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == "execution_substate",
+            )
+            .order_by(
+                orm.EventContextJournal.version.asc(),
+                orm.EventContextJournal.created_at.asc(),
+            )
         )
         return list(rows)
 
