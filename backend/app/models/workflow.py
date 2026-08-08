@@ -437,10 +437,32 @@ OUTBOX_DELIVERY_TRANSITIONS: dict[OutboxDeliveryStatus, set[OutboxDeliveryStatus
         OutboxDeliveryStatus.READY,  # after status lookup / manual adjudication
         OutboxDeliveryStatus.DELIVERED,  # lookup found the external submission
         OutboxDeliveryStatus.DEAD_LETTER,
+        OutboxDeliveryStatus.DELIVERED,  # operator retry reconcile — no re-egress (ISSUE-274)
     },
-    OutboxDeliveryStatus.DELIVERED: set(),
-    OutboxDeliveryStatus.DEAD_LETTER: set(),
+    OutboxDeliveryStatus.DELIVERED: {
+        OutboxDeliveryStatus.PAUSED,  # operator retry from failed writeback (ISSUE-274)
+    },
+    OutboxDeliveryStatus.DEAD_LETTER: {
+        OutboxDeliveryStatus.PAUSED,  # operator retry recovery (ISSUE-274)
+    },
 }
+
+# Writeback statuses eligible for operator retry from DELIVERED delivery.
+_OPERATOR_RETRY_FAILURE_WRITEBACK_STATUSES: frozenset[WritebackStatus] = frozenset(
+    {
+        WritebackStatus.FAILED,
+        WritebackStatus.PARTIAL,
+        WritebackStatus.UNKNOWN,
+    }
+)
+
+# Terminal writeback statuses that reconcile to DELIVERED without re-egress.
+_OPERATOR_RETRY_TERMINAL_SUCCESS_WRITEBACK_STATUSES: frozenset[WritebackStatus] = frozenset(
+    {
+        WritebackStatus.CONFIRMED,
+        WritebackStatus.ACCEPTED,
+    }
+)
 
 WRITEBACK_STATUS_TRANSITIONS: dict[WritebackStatus, set[WritebackStatus]] = {
     WritebackStatus.PENDING: {
@@ -1171,6 +1193,43 @@ def validate_job_status_transition(
         )
 
 
+def operator_retry_writeback_status_blocked(
+    writeback_status: WritebackStatus | None,
+) -> bool:
+    """True when operator retry must be rejected (CONFIRMED is terminal)."""
+    return writeback_status is WritebackStatus.CONFIRMED
+
+
+def delivery_status_eligible_for_operator_retry_pause(
+    delivery_status: OutboxDeliveryStatus,
+    writeback_status: WritebackStatus | None,
+) -> bool:
+    """Whether operator retry may enter (or continue from) the PAUSED gate."""
+    if operator_retry_writeback_status_blocked(writeback_status):
+        return False
+    if delivery_status is OutboxDeliveryStatus.DEAD_LETTER:
+        return True
+    if delivery_status is OutboxDeliveryStatus.DELIVERED:
+        return writeback_status in _OPERATOR_RETRY_FAILURE_WRITEBACK_STATUSES
+    return delivery_status in {
+        OutboxDeliveryStatus.PAUSED,
+        OutboxDeliveryStatus.READY,
+    }
+
+
+def adapter_capabilities_allow_safe_retry(
+    *,
+    supports_idempotency: bool,
+) -> bool:
+    """Adapter declares idempotent resubmit safe (ISSUE-274 / WRITEBACK_STATUS_TRANSITIONS)."""
+    return supports_idempotency
+
+
+def is_operator_retry_terminal_success(writeback_status: WritebackStatus) -> bool:
+    """Lookup proved provider-side success — reconcile without re-egress."""
+    return writeback_status in _OPERATOR_RETRY_TERMINAL_SUCCESS_WRITEBACK_STATUSES
+
+
 def validate_outbox_delivery_transition(
     current: OutboxDeliveryStatus,
     target: OutboxDeliveryStatus,
@@ -1178,7 +1237,24 @@ def validate_outbox_delivery_transition(
     lease_expired_resend: bool = False,
     known_pre_egress_failure: bool = False,
     lookup_confirmed_submission: bool = False,
+    operator_retry_pause: bool = False,
 ) -> None:
+    if operator_retry_pause:
+        if target is not OutboxDeliveryStatus.PAUSED:
+            raise InvalidStateTransitionError(
+                "operator retry pause must target PAUSED",
+                current=current,
+                target=target,
+            )
+        if current not in {
+            OutboxDeliveryStatus.DEAD_LETTER,
+            OutboxDeliveryStatus.DELIVERED,
+        }:
+            raise InvalidStateTransitionError(
+                "operator retry pause only from DEAD_LETTER or failed DELIVERED",
+                current=current,
+                target=target,
+            )
     if lease_expired_resend and current is OutboxDeliveryStatus.LEASED:
         # Expired lease must PAUSE + lookup first — never direct re-send or
         # two-hop bypass via WAITING_RETRY → LEASED.

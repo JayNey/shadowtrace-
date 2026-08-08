@@ -507,6 +507,379 @@ async def test_retry_unknown_writeback_rejected(
         await sync.retry_writeback(writeback_id, operator="operator-1")
 
 
+async def _insert_operator_retry_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    event_id: str,
+    action_id: str,
+    source_record_id: str,
+    locator: SourceObjectLocator,
+    concurrency_token: str,
+    delivery_status: OutboxDeliveryStatus,
+    writeback_status: WritebackStatus | None,
+    idempotency_key: str | None = None,
+) -> tuple[str, str]:
+    writeback_id = f"wbk-{_sfx()}"
+    outbox_id = f"obx-{_sfx()}"
+    disposition_id = f"disp-{_sfx()}"
+    idem = idempotency_key or f"idem-{_sfx()}"
+    command_payload = factory_build_min_command(
+        action_id,
+        event_id,
+        locator,
+        concurrency_token,
+    )
+    command_payload["disposition_id"] = disposition_id
+    command_payload["idempotency_key"] = idem
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=writeback_id,
+                    disposition_id=disposition_id,
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=idem,
+                    command_payload=command_payload,
+                    command_payload_sha256="deadbeef",
+                    delivery_status=delivery_status.value,
+                    latest_writeback_status=(
+                        writeback_status.value if writeback_status is not None else None
+                    ),
+                )
+            )
+    return writeback_id, outbox_id
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_dead_letter_re_enqueues(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DEAD_LETTER,
+        writeback_status=WritebackStatus.FAILED,
+    )
+    status = await sync.retry_writeback(writeback_id, operator="operator-1")
+    assert status is WritebackStatus.PENDING
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.READY.value
+        assert row.latest_writeback_status == WritebackStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_delivered_failed_re_enqueues(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.FAILED,
+    )
+    status = await sync.retry_writeback(writeback_id, operator="operator-1")
+    assert status is WritebackStatus.PENDING
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.READY.value
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_confirmed_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, _ = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DELIVERED,
+        writeback_status=WritebackStatus.CONFIRMED,
+    )
+    with pytest.raises(WritebackConflictError, match="CONFIRMED"):
+        await sync.retry_writeback(writeback_id, operator="operator-1")
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_lookup_degraded_stays_paused(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    from app.adapters.mock_xdr import MockXDRDispositionAdapter
+
+    class _DegradedLookupAdapter(MockXDRDispositionAdapter):
+        async def lookup_submission(
+            self,
+            idempotency_key: str,
+            source_locator: SourceObjectLocator,
+        ) -> None:
+            raise RuntimeError("lookup degraded")
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    registry = DispositionAdapterRegistry()
+    registry.register(
+        "mock_xdr",
+        _DegradedLookupAdapter(
+            client=mock_xdr_client,
+            read_token="mock-read-token",
+            write_token="mock-write-token",
+        ),
+    )
+    sync = DispositionSyncService(
+        session_factory,
+        context_store=store,
+        adapter_registry=registry,
+        outbound_guard=OutboundDispositionGuard(),
+    )
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DEAD_LETTER,
+        writeback_status=WritebackStatus.FAILED,
+    )
+    with pytest.raises(WritebackConflictError, match="lookup degraded"):
+        await sync.retry_writeback(writeback_id, operator="operator-1")
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_late_confirmed_reconcile_no_resend(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-late",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": f"idem-late-{_sfx()}",
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="test",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            record = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+    await sync.process_ready_outboxes(limit=1)
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.DispositionOutbox, record.outbox_id)
+            assert row is not None
+            row.latest_writeback_status = WritebackStatus.FAILED.value
+            row.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+    status = await sync.retry_writeback(record.writeback_id, operator="operator-1")
+    assert status in {WritebackStatus.CONFIRMED, WritebackStatus.ACCEPTED}
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, record.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == record.writeback_id
+                )
+            )
+        ).all()
+        assert len(receipts) >= 2
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_operation_replay_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DEAD_LETTER,
+        writeback_status=WritebackStatus.FAILED,
+    )
+    op_id = f"op-replay-{_sfx()}"
+    first = await sync.retry_writeback(
+        writeback_id,
+        operator="operator-1",
+        operation_id=op_id,
+    )
+    second = await sync.retry_writeback(
+        writeback_id,
+        operator="operator-1",
+        operation_id=op_id,
+    )
+    assert first is second is WritebackStatus.PENDING
+    async with session_factory() as session:
+        replay_rows = (
+            await session.scalars(
+                select(orm.EventAuditLog).where(
+                    orm.EventAuditLog.event_id == event_id,
+                    orm.EventAuditLog.reason.like(f"operator_retry:replay:{writeback_id}:{op_id}:%"),
+                )
+            )
+        ).all()
+        assert len(replay_rows) == 1
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_without_safe_retry_blocked(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    from app.adapters.mock_xdr import LiveDispositionAdapterStub
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    registry = DispositionAdapterRegistry()
+    registry.register("live_stub", LiveDispositionAdapterStub())
+    sync = DispositionSyncService(
+        session_factory,
+        context_store=store,
+        adapter_registry=registry,
+        outbound_guard=OutboundDispositionGuard(),
+    )
+    live_locator = locator.model_copy(update={"source_product": "live_stub"})
+    writeback_id, outbox_id = await _insert_operator_retry_outbox(
+        session_factory,
+        event_id=event_id,
+        action_id=action_id,
+        source_record_id=source_record_id,
+        locator=live_locator,
+        concurrency_token=concurrency_token,
+        delivery_status=OutboxDeliveryStatus.DEAD_LETTER,
+        writeback_status=WritebackStatus.FAILED,
+    )
+    with pytest.raises(WritebackConflictError, match="lookup capability unavailable"):
+        await sync.retry_writeback(writeback_id, operator="operator-1")
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+
+
 @pytest.mark.asyncio
 async def test_resolve_writeback_manual_confirmed(
     session_factory: async_sessionmaker[AsyncSession],

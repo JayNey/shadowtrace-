@@ -86,8 +86,15 @@ async def retry_writeback(
     writeback_id: str,
     principal: Annotated[Principal, require_roles(ROLE_DISPOSITION_OPERATOR)],
     sync: DispositionSyncDep,
+    body: s.RetryWritebackRequest | None = None,
 ) -> s.WritebackOperationResponse:
-    status = await sync.retry_writeback(writeback_id, operator=principal.subject)
+    request = body or s.RetryWritebackRequest()
+    status = await sync.retry_writeback(
+        writeback_id,
+        operator=principal.subject,
+        operation_id=request.operation_id,
+        reason=request.reason,
+    )
     await sync.process_ready_outboxes(limit=1)
     return s.WritebackOperationResponse(
         writeback_id=writeback_id,

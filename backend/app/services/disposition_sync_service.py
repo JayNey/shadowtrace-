@@ -48,6 +48,10 @@ from app.models.enums import (
 )
 from app.models.ids import new_writeback_id
 from app.models.workflow import (
+    adapter_capabilities_allow_safe_retry,
+    delivery_status_eligible_for_operator_retry_pause,
+    is_operator_retry_terminal_success,
+    operator_retry_writeback_status_blocked,
     validate_outbox_delivery_transition,
     validate_writeback_status_transition,
 )
@@ -69,6 +73,7 @@ ResumeInvestigationHook = Callable[[str], Awaitable[None]]
 _DEFAULT_LEASE_SECONDS = 30
 _ERROR_DETAIL_MAX_LEN = 500
 OUTBOX_SUPERSEDED_ERROR_CODE = "superseded_by_new_head"
+_OPERATOR_RETRY_REPLAY_PREFIX = "operator_retry:replay"
 
 
 class _PausedLookupKind(StrEnum):
@@ -98,6 +103,22 @@ class _PausedLookupOutcome:
     receipt: DispositionReceipt | None = None
     error_code: str | None = None
     detail: str | None = None
+
+
+class _OperatorRetryAction(StrEnum):
+    RE_ENQUEUE = "re_enqueue"
+    RECONCILE_TERMINAL = "reconcile_terminal"
+    BLOCKED = "blocked"
+
+
+@dataclass(frozen=True)
+class _OperatorRetryDecision:
+    action: _OperatorRetryAction
+    reason: str = ""
+    target_status: WritebackStatus | None = None
+    receipt: DispositionReceipt | None = None
+    lookup_never_accepted: bool = False
+    adapter_allows_safe_retry: bool = False
 
 
 class _NullResumeHook:
@@ -309,7 +330,16 @@ class DispositionSyncService:
             }
         )
 
-    async def retry_writeback(self, writeback_id: str, *, operator: str) -> WritebackStatus:
+    async def retry_writeback(
+        self,
+        writeback_id: str,
+        *,
+        operator: str,
+        operation_id: str | None = None,
+        reason: str | None = None,
+    ) -> WritebackStatus:
+        result: WritebackStatus
+        sync_event_id: str | None = None
         async with self._session_factory() as session:
             async with session.begin():
                 outbox = await session.scalar(
@@ -322,37 +352,190 @@ class DispositionSyncService:
                         f"writeback not found: {writeback_id}",
                         details={"writeback_id": writeback_id},
                     )
+
+                if operation_id is not None:
+                    replay_status = await self._find_operator_retry_replay(
+                        session,
+                        event_id=outbox.event_id,
+                        writeback_id=writeback_id,
+                        operation_id=operation_id,
+                    )
+                    if replay_status is not None:
+                        return replay_status
+
+                delivery = OutboxDeliveryStatus(outbox.delivery_status)
                 latest = (
                     WritebackStatus(outbox.latest_writeback_status)
                     if outbox.latest_writeback_status
-                    else WritebackStatus.PENDING
+                    else None
                 )
-                if latest is WritebackStatus.UNKNOWN:
+
+                if operator_retry_writeback_status_blocked(latest):
+                    raise WritebackConflictError(
+                        "CONFIRMED writeback cannot be retried",
+                        details={
+                            "writeback_id": writeback_id,
+                            "status": latest.value if latest else None,
+                        },
+                    )
+
+                if latest is WritebackStatus.UNKNOWN and delivery is OutboxDeliveryStatus.DELIVERED:
                     raise WritebackConflictError(
                         "UNKNOWN writeback must be verified before retry",
                         details={"writeback_id": writeback_id, "status": latest.value},
                     )
-                validate_outbox_delivery_transition(
-                    OutboxDeliveryStatus(outbox.delivery_status),
-                    OutboxDeliveryStatus.READY,
-                )
-                outbox.delivery_status = OutboxDeliveryStatus.READY.value
-                outbox.locked_by = None
-                outbox.locked_at = None
-                outbox.lease_expires_at = None
-                outbox.next_retry_at = None
-                outbox.updated_at = datetime.now(UTC)
-                session.add(
-                    orm.EventAuditLog(
-                        event_id=outbox.event_id,
-                        from_status=outbox.latest_writeback_status,
-                        to_status=WritebackStatus.PENDING.value,
-                        operator=operator,
-                        reason="retry_writeback:re-enqueued",
+
+                if delivery in {
+                    OutboxDeliveryStatus.LEASED,
+                    OutboxDeliveryStatus.WAITING_RETRY,
+                }:
+                    raise WritebackConflictError(
+                        "outbox delivery in progress; operator retry not allowed",
+                        details={
+                            "writeback_id": writeback_id,
+                            "delivery_status": delivery.value,
+                        },
                     )
-                )
-                record_writeback_retry(adapter=self._adapter_label(outbox))
-        return WritebackStatus.PENDING
+
+                if delivery is OutboxDeliveryStatus.READY:
+                    result = WritebackStatus.PENDING
+                    await self._record_operator_retry_audit(
+                        session,
+                        outbox,
+                        operator=operator,
+                        operation_id=operation_id,
+                        reason=reason,
+                        audit_reason="operator_retry:idempotent-ready",
+                        from_delivery=delivery.value,
+                        to_delivery=delivery.value,
+                        result_status=result,
+                    )
+                    record_writeback_retry(adapter=self._adapter_label(outbox))
+                else:
+                    if not delivery_status_eligible_for_operator_retry_pause(delivery, latest):
+                        raise WritebackConflictError(
+                            "illegal outbox state for operator retry",
+                            details={
+                                "writeback_id": writeback_id,
+                                "delivery_status": delivery.value,
+                                "writeback_status": latest.value if latest else None,
+                            },
+                        )
+
+                    paused_from = delivery.value
+                    if delivery in {
+                        OutboxDeliveryStatus.DEAD_LETTER,
+                        OutboxDeliveryStatus.DELIVERED,
+                    }:
+                        validate_outbox_delivery_transition(
+                            delivery,
+                            OutboxDeliveryStatus.PAUSED,
+                            operator_retry_pause=True,
+                        )
+                        outbox.delivery_status = OutboxDeliveryStatus.PAUSED.value
+                        outbox.locked_by = None
+                        outbox.locked_at = None
+                        outbox.lease_expires_at = None
+                        outbox.next_retry_at = None
+                        outbox.updated_at = datetime.now(UTC)
+                        session.add(
+                            orm.EventAuditLog(
+                                event_id=outbox.event_id,
+                                from_status=paused_from,
+                                to_status=OutboxDeliveryStatus.PAUSED.value,
+                                operator=operator,
+                                reason=self._operator_retry_pause_reason(reason),
+                            )
+                        )
+                        delivery = OutboxDeliveryStatus.PAUSED
+
+                    decision = await self._evaluate_operator_retry_lookup(session, outbox)
+                    if decision.action is _OperatorRetryAction.RECONCILE_TERMINAL:
+                        assert decision.target_status is not None
+                        assert decision.receipt is not None
+                        validate_outbox_delivery_transition(
+                            OutboxDeliveryStatus.PAUSED,
+                            OutboxDeliveryStatus.DELIVERED,
+                        )
+                        await self._append_receipt(session, outbox, receipt=decision.receipt)
+                        outbox.latest_writeback_status = decision.target_status.value
+                        outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                        outbox.delivered_at = outbox.delivered_at or datetime.now(UTC)
+                        outbox.updated_at = datetime.now(UTC)
+                        action = await session.get(
+                            orm.Action, outbox.action_id, with_for_update=True
+                        )
+                        _mirror_writeback_status_to_action(action, decision.target_status.value)
+                        await self._record_operator_retry_audit(
+                            session,
+                            outbox,
+                            operator=operator,
+                            operation_id=operation_id,
+                            reason=reason,
+                            audit_reason=(
+                                f"operator_retry:reconcile:{decision.target_status.value}"
+                            ),
+                            from_delivery=OutboxDeliveryStatus.PAUSED.value,
+                            to_delivery=OutboxDeliveryStatus.DELIVERED.value,
+                            result_status=decision.target_status,
+                        )
+                        record_writeback(
+                            status=decision.target_status.value,
+                            adapter=self._adapter_label(outbox),
+                        )
+                        result = decision.target_status
+                        sync_event_id = outbox.event_id
+                    elif decision.action is _OperatorRetryAction.BLOCKED:
+                        raise WritebackConflictError(
+                            decision.reason or "operator retry blocked after lookup",
+                            details={
+                                "writeback_id": writeback_id,
+                                "delivery_status": OutboxDeliveryStatus.PAUSED.value,
+                            },
+                        )
+                    else:
+                        current_writeback = latest or WritebackStatus.FAILED
+                        target_writeback = WritebackStatus.PENDING
+                        validate_writeback_status_transition(
+                            current_writeback,
+                            target_writeback,
+                            lookup_never_accepted=decision.lookup_never_accepted,
+                            adapter_allows_safe_retry=decision.adapter_allows_safe_retry,
+                        )
+                        validate_outbox_delivery_transition(
+                            OutboxDeliveryStatus.PAUSED,
+                            OutboxDeliveryStatus.READY,
+                        )
+                        outbox.delivery_status = OutboxDeliveryStatus.READY.value
+                        outbox.latest_writeback_status = target_writeback.value
+                        outbox.attempt = 0
+                        outbox.locked_by = None
+                        outbox.locked_at = None
+                        outbox.lease_expires_at = None
+                        outbox.next_retry_at = None
+                        outbox.updated_at = datetime.now(UTC)
+                        action = await session.get(
+                            orm.Action, outbox.action_id, with_for_update=True
+                        )
+                        _mirror_writeback_status_to_action(action, target_writeback.value)
+                        await self._record_operator_retry_audit(
+                            session,
+                            outbox,
+                            operator=operator,
+                            operation_id=operation_id,
+                            reason=reason,
+                            audit_reason="operator_retry:re-enqueued",
+                            from_delivery=OutboxDeliveryStatus.PAUSED.value,
+                            to_delivery=OutboxDeliveryStatus.READY.value,
+                            result_status=target_writeback,
+                        )
+                        record_writeback_retry(adapter=self._adapter_label(outbox))
+                        result = target_writeback
+
+        if sync_event_id is not None:
+            await self._sync_writeback_summary(sync_event_id)
+            await self._maybe_resume(sync_event_id)
+        return result
 
     async def lookup_writeback_status(self, writeback_id: str) -> WritebackStatus | None:
         """Look up writeback status, preferring provider query when declared.
@@ -1115,6 +1298,162 @@ class DispositionSyncService:
         )
         action.status = target.value
         action.executed_at = datetime.now(UTC)
+
+    @staticmethod
+    def _operator_retry_pause_reason(reason: str | None) -> str:
+        detail = (reason or "operator-initiated").strip()
+        return f"operator_retry:pause:{detail}"
+
+    async def _find_operator_retry_replay(
+        self,
+        session: AsyncSession,
+        *,
+        event_id: str,
+        writeback_id: str,
+        operation_id: str,
+    ) -> WritebackStatus | None:
+        prefix = f"{_OPERATOR_RETRY_REPLAY_PREFIX}:{writeback_id}:{operation_id}:"
+        row = await session.scalar(
+            select(orm.EventAuditLog.to_status)
+            .where(
+                orm.EventAuditLog.event_id == event_id,
+                orm.EventAuditLog.reason.like(f"{prefix}%"),
+            )
+            .order_by(orm.EventAuditLog.id.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        try:
+            return WritebackStatus(row)
+        except ValueError:
+            logger.warning(
+                "invalid operator retry replay status event=%s writeback=%s op=%s status=%s",
+                event_id,
+                writeback_id,
+                operation_id,
+                row,
+            )
+            return None
+
+    async def _record_operator_retry_audit(
+        self,
+        session: AsyncSession,
+        outbox: orm.DispositionOutbox,
+        *,
+        operator: str,
+        operation_id: str | None,
+        reason: str | None,
+        audit_reason: str,
+        from_delivery: str,
+        to_delivery: str,
+        result_status: WritebackStatus,
+    ) -> None:
+        _ = reason
+        replay_reason = audit_reason
+        if operation_id is not None:
+            replay_reason = (
+                f"{_OPERATOR_RETRY_REPLAY_PREFIX}:{outbox.writeback_id}:"
+                f"{operation_id}:{result_status.value}"
+            )
+        session.add(
+            orm.EventAuditLog(
+                event_id=outbox.event_id,
+                from_status=from_delivery,
+                to_status=result_status.value,
+                operator=operator,
+                reason=replay_reason,
+            )
+        )
+
+    async def _evaluate_operator_retry_lookup(
+        self,
+        session: AsyncSession,
+        outbox: orm.DispositionOutbox,
+    ) -> _OperatorRetryDecision:
+        adapter = self._resolve_adapter(outbox)
+        caps = adapter.capabilities()
+        safe_retry = adapter_capabilities_allow_safe_retry(
+            supports_idempotency=caps.supports_idempotency,
+        )
+        if not (caps.supports_lookup_by_idempotency or caps.supports_status_query):
+            return _OperatorRetryDecision(
+                action=_OperatorRetryAction.BLOCKED,
+                reason="lookup capability unavailable; cannot prove safe retry",
+            )
+
+        command = DispositionCommand.model_validate(outbox.command_payload)
+        receipt: DispositionReceipt | None = None
+        lookup_degraded = False
+        try:
+            if caps.supports_lookup_by_idempotency:
+                receipt = await adapter.lookup_submission(
+                    command.idempotency_key,
+                    command.source_locator,
+                )
+            if receipt is None and caps.supports_status_query:
+                latest_receipt = await session.scalar(
+                    select(orm.DispositionReceipt)
+                    .where(orm.DispositionReceipt.writeback_id == outbox.writeback_id)
+                    .order_by(orm.DispositionReceipt.sequence.desc())
+                    .limit(1)
+                )
+                provider_job_id = (
+                    latest_receipt.provider_job_id if latest_receipt is not None else None
+                )
+                if provider_job_id:
+                    receipt = await adapter.get_status(provider_job_id)
+        except Exception as exc:
+            logger.warning(
+                "operator retry lookup degraded writeback=%s: %s",
+                outbox.writeback_id,
+                type(exc).__name__,
+            )
+            lookup_degraded = True
+
+        if lookup_degraded:
+            return _OperatorRetryDecision(
+                action=_OperatorRetryAction.BLOCKED,
+                reason="lookup degraded; outbox remains PAUSED",
+            )
+
+        if receipt is not None:
+            if is_operator_retry_terminal_success(receipt.status):
+                return _OperatorRetryDecision(
+                    action=_OperatorRetryAction.RECONCILE_TERMINAL,
+                    target_status=receipt.status,
+                    receipt=receipt,
+                )
+            if receipt.status is WritebackStatus.UNKNOWN:
+                return _OperatorRetryDecision(
+                    action=_OperatorRetryAction.BLOCKED,
+                    reason="lookup still UNKNOWN; manual adjudication required",
+                )
+            if receipt.status in {WritebackStatus.FAILED, WritebackStatus.PARTIAL}:
+                if safe_retry:
+                    return _OperatorRetryDecision(
+                        action=_OperatorRetryAction.RE_ENQUEUE,
+                        adapter_allows_safe_retry=True,
+                    )
+                return _OperatorRetryDecision(
+                    action=_OperatorRetryAction.BLOCKED,
+                    reason="adapter does not allow safe retry after failed lookup",
+                )
+            return _OperatorRetryDecision(
+                action=_OperatorRetryAction.BLOCKED,
+                reason=f"lookup returned non-retryable status {receipt.status.value}",
+            )
+
+        if safe_retry:
+            return _OperatorRetryDecision(
+                action=_OperatorRetryAction.RE_ENQUEUE,
+                lookup_never_accepted=True,
+                adapter_allows_safe_retry=True,
+            )
+        return _OperatorRetryDecision(
+            action=_OperatorRetryAction.BLOCKED,
+            reason="lookup proves never-accepted but adapter lacks safe-retry",
+        )
 
     def _resolve_adapter(self, outbox: orm.DispositionOutbox) -> BaseDispositionAdapter:
         payload = outbox.command_payload or {}

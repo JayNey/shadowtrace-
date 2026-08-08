@@ -293,6 +293,7 @@ class _MockDispositionSyncService:
     _KNOWN_DISPOSITIONS = frozenset({"disp-0a1b2c3d"})
     _KNOWN_WRITEBACKS: dict[str, WritebackStatus] = {
         "wbk-0a1b2c3d": WritebackStatus.CONFIRMED,
+        "wbk-failed-retry": WritebackStatus.FAILED,
         "wbk-unknown": WritebackStatus.UNKNOWN,
     }
 
@@ -360,8 +361,15 @@ class _MockDispositionSyncService:
         )
         return record, receipt
 
-    async def retry_writeback(self, writeback_id: str, *, operator: str) -> WritebackStatus:
-        _ = operator
+    async def retry_writeback(
+        self,
+        writeback_id: str,
+        *,
+        operator: str,
+        operation_id: str | None = None,
+        reason: str | None = None,
+    ) -> WritebackStatus:
+        _ = (operator, operation_id, reason)
         status = self._KNOWN_WRITEBACKS.get(writeback_id)
         if status is None:
             raise EventNotFoundError(
@@ -371,6 +379,11 @@ class _MockDispositionSyncService:
         if status is WritebackStatus.UNKNOWN:
             raise WritebackConflictError(
                 "writeback is UNKNOWN and must be verified before retry",
+                details={"writeback_id": writeback_id, "status": status.value},
+            )
+        if status is WritebackStatus.CONFIRMED:
+            raise WritebackConflictError(
+                "CONFIRMED writeback cannot be retried",
                 details={"writeback_id": writeback_id, "status": status.value},
             )
         return WritebackStatus.PENDING
@@ -735,9 +748,23 @@ def test_writeback_retry_requires_verification_then_idempotent(client: TestClien
     assert unknown.status_code == 409
     assert unknown.json()["error_code"] == "writeback_conflict"
 
-    # A known confirmed writeback re-enqueues idempotently (repeatable).
-    first = client.post("/api/v1/writebacks/wbk-0a1b2c3d/retry", headers=_hdr("operator"))
-    second = client.post("/api/v1/writebacks/wbk-0a1b2c3d/retry", headers=_hdr("operator"))
+    # CONFIRMED writebacks are terminal and cannot be retried.
+    confirmed = client.post("/api/v1/writebacks/wbk-0a1b2c3d/retry", headers=_hdr("operator"))
+    assert confirmed.status_code == 409
+    assert confirmed.json()["error_code"] == "writeback_conflict"
+
+    # Failed writeback operator retry is idempotent when replaying operation_id.
+    body = {"operation_id": "op-contract-replay-1"}
+    first = client.post(
+        "/api/v1/writebacks/wbk-failed-retry/retry",
+        headers=_hdr("operator"),
+        json=body,
+    )
+    second = client.post(
+        "/api/v1/writebacks/wbk-failed-retry/retry",
+        headers=_hdr("operator"),
+        json=body,
+    )
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()
 

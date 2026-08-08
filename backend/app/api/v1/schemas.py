@@ -153,6 +153,17 @@ class ResolveWritebackRequest(_StrictRequest):
     evidence_ref: str | None = None
 
 
+class RetryWritebackRequest(_StrictRequest):
+    operation_id: str | None = Field(
+        default=None,
+        description="Optional idempotency key for operator retry replay (ISSUE-274).",
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Optional operator note recorded in audit log.",
+    )
+
+
 class SelectDispositionSourceRequest(_StrictRequest):
     source_record_id: str
     expected_event_version: int

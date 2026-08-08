@@ -691,6 +691,20 @@ def test_job_and_outbox_and_writeback_edges() -> None:
         OutboxDeliveryStatus.WAITING_RETRY,
         OutboxDeliveryStatus.DEAD_LETTER,
     )
+    validate_outbox_delivery_transition(
+        OutboxDeliveryStatus.DEAD_LETTER,
+        OutboxDeliveryStatus.PAUSED,
+        operator_retry_pause=True,
+    )
+    validate_outbox_delivery_transition(
+        OutboxDeliveryStatus.DELIVERED,
+        OutboxDeliveryStatus.PAUSED,
+        operator_retry_pause=True,
+    )
+    validate_outbox_delivery_transition(
+        OutboxDeliveryStatus.PAUSED,
+        OutboxDeliveryStatus.DELIVERED,
+    )
     with pytest.raises(InvalidStateTransitionError, match="PAUSED"):
         validate_outbox_delivery_transition(
             OutboxDeliveryStatus.LEASED,
