@@ -24,8 +24,10 @@ RUN_INVESTIGATION_BODY_KWARG_NAMES: Final = frozenset(
         "include_response_execution",
         "generate_report",
         "owner_id",
+        "task_id",
         "redelivered",
         "lease_acquired",
+        "request_headers",
     }
 )
 
@@ -33,8 +35,10 @@ RUN_ANALYSIS_ONLY_BODY_KWARG_NAMES: Final = frozenset(
     {
         "generate_report",
         "owner_id",
+        "task_id",
         "redelivered",
         "lease_acquired",
+        "request_headers",
     }
 )
 

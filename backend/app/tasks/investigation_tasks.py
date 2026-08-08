@@ -13,9 +13,23 @@ from kombu.exceptions import OperationalError
 
 from app.core.celery_app import celery_app
 from app.core.celery_delivery import (
+    DEFER_RETRY_HEADER,
+    DEFER_RETRY_MAX_ATTEMPTS,
+    LOOKUP_RETRY_HEADER,
+    LOOKUP_RETRY_MAX_ATTEMPTS,
+    RedeliveryDecision,
+    RedeliveryDeferRetry,
+    RedeliveryHandoffAction,
+    RedeliveryLookupRetry,
     celery_task_owner_id,
-    evaluate_redelivered_investigation_skip,
+    defer_retry_count,
+    defer_retry_countdown,
+    evaluate_redelivered_investigation_decision,
+    evaluate_redelivery_handoff,
+    lookup_retry_count,
+    lookup_retry_countdown,
     normalize_public_task_state,
+    record_redelivery_recovery_needed,
 )
 from app.core.errors import (
     DependencyUnavailableError,
@@ -23,6 +37,7 @@ from app.core.errors import (
     InvestigationLeaseLostError,
 )
 from app.core.redis_client import RedisClient
+from app.models.enums import EventStatus
 from app.models.investigation_intent import IntentDeliveryAdmission
 from app.tasks.investigation_task_contract import (
     build_analysis_only_dispatch_kwargs,
@@ -267,6 +282,181 @@ def _skipped_delivery_result(
     }
 
 
+def _redelivery_retry_headers(
+    request_headers: dict[str, object] | None,
+    *,
+    lookup_attempt: int | None = None,
+    defer_attempt: int | None = None,
+) -> dict[str, object]:
+    headers = dict(request_headers or {})
+    if lookup_attempt is not None:
+        headers[LOOKUP_RETRY_HEADER] = lookup_attempt
+    if defer_attempt is not None:
+        headers[DEFER_RETRY_HEADER] = defer_attempt
+    return headers
+
+
+def _raise_lookup_retry(event_id: str, *, attempt: int, cause: BaseException | None = None) -> None:
+    raise RedeliveryLookupRetry(event_id, attempt=attempt, cause=cause)
+
+
+def _raise_defer_retry(event_id: str, *, reason: str, attempt: int) -> None:
+    raise RedeliveryDeferRetry(event_id, reason=reason, attempt=attempt)
+
+
+def _celery_redelivery_retry(
+    task: Any,
+    exc: RedeliveryLookupRetry | RedeliveryDeferRetry,
+    *,
+    request_headers: dict[str, object] | None,
+) -> None:
+    """Retry broker redelivery without ack; propagate typed retry counters via headers."""
+    if isinstance(exc, RedeliveryLookupRetry):
+        countdown = lookup_retry_countdown(exc.attempt)
+        headers = _redelivery_retry_headers(
+            request_headers,
+            lookup_attempt=exc.attempt,
+        )
+    else:
+        countdown = defer_retry_countdown(exc.attempt)
+        headers = _redelivery_retry_headers(
+            request_headers,
+            defer_attempt=exc.attempt,
+        )
+    logger.info(
+        "run_investigation redelivery retry event=%s countdown=%.2fs attempt=%s",
+        exc.event_id,
+        countdown,
+        exc.attempt,
+    )
+    raise task.retry(exc=exc, countdown=countdown, headers=headers) from exc
+
+
+async def execute_redelivery_resume(
+    event_id: str,
+    *,
+    owner_id: str,
+    event_status: EventStatus | None,
+    lease_acquired: bool = False,
+    analysis_only: bool = False,
+    generate_report: bool = True,
+) -> dict[str, str]:
+    """Resume investigation from checkpoint when broker redelivery proves handoff."""
+    from app.api.v1.deps import (
+        _get_session_factory,
+        get_super_agent,
+        get_workflow_runtime,
+    )
+    from app.orchestration.graph_resume import resume_investigation_from_checkpoint
+
+    if analysis_only or event_status not in {
+        EventStatus.WAITING_APPROVAL,
+        EventStatus.EXECUTING_RESPONSE,
+        EventStatus.VERIFYING,
+        EventStatus.REPLANNING,
+        EventStatus.REPORTING,
+    }:
+        if analysis_only:
+            return await execute_analysis_only_investigation(
+                event_id,
+                generate_report=generate_report,
+                owner_id=owner_id,
+                lease_acquired=lease_acquired,
+            )
+        return await execute_investigation(
+            event_id,
+            owner_id=owner_id,
+            lease_acquired=lease_acquired,
+        )
+
+    await resume_investigation_from_checkpoint(
+        _get_session_factory(),
+        event_id,
+        get_super_agent=get_super_agent,
+        get_workflow_runtime=get_workflow_runtime,
+    )
+    return {"status": "completed", "event_id": event_id}
+
+
+async def _handle_redelivered_investigation(
+    event_id: str,
+    *,
+    task_id: str,
+    owner_id: str,
+    request_headers: dict[str, object] | None,
+    lease_acquired: bool,
+    analysis_only: bool = False,
+    generate_report: bool = True,
+) -> dict[str, str] | None:
+    """Return a terminal skip payload or None when redelivery should continue."""
+    try:
+        decision, event_status = await evaluate_redelivered_investigation_decision(event_id)
+    except RedeliveryLookupRetry as exc:
+        attempt = lookup_retry_count(request_headers) + 1
+        if attempt >= LOOKUP_RETRY_MAX_ATTEMPTS:
+            await record_redelivery_recovery_needed(
+                event_id,
+                task_id=task_id,
+                reason="lookup_retry_exhausted",
+            )
+            raise
+        _raise_lookup_retry(event_id, attempt=attempt, cause=exc.cause)
+
+    if decision is RedeliveryDecision.ACK_TERMINAL:
+        logger.info(
+            "run_investigation redelivery ack_terminal event=%s status=%s",
+            event_id,
+            event_status.value if event_status is not None else None,
+        )
+        return _skipped_delivery_result(event_id, reason="terminal_event")
+
+    handoff = await evaluate_redelivery_handoff(
+        event_id,
+        task_id=task_id,
+        owner_id=owner_id,
+        event_status=event_status,
+    )
+    if handoff.action is RedeliveryHandoffAction.RETRY_DEFER:
+        attempt = defer_retry_count(request_headers) + 1
+        if attempt >= DEFER_RETRY_MAX_ATTEMPTS:
+            await record_redelivery_recovery_needed(
+                event_id,
+                task_id=task_id,
+                reason=handoff.reason or "defer_retry_exhausted",
+            )
+            _raise_defer_retry(
+                event_id,
+                reason=handoff.reason or "defer_retry_exhausted",
+                attempt=attempt,
+            )
+        _raise_defer_retry(
+            event_id,
+            reason=handoff.reason or "defer",
+            attempt=attempt,
+        )
+
+    if handoff.action is RedeliveryHandoffAction.ACK_SKIP:
+        return _skipped_delivery_result(
+            event_id,
+            reason=handoff.reason or "redelivery_skip",
+        )
+
+    logger.info(
+        "run_investigation redelivery resume event=%s reason=%s status=%s",
+        event_id,
+        handoff.reason,
+        event_status.value if event_status is not None else None,
+    )
+    return await execute_redelivery_resume(
+        event_id,
+        owner_id=owner_id,
+        event_status=event_status,
+        lease_acquired=lease_acquired or handoff.reason == "lease_acquired",
+        analysis_only=analysis_only,
+        generate_report=generate_report,
+    )
+
+
 async def _finalize_intent_from_result(intent_id: str, result: dict[str, str]) -> None:
     from app.db.session import get_session_factory
     from app.services.investigation_intent_service import InvestigationIntentService
@@ -301,22 +491,21 @@ async def _run_investigation_body(
     include_response_execution: bool,
     generate_report: bool = True,
     owner_id: str,
+    task_id: str,
     redelivered: bool,
     lease_acquired: bool = False,
+    request_headers: dict[str, object] | None = None,
 ) -> dict[str, str]:
     if redelivered:
-        skip, skip_reason = await evaluate_redelivered_investigation_skip(event_id)
-        if skip:
-            logger.info(
-                "run_investigation redelivery skipped event=%s reason=%s",
-                event_id,
-                skip_reason,
-            )
-            return {
-                "status": "skipped",
-                "event_id": event_id,
-                "reason": skip_reason or "lookup_degraded",
-            }
+        redelivery_result = await _handle_redelivered_investigation(
+            event_id,
+            task_id=task_id,
+            owner_id=owner_id,
+            request_headers=request_headers,
+            lease_acquired=lease_acquired,
+        )
+        if redelivery_result is not None:
+            return redelivery_result
     return await execute_investigation(
         event_id,
         include_response_execution=include_response_execution,
@@ -351,6 +540,8 @@ def run_investigation(
     can reclaim the same lease.
     """
     resolved_owner = owner_id or celery_task_owner_id(str(self.request.id))
+    task_id = str(self.request.id)
+    request_headers = getattr(self.request, "headers", None)
     redelivered = bool(getattr(self.request, "delivery_info", {}).get("redelivered"))
     if redelivered:
         logger.info(
@@ -384,8 +575,10 @@ def run_investigation(
                     include_response_execution=bool(include_response_execution),
                     generate_report=bool(generate_report),
                     owner_id=resolved_owner,
+                    task_id=task_id,
                     redelivered=redelivered,
                     lease_acquired=lease_acquired,
+                    request_headers=request_headers,
                 )
             )
             if intent_id:
@@ -419,6 +612,8 @@ def run_investigation(
                 )
             )
         raise
+    except (RedeliveryLookupRetry, RedeliveryDeferRetry) as exc:
+        _celery_redelivery_retry(self, exc, request_headers=request_headers)
     except (DependencyUnavailableError, OperationalError, OSError, ConnectionError) as exc:
         logger.warning(
             "run_investigation transient failure for event=%s; retry=%s",
@@ -472,22 +667,23 @@ async def _run_analysis_only_body(
     *,
     generate_report: bool,
     owner_id: str,
+    task_id: str,
     redelivered: bool,
     lease_acquired: bool = False,
+    request_headers: dict[str, object] | None = None,
 ) -> dict[str, str]:
     if redelivered:
-        skip, skip_reason = await evaluate_redelivered_investigation_skip(event_id)
-        if skip:
-            logger.info(
-                "run_analysis_only redelivery skipped event=%s reason=%s",
-                event_id,
-                skip_reason,
-            )
-            return {
-                "status": "skipped",
-                "event_id": event_id,
-                "reason": skip_reason or "lookup_degraded",
-            }
+        redelivery_result = await _handle_redelivered_investigation(
+            event_id,
+            task_id=task_id,
+            owner_id=owner_id,
+            request_headers=request_headers,
+            lease_acquired=lease_acquired,
+            analysis_only=True,
+            generate_report=generate_report,
+        )
+        if redelivery_result is not None:
+            return redelivery_result
     return await execute_analysis_only_investigation(
         event_id,
         generate_report=generate_report,
@@ -674,6 +870,8 @@ def run_analysis_only_investigation(
     skips its own acquire and only starts renewal.
     """
     resolved_owner = owner_id or celery_task_owner_id(str(self.request.id))
+    task_id = str(self.request.id)
+    request_headers = getattr(self.request, "headers", None)
     redelivered = bool(getattr(self.request, "delivery_info", {}).get("redelivered"))
     if redelivered:
         logger.info(
@@ -689,8 +887,10 @@ def run_analysis_only_investigation(
                     event_id,
                     generate_report=bool(generate_report),
                     owner_id=resolved_owner,
+                    task_id=task_id,
                     redelivered=redelivered,
                     lease_acquired=lease_acquired,
+                    request_headers=request_headers,
                 )
             )
             return result
@@ -712,6 +912,8 @@ def run_analysis_only_investigation(
                 exc_info=True,
             )
         raise
+    except (RedeliveryLookupRetry, RedeliveryDeferRetry) as exc:
+        _celery_redelivery_retry(self, exc, request_headers=request_headers)
     except (DependencyUnavailableError, OperationalError, OSError, ConnectionError) as exc:
         logger.warning(
             "run_analysis_only transient failure for event=%s; retry=%s",

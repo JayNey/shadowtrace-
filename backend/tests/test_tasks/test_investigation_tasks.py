@@ -1222,10 +1222,14 @@ def test_run_analysis_only_redelivery_skips_terminal_event(
 
     monkeypatch.setattr(tasks, "execute_analysis_only_investigation", _fake_execute)
 
-    async def _skip_redelivery(_event_id: str) -> tuple[bool, str]:
-        return True, "terminal_event"
+    async def _ack_terminal(_event_id: str, **_kwargs: Any) -> dict[str, str]:
+        return {
+            "status": "skipped",
+            "event_id": _event_id,
+            "reason": "terminal_event",
+        }
 
-    monkeypatch.setattr(tasks, "evaluate_redelivered_investigation_skip", _skip_redelivery)
+    monkeypatch.setattr(tasks, "_handle_redelivered_investigation", _ack_terminal)
 
     ctx = Context(id="task-ao-redelivery", delivery_info={"redelivered": True}, retries=0)
     tasks.run_analysis_only_investigation.request_stack.push(ctx)

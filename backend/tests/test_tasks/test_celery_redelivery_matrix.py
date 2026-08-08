@@ -9,7 +9,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.core.celery_app import celery_app
-from app.core.celery_delivery import celery_task_owner_id, normalize_public_task_state
+from app.core.celery_delivery import (
+    celery_task_owner_id,
+    normalize_public_task_state,
+)
 from app.core.errors import InvestigationInProgressError
 from app.core.redis_client import RedisClient
 from app.models.enums import (
@@ -325,10 +328,14 @@ def test_redelivery_skips_when_event_terminal(
     assert calls["n"] == 0
 
 
-def test_redelivery_skips_with_lookup_degraded_reason(
+def test_redelivery_lookup_degraded_triggers_retry_not_skip(
     celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from celery.exceptions import Retry
+
+    from app.core.celery_delivery import RedeliveryLookupRetry
+
     calls = {"n": 0}
 
     async def _fake_execute(event_id: str, **_kwargs: Any) -> dict[str, str]:
@@ -347,13 +354,11 @@ def test_redelivery_skips_with_lookup_degraded_reason(
     monkeypatch.setattr("app.api.v1.deps.get_event_service", _fail_service)
     monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
 
-    result = _run_with_redelivered_request(
-        task_id="task-degraded-redelivery",
-        event_id="evt-degraded-redelivery",
-    )
-
-    assert result["status"] == "skipped"
-    assert result.get("reason") == "lookup_degraded"
+    with pytest.raises((Retry, RedeliveryLookupRetry)):
+        _run_with_redelivered_request(
+            task_id="task-degraded-redelivery",
+            event_id="evt-degraded-redelivery",
+        )
     assert calls["n"] == 0
 
 
@@ -365,21 +370,28 @@ def test_redelivery_skips_with_lookup_degraded_reason(
         EventStatus.VERIFYING,
     ],
 )
-def test_redelivery_skips_for_post_response_terminal_states(
+def test_redelivery_intermediate_states_attempt_resume_not_terminal_skip(
     celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
     status: EventStatus,
 ) -> None:
-    calls = {"n": 0}
+    resume_calls = {"n": 0}
 
-    async def _fake_execute(event_id: str, **_kwargs: Any) -> dict[str, str]:
-        calls["n"] += 1
+    async def _fake_resume(
+        event_id: str,
+        *,
+        owner_id: str,
+        event_status: EventStatus | None,
+        **_kwargs: Any,
+    ) -> dict[str, str]:
+        resume_calls["n"] += 1
+        assert event_status is status
         return {"status": "completed", "event_id": event_id}
 
     event = SecurityEvent(
         event_id=f"evt-{status.value}",
         event_type=EventType.OTHER,
-        title="terminal",
+        title="intermediate",
         status=status,
         severity=Severity.LOW,
         creation_source_ref=SourceReference(
@@ -397,20 +409,80 @@ def test_redelivery_skips_for_post_response_terminal_states(
         async def get_event(self, _event_id: str) -> SecurityEvent:
             return event
 
+    class _Lease:
+        async def get_owner(self, _event_id: str) -> str | None:
+            return celery_task_owner_id(f"task-{status.value}")
+
+        async def acquire(self, *_args: object, **_kwargs: object) -> bool:
+            return False
+
     async def _fake_get_event_service() -> _EventService:
         return _EventService()
 
     monkeypatch.setattr("app.api.v1.deps.get_event_service", _fake_get_event_service)
-    monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
+    monkeypatch.setattr(
+        "app.core.celery_delivery.checkpoint_exists_for_event",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(tasks, "execute_redelivery_resume", _fake_resume)
 
     result = _run_with_redelivered_request(
         task_id=f"task-{status.value}",
         event_id=event.event_id,
     )
 
-    assert result["status"] == "skipped"
-    assert result.get("reason") == "terminal_event"
-    assert calls["n"] == 0
+    assert result["status"] == "completed"
+    assert resume_calls["n"] == 1
+
+
+def test_redelivery_defer_when_other_worker_holds_lease(
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from celery.exceptions import Retry
+
+    from app.core.celery_delivery import RedeliveryDeferRetry
+
+    event = SecurityEvent(
+        event_id="evt-defer",
+        event_type=EventType.OTHER,
+        title="defer",
+        status=EventStatus.TRIAGING,
+        severity=Severity.LOW,
+        creation_source_ref=SourceReference(
+            source_kind=SourceObjectKind.INCIDENT,
+            source_product="manual",
+            source_tenant_id="tenant-test",
+            connector_id="conn-test",
+            source_object_id="manual-1",
+            ingested_at=datetime.now(UTC),
+        ),
+        disposition_policy=DispositionPolicy.NOT_REQUIRED,
+    )
+
+    class _EventService:
+        async def get_event(self, _event_id: str) -> SecurityEvent:
+            return event
+
+    class _Lease:
+        async def get_owner(self, _event_id: str) -> str:
+            return "worker-other"
+
+        async def acquire(self, *_args: object, **_kwargs: object) -> bool:
+            raise AssertionError("acquire should not run when another owner holds lease")
+
+    async def _fake_get_event_service() -> _EventService:
+        return _EventService()
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_service", _fake_get_event_service)
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
+
+    with pytest.raises((Retry, RedeliveryDeferRetry)):
+        _run_with_redelivered_request(
+            task_id="task-defer",
+            event_id="evt-defer",
+        )
 
 
 @pytest.mark.asyncio

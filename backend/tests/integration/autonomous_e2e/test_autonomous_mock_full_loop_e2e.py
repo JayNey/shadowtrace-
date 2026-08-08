@@ -1102,6 +1102,7 @@ async def test_scenario_c_redelivery_after_terminal_event_skips_body(
         event_id,
         include_response_execution=False,
         owner_id=celery_task_owner_id("task-c-redelivery"),
+        task_id="task-c-redelivery",
         redelivered=True,
     )
     assert result["status"] == "skipped"

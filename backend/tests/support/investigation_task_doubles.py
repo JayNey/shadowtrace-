@@ -56,8 +56,10 @@ def make_run_investigation_body_double(
         include_response_execution: bool = False,
         generate_report: bool = True,
         owner_id: str,
+        task_id: str,
         redelivered: bool,
         lease_acquired: bool = False,
+        request_headers: dict[str, object] | None = None,
     ) -> dict[str, str]:
         captured.clear()
         captured.update(
@@ -66,8 +68,10 @@ def make_run_investigation_body_double(
                 "include_response_execution": include_response_execution,
                 "generate_report": generate_report,
                 "owner_id": owner_id,
+                "task_id": task_id,
                 "redelivered": redelivered,
                 "lease_acquired": lease_acquired,
+                "request_headers": request_headers,
             }
         )
         return {"status": result_status, "event_id": event_id}
@@ -87,8 +91,10 @@ def make_run_analysis_only_body_double(
         *,
         generate_report: bool,
         owner_id: str,
+        task_id: str,
         redelivered: bool,
         lease_acquired: bool = False,
+        request_headers: dict[str, object] | None = None,
     ) -> dict[str, str]:
         captured.clear()
         captured.update(
@@ -96,8 +102,10 @@ def make_run_analysis_only_body_double(
                 "event_id": event_id,
                 "generate_report": generate_report,
                 "owner_id": owner_id,
+                "task_id": task_id,
                 "redelivered": redelivered,
                 "lease_acquired": lease_acquired,
+                "request_headers": request_headers,
             }
         )
         return {"status": result_status, "event_id": event_id}
