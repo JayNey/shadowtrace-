@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
+from collections import defaultdict
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters._util import sanitize_raw_result
@@ -96,10 +98,24 @@ async def load_target_results_by_job_ids(
 ) -> dict[str, list[TargetExecutionResult]]:
     if not jobs:
         return {}
-    loaded: dict[str, list[TargetExecutionResult]] = {}
-    for job in jobs:
-        loaded[job.job_id] = await load_target_results_for_job(session, job.job_id, job.attempt)
-    return loaded
+    attempt_by_job = {job.job_id: int(job.attempt) for job in jobs}
+    job_ids = list(attempt_by_job)
+    rows = (
+        await session.scalars(
+            select(orm.ActionTargetResult)
+            .where(orm.ActionTargetResult.job_id.in_(job_ids))
+            .order_by(
+                orm.ActionTargetResult.job_id.asc(),
+                orm.ActionTargetResult.canonical_target.asc(),
+            )
+        )
+    ).all()
+    loaded: dict[str, list[TargetExecutionResult]] = defaultdict(list)
+    for row in rows:
+        if attempt_by_job.get(row.job_id) != int(row.attempt):
+            continue
+        loaded[row.job_id].append(target_result_from_row(row))
+    return {job_id: loaded.get(job_id, []) for job_id in job_ids}
 
 
 def job_from_row(
@@ -107,6 +123,7 @@ def job_from_row(
     *,
     target_results: list[TargetExecutionResult] | None = None,
 ) -> ActionExecutionJob:
+    resolved = target_results if target_results is not None else []
     return ActionExecutionJob(
         job_id=row.job_id,
         event_id=row.event_id,
@@ -126,7 +143,8 @@ def job_from_row(
         updated_at=row.updated_at,
         started_at=row.started_at,
         finished_at=row.finished_at,
-        target_results=target_results if target_results is not None else [],
+        target_results=resolved,
+        legacy_target_results=len(resolved) == 0,
     )
 
 
@@ -137,7 +155,7 @@ async def sync_target_results_in_tx(
     attempt: int,
     targets: list[TargetExecutionResult],
 ) -> bool:
-    """Replace rows for ``(job_id, attempt)``. Fail-closed on duplicate/conflict."""
+    """Insert rows for ``(job_id, attempt)``. Fail-closed on duplicate/conflict."""
 
     if not targets:
         return True
@@ -153,12 +171,6 @@ async def sync_target_results_in_tx(
             return True
         return False
 
-    await session.execute(
-        delete(orm.ActionTargetResult).where(
-            orm.ActionTargetResult.job_id == job_id,
-            orm.ActionTargetResult.attempt == attempt,
-        )
-    )
     for target in normalized:
         session.add(
             orm.ActionTargetResult(

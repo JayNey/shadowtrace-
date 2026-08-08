@@ -67,6 +67,8 @@ class ActionExecutionJob(BaseModel):
     poll_after_ms: int | None = None
     attempt: int = 0
     target_results: list[TargetExecutionResult] = Field(default_factory=list)
+    # True when no ActionTargetResult child rows exist for this attempt (ISSUE-272).
+    legacy_target_results: bool = False
     provider_code: str | None = None
     provider_message: str | None = None
     raw_result: dict[str, Any] = Field(default_factory=dict)

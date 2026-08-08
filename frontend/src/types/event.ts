@@ -719,6 +719,8 @@ export interface ExecutionJobResponse {
   status: string;
   attempt?: number;
   target_results?: Record<string, unknown>[];
+  /** True when no persisted ActionTargetResult rows exist for this attempt. */
+  legacy_target_results?: boolean;
 }
 
 export interface ConnectorPublic {

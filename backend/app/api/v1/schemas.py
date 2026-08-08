@@ -519,6 +519,8 @@ class ExecutionJobResponse(BaseModel):
     status: str
     attempt: int = 0
     target_results: list[dict[str, Any]] = Field(default_factory=list)
+    # ISSUE-272: historical jobs with no persisted child rows stay empty (not invented).
+    legacy_target_results: bool = False
 
 
 class TaskResponse(BaseModel):

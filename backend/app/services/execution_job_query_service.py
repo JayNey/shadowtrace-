@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 DEMO_EXECUTION_JOB_ID = "job-0a1b2c3d"
 # Matches ``example_security_event`` creation_source_ref.source_tenant_id.
 DEMO_FIXTURE_TENANT_ID = "t1"
-_SAFE_TARGET_KEYS = frozenset({"canonical_target", "status", "code", "message"})
 
 
 def assert_execution_job_tenant_access(principal: Principal, tenant_id: str) -> None:
@@ -69,48 +68,16 @@ def _safe_target_dict(row: orm.ActionTargetResult) -> dict[str, Any]:
     return payload
 
 
-def _targets_from_embedded_raw(raw_result: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Best-effort target extraction from persisted raw_result without leaking secrets."""
-    if not isinstance(raw_result, dict):
-        return []
-    embedded = raw_result.get("target_results")
-    if not isinstance(embedded, list):
-        return []
-    projected: list[dict[str, Any]] = []
-    for item in embedded:
-        if not isinstance(item, dict):
-            continue
-        safe = {key: item[key] for key in _SAFE_TARGET_KEYS if key in item}
-        canonical = safe.get("canonical_target")
-        status = safe.get("status")
-        if not isinstance(canonical, str) or not isinstance(status, str):
-            continue
-        if "code" in safe:
-            safe_code = _safe_code_or_message(str(safe["code"]))
-            if safe_code:
-                safe["code"] = safe_code
-            else:
-                safe.pop("code", None)
-        if "message" in safe:
-            safe_message = _safe_code_or_message(str(safe["message"]))
-            if safe_message:
-                safe["message"] = safe_message
-            else:
-                safe.pop("message", None)
-        projected.append(safe)
-    return projected
-
-
 def project_execution_job_response(
     job_row: orm.ActionExecutionJob,
     target_rows: list[orm.ActionTargetResult],
 ) -> api_schemas.ExecutionJobResponse:
-    """Build the public execution-job contract without provider internals."""
-    if target_rows:
-        target_results = [_safe_target_dict(row) for row in target_rows]
-    else:
-        target_results = _targets_from_embedded_raw(job_row.raw_result)
+    """Build the public execution-job contract without provider internals.
 
+    Missing child rows stay empty and are marked ``legacy_target_results`` —
+    never invented from job.raw_result / summary (ISSUE-272).
+    """
+    target_results = [_safe_target_dict(row) for row in target_rows]
     return api_schemas.ExecutionJobResponse(
         job_id=job_row.job_id,
         event_id=job_row.event_id,
@@ -118,6 +85,7 @@ def project_execution_job_response(
         status=job_row.status,
         attempt=job_row.attempt,
         target_results=target_results,
+        legacy_target_results=len(target_results) == 0,
     )
 
 
@@ -135,6 +103,7 @@ def demo_execution_job_response(job_id: str) -> api_schemas.ExecutionJobResponse
             {"canonical_target": "ip:203.0.113.9", "status": "success"},
             {"canonical_target": "ip:203.0.113.10", "status": "failed"},
         ],
+        legacy_target_results=False,
     )
 
 
@@ -228,8 +197,11 @@ class ExecutionJobQueryService:
                     target_rows = list(
                         await session.scalars(
                             select(orm.ActionTargetResult)
-                            .where(orm.ActionTargetResult.job_id == job_id)
-                            .order_by(orm.ActionTargetResult.id.asc())
+                            .where(
+                                orm.ActionTargetResult.job_id == job_id,
+                                orm.ActionTargetResult.attempt == int(job_row.attempt),
+                            )
+                            .order_by(orm.ActionTargetResult.canonical_target.asc())
                         )
                     )
                     return project_execution_job_response(job_row, target_rows)

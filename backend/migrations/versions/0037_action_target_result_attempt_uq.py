@@ -1,10 +1,11 @@
 """Add attempt + unique business key on action_target_result (ISSUE-272).
 
-Revision ID: 0036_action_target_result_attempt_uq
-Revises: 0035_llm_call_log_error_fields
+Revision ID: 0037_action_target_result_attempt_uq
+Revises: 0036_evidence_raw_data_sanitize
 Create Date: 2026-08-08 00:00:00.000000+00:00
 
 Stable idempotent upsert key: (job_id, canonical_target, attempt).
+Chained after ISSUE-269 sanitize migration to keep a single Alembic head.
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0036_action_target_result_attempt_uq"
-down_revision = "0035_llm_call_log_error_fields"
+revision = "0037_action_target_result_attempt_uq"
+down_revision = "0036_evidence_raw_data_sanitize"
 branch_labels = None
 depends_on = None
 
