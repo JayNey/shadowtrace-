@@ -1752,6 +1752,7 @@ class DispositionSyncService:
         prior_head.updated_at = now
         validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
         prior_head.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+        record_writeback_dead_letter(adapter=self._adapter_label(prior_head))
 
     def _block_superseded_outbox(
         self,
@@ -1799,6 +1800,7 @@ class DispositionSyncService:
                 orm.DispositionOutbox.logical_slot == outbox.logical_slot,
                 orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
             )
+            .order_by(orm.DispositionOutbox.created_at.desc())
             .limit(1)
         )
         return active_head_id == outbox.disposition_id

@@ -282,6 +282,208 @@ async def test_enqueue_idempotent_replay_returns_existing_head() -> None:
 
 
 @pytest.mark.asyncio
+async def test_finalize_superseded_head_records_dead_letter_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-273: finalize must emit writeback dead-letter metric for undelivered heads."""
+    from datetime import UTC, datetime
+
+    from app.services import disposition_sync_service as mod
+
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        mod,
+        "record_writeback_dead_letter",
+        lambda *, adapter: recorded.append(adapter),
+    )
+    prior = _prior_head()
+    prior.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
+    prior.locked_by = "worker-x"
+    service = _service()
+    service._resolve_adapter = lambda _outbox: SimpleNamespace(name="mock_xdr")  # type: ignore[method-assign]
+
+    service._finalize_superseded_head(
+        prior,
+        superseded_by_disposition_id="disp-new",
+        now=datetime.now(UTC),
+    )
+
+    assert prior.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+    assert prior.last_error_code == "superseded_by_new_head"
+    assert prior.locked_by is None
+    assert recorded == ["mock_xdr"]
+
+
+@pytest.mark.asyncio
+async def test_block_superseded_outbox_terminates_ready_and_leased(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-273: pre-egress block must DEAD_LETTER READY and LEASED superseded rows."""
+    from datetime import UTC, datetime
+
+    from app.services import disposition_sync_service as mod
+
+    recorded: list[str] = []
+    monkeypatch.setattr(
+        mod,
+        "record_writeback_dead_letter",
+        lambda *, adapter: recorded.append(adapter),
+    )
+    service = _service()
+    service._resolve_adapter = lambda _outbox: SimpleNamespace(name="mock_xdr")  # type: ignore[method-assign]
+    now = datetime.now(UTC)
+
+    ready = _prior_head("disp-ready")
+    ready.outbox_id = "ob-ready"
+    ready.superseded_by_disposition_id = "disp-new"
+    ready.delivery_status = OutboxDeliveryStatus.READY.value
+    assert service._block_superseded_outbox(ready, now=now) is OutboxDeliveryStatus.DEAD_LETTER
+    assert ready.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+
+    leased = _prior_head("disp-leased")
+    leased.outbox_id = "ob-leased"
+    leased.superseded_by_disposition_id = "disp-new"
+    leased.delivery_status = OutboxDeliveryStatus.LEASED.value
+    leased.locked_by = "worker-1"
+    assert service._block_superseded_outbox(leased, now=now) is OutboxDeliveryStatus.DEAD_LETTER
+    assert leased.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+    assert leased.locked_by is None
+    assert recorded == ["mock_xdr", "mock_xdr"]
+
+
+@pytest.mark.asyncio
+async def test_assert_active_head_for_delivery_rejects_stale_head() -> None:
+    """ISSUE-273: active-head CAS fails when another disposition is the live head."""
+    outbox = _prior_head("disp-stale")
+    command = _command(
+        intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE,
+        disposition_id="disp-stale",
+    )
+    session = SimpleNamespace(scalar=AsyncMock(return_value="disp-new"))
+    service = _service()
+
+    assert await service._assert_active_head_for_delivery(session, outbox, command) is False
+    session.scalar.assert_awaited_once()
+    stmt = session.scalar.await_args.args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": False}))
+    assert "ORDER BY" in compiled.upper()
+
+
+@pytest.mark.asyncio
+async def test_claim_batch_skips_superseded_rows_even_if_returned() -> None:
+    """ISSUE-273: claim loop must skip superseded rows (defense in depth vs SQL filter)."""
+    from datetime import UTC, datetime
+
+    from app.services.disposition_sync_service import OutboxWorker
+
+    superseded = _prior_head("disp-old")
+    superseded.outbox_id = "ob-superseded"
+    superseded.superseded_by_disposition_id = "disp-new"
+    superseded.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
+    superseded.next_retry_at = datetime.now(UTC)
+
+    active = _prior_head("disp-active")
+    active.outbox_id = "ob-active"
+    active.superseded_by_disposition_id = None
+    active.delivery_status = OutboxDeliveryStatus.READY.value
+    active.next_retry_at = None
+    active.created_at = datetime.now(UTC)
+
+    class _Scalars:
+        def all(self) -> list[orm.DispositionOutbox]:
+            return [superseded, active]
+
+    class _ClaimSession:
+        def begin(self) -> _ClaimSession:
+            return self
+
+        async def __aenter__(self) -> _ClaimSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def scalars(self, stmt: Any) -> _Scalars:
+            return _Scalars()
+
+        async def get(self, *args: Any, **kwargs: Any) -> None:
+            return None
+
+    class _Factory:
+        def __call__(self) -> _ClaimSession:
+            return _ClaimSession()
+
+    service = _service()
+    service._session_factory = _Factory()  # type: ignore[assignment]
+    worker = OutboxWorker(service)
+
+    claimed = await worker._claim_batch(limit=10)
+    assert claimed == ["ob-active"]
+    assert active.delivery_status == OutboxDeliveryStatus.LEASED.value
+    assert superseded.delivery_status == OutboxDeliveryStatus.WAITING_RETRY.value
+
+
+@pytest.mark.asyncio
+async def test_deliver_after_supersede_never_calls_adapter_submit() -> None:
+    """ISSUE-273: claim→supersede→deliver race must yield zero provider submits."""
+    from datetime import UTC, datetime
+
+    outbox = _prior_head("disp-old")
+    outbox.outbox_id = "ob-raced"
+    outbox.delivery_status = OutboxDeliveryStatus.LEASED.value
+    outbox.locked_by = "worker-test"
+    outbox.superseded_by_disposition_id = None
+    # Simulate concurrent supersede after claim: lineage written, status still LEASED.
+    outbox.superseded_by_disposition_id = "disp-new"
+
+    submit_calls = 0
+
+    class _Adapter:
+        name = "mock_xdr"
+
+        async def submit(self, *args: Any, **kwargs: Any) -> Any:
+            nonlocal submit_calls
+            submit_calls += 1
+            raise AssertionError("adapter.submit must not run for superseded outbox")
+
+    class _DeliverSession:
+        def begin(self) -> _DeliverSession:
+            return self
+
+        async def __aenter__(self) -> _DeliverSession:
+            return self
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+        async def scalar(self, stmt: Any) -> orm.DispositionOutbox:
+            return outbox
+
+        async def get(self, *args: Any, **kwargs: Any) -> Any:
+            raise AssertionError("action lock must not run after superseded early return")
+
+    class _Factory:
+        def __call__(self) -> _DeliverSession:
+            return _DeliverSession()
+
+    service = DispositionSyncService(
+        session_factory=_Factory(),  # type: ignore[arg-type]
+        context_store=AsyncMock(),  # type: ignore[arg-type]
+        adapter_registry=SimpleNamespace(get=lambda _name: _Adapter()),  # type: ignore[arg-type]
+        outbound_guard=AsyncMock(),  # type: ignore[arg-type]
+    )
+    service._worker_id = "worker-test"
+    service._resolve_adapter = lambda _o: _Adapter()  # type: ignore[method-assign]
+
+    await service._deliver_outbox("ob-raced")
+
+    assert submit_calls == 0
+    assert outbox.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+    assert outbox.last_error_code == "superseded_by_new_head"
+    assert outbox.locked_by is None
+
+
+@pytest.mark.asyncio
 async def test_enqueue_command_resolves_approved_action_ids_for_guard() -> None:
     """ISSUE-224: enqueue_command must pass a real approved set to the guard."""
     from app.core.guardrails import OutboundDispositionGuard
