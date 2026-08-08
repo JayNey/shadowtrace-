@@ -33,6 +33,7 @@ from app.models.enums import (
 from app.models.report import InvestigationReport
 from app.models.security_event import EventSummary
 from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
+from app.services.context_service import SetResult
 
 EVENT_ID = "evt-mem-pipeline-0001"
 
@@ -74,6 +75,17 @@ class _ContextStore:
 
     async def get(self, event_id: str, key: str) -> Any:
         return getattr(self.context, key, None)
+
+    async def set(
+        self,
+        event_id: str,
+        key: str,
+        value: Any,
+        version: int | None = None,
+    ) -> SetResult:
+        del event_id, version
+        setattr(self.context, key, value)
+        return SetResult(redis_ok=True, version=1)
 
 
 class _MemoryAgent:

@@ -357,6 +357,127 @@ async def test_refresh_closed_snapshot_from_journal_without_redis(
 
 
 @pytest.mark.asyncio
+async def test_refresh_closed_snapshot_preserves_monotonic_analysis_completion(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """ISSUE-266: a stale/absent journal value cannot erase snapshot true."""
+    event_id = await _seed_event(
+        session_factory,
+        status="closed",
+        snapshot={"analysis_only_complete": True},
+    )
+    await store.init_context(event_id, _summary(event_id, status=EventStatus.CLOSED))
+
+    refreshed = await store.refresh_closed_snapshot(event_id)
+
+    assert refreshed.analysis_only_complete is True
+    assert await store.get(event_id, "analysis_only_complete") is True
+    journal_value, _ = await store.get_versioned_field(
+        event_id,
+        "analysis_only_complete",
+    )
+    assert journal_value is True
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot["analysis_only_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_complete_atomic_write_rejects_stale_false(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory)
+    await store.init_context(event_id, _summary(event_id))
+
+    first = await store.set(event_id, "analysis_only_complete", True)
+    stale = await store.set(event_id, "analysis_only_complete", False)
+    stale_cas = await store.compare_and_set(
+        event_id,
+        "analysis_only_complete",
+        first.version,
+        False,
+    )
+    stale_true_cas = await store.compare_and_set(
+        event_id,
+        "analysis_only_complete",
+        0,
+        True,
+    )
+    value, version = await store.get_versioned_field(
+        event_id,
+        "analysis_only_complete",
+    )
+
+    assert value is True
+    assert version == first.version
+    assert stale.version == first.version
+    assert stale_cas is False
+    assert stale_true_cas is False
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot["analysis_only_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_complete_redis_failure_keeps_durable_truth(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(session_factory, status="closed")
+    await store.init_context(event_id, _summary(event_id, status=EventStatus.CLOSED))
+
+    with patch.object(
+        store,
+        "_redis_set_fields",
+        new_callable=AsyncMock,
+        return_value=False,
+    ):
+        result = await store.set(event_id, "analysis_only_complete", True)
+
+    assert result.redis_ok is False
+    with patch.object(store._redis, "ping", new_callable=AsyncMock, return_value=False):
+        rebuilt = await store.rebuild_context(event_id)
+    assert rebuilt.analysis_only_complete is True
+
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot["analysis_only_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_concurrent_closed_refresh_cannot_overwrite_analysis_completion(
+    store: EventContextStore,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_event(
+        session_factory,
+        status="closed",
+        snapshot={"analysis_only_complete": False},
+    )
+    await store.init_context(event_id, _summary(event_id, status=EventStatus.CLOSED))
+
+    await asyncio.gather(
+        store.refresh_closed_snapshot(event_id),
+        store.set(event_id, "analysis_only_complete", True),
+    )
+
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot["analysis_only_complete"] is True
+    assert await store.get(event_id, "analysis_only_complete") is True
+
+
+@pytest.mark.asyncio
 async def test_rebuild_merges_late_writeback_receipt(
     store: EventContextStore,
     session_factory: async_sessionmaker[AsyncSession],

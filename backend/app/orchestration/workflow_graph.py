@@ -892,7 +892,7 @@ def build_investigation_graph(
         degraded = services.get("degraded_flags")
 
         async def _persist_analysis_only_complete_flag() -> None:
-            if not defer_response:
+            if not defer_response or store is None:
                 return
             await persist_analysis_only_complete_authoritative(
                 event_id,
@@ -962,9 +962,7 @@ def build_investigation_graph(
                     )
             if snapshot_svc is not None:
                 try:
-                    await snapshot_svc.merge_report_generated_context_snapshot(
-                        event_id, False
-                    )
+                    await snapshot_svc.merge_report_generated_context_snapshot(event_id, False)
                 except Exception:
                     logger.warning(
                         "failed to merge report_generated=false snapshot event=%s",

@@ -432,6 +432,10 @@ class EventContextStore:
     ) -> SetResult:
         if key not in CONTEXT_FIELD_NAMES:
             raise KeyError(f"unknown EventContext field: {key!r}")
+        if key == "analysis_only_complete":
+            if not isinstance(value, bool):
+                raise TypeError("analysis_only_complete must be a boolean")
+            return await self.set_analysis_only_complete(event_id, value)
 
         stored = _journal_value(value)
         async with self._session_factory() as session:
@@ -457,6 +461,123 @@ class EventContextStore:
             self._degraded_cache_ts[event_id] = time.monotonic()
 
         return SetResult(redis_ok=redis_ok, version=new_version)
+
+    async def set_analysis_only_complete(
+        self,
+        event_id: str,
+        complete: bool = True,
+    ) -> SetResult:
+        result = await self._set_analysis_only_complete(
+            event_id,
+            complete,
+            expected_version=None,
+        )
+        assert result is not None  # no version precondition was supplied
+        return result
+
+    async def _set_analysis_only_complete(
+        self,
+        event_id: str,
+        complete: bool,
+        *,
+        expected_version: int | None,
+    ) -> SetResult | None:
+        """Atomically persist the monotonic completion marker and ORM snapshot.
+
+        The SecurityEvent row lock serializes all writes for this field. Once either
+        the journal or snapshot records ``true``, a stale ``false`` request heals to
+        ``true`` instead of allocating a downgrading journal version.
+        """
+        if not isinstance(complete, bool):
+            raise TypeError("analysis_only_complete must be a boolean")
+
+        from app.services.event_context_snapshot_projection import (
+            merge_analysis_only_complete_into_snapshot,
+        )
+
+        async with self._session_factory() as session:
+            async with session.begin():
+                event_row = await session.get(
+                    orm.SecurityEvent,
+                    event_id,
+                    with_for_update=True,
+                )
+                if event_row is None:
+                    raise KeyError(f"security_event not found: {event_id}")
+
+                version_row = await session.get(
+                    orm.EventContextFieldVersion,
+                    (event_id, "analysis_only_complete"),
+                    with_for_update=True,
+                )
+                current_version = int(version_row.current_version) if version_row is not None else 0
+                if expected_version is not None and current_version != expected_version:
+                    return None
+                current_value: Any = None
+                if current_version > 0:
+                    raw_current = await session.scalar(
+                        select(orm.EventContextJournal.value).where(
+                            orm.EventContextJournal.event_id == event_id,
+                            orm.EventContextJournal.field_name == "analysis_only_complete",
+                            orm.EventContextJournal.version == current_version,
+                        )
+                    )
+                    current_value = self._unwrap_journal_value(raw_current)
+
+                snapshot = (
+                    dict(event_row.event_context_snapshot)
+                    if isinstance(event_row.event_context_snapshot, dict)
+                    else {}
+                )
+                effective = (
+                    current_value is True
+                    or snapshot.get("analysis_only_complete") is True
+                    or complete
+                )
+
+                if current_value != effective:
+                    current_version = await self._upsert_version(
+                        session,
+                        event_id,
+                        "analysis_only_complete",
+                    )
+                    await self._insert_journal(
+                        session,
+                        event_id,
+                        "analysis_only_complete",
+                        effective,
+                        current_version,
+                    )
+
+                event_row.event_context_snapshot = merge_analysis_only_complete_into_snapshot(
+                    snapshot, effective
+                )
+                await session.flush()
+
+        redis_ok = await self._redis_set_fields(
+            event_id,
+            {
+                "analysis_only_complete": effective,
+                version_field("analysis_only_complete"): current_version,
+            },
+            log_entry={
+                "op": "set_analysis_only_complete",
+                "field_name": "analysis_only_complete",
+                "version": current_version,
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+        )
+        if not redis_ok and event_id in self._degraded_cache:
+            current = self._degraded_cache[event_id]
+            self._degraded_cache[event_id] = EventContext.model_validate(
+                {
+                    **_context_as_dict(current),
+                    "analysis_only_complete": effective,
+                }
+            )
+            self._degraded_cache_ts[event_id] = time.monotonic()
+
+        return SetResult(redis_ok=redis_ok, version=current_version)
 
     async def get_full_context(self, event_id: str) -> EventContext:
         if await self._redis.ping():
@@ -489,6 +610,15 @@ class EventContextStore:
     ) -> bool:
         if key not in CONTEXT_FIELD_NAMES:
             raise KeyError(f"unknown EventContext field: {key!r}")
+        if key == "analysis_only_complete":
+            if value is not True:
+                return False
+            analysis_result = await self._set_analysis_only_complete(
+                event_id,
+                True,
+                expected_version=expected_version,
+            )
+            return analysis_result is not None
 
         stored = _journal_value(value)
         async with self._session_factory() as session:
@@ -633,11 +763,33 @@ class EventContextStore:
         """Rebuild snapshot from journal + security_event mirrors; no Redis required."""
         async with self._session_factory() as session:
             async with session.begin():
-                se = await session.get(orm.SecurityEvent, event_id)
+                se = await session.get(
+                    orm.SecurityEvent,
+                    event_id,
+                    with_for_update=True,
+                )
                 if se is None:
                     raise KeyError(f"security_event not found: {event_id}")
 
                 ctx = await self._rebuild_from_journal(session, event_id)
+                snapshot_complete = (
+                    (se.event_context_snapshot or {}).get("analysis_only_complete") is True
+                    if isinstance(se.event_context_snapshot, dict)
+                    else False
+                )
+                if snapshot_complete and not ctx.analysis_only_complete:
+                    version = await self._upsert_version(
+                        session,
+                        event_id,
+                        "analysis_only_complete",
+                    )
+                    await self._insert_journal(
+                        session,
+                        event_id,
+                        "analysis_only_complete",
+                        True,
+                        version,
+                    )
                 summary = event_summary_from_security_event(se)
                 flags = list(se.degraded_flags or [])
                 writeback = await self._merge_writeback_summary(session, se)
@@ -650,6 +802,8 @@ class EventContextStore:
                         "writeback_summary": writeback,
                     }
                 )
+                if snapshot_complete:
+                    merged["analysis_only_complete"] = True
                 ctx = EventContext.model_validate(merged)
                 snapshot = {k: _to_jsonable(v) for k, v in _context_as_dict(ctx).items()}
                 snapshot["event"] = summary.model_dump(mode="json")
@@ -657,7 +811,23 @@ class EventContextStore:
                     writeback.model_dump(mode="json") if writeback is not None else None
                 )
                 se.event_context_snapshot = snapshot
+                versions = await self._load_field_versions(session, event_id)
                 await session.flush()
+
+        redis_ok = await self._redis.ping()
+        if redis_ok:
+            mapping = self._context_to_redis_mapping(ctx, versions)
+            redis_ok = await self._redis_set_fields(
+                event_id,
+                mapping,
+                log_entry=None,
+                expire=False,
+            )
+        if redis_ok:
+            self._clear_degraded_cache(event_id)
+        else:
+            self._degraded_cache[event_id] = ctx
+            self._degraded_cache_ts[event_id] = time.monotonic()
 
         return ctx
 

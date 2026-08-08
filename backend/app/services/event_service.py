@@ -713,8 +713,12 @@ class EventService:
                     and "risk_assessment" not in snapshot
                 ):
                     snapshot["risk_assessment"] = raw["risk_assessment"]
-                if needs_flags and raw.get("analysis_only_complete") is not None:
-                    snapshot["analysis_only_complete"] = bool(raw["analysis_only_complete"])
+                if (
+                    needs_flags
+                    and raw.get("analysis_only_complete") is True
+                    and snapshot.get("analysis_only_complete") is not True
+                ):
+                    snapshot["analysis_only_complete"] = True
                 if needs_flags and raw.get("report_generated") is not None:
                     snapshot = merge_report_generated_into_snapshot(
                         snapshot, bool(raw["report_generated"])
@@ -740,8 +744,8 @@ class EventService:
 
         try:
             aoc = await self._store.get(event_id, "analysis_only_complete")
-            if aoc is not None and snapshot.get("analysis_only_complete") != bool(aoc):
-                snapshot["analysis_only_complete"] = bool(aoc)
+            if aoc is True and snapshot.get("analysis_only_complete") is not True:
+                snapshot["analysis_only_complete"] = True
         except Exception:
             logger.debug(
                 "overlay analysis_only_complete failed event_id=%s",

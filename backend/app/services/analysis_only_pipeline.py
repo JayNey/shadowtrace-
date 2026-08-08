@@ -519,6 +519,7 @@ class AnalysisOnlyPipeline:
                     disposition_policy="required",
                 )
 
+            await self._persist_analysis_only_complete(event_id)
             await self._transition(
                 event_id,
                 EventStatus.CLOSED,
@@ -536,7 +537,6 @@ class AnalysisOnlyPipeline:
                     default="analysis_pipeline:complete_not_required",
                 ),
             )
-            await self._persist_analysis_only_complete(event_id)
             # ISSUE-208: analysis-only auto-close — schedule full CLOSED
             # consolidation (history_case + fp_rule + profile).
             self._schedule_memory_after_close(event_id)
@@ -819,6 +819,8 @@ class AnalysisOnlyPipeline:
 
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
         await self._evaluate_quality_scores(event_id)
+        if self._context_store is None:
+            return
         await persist_analysis_only_complete_authoritative(
             event_id,
             context_store=self._context_store,

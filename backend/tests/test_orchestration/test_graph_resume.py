@@ -477,8 +477,12 @@ async def test_resume_reporting_without_graph_uses_report_only_not_full_restart(
         }.get(field)
     )
     context_store.set = AsyncMock()
+    context_store.set_analysis_only_complete = AsyncMock(
+        return_value=MagicMock(redis_ok=True, version=1)
+    )
     event_service = MagicMock()
     event_service.get_report = AsyncMock(return_value=None)
+    event_service.merge_analysis_only_complete_context_snapshot = AsyncMock()
 
     agent = MagicMock()
     agent._investigation_graph = None
@@ -508,7 +512,9 @@ async def test_resume_reporting_without_graph_uses_report_only_not_full_restart(
     report_agent.execute.assert_awaited_once()
     set_fields = {call.args[1] for call in context_store.set.await_args_list}
     assert "report_generated" in set_fields
-    assert "analysis_only_complete" in set_fields
+    assert "analysis_only_complete" not in set_fields
+    context_store.set_analysis_only_complete.assert_awaited_once_with("evt-247-report-only", True)
+    event_service.merge_analysis_only_complete_context_snapshot.assert_not_awaited()
 
 
 @pytest.mark.asyncio

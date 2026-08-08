@@ -1486,6 +1486,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         )
 
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
+        if self.context_store is None:
+            return
         degraded = getattr(self, "_degraded_flags", None)
         await persist_analysis_only_complete_authoritative(
             event_id,

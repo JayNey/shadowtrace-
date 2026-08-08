@@ -34,6 +34,9 @@ from app.orchestration.workflow_graph import (
     NODE_VERIFY,
     invoke_investigation_graph,
 )
+from app.services.analysis_only_complete_persistence import (
+    persist_analysis_only_complete_authoritative,
+)
 from app.services.evidence_projection import EvidenceProjection, bind_evidence_projection
 
 logger = logging.getLogger(__name__)
@@ -393,6 +396,16 @@ async def _resume_report_only_from_analysis(
             error_type="report_prerequisites_missing",
         )
 
+    async def _persist_analysis_completion() -> None:
+        await persist_analysis_only_complete_authoritative(
+            event_id,
+            context_store=context_store,
+            event_service=event_service,
+            degraded_flags=getattr(agent, "_degraded_flags", None),
+            writer="GraphResume",
+            refresh_closed_snapshot=False,
+        )
+
     evidence_raw = await context_store.get(event_id, "evidence_output")
     risk_raw = await context_store.get(event_id, "risk_assessment")
     if evidence_raw is None or risk_raw is None:
@@ -430,7 +443,7 @@ async def _resume_report_only_from_analysis(
             existing = await get_report(event_id)
         if existing is not None:
             await _persist_context_flag(context_store, event_id, "report_generated", True)
-            await _persist_context_flag(context_store, event_id, "analysis_only_complete", True)
+            await _persist_analysis_completion()
             logger.info(
                 "report-only resume: report already present event=%s; keeping REPORTING",
                 event_id,
@@ -463,7 +476,7 @@ async def _resume_report_only_from_analysis(
         )
 
     await _persist_context_flag(context_store, event_id, "report_generated", True)
-    await _persist_context_flag(context_store, event_id, "analysis_only_complete", True)
+    await _persist_analysis_completion()
     logger.info("report-only resume completed event=%s (status remains REPORTING)", event_id)
 
 

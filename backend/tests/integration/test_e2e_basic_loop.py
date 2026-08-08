@@ -307,6 +307,13 @@ async def test_golden_path_analysis_only_state_sequence(
 
     analysis_only_complete = await context_store.get(event_id, "analysis_only_complete")
     assert analysis_only_complete is True
+    assert event.event_context_snapshot is not None
+    assert event.event_context_snapshot.get("analysis_only_complete") is True
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot.get("analysis_only_complete") is True
 
     await _assert_report_persisted(session_factory, context_store, event_id)
     await _assert_observability(
@@ -403,6 +410,13 @@ async def test_low_risk_graph_mode_short_circuit_closed(
 
     analysis_only_complete = await context_store.get(event_id, "analysis_only_complete")
     assert analysis_only_complete is True
+    assert event.event_context_snapshot is not None
+    assert event.event_context_snapshot.get("analysis_only_complete") is True
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.event_context_snapshot is not None
+        assert row.event_context_snapshot.get("analysis_only_complete") is True
 
     await _assert_report_persisted(session_factory, context_store, event_id)
     await _assert_observability(

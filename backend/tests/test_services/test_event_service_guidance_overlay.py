@@ -8,13 +8,16 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from app.db import models as orm
+from app.models.context import EventContext
 from app.models.enums import (
     DispositionPolicy,
     EventStatus,
     EventType,
     FinalVerdict,
     Severity,
+    WritebackReadiness,
 )
+from app.models.security_event import EventSummary
 from app.services.event_service import EventService
 
 
@@ -89,6 +92,58 @@ async def test_get_event_overlays_analysis_only_complete_from_context_store() ->
     assert event.event_context_snapshot is not None
     assert event.event_context_snapshot.get("analysis_only_complete") is True
     service._store.get.assert_any_await(event_id, "analysis_only_complete")
+
+
+@pytest.mark.asyncio
+async def test_get_event_never_downgrades_analysis_only_complete_from_snapshot() -> None:
+    """ISSUE-266: stale journal false cannot overwrite durable snapshot true."""
+    event_id = "evt-overlay-266-monotonic"
+    row = _reporting_row(
+        event_id,
+        snapshot={"analysis_only_complete": True},
+    )
+    service = _service_with_row(row, store_values={"analysis_only_complete": False})
+
+    event = await service.get_event(event_id)
+
+    assert event is not None
+    assert event.event_context_snapshot is not None
+    assert event.event_context_snapshot.get("analysis_only_complete") is True
+
+
+@pytest.mark.asyncio
+async def test_get_event_hydration_never_downgrades_analysis_completion() -> None:
+    """Partial snapshot hydration must preserve monotonic durable true."""
+    event_id = "evt-overlay-266-hydration"
+    row = _reporting_row(
+        event_id,
+        snapshot={"analysis_only_complete": True},
+    )
+    service = _service_with_row(row, store_values={"analysis_only_complete": False})
+    service._store.get_full_context = AsyncMock(
+        return_value=EventContext(
+            event=EventSummary(
+                event_id=event_id,
+                event_type=EventType.MALICIOUS_PROCESS,
+                title="overlay test",
+                status=EventStatus.REPORTING,
+                severity=Severity.HIGH,
+                final_verdict=FinalVerdict.NONE,
+                risk_score=0,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.REQUIRED,
+            ),
+            analysis_only_complete=False,
+            report_generated=False,
+        )
+    )
+
+    event = await service.get_event(event_id)
+
+    assert event is not None
+    assert event.event_context_snapshot is not None
+    assert event.event_context_snapshot.get("analysis_only_complete") is True
 
 
 @pytest.mark.asyncio

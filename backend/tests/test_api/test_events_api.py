@@ -1561,6 +1561,8 @@ async def test_investigate_http_low_risk_polls_to_closed(
 
     detail = await _poll_event_status(client, event_id, "closed")
     assert detail["event"]["status"] == "closed"
+    assert detail["analysis_only_complete"] is True
+    assert detail["response_phase_state"] == "complete"
 
     report_resp = client.get(f"/api/v1/events/{event_id}/report", headers=_hdr())
     assert report_resp.status_code == 200
@@ -2536,6 +2538,13 @@ async def test_full_analysis_pipeline_happy_path(
     event = await event_service.get_event(event_id)
     assert event is not None
     assert event.status == EventStatus.CLOSED
+    assert event.event_context_snapshot is not None
+    assert event.event_context_snapshot["analysis_only_complete"] is True
+
+    detail = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert detail.status_code == 200
+    assert detail.json()["analysis_only_complete"] is True
+    assert detail.json()["response_phase_state"] == "complete"
 
 
 @pytest.mark.asyncio
