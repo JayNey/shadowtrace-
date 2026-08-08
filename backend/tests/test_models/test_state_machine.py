@@ -697,6 +697,12 @@ def test_job_and_outbox_and_writeback_edges() -> None:
             OutboxDeliveryStatus.LEASED,
             lease_expired_resend=True,
         )
+    with pytest.raises(InvalidStateTransitionError, match="WAITING_RETRY"):
+        validate_outbox_delivery_transition(
+            OutboxDeliveryStatus.LEASED,
+            OutboxDeliveryStatus.WAITING_RETRY,
+            lease_expired_resend=True,
+        )
 
     validate_writeback_status_transition(WritebackStatus.PENDING, WritebackStatus.SENDING)
     assert (

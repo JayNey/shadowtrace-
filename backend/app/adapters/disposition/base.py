@@ -42,6 +42,11 @@ class BaseDispositionAdapter(ABC):
     def capabilities(self) -> DispositionAdapterCapabilities:
         """Declare intent/operation capability and lookup/status support."""
 
+    def allows_safe_retry(self) -> bool:
+        """True when idempotent submit + lookup can safely re-enqueue after never-accepted."""
+        caps = self.capabilities()
+        return caps.supports_idempotency and caps.supports_lookup_by_idempotency
+
     @abstractmethod
     def validate_command(self, command: DispositionCommand) -> None:
         """Raise on allowlist / policy violations before submit."""

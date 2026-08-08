@@ -1174,11 +1174,12 @@ def validate_outbox_delivery_transition(
     lease_expired_resend: bool = False,
 ) -> None:
     if lease_expired_resend and current is OutboxDeliveryStatus.LEASED:
-        # Expired lease must PAUSE + lookup first — never direct re-send.
-        if target is OutboxDeliveryStatus.LEASED:
+        # Expired lease must PAUSE + lookup first — never direct re-send or
+        # two-hop bypass via WAITING_RETRY → LEASED.
+        if target in (OutboxDeliveryStatus.LEASED, OutboxDeliveryStatus.WAITING_RETRY):
             raise InvalidStateTransitionError(
                 "expired outbox lease must transition to PAUSED and lookup; "
-                "cannot re-LEASED / re-send directly",
+                "cannot re-LEASED / WAITING_RETRY / re-send directly",
                 current=current,
                 target=target,
             )

@@ -142,10 +142,15 @@ async def store(
 
 
 @pytest_asyncio.fixture
-async def mock_xdr_client() -> AsyncIterator[httpx.AsyncClient]:
+async def mock_xdr_state() -> MockXDRState:
     state = MockXDRState()
     state.load_scenario(build_scenario("insider_data_exfiltration", seed=42))
-    app = create_app(state=state)
+    return state
+
+
+@pytest_asyncio.fixture
+async def mock_xdr_client(mock_xdr_state: MockXDRState) -> AsyncIterator[httpx.AsyncClient]:
+    app = create_app(state=mock_xdr_state)
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport,
@@ -839,15 +844,13 @@ async def test_outbound_guard_blocks_non_allowlisted_field(
 
 
 @pytest.mark.asyncio
-async def test_expired_lease_outbox_reclaimed(
+async def test_expired_lease_outbox_paused_not_waiting_retry(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,
     cleanup: None,
 ) -> None:
-    from datetime import timedelta
-
-    from app.models.enums import OutboxDeliveryStatus
+    """ISSUE-260: expired LEASED must PAUSE (lookup-first), not WAITING_RETRY."""
     from app.services.disposition_sync_service import OutboxWorker
 
     (
@@ -859,7 +862,183 @@ async def test_expired_lease_outbox_reclaimed(
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
     sync = _sync_service(session_factory, store, mock_xdr_client)
     outbox_id = f"obx-{_sfx()}"
+    idem = f"idem-{_sfx()}"
     expired = datetime.now(UTC) - timedelta(minutes=5)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=idem,
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                        "idempotency_key": idem,
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.LEASED.value,
+                    locked_by="stale-worker",
+                    locked_at=expired,
+                    lease_expires_at=expired,
+                )
+            )
+    worker = OutboxWorker(sync)
+    claimed = await worker.run_once(limit=1)
+    assert claimed == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.attempt == 0
+        assert row.next_retry_at is None
+        assert row.last_error_code == "lease_expired"
+
+
+@pytest.mark.asyncio
+async def test_expired_lease_lookup_reconciles_without_resubmit(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    mock_xdr_state: MockXDRState,
+    cleanup: None,
+) -> None:
+    """ISSUE-260 fault injection: provider accepted, crash before receipt → lookup补 receipt."""
+    from app.services.disposition_sync_service import OutboxWorker
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-crash",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": f"idem-crash-{_sfx()}",
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    adapter = MockXDRDispositionAdapter(
+        client=mock_xdr_client,
+        read_token="mock-read-token",
+        write_token="mock-write-token",
+    )
+    submit_before = len(mock_xdr_state.disposition_by_id)
+    await adapter.submit(command)
+    assert len(mock_xdr_state.disposition_by_id) == submit_before + 1
+
+    outbox_id = f"obx-{_sfx()}"
+    expired = datetime.now(UTC) - timedelta(minutes=5)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=command.disposition_id,
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=command.idempotency_key,
+                    command_payload=command.model_dump(mode="json"),
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.LEASED.value,
+                    locked_by="stale-worker",
+                    locked_at=expired,
+                    lease_expires_at=expired,
+                )
+            )
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+
+    assert await worker.run_once(limit=1) == 0
+    assert len(mock_xdr_state.disposition_by_id) == submit_before + 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+        assert row.latest_writeback_status in {
+            WritebackStatus.ACCEPTED.value,
+            WritebackStatus.CONFIRMED.value,
+        }
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert len(receipts) >= 1
+
+
+@pytest.mark.asyncio
+async def test_paused_outbox_not_claimed_before_lookup(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-260: PAUSED outbox cannot be claimed/delivered before reconciliation."""
+    from app.services.disposition_sync_service import OutboxWorker
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
     async with session_factory() as session:
         async with session.begin():
             session.add(
@@ -882,31 +1061,77 @@ async def test_expired_lease_outbox_reclaimed(
                         ),
                     },
                     command_payload_sha256="deadbeef",
-                    delivery_status=OutboxDeliveryStatus.LEASED.value,
-                    locked_by="stale-worker",
-                    locked_at=expired,
-                    lease_expires_at=expired,
+                    delivery_status=OutboxDeliveryStatus.PAUSED.value,
+                    latest_writeback_status=WritebackStatus.UNKNOWN.value,
+                    last_error_code="lease_expired",
                 )
             )
     worker = OutboxWorker(sync)
-    claimed = await worker.run_once(limit=1)
-    assert claimed == 0
+    assert await worker.run_once(limit=1) == 0
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
-        assert row.delivery_status == OutboxDeliveryStatus.WAITING_RETRY.value
-        assert row.attempt == 0
-        assert row.next_retry_at is not None
-        assert row.next_retry_at > datetime.now(UTC)
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
 
+
+@pytest.mark.asyncio
+async def test_lookup_never_accepted_safe_retry_re_enqueues(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-260: lookup 404 + safe-retry adapter re-enqueues; otherwise stays PAUSED."""
+    from app.services.disposition_sync_service import OutboxWorker
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    idem = f"idem-never-{_sfx()}"
     async with session_factory() as session:
         async with session.begin():
-            row = await session.get(orm.DispositionOutbox, outbox_id, with_for_update=True)
-            assert row is not None
-            row.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=idem,
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                        "idempotency_key": idem,
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.PAUSED.value,
+                    latest_writeback_status=WritebackStatus.UNKNOWN.value,
+                    last_error_code="lease_expired",
+                )
+            )
+    worker = OutboxWorker(sync)
+    assert await sync.reconcile_paused_outboxes(limit=1) == 1
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.READY.value
+        assert row.latest_writeback_status == WritebackStatus.PENDING.value
+        assert row.last_error_code == "lookup_never_accepted"
 
-    claimed = await worker.run_once(limit=1)
-    assert claimed == 1
+    assert await worker.run_once(limit=1) == 1
     async with session_factory() as session:
         row = await session.get(orm.DispositionOutbox, outbox_id)
         assert row is not None
