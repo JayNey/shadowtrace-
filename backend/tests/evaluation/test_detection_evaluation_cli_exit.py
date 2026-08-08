@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from scripts.run_detection_evaluation import cli_exit_code
 
@@ -106,19 +108,44 @@ def test_cli_exit_code_observe_mode_allows_non_completed_with_gate_pass() -> Non
     )
 
 
-@pytest.mark.evaluation
-def test_ci_required_detection_step_omits_allow_gate_fail_bypass() -> None:
+def test_shipped_failing_baseline_is_nonzero_only_in_required_mode() -> None:
     repo_root = Path(__file__).resolve().parents[3]
-    ci_yaml = (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    required_marker = "Run mock detection evaluation (required gate)"
-    observe_marker = "--allow-gate-fail"
+    baseline = json.loads(
+        (
+            repo_root / "data" / "evaluation" / "detection_shadow_v1" / "baseline_artifact.json"
+        ).read_text(encoding="utf-8")
+    )
+    inputs = {
+        "artifact_status": baseline["status"],
+        "gate_verdict": baseline["gate"]["verdict"],
+        "baseline_compare_failed": False,
+        "required_scorer_error_count": baseline["aggregates"]["required_scorer_error_count"],
+    }
 
-    start = ci_yaml.index(required_marker)
-    next_frontend = ci_yaml.index("  frontend-build:", start)
-    required_block = ci_yaml[start:next_frontend]
+    assert cli_exit_code(**inputs, allow_gate_fail=False) == 1
+    assert cli_exit_code(**inputs, allow_gate_fail=True) == 0
 
-    assert observe_marker not in required_block
-    assert "if: always()" in ci_yaml.split("Upload evaluation artifact", 1)[1]
+
+@pytest.mark.evaluation
+def test_ci_required_detection_step_and_artifact_upload_are_strict() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    workflow = yaml.safe_load(
+        (repo_root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["backend-evaluation"]["steps"]
+    by_name = {step.get("name"): step for step in steps if step.get("name")}
+
+    required = by_name["Run mock detection evaluation (required gate)"]
+    assert "continue-on-error" not in required
+    for bypass in ("--allow-gate-fail", "|| true", "|| :", "set +e"):
+        assert bypass not in required["run"]
+
+    detection_upload = by_name["Upload required detection artifact"]
+    assert detection_upload["if"] == "always()"
+    assert detection_upload["with"]["if-no-files-found"] == "error"
+    assert detection_upload["with"]["path"].strip() == (
+        "artifacts/evaluation/detection_ci_run.json"
+    )
 
 
 @pytest.mark.evaluation
@@ -143,8 +170,49 @@ def test_format_evaluation_summary_includes_gate_and_policy() -> None:
         aggregates=SimpleNamespace(pass_rate=0.66, required_scorer_error_count=2),
         artifact_hash="abc123",
     )
-    summary = format_evaluation_summary(artifact=artifact, threshold_path=threshold_path)
+    summary = format_evaluation_summary(
+        artifact=artifact,
+        threshold_path=threshold_path,
+        baseline_compare="failed",
+        baseline_drift_count=3,
+    )
     assert "**status**: `failed`" in summary
     assert "**gate_verdict**: `fail_closed`" in summary
     assert "**required_gate** (manifest): `True`" in summary
+    assert "**execution_mode**: `required`" in summary
+    assert "**baseline_compare**: `failed`" in summary
+    assert "**baseline_drift_count**: `3`" in summary
     assert "pass_rate below manifest minimum" in summary
+
+
+@pytest.mark.evaluation
+def test_write_evaluation_summary_preserves_drift_failure_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from scripts.run_detection_evaluation import write_evaluation_summary
+
+    summary_path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    artifact = SimpleNamespace(
+        status=SimpleNamespace(value="failed"),
+        gate=SimpleNamespace(verdict=SimpleNamespace(value="fail_closed"), diffs=[]),
+        aggregates=SimpleNamespace(pass_rate=0.5, required_scorer_error_count=1),
+        artifact_hash="drift-hash",
+    )
+
+    written = write_evaluation_summary(
+        artifact=artifact,
+        threshold_path=None,
+        allow_gate_fail=True,
+        baseline_compare="failed",
+        baseline_drift_count=2,
+    )
+
+    assert written is True
+    summary = summary_path.read_text(encoding="utf-8")
+    assert "**execution_mode**: `observe`" in summary
+    assert "**baseline_compare**: `failed`" in summary
+    assert "**baseline_drift_count**: `2`" in summary

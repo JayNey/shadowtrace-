@@ -73,7 +73,14 @@ def cli_exit_code(
     return 0
 
 
-def format_evaluation_summary(*, artifact, threshold_path: Path | None) -> str:
+def format_evaluation_summary(
+    *,
+    artifact,
+    threshold_path: Path | None,
+    allow_gate_fail: bool = False,
+    baseline_compare: str | None = None,
+    baseline_drift_count: int = 0,
+) -> str:
     """Render a compact human-readable summary for CI step output."""
     gate = artifact.gate
     required_gate = None
@@ -87,10 +94,15 @@ def format_evaluation_summary(*, artifact, threshold_path: Path | None) -> str:
         f"- **status**: `{artifact.status.value}`",
         f"- **gate_verdict**: `{gate.verdict.value if gate else 'none'}`",
         f"- **required_gate** (manifest): `{required_gate}`",
+        f"- **execution_mode**: `{'observe' if allow_gate_fail else 'required'}`",
         f"- **pass_rate**: `{artifact.aggregates.pass_rate}`",
         f"- **required_scorer_error_count**: `{artifact.aggregates.required_scorer_error_count}`",
         f"- **artifact_hash**: `{artifact.artifact_hash}`",
     ]
+    if baseline_compare is not None:
+        lines.append(f"- **baseline_compare**: `{baseline_compare}`")
+        if baseline_drift_count:
+            lines.append(f"- **baseline_drift_count**: `{baseline_drift_count}`")
     if gate and gate.diffs:
         lines.extend(["", "**Gate diffs:**", ""])
         for diff in gate.diffs[:10]:
@@ -98,6 +110,31 @@ def format_evaluation_summary(*, artifact, threshold_path: Path | None) -> str:
         if len(gate.diffs) > 10:
             lines.append(f"- … and {len(gate.diffs) - 10} more")
     return "\n".join(lines) + "\n"
+
+
+def write_evaluation_summary(
+    *,
+    artifact,
+    threshold_path: Path | None,
+    allow_gate_fail: bool,
+    baseline_compare: str | None,
+    baseline_drift_count: int = 0,
+) -> bool:
+    """Write CI summary for both successful and failing evaluation exits."""
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return False
+    Path(summary_path).write_text(
+        format_evaluation_summary(
+            artifact=artifact,
+            threshold_path=threshold_path,
+            allow_gate_fail=allow_gate_fail,
+            baseline_compare=baseline_compare,
+            baseline_drift_count=baseline_drift_count,
+        ),
+        encoding="utf-8",
+    )
+    return True
 
 
 def _apply_migrations(database_url: str) -> None:
@@ -237,7 +274,9 @@ async def _run(args: argparse.Namespace) -> int:
                 "total_replay_duration_ms": artifact.resource_summary.total_replay_duration_ms,
                 "quality_metrics": {
                     metric.metric_id: metric.value
-                    for metric in (artifact.quality_report.metrics if artifact.quality_report else [])
+                    for metric in (
+                        artifact.quality_report.metrics if artifact.quality_report else []
+                    )
                 },
                 "output": str(output_path),
                 "loaded_cases": loaded_cases,
@@ -247,6 +286,7 @@ async def _run(args: argparse.Namespace) -> int:
         )
     )
 
+    baseline_compare: str | None = None
     if args.compare_baseline is not None:
         baseline_payload = json.loads(args.compare_baseline.read_text(encoding="utf-8"))
         baseline = DetectionEvaluationArtifact.model_validate(baseline_payload)
@@ -262,6 +302,13 @@ async def _run(args: argparse.Namespace) -> int:
                     indent=2,
                 ),
                 file=sys.stderr,
+            )
+            write_evaluation_summary(
+                artifact=artifact,
+                threshold_path=threshold_path,
+                allow_gate_fail=args.allow_gate_fail,
+                baseline_compare="failed",
+                baseline_drift_count=len(drift),
             )
             await engine.dispose()
             return cli_exit_code(
@@ -280,13 +327,14 @@ async def _run(args: argparse.Namespace) -> int:
                 indent=2,
             )
         )
+        baseline_compare = "passed"
 
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        Path(summary_path).write_text(
-            format_evaluation_summary(artifact=artifact, threshold_path=threshold_path),
-            encoding="utf-8",
-        )
+    write_evaluation_summary(
+        artifact=artifact,
+        threshold_path=threshold_path,
+        allow_gate_fail=args.allow_gate_fail,
+        baseline_compare=baseline_compare,
+    )
 
     await engine.dispose()
     return cli_exit_code(

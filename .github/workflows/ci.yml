@@ -383,7 +383,7 @@ jobs:
             --threshold-manifest "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1/threshold_manifest.json" \
             --compare-baseline "${GITHUB_WORKSPACE}/data/evaluation/detection_shadow_v1/baseline_artifact.json"
 
-      - name: Upload evaluation artifact
+      - name: Upload non-detection evaluation artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -392,8 +392,16 @@ jobs:
             artifacts/evaluation/ci_run.json
             artifacts/evaluation/security_knowledge_ci_run.json
             artifacts/evaluation/agentic_coordination_ci_run.json
+          if-no-files-found: error
+
+      - name: Upload required detection artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: detection-evaluation-run-artifact
+          path: |
             artifacts/evaluation/detection_ci_run.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
   frontend-build:
     name: frontend-build
