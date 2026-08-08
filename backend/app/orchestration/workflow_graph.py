@@ -337,6 +337,19 @@ def route_after_verify(state: InvestigationState) -> str:
     return ROUTE_REPORT
 
 
+def route_after_writeback_recovery(state: InvestigationState) -> str:
+    """Re-run Verify after recovery resolves instead of trusting stale checkpoint status."""
+    if state.get("halted"):
+        return ROUTE_HALT
+    if state.get("verify_need_manual_resolution"):
+        return ROUTE_MANUAL
+    if state.get("verify_need_writeback_recovery"):
+        return ROUTE_WRITEBACK
+    if state.get("verify_need_action_replan"):
+        return ROUTE_REPLAN
+    return ROUTE_TO_VERIFY
+
+
 def route_after_replan(state: InvestigationState) -> str:
     """After replan_node: if escalated, go to report; otherwise loop to planner."""
     if state.get("escalated"):
@@ -2013,27 +2026,21 @@ def build_investigation_graph(
             ROUTE_HALT: NODE_HALT,
         },
     )
-    # Writeback recovery routing (ISSUE-062 S2):
-    #
-    # NODE_WRITEBACK_RECOVERY deliberately reuses ``route_after_verify`` because
-    # its state output produces the same routing flags (verify_need_* / halted)
-    # that the verify→{report, replan, manual, writeback, halt} truth table
-    # consumes.  This is an intentional contract — not an oversight:
+    # Writeback recovery routing (ISSUE-062 S2 / ISSUE-261):
     #
     #   writeback_recovery_graph_node sets:
     #     verify_need_writeback_recovery → ROUTE_WRITEBACK (loop back here)
     #     verify_need_manual_resolution    → ROUTE_MANUAL  (manual_hold_node)
-    #     (neither flag)                   → ROUTE_REPORT  (report_node)
+    #     (neither flag)                   → ROUTE_TO_VERIFY (fresh authoritative verify)
     #     halted                           → ROUTE_HALT    (halt_node)
     #
-    # If writeback recovery ever needs to send a signal beyond this set (e.g.
-    # "waiting but don't halt the graph"), define a dedicated route function
-    # rather than adding a new flag that route_after_verify must also handle.
+    # A resolved recovery must not route straight to report: the checkpoint's
+    # verify_overall_status still describes the pre-recovery WAITING result.
     graph.add_conditional_edges(
         NODE_WRITEBACK_RECOVERY,
-        route_after_verify,
+        route_after_writeback_recovery,
         {
-            ROUTE_REPORT: NODE_REPORT,
+            ROUTE_TO_VERIFY: NODE_VERIFY,
             ROUTE_REPLAN: NODE_REPLAN,
             ROUTE_MANUAL: NODE_MANUAL_HOLD,
             ROUTE_WRITEBACK: NODE_WRITEBACK_RECOVERY,

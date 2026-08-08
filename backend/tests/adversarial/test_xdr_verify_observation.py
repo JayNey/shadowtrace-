@@ -31,8 +31,8 @@ from app.models.enums import (
     WritebackStatus,
 )
 from app.models.tool_meta import ToolResultStatus
+from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 from tests.adversarial.xdr_verify_observation import (
-    AdversarialTerminalDispositionResolver,
     AdversarialVerifyAgent,
     XdrManagedVerifyToolExecutor,
     verified_via_xdr_writeback,
@@ -86,13 +86,13 @@ async def _seed_response_action(
 
 
 @pytest.mark.asyncio
-async def test_verified_via_xdr_writeback_success_action(
+async def test_verified_via_xdr_writeback_success_without_receipt_is_not_verified(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     target = "198.51.100.44"
     event_id, _ = await _seed_response_action(session_factory, target=target)
-    assert await verified_via_xdr_writeback(session_factory, event_id, target) is True
-    assert await verified_via_xdr_writeback(session_factory, event_id, target.upper()) is True
+    assert await verified_via_xdr_writeback(session_factory, event_id, target) is False
+    assert await verified_via_xdr_writeback(session_factory, event_id, target.upper()) is False
 
 
 @pytest.mark.asyncio
@@ -120,7 +120,12 @@ async def test_xdr_managed_executor_routes_check_tools(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     target = "wks-data-031"
-    event_id, _ = await _seed_response_action(session_factory, target=target)
+    event_id = await _seed_action_with_receipt(
+        session_factory,
+        target=target,
+        action_status=ActionStatus.SUCCESS.value,
+        receipt_status=WritebackStatus.ACCEPTED.value,
+    )
     inner = AsyncMock()
     inner.call = AsyncMock(
         return_value=type(
@@ -166,7 +171,7 @@ async def test_xdr_managed_executor_delegates_non_check_tools(
     )
 
 
-def test_adversarial_terminal_resolver_ignores_non_verifiable_skipped() -> None:
+def test_production_resolver_ignores_non_effect_bearing_threat_actions() -> None:
     verification = VerificationResult(
         results=[
             VerificationActionResult(
@@ -193,7 +198,7 @@ def test_adversarial_terminal_resolver_ignores_non_verifiable_skipped() -> None:
         overall_status=VerificationOverallStatus.SUCCESS,
         verification_phase=VerificationPhase.EFFECT,
     )
-    resolver = AdversarialTerminalDispositionResolver()
+    resolver = TerminalDispositionResolver()
     result = resolver.resolve(
         final_verdict=FinalVerdict.CONFIRMED_THREAT,
         verification=verification,
@@ -203,6 +208,35 @@ def test_adversarial_terminal_resolver_ignores_non_verifiable_skipped() -> None:
         writeback_readiness=WritebackReadiness.READY,
     )
     assert result.disposition is SourceDisposition.CONTAINED
+
+
+def test_production_resolver_rejects_only_non_effect_bearing_threat_actions() -> None:
+    verification = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id="act-ticket-only",
+                effect_status=EffectStatus.SKIPPED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                writeback_status=None,
+                writeback_ids=[],
+                detail="non_verifiable_action",
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    result = TerminalDispositionResolver().resolve(
+        final_verdict=FinalVerdict.CONFIRMED_THREAT,
+        verification=verification,
+        approved_terminal_dispositions=[SourceDisposition.CONTAINED],
+        disposition_only=False,
+        disposition_policy=DispositionPolicy.REQUIRED,
+        writeback_readiness=WritebackReadiness.READY,
+    )
+    assert result.disposition is None
+    assert result.need_manual_resolution is True
 
 
 async def _seed_action_with_receipt(
@@ -288,6 +322,20 @@ async def test_verified_via_xdr_writeback_accepted_receipt_while_executing(
         session_factory,
         target=target,
         action_status=ActionStatus.EXECUTING.value,
+        receipt_status=WritebackStatus.ACCEPTED.value,
+    )
+    assert await verified_via_xdr_writeback(session_factory, event_id, target) is False
+
+
+@pytest.mark.asyncio
+async def test_verified_via_xdr_writeback_requires_success_and_receipt(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    target = "198.51.100.56"
+    event_id = await _seed_action_with_receipt(
+        session_factory,
+        target=target,
+        action_status=ActionStatus.SUCCESS.value,
         receipt_status=WritebackStatus.ACCEPTED.value,
     )
     assert await verified_via_xdr_writeback(session_factory, event_id, target) is True

@@ -27,6 +27,13 @@ SkippedReason = Literal[
     "capability_blocked",
 ]
 
+_THREAT_NON_BLOCKING_SKIPPED_DETAILS = frozenset(
+    {
+        "non_verifiable_action",
+        "writeback_not_applicable",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class TerminalDispositionResolveResult:
@@ -111,7 +118,19 @@ class TerminalDispositionResolver:
         if verification.overall_status is not VerificationOverallStatus.SUCCESS:
             return None
 
-        applicable = applicable_effect_results(verification)
+        raw_applicable = applicable_effect_results(verification)
+        applicable = [
+            item
+            for item in raw_applicable
+            if not (
+                item.effect_status is EffectStatus.SKIPPED
+                and item.detail in _THREAT_NON_BLOCKING_SKIPPED_DETAILS
+            )
+        ]
+        if raw_applicable and not applicable:
+            # A plan made only of non-effect-bearing actions (for example a
+            # ticket) is not containment evidence.
+            return None
         if any(item.effect_status is EffectStatus.FAILED for item in applicable):
             if SourceDisposition.SUSPENDED in approved_set:
                 return SourceDisposition.SUSPENDED

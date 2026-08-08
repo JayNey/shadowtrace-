@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -18,8 +19,11 @@ from sqlalchemy.pool import NullPool
 
 from app.core.errors import ValidationError
 from app.db import models as orm
-from app.models.decision_record import DecisionStage
-from app.services.decision_record_service import DecisionRecordService
+from app.models.decision_record import DecisionRecord, DecisionStage
+from app.services.decision_record_service import (
+    DecisionRecordService,
+    _legacy_record_hash_for_existing_identity,
+)
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
@@ -40,7 +44,19 @@ def _run_migrations() -> None:
     from app.core.config import get_settings
 
     get_settings.cache_clear()
-    command.upgrade(_alembic_config(), "head")
+    loggers = {
+        name: logger
+        for name, logger in logging.root.manager.loggerDict.items()
+        if isinstance(logger, logging.Logger)
+    }
+    disabled_before = {name: logger.disabled for name, logger in loggers.items()}
+    try:
+        command.upgrade(_alembic_config(), "head")
+    finally:
+        # Alembic's fileConfig(disable_existing_loggers=True) is process-global.
+        # Restore the pre-migration states so later tests can capture warnings.
+        for name, disabled in disabled_before.items():
+            loggers[name].disabled = disabled
 
 
 @pytest.fixture(scope="module")
@@ -712,6 +728,61 @@ async def test_idempotent_replay_ignores_generated_record_and_trace_identity(
 
 
 @pytest.mark.asyncio
+async def test_idempotent_replay_accepts_pre_issue261_hash(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    degraded_calls: list[tuple[str, str, bool, str]] = []
+
+    class FakeDegradedFlags:
+        async def set_flag(
+            self,
+            event_id: str,
+            flag_name: str,
+            value: bool,
+            writer: str,
+        ) -> list[str]:
+            degraded_calls.append((event_id, flag_name, value, writer))
+            return [f"{flag_name}=true"]
+
+    service = DecisionRecordService(
+        session_factory,
+        degraded_flag_service=FakeDegradedFlags(),
+    )
+    payload = {
+        "stage": "verify",
+        "overall_status": "success",
+        "verification_phase": "effect",
+        "results": [],
+    }
+    first = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-legacy-a",
+        input_data={"event_id": event_id},
+        output_data=payload,
+    )
+    assert first is not None
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.DecisionRecord, first)
+            assert row is not None
+            record = DecisionRecord.model_validate(row, from_attributes=True)
+            row.record_hash = _legacy_record_hash_for_existing_identity(record, row)
+
+    second = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-legacy-b",
+        input_data={"event_id": event_id},
+        output_data=payload,
+    )
+
+    assert second == first
+    assert degraded_calls == []
+
+
+@pytest.mark.asyncio
 async def test_verify_outcome_transition_creates_distinct_audit_records(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -799,6 +870,68 @@ async def test_verify_result_change_creates_distinct_audit_records(
     assert first is not None
     assert second is not None
     assert second != first
+
+
+@pytest.mark.asyncio
+async def test_verify_result_order_is_semantically_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    degraded_calls: list[tuple[str, str, bool, str]] = []
+
+    class FakeDegradedFlags:
+        async def set_flag(
+            self,
+            event_id: str,
+            flag_name: str,
+            value: bool,
+            writer: str,
+        ) -> list[str]:
+            degraded_calls.append((event_id, flag_name, value, writer))
+            return [f"{flag_name}=true"]
+
+    service = DecisionRecordService(
+        session_factory,
+        degraded_flag_service=FakeDegradedFlags(),
+    )
+    result_a = {
+        "action_id": "act-1234abcd",
+        "effect_status": "verified",
+        "writeback_ids": ["wbk-bbbbbbbb", "wbk-aaaaaaaa"],
+    }
+    result_b = {
+        "action_id": "act-5678efab",
+        "effect_status": "verified",
+        "writeback_ids": [],
+    }
+    common = {
+        "stage": "verify",
+        "verification_phase": "effect",
+        "overall_status": "success",
+    }
+    first = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-order-a",
+        input_data={"event_id": event_id},
+        output_data={**common, "results": [result_a, result_b]},
+    )
+    second = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-order-b",
+        input_data={"event_id": event_id},
+        output_data={
+            **common,
+            "results": [
+                result_b,
+                {**result_a, "writeback_ids": list(reversed(result_a["writeback_ids"]))},
+            ],
+        },
+    )
+
+    assert second == first
+    assert degraded_calls == []
 
 
 @pytest.mark.asyncio

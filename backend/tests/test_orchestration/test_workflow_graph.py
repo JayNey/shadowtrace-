@@ -86,6 +86,7 @@ from app.orchestration.workflow_graph import (
     ROUTE_REPLAN,
     ROUTE_REPORT,
     ROUTE_RESPONSE,
+    ROUTE_TO_VERIFY,
     ROUTE_WAIT,
     ROUTE_WRITEBACK,
     _resolve_verify_writeback_status,
@@ -98,6 +99,7 @@ from app.orchestration.workflow_graph import (
     route_after_risk,
     route_after_triage,
     route_after_verify,
+    route_after_writeback_recovery,
 )
 
 
@@ -711,6 +713,11 @@ def test_remaining_route_truth_tables() -> None:
         == ROUTE_REPORT
     )
     assert route_after_verify(_base_state()) == ROUTE_REPORT
+    assert (
+        route_after_writeback_recovery(_base_state(verify_need_writeback_recovery=True))
+        == ROUTE_WRITEBACK
+    )
+    assert route_after_writeback_recovery(_base_state()) == ROUTE_TO_VERIFY
 
 
 @pytest.mark.asyncio

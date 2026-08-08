@@ -160,16 +160,14 @@ Harness-only helpers (ISSUE-204, ``tests/adversarial/xdr_verify_observation.py``
 |-----------|------|
 | ``XdrManagedVerifyToolExecutor`` | Routes ``check_*`` to DB-backed XDR writeback facts |
 | ``AdversarialVerifyAgent`` | Unit-test helper only; the full-loop runner uses production ``VerifyAgent`` |
-| ``AdversarialTerminalDispositionResolver`` | Non-verifiable SKIPPED actions (e.g. ``create_ticket``) do not block ``CONTAINED`` |
 
 Approval resumes through the production ``ApprovalEngine`` callback. The runner
 simulates worker delivery by calling production ``DispositionSyncService``; confirmed
 outboxes resume the graph through the service callback.
 
-**Note:** ``AdversarialTerminalDispositionResolver`` aligns harness terminal mapping
-with non-verifiable SKIPPED actions (e.g. ``create_ticket``). Production
-``TerminalDispositionResolver`` may still treat those rows differently; a production
-fix belongs in a separate issue, not in this adversarial harness.
+The full-loop gate intentionally uses production terminal-resolution semantics.
+Non-verifiable or non-applicable actions must be projected correctly by production
+``VerifyAgent``; the harness does not relax that gate with a custom resolver.
 
 Console prints human verdict + check matrix for each run.
 

@@ -56,10 +56,7 @@ _REMOVED_SHIMS = (
 )
 _DEFAULT_MOCK_TIMEOUT_S = 120.0
 _DEFAULT_LIVE_TIMEOUT_S = 600.0
-_ADVERSARIAL_DI_OVERRIDES = (
-    "AdversarialTerminalDispositionResolver",
-    "XdrManagedVerifyToolExecutor",
-)
+_ADVERSARIAL_DI_OVERRIDES = ("XdrManagedVerifyToolExecutor",)
 
 
 def resolve_full_loop_timeout_s() -> float:
@@ -137,6 +134,7 @@ def _wire_production_monkeypatches(
 
     monkeypatch.setattr("app.api.v1.deps.get_disposition_sync", _disposition_sync)
     monkeypatch.setattr("app.api.v1.deps.get_event_disposition_service", _event_disposition)
+
 
 async def _resume_investigation_graph(
     session_factory: async_sessionmaker[AsyncSession],
@@ -230,25 +228,29 @@ async def _writeback_flags(
             return False, False
         active_terminal_filters = (
             orm.DispositionOutbox.event_id == event_id,
-            orm.DispositionOutbox.intent_kind
-            == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+            orm.DispositionOutbox.intent_kind == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
             orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
             orm.Action.plan_revision == current_revision,
             orm.Action.superseded_by_revision.is_(None),
         )
-        confirmed = await session.scalar(
-            select(orm.DispositionReceipt)
-            .join(
-                orm.DispositionOutbox,
-                orm.DispositionOutbox.writeback_id == orm.DispositionReceipt.writeback_id,
+        confirmed_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.DispositionReceipt)
+                .join(
+                    orm.DispositionOutbox,
+                    orm.DispositionOutbox.writeback_id == orm.DispositionReceipt.writeback_id,
+                )
+                .join(orm.Action, orm.Action.action_id == orm.DispositionOutbox.action_id)
+                .where(
+                    *active_terminal_filters,
+                    orm.DispositionOutbox.delivery_status == OutboxDeliveryStatus.DELIVERED.value,
+                    orm.DispositionReceipt.status == WritebackStatus.CONFIRMED.value,
+                    orm.DispositionReceipt.confirmation_evidence
+                    == ConfirmationEvidence.READBACK_VERIFIED.value,
+                )
             )
-            .join(orm.Action, orm.Action.action_id == orm.DispositionOutbox.action_id)
-            .where(
-                *active_terminal_filters,
-                orm.DispositionReceipt.status == WritebackStatus.CONFIRMED.value,
-                orm.DispositionReceipt.confirmation_evidence
-                == ConfirmationEvidence.READBACK_VERIFIED.value,
-            )
+            or 0
         )
         terminal_outbox_count = int(
             await session.scalar(
@@ -259,7 +261,25 @@ async def _writeback_flags(
             )
             or 0
         )
-    return confirmed is not None, terminal_outbox_count == 1
+        delivered_terminal_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.DispositionOutbox)
+                .join(
+                    orm.Action,
+                    orm.Action.action_id == orm.DispositionOutbox.action_id,
+                )
+                .where(
+                    *active_terminal_filters,
+                    orm.DispositionOutbox.delivery_status == OutboxDeliveryStatus.DELIVERED.value,
+                )
+            )
+            or 0
+        )
+    return (
+        confirmed_count == 1 and delivered_terminal_count == 1,
+        terminal_outbox_count == 1,
+    )
 
 
 def _loop_quiescent(

@@ -30,6 +30,7 @@ from app.models.enums import (
 )
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
+    NODE_EXECUTE,
     NODE_VERIFY,
     invoke_investigation_graph,
 )
@@ -262,16 +263,24 @@ async def prepare_graph_resume_state(
     values = snapshot.values
 
     if status_value == EventStatus.VERIFYING.value:
+        prior_need_writeback = bool(values.get("verify_need_writeback_recovery"))
+        prior_need_manual = bool(values.get("verify_need_manual_resolution"))
         resume_patch = await _reconcile_verify_resume_patch(
             session_factory,
             event_id,
             values,
         )
         if resume_patch:
+            recovery_resolved = (
+                prior_need_writeback and resume_patch.get("verify_need_writeback_recovery") is False
+            ) or (prior_need_manual and resume_patch.get("verify_need_manual_resolution") is False)
             await graph.aupdate_state(
                 config,
                 resume_patch,
-                as_node=NODE_VERIFY,
+                # Mark the patch as the execute tail when recovery has resolved,
+                # so the graph schedules a fresh Verify pass.  Using NODE_VERIFY
+                # here would route directly from stale WAITING state to report.
+                as_node=NODE_EXECUTE if recovery_resolved else NODE_VERIFY,
             )
             values = {**values, **resume_patch}
         if values.get("execution_substate") == ExecutionSubstate.WAITING_WRITEBACK.value:

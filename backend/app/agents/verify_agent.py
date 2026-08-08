@@ -707,7 +707,6 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             params: dict[str, Any] = {
                 "target_type": action.target_type or "",
                 "target": action.target or "",
-                "event_id": event_id,
             }
             if job is not None:
                 params["parameters"] = {"job_id": job.job_id}
@@ -2155,12 +2154,10 @@ def _make_skipped_result(
             detail=detail,
             verification_phase=VerificationPhase.EFFECT,
         )
-    # writeback_required expresses the event-level business obligation and
-    # MUST NOT be rewritten by technical capability flags like
-    # writeback_applicable (§4.5 item 6).  The SKIPPED effect_status is
-    # already exempt from the Validator's writeback-consistency check,
-    # so preserving the original obligation is safe.
-    wb_required = action.writeback_required
+    # For ordinary entity actions this result describes the action-level
+    # writeback projection.  An event-level required disposition does not make
+    # every non-applicable action (for example create_ticket) writeback-required.
+    wb_required = action.writeback_required and action.writeback_applicable
     wb_readiness = WritebackReadiness.NOT_REQUIRED
     wb_status = None
     return VerificationActionResult(

@@ -35,7 +35,6 @@ from tests.adversarial.scenario_credential_db_staging_exfil import (
     build_adversarial_credential_db_staging_exfil,
 )
 from tests.adversarial.xdr_verify_observation import (
-    AdversarialTerminalDispositionResolver,
     XdrManagedVerifyToolExecutor,
 )
 
@@ -176,7 +175,6 @@ async def adversarial_event_disposition_service(
         session_factory,
         disposition_sync=adversarial_disposition_sync_service,
         context_store=context_store,
-        resolver=AdversarialTerminalDispositionResolver(),
         factory=DispositionCommandFactory(),
         event_bus=EventBus(redis_client),
         event_disposition_supported=True,

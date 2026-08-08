@@ -20,48 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.agents.verify_agent import VerifyAgent
 from app.db import models as orm
 from app.models.action import Action
-from app.models.agent_io import EffectStatus, VerificationActionResult, VerificationResult
+from app.models.agent_io import EffectStatus, VerificationActionResult
 from app.models.enums import ActionCategory, ActionStatus, WritebackStatus
 from app.models.ids import new_call_id
 from app.models.tool_meta import ToolResult, ToolResultStatus
-from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 
 _PROVIDER_NAME = "mock_xdr_writeback_observation"
-
-_NON_BLOCKING_SKIPPED_DETAILS = frozenset(
-    {
-        "deferred_pending_activation",
-        "non_verifiable_action",
-        "no_verification_tool_registered",
-        "writeback_not_applicable",
-    }
-)
-
-
-class AdversarialTerminalDispositionResolver(TerminalDispositionResolver):
-    """Resolver that ignores non-verifiable SKIPPED actions for terminal mapping (ISSUE-204).
-
-    ``create_ticket`` and similar tools are intentionally skipped in phase-1 verify
-    but must not block ``CONTAINED`` terminal activation once verifiable containment
-    effects are ``VERIFIED``.
-    """
-
-    def resolve(self, **kwargs: Any) -> Any:
-        verification = kwargs.get("verification")
-        if isinstance(verification, VerificationResult):
-            filtered = [
-                item
-                for item in verification.results
-                if not (
-                    item.effect_status is EffectStatus.SKIPPED
-                    and (item.detail or "") in _NON_BLOCKING_SKIPPED_DETAILS
-                )
-            ]
-            kwargs = {
-                **kwargs,
-                "verification": verification.model_copy(update={"results": filtered}),
-            }
-        return super().resolve(**kwargs)
 
 
 async def verified_via_xdr_writeback(
@@ -96,12 +60,15 @@ async def verified_via_xdr_writeback(
             .order_by(orm.DispositionReceipt.sequence.desc())
             .limit(1)
         )
-    if receipt_status in {
+    verified_by_receipt = receipt_status in {
         WritebackStatus.CONFIRMED.value,
         WritebackStatus.ACCEPTED.value,
-    }:
-        return True
-    return action_row.status == ActionStatus.SUCCESS.value
+    }
+    verified_by_action_status = action_row.status == ActionStatus.SUCCESS.value
+    # Action SUCCESS is an execution claim, not an independent external
+    # observation.  Require both the successful action fact and a provider-side
+    # receipt before VerifyAgent may treat the entity effect as established.
+    return verified_by_receipt and verified_by_action_status
 
 
 class AdversarialVerifyAgent(VerifyAgent):
@@ -205,7 +172,6 @@ class XdrManagedVerifyToolExecutor:
 
 
 __all__ = [
-    "AdversarialTerminalDispositionResolver",
     "AdversarialVerifyAgent",
     "XdrManagedVerifyToolExecutor",
     "verified_via_xdr_writeback",

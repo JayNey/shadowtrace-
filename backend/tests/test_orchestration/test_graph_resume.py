@@ -16,9 +16,11 @@ from app.models.enums import (
 )
 from app.orchestration.graph_resume import (
     _reconcile_verify_resume_patch,
+    prepare_graph_resume_state,
     resume_investigation_from_checkpoint,
 )
 from app.orchestration.graph_resume_observability import GraphResumeFailedError
+from app.orchestration.workflow_graph import NODE_EXECUTE
 
 OutboxRow = tuple[str, str | None]
 
@@ -112,6 +114,41 @@ async def test_reconcile_verify_resume_clears_stale_manual_when_terminal_confirm
     assert patch["verify_need_manual_resolution"] is False
     assert patch["execution_substate"] == ExecutionSubstate.NONE.value
     assert "verify_degraded=True" not in patch.get("degraded_flags", [])
+
+
+@pytest.mark.asyncio
+async def test_prepare_verify_resume_schedules_fresh_verify_after_recovery() -> None:
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "verify_overall_status": "waiting",
+                "verify_need_manual_resolution": True,
+                "verify_need_writeback_recovery": False,
+                "verify_failed_writebacks": [],
+                "degraded_flags": ["verify_degraded=True"],
+                "disposition_policy": DispositionPolicy.REQUIRED.value,
+                "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock()
+
+    found = await prepare_graph_resume_state(
+        _SessionFactory(
+            EventStatus.VERIFYING.value,
+            outbox_rows=_terminal_confirmed(),
+        ),
+        graph,
+        "evt-261-reverify",
+        runtime,
+    )
+
+    assert found is True
+    assert graph.aupdate_state.await_args.kwargs["as_node"] == NODE_EXECUTE
 
 
 @pytest.mark.asyncio

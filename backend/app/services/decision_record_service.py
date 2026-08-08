@@ -62,6 +62,26 @@ def _record_hash_payload(record: DecisionRecord) -> dict[str, Any]:
     return canonical
 
 
+def _legacy_record_hash_for_existing_identity(
+    record: DecisionRecord,
+    existing: orm.DecisionRecord,
+) -> str:
+    """Recompute the pre-ISSUE-261 hash using the durable row's generated identity."""
+    legacy_record = record.model_copy(
+        update={
+            "record_id": existing.record_id,
+            "trace_ref": existing.trace_ref,
+            "created_at": existing.created_at,
+        }
+    )
+    canonical = TraceProjection.project(
+        legacy_record.model_dump(mode="json", exclude={"record_hash"})
+    )
+    assert isinstance(canonical, dict)
+    canonical.pop("created_at", None)
+    return _record_hash(canonical)
+
+
 def _validate_ref_id(ref_id: str) -> bool:
     return bool(_REF_ID_PATTERN.match(ref_id.strip()))
 
@@ -209,7 +229,7 @@ def _idempotency_key(
         variant = {
             "verification_phase": output_data.get("verification_phase"),
             "overall_status": output_data.get("overall_status"),
-            "results": output_data.get("results") or [],
+            "results": _normalize_verify_results(output_data.get("results")),
             "failed_actions": sorted(
                 str(item) for item in (output_data.get("failed_actions") or [])
             ),
@@ -232,6 +252,38 @@ def _idempotency_key(
         variant_hash = hashlib.sha256(_canonical_bytes(variant)).hexdigest()[:16]
         return f"{event_id}:{stage.value}:{agent_name}:outcome-{variant_hash}:r1"
     return f"{event_id}:{stage.value}:{agent_name}:r1"
+
+
+def _normalize_verify_results(raw: Any) -> list[dict[str, Any]]:
+    """Canonicalize semantically unordered Verify results for stable idempotency."""
+    if not isinstance(raw, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        result = dict(item)
+        writeback_ids = result.get("writeback_ids")
+        if isinstance(writeback_ids, list):
+            result["writeback_ids"] = sorted(str(value) for value in writeback_ids)
+        normalized.append(result)
+    return sorted(normalized, key=_canonical_bytes)
+
+
+def _canonicalize_verify_output(output_data: dict[str, Any]) -> dict[str, Any]:
+    canonical = dict(output_data)
+    canonical["results"] = _normalize_verify_results(output_data.get("results"))
+    for field in (
+        "failed_actions",
+        "failed_writebacks",
+        "blocked_writebacks",
+        "recoverable_writeback_ids",
+        "pending_writeback_action_ids",
+    ):
+        raw = output_data.get(field)
+        if isinstance(raw, list):
+            canonical[field] = sorted(str(item) for item in raw)
+    return canonical
 
 
 def _enrich_agent_output(
@@ -510,6 +562,8 @@ def _build_record_payload(
     output_data: dict[str, Any],
     llm_model: str | None,
 ) -> DecisionRecord | None:
+    if agent_name == "verify_agent" or output_data.get("stage") == DecisionStage.VERIFY.value:
+        output_data = _canonicalize_verify_output(output_data)
     output_data = _enrich_agent_output(agent_name, input_data, output_data)
 
     summary = output_data.get("decision_summary")
@@ -701,6 +755,14 @@ class DecisionRecordService:
         record: DecisionRecord,
     ) -> str:
         if existing.record_hash != record.record_hash:
+            legacy_hash = _legacy_record_hash_for_existing_identity(record, existing)
+            legacy_compatible = existing.record_hash == legacy_hash
+            if legacy_compatible:
+                logger.info(
+                    "DecisionRecord legacy hash replay accepted key=%s",
+                    record.idempotency_key,
+                )
+                return existing.record_id
             logger.warning(
                 "DecisionRecord idempotency replay hash mismatch key=%s existing=%s new=%s",
                 record.idempotency_key,

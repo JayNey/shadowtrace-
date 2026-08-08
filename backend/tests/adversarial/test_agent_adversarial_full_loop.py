@@ -32,6 +32,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.v1.deps import get_super_agent
 from app.db import models as orm
 from app.models.enums import EventStatus
 from app.services.context_service import EventContextStore
@@ -74,6 +75,88 @@ def _report_excerpt(report_ctx: dict[str, Any]) -> str:
     return (title + "\n" + summary).strip()[:1200]
 
 
+async def _closure_diagnostics(
+    session_factory: async_sessionmaker[AsyncSession],
+    context_store: EventContextStore,
+    event_id: str,
+) -> dict[str, Any]:
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, event_id)
+        outboxes = list(
+            await session.scalars(
+                select(orm.DispositionOutbox)
+                .where(orm.DispositionOutbox.event_id == event_id)
+                .order_by(orm.DispositionOutbox.created_at, orm.DispositionOutbox.writeback_id)
+            )
+        )
+        receipts = list(
+            await session.scalars(
+                select(orm.DispositionReceipt)
+                .join(
+                    orm.DispositionOutbox,
+                    orm.DispositionOutbox.writeback_id == orm.DispositionReceipt.writeback_id,
+                )
+                .where(orm.DispositionOutbox.event_id == event_id)
+                .order_by(
+                    orm.DispositionReceipt.writeback_id,
+                    orm.DispositionReceipt.sequence,
+                )
+            )
+        )
+    checkpoint: dict[str, Any] = {}
+    try:
+        agent = await get_super_agent()
+        graph = getattr(agent, "_investigation_graph", None)
+        if graph is not None:
+            snapshot = await graph.aget_state({"configurable": {"thread_id": event_id}})
+            values = dict(snapshot.values or {})
+            checkpoint = {
+                key: values.get(key)
+                for key in (
+                    "event_status",
+                    "execution_substate",
+                    "halted",
+                    "verify_overall_status",
+                    "verify_need_action_replan",
+                    "verify_need_writeback_recovery",
+                    "verify_need_manual_resolution",
+                    "verify_recoverable_writeback_ids",
+                    "verify_pending_writeback_action_ids",
+                    "node_trace",
+                )
+            }
+    except Exception as exc:  # noqa: BLE001 - preserve original gate failure
+        checkpoint = {"collection_error": type(exc).__name__}
+    return {
+        "event_id": event_id,
+        "event_status": event.status if event is not None else None,
+        "execution_substate": await context_store.get(event_id, "execution_substate"),
+        "verification_result": await context_store.get(event_id, "verification_result"),
+        "checkpoint": checkpoint,
+        "outboxes": [
+            {
+                "writeback_id": row.writeback_id,
+                "action_id": row.action_id,
+                "intent_kind": row.intent_kind,
+                "delivery_status": row.delivery_status,
+                "latest_writeback_status": row.latest_writeback_status,
+                "last_error_code": row.last_error_code,
+            }
+            for row in outboxes
+        ],
+        "receipts": [
+            {
+                "writeback_id": row.writeback_id,
+                "sequence": row.sequence,
+                "status": row.status,
+                "confirmation_evidence": row.confirmation_evidence,
+                "provider_code": row.provider_code,
+            }
+            for row in receipts
+        ],
+    }
+
+
 @pytest.mark.usefixtures("clean_state")
 @pytest.mark.asyncio
 async def test_adversarial_noisy_production_full_response_closed_loop(
@@ -103,17 +186,39 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         f"title={event_before.title!r} NEW queue={new_events.total}"
     )
 
-    loop_result = await run_production_full_loop(
-        monkeypatch=monkeypatch,
-        session_factory=session_factory,
-        redis_client=redis_client,
-        event_service=event_service,
-        context_store=context_store,
-        adversarial_disposition_sync_service=adversarial_disposition_sync_service,
-        adversarial_event_disposition_service=adversarial_event_disposition_service,
-        e2e_tool_executor=e2e_tool_executor,
-        event_id=event_id,
-    )
+    try:
+        loop_result = await run_production_full_loop(
+            monkeypatch=monkeypatch,
+            session_factory=session_factory,
+            redis_client=redis_client,
+            event_service=event_service,
+            context_store=context_store,
+            adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+            adversarial_event_disposition_service=adversarial_event_disposition_service,
+            e2e_tool_executor=e2e_tool_executor,
+            event_id=event_id,
+        )
+    except Exception as exc:
+        failure_report = {
+            "scenario": GROUND_TRUTH["scenario"],
+            "event_id": event_id,
+            "result": "failed_before_audit",
+            "failure": {
+                "type": type(exc).__name__,
+                "message": str(exc)[:500],
+            },
+            "closure_diagnostics": await _closure_diagnostics(
+                session_factory,
+                context_store,
+                event_id,
+            ),
+        }
+        ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ARTIFACT_PATH.write_text(
+            json.dumps(failure_report, indent=2, default=str),
+            encoding="utf-8",
+        )
+        raise
     print(
         f"[adversarial-full-loop] production loop finished in {loop_result.elapsed_s:.1f}s "
         f"status={loop_result.investigate_status!r} approvals={loop_result.approval_rounds}"
@@ -213,6 +318,11 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "tools_invoked": loop_result.tool_call_count > 0,
         "llm_invoked": loop_result.llm_call_count > 0,
     }
+    report["closure_diagnostics"] = await _closure_diagnostics(
+        session_factory,
+        context_store,
+        event_id,
+    )
     ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
     ARTIFACT_PATH.write_text(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n",
@@ -229,8 +339,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
 
     prod = report["production_checks"]
     assert prod["no_sunset_shims"], (
-        "ISSUE-204: sunset_shims_used must be empty, "
-        f"got {loop_result.sunset_shims_used}"
+        f"ISSUE-204: sunset_shims_used must be empty, got {loop_result.sunset_shims_used}"
     )
     assert prod["response_agent_ran"], "expected response_agent trace"
     assert prod["execution_ran"], "expected ActionExecution jobs after approval"
@@ -244,23 +353,31 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "expected CONFIRMED+readback_verified disposition receipt on Mock path"
     )
     assert "AdversarialDispositionSyncService" not in loop_result.adversarial_di_overrides
+    assert "AdversarialTerminalDispositionResolver" not in loop_result.adversarial_di_overrides
     assert any(note == "approval_resume: production callback" for note in loop_result.notes)
     assert not any(
         marker in note
         for note in loop_result.notes
-        for marker in ("runner owns", "production_verify_rerun", "legal_close_after")
+        for marker in (
+            "runner owns",
+            "production_verify_rerun",
+            "legal_close_after",
+            "loop_timeout",
+            "outbox_delivery_failed",
+        )
     )
     assert loop_result.terminal_outbox_enqueued, "expected terminal EVENT_STATUS_UPDATE outbox row"
     assert event_final.status is EventStatus.CLOSED
     assert EventStatus.REPORTING.value in status_sequence
     assert EventStatus.CLOSED.value in status_sequence
+    assert status_sequence.index(EventStatus.REPORTING.value) < status_sequence.index(
+        EventStatus.CLOSED.value
+    )
     assert _report_excerpt(report_ctx).strip(), (
         "ISSUE-196: full loop must reach REPORTING/CLOSED with non-empty report"
     )
     assert EventStatus.EXECUTING_RESPONSE.value in status_sequence, (
         "expected audited transition through executing_response"
     )
-    assert (
-        report["checks"]["verdict_matches_expected"]
-        or report["checks"]["risk_score_at_least_minimum"]
-    )
+    assert report["checks"]["verdict_matches_expected"]
+    assert report["checks"]["risk_score_at_least_minimum"]
