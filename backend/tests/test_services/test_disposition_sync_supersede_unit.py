@@ -27,6 +27,7 @@ from app.models.disposition import (
 from app.models.enums import (
     DispositionIntentKind,
     ExecutionOwner,
+    OutboxDeliveryStatus,
     SourceObjectKind,
 )
 from app.services.disposition_sync_service import DispositionSyncService
@@ -90,6 +91,7 @@ def _prior_head(disposition_id: str = "disp-prior") -> orm.DispositionOutbox:
         idempotency_key="idem-prior",
         command_payload={"op": "set_event_disposition"},
         command_payload_sha256="sha",
+        delivery_status=OutboxDeliveryStatus.READY.value,
     )
 
 
@@ -183,6 +185,8 @@ async def test_enqueue_supersedes_prior_event_status_update_head() -> None:
 
     # Old head lineage: superseded by the new head's disposition_id.
     assert prior.superseded_by_disposition_id == record.disposition_id
+    assert prior.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+    assert prior.last_error_code == "superseded_by_new_head"
     # New head lineage + wire payload carry the supersede contract.
     assert record.supersedes_disposition_id == "disp-prior"
     added_outbox = session.added[0]
@@ -237,6 +241,44 @@ async def test_enqueue_entity_action_submit_never_supersedes() -> None:
     assert added_outbox.supersedes_disposition_id is None
     # The prior head must not be marked superseded by a non-terminal intent.
     assert session.prior_head.superseded_by_disposition_id is None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_idempotent_replay_returns_existing_head() -> None:
+    """ISSUE-273: same idempotency_key + payload returns existing head without superseding."""
+    source_row = SimpleNamespace(next_outbox_sequence=7)
+    command = _command(
+        intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE,
+        disposition_id="disp-prior",
+    )
+    command = command.model_copy(update={"idempotency_key": "idem-replay"})
+    payload = command.model_dump(mode="json")
+    import hashlib
+    import json
+
+    payload_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode(
+            "utf-8",
+        ),
+    ).hexdigest()
+    prior = _prior_head()
+    prior.idempotency_key = "idem-replay"
+    prior.command_payload = payload
+    prior.command_payload_sha256 = payload_hash
+    session = _FakeSession(source_row, prior)
+    service = _service()
+
+    record = await service.enqueue_command(
+        session,
+        command=command,
+        event_id="evt-1",
+        source_record_id="src-1",
+        logical_slot="terminal",
+    )
+
+    assert record.outbox_id == prior.outbox_id
+    assert prior.superseded_by_disposition_id is None
+    assert len(session.added) == 0
 
 
 @pytest.mark.asyncio

@@ -20,7 +20,7 @@ import pytest_asyncio
 from alembic import command
 from alembic.config import Config
 from httpx import ASGITransport
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -42,6 +42,7 @@ from app.models.enums import (
     ActionStatus,
     ConfirmationEvidence,
     DispositionPolicy,
+    DispositionIntentKind,
     EventStatus,
     EventType,
     ExecutionJobStatus,
@@ -51,6 +52,7 @@ from app.models.enums import (
     OutboxDeliveryStatus,
     Severity,
     SourceObjectKind,
+    SourceDisposition,
     TargetExecutionStatus,
     TargetWritebackStatus,
     WritebackReadiness,
@@ -66,7 +68,11 @@ from app.services.context_service import (
     unwrap_journal_value,
 )
 from app.services.disposition_command_factory import DispositionCommandFactory
-from app.services.disposition_sync_service import DispositionSyncService
+from app.services.disposition_sync_service import (
+    OUTBOX_SUPERSEDED_ERROR_CODE,
+    DispositionSyncService,
+    OutboxWorker,
+)
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
     fetch_mock_concurrency_token,
@@ -2818,3 +2824,258 @@ async def test_deliver_execution_result_rejected_after_supersede(
         assert row is not None
         assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
         assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+
+async def _enqueue_terminal_event_status_update(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    *,
+    target_disposition: SourceDisposition = SourceDisposition.CONTAINED,
+    idempotency_key: str | None = None,
+    logical_slot: str = "terminal",
+) -> tuple[DispositionSyncService, str, str, orm.DispositionOutbox]:
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    idem = idempotency_key or f"idem-terminal-{_sfx()}"
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-terminal",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "close event",
+            "tool_name": "update_event_disposition",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "event",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": idem,
+        }
+    )
+    command = factory.build_event_status_update(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="test-operator",
+        disposition_id=new_disposition_id(),
+        closure_cycle=1,
+        target_disposition=target_disposition,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            record = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+                logical_slot=logical_slot,
+            )
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, record.outbox_id)
+        assert row is not None
+    return sync, event_id, source_record_id, row
+
+
+@pytest.mark.asyncio
+async def test_superseded_outbox_not_claimed_by_worker(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-273: superseded rows with delayed-retry shape must never be claimed."""
+    sync, event_id, source_record_id, first_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": f"act-supersede-{_sfx()}",
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-terminal-2",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "close event",
+            "tool_name": "update_event_disposition",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "event",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": first_row.command_payload["source_locator"],
+            "idempotency_key": f"idem-supersede-{_sfx()}",
+        }
+    )
+    locator = SourceObjectLocator.model_validate(first_row.command_payload["source_locator"])
+    concurrency_token = first_row.command_payload.get("source_concurrency_token")
+    command = factory.build_event_status_update(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="test-operator",
+        disposition_id=new_disposition_id(),
+        closure_cycle=1,
+        target_disposition=SourceDisposition.RESOLVED,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+                logical_slot="terminal",
+            )
+
+    async with session_factory() as session:
+        async with session.begin():
+            old = await session.get(orm.DispositionOutbox, first_row.outbox_id)
+            assert old is not None
+            assert old.superseded_by_disposition_id is not None
+            assert old.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+            old.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
+            old.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    worker = OutboxWorker(sync)
+    claimed = await worker.run_once(limit=10)
+    assert claimed == 0
+    assert submit_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_superseded_outbox_pre_egress_blocks_delivery(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-273: pre-egress CAS must block delivery of a superseded head."""
+    sync, _event_id, _source_record_id, first_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.DispositionOutbox, first_row.outbox_id)
+            assert row is not None
+            row.superseded_by_disposition_id = "disp-newer-head"
+            row.delivery_status = OutboxDeliveryStatus.READY.value
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    await sync.deliver_outbox(first_row.outbox_id)
+    assert submit_calls == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, first_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == OUTBOX_SUPERSEDED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_idempotent_enqueue_returns_existing_head_without_superseding(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-273: identical payload/token/cycle replays return the existing active head."""
+    idem = f"idem-replay-{_sfx()}"
+    sync, event_id, source_record_id, first_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+        idempotency_key=idem,
+    )
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": first_row.action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-terminal",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "close event",
+            "tool_name": "update_event_disposition",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target": "event",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": first_row.command_payload["source_locator"],
+            "idempotency_key": idem,
+        }
+    )
+    locator = SourceObjectLocator.model_validate(first_row.command_payload["source_locator"])
+    command = factory.build_event_status_update(
+        action,
+        source_locator=locator,
+        source_concurrency_token=first_row.command_payload.get("source_concurrency_token"),
+        operator_id="test-operator",
+        disposition_id=new_disposition_id(),
+        closure_cycle=1,
+        target_disposition=SourceDisposition.CONTAINED,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            replay = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+                logical_slot="terminal",
+            )
+
+    assert replay.outbox_id == first_row.outbox_id
+    assert replay.disposition_id == first_row.disposition_id
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.count())
+            .select_from(orm.DispositionOutbox)
+            .where(orm.DispositionOutbox.event_id == event_id)
+        )
+    assert int(count or 0) == 1

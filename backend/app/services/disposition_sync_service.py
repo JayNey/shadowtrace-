@@ -68,6 +68,7 @@ logger = logging.getLogger(__name__)
 ResumeInvestigationHook = Callable[[str], Awaitable[None]]
 _DEFAULT_LEASE_SECONDS = 30
 _ERROR_DETAIL_MAX_LEN = 500
+OUTBOX_SUPERSEDED_ERROR_CODE = "superseded_by_new_head"
 
 
 class _PausedLookupKind(StrEnum):
@@ -216,6 +217,35 @@ class DispositionSyncService:
                 .limit(1)
             )
             if prior_head is not None:
+                tentative_payload = command.model_dump(mode="json")
+                tentative_hash = _payload_sha256(tentative_payload)
+                if (
+                    prior_head.idempotency_key == command.idempotency_key
+                    and prior_head.command_payload_sha256 == tentative_hash
+                ):
+                    return DispositionOutboxRecord.model_validate(
+                        {
+                            "outbox_id": prior_head.outbox_id,
+                            "writeback_id": prior_head.writeback_id,
+                            "disposition_id": prior_head.disposition_id,
+                            "action_id": prior_head.action_id,
+                            "event_id": prior_head.event_id,
+                            "closure_cycle": prior_head.closure_cycle,
+                            "source_record_id": prior_head.source_record_id,
+                            "source_locator_hash": prior_head.source_locator_hash,
+                            "source_sequence": prior_head.source_sequence,
+                            "intent_kind": prior_head.intent_kind,
+                            "logical_slot": prior_head.logical_slot,
+                            "supersedes_disposition_id": prior_head.supersedes_disposition_id,
+                            "superseded_by_disposition_id": (
+                                prior_head.superseded_by_disposition_id
+                            ),
+                            "idempotency_key": prior_head.idempotency_key,
+                            "command_payload": prior_head.command_payload,
+                            "command_payload_sha256": prior_head.command_payload_sha256,
+                            "delivery_status": prior_head.delivery_status,
+                        }
+                    )
                 # Propagate lineage onto the wire payload so the adapter / Mock
                 # XDR can honor its supersede contract (old head deactivated).
                 command = command.model_copy(
@@ -242,8 +272,13 @@ class DispositionSyncService:
             delivery_status=OutboxDeliveryStatus.READY.value,
         )
         if prior_head is not None:
-            # Atomic lineage: the old head is superseded by the new head.
-            prior_head.superseded_by_disposition_id = command.disposition_id
+            # Atomic lineage + non-deliverable terminal state for the old head
+            # (ISSUE-273): superseded rows must never be claimable or egressed.
+            self._finalize_superseded_head(
+                prior_head,
+                superseded_by_disposition_id=command.disposition_id,
+                now=datetime.now(UTC),
+            )
         session.add(outbox)
         await session.flush()
         await append_list_context_journal_in_session(
@@ -717,6 +752,13 @@ class DispositionSyncService:
                 )
                 if outbox is None:
                     return
+                # ISSUE-273: superseded heads are non-deliverable from commit time.
+                if outbox.superseded_by_disposition_id is not None:
+                    self._block_superseded_outbox(
+                        outbox,
+                        now=datetime.now(UTC),
+                    )
+                    return
                 delivery_status = OutboxDeliveryStatus(outbox.delivery_status)
                 if delivery_status is OutboxDeliveryStatus.PAUSED:
                     logger.info(
@@ -744,17 +786,6 @@ class DispositionSyncService:
                     if outbox.lease_expires_at is None or outbox.lease_expires_at <= now:
                         self._release_leased_outbox_after_lease_expiry(outbox, now=now)
                         return
-                if outbox.superseded_by_disposition_id is not None:
-                    logger.warning(
-                        "outbox delivery blocked: superseded head outbox=%s",
-                        outbox_id,
-                    )
-                    self._block_outbox_for_writeback_fence(
-                        outbox,
-                        now=now,
-                        error_detail="superseded outbox head cannot deliver",
-                    )
-                    return
                 # ISSUE-235: lock the action row for the delivery-time approval
                 # re-check so a concurrent revoke cannot slip in between the
                 # check and the adapter submit (TOCTOU 纵深防御).
@@ -807,6 +838,26 @@ class DispositionSyncService:
                     )
                     return
                 command = DispositionCommand.model_validate(outbox.command_payload)
+                if not await self._assert_active_head_for_delivery(session, outbox, command):
+                    self._block_superseded_outbox(
+                        outbox,
+                        now=datetime.now(UTC),
+                    )
+                    return
+                current_delivery = OutboxDeliveryStatus(outbox.delivery_status)
+                if (
+                    current_delivery is OutboxDeliveryStatus.LEASED
+                    and outbox.locked_by is not None
+                    and outbox.locked_by != self._worker_id
+                ):
+                    logger.warning(
+                        "outbox delivery skipped: lease owned by another worker "
+                        "outbox=%s locked_by=%s worker=%s",
+                        outbox_id,
+                        outbox.locked_by,
+                        self._worker_id,
+                    )
+                    return
                 # ISSUE-235 (SUS-301): TOCTOU 纵深防御 — deliver relies on the
                 # enqueue-time approved_action_ids snapshot and does not
                 # re-derive it; an approval revoked between enqueue and
@@ -1677,6 +1728,81 @@ class DispositionSyncService:
                 {"writeback_id": writeback_id, "status": WritebackStatus.UNKNOWN.value},
             )
 
+    def _finalize_superseded_head(
+        self,
+        prior_head: orm.DispositionOutbox,
+        *,
+        superseded_by_disposition_id: str,
+        now: datetime,
+    ) -> None:
+        """Write lineage and terminate undelivered delivery for a superseded head (ISSUE-273)."""
+        prior_head.superseded_by_disposition_id = superseded_by_disposition_id
+        raw_status = prior_head.delivery_status or OutboxDeliveryStatus.READY.value
+        current = OutboxDeliveryStatus(raw_status)
+        if current in {OutboxDeliveryStatus.DELIVERED, OutboxDeliveryStatus.DEAD_LETTER}:
+            return
+        prior_head.last_error_code = OUTBOX_SUPERSEDED_ERROR_CODE
+        prior_head.last_error_detail = self._truncate_error_detail(
+            f"superseded by disposition {superseded_by_disposition_id}",
+        )
+        prior_head.locked_by = None
+        prior_head.locked_at = None
+        prior_head.lease_expires_at = None
+        prior_head.next_retry_at = None
+        prior_head.updated_at = now
+        validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
+        prior_head.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+
+    def _block_superseded_outbox(
+        self,
+        outbox: orm.DispositionOutbox,
+        *,
+        now: datetime,
+    ) -> OutboxDeliveryStatus:
+        """Fail-closed pre-egress block for superseded or stale active heads (ISSUE-273)."""
+        current = OutboxDeliveryStatus(outbox.delivery_status)
+        if current is OutboxDeliveryStatus.LEASED:
+            return self._release_leased_outbox_to_dead_letter(
+                outbox,
+                now=now,
+                error_code=OUTBOX_SUPERSEDED_ERROR_CODE,
+                error_detail="superseded outbox head cannot egress",
+            )
+
+        outbox.last_error_code = OUTBOX_SUPERSEDED_ERROR_CODE
+        outbox.last_error_detail = self._truncate_error_detail(
+            "superseded outbox head cannot egress",
+        )
+        outbox.updated_at = now
+        outbox.next_retry_at = None
+        if current is not OutboxDeliveryStatus.DEAD_LETTER:
+            validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
+            outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+            record_writeback_dead_letter(adapter=self._adapter_label(outbox))
+        return OutboxDeliveryStatus.DEAD_LETTER
+
+    async def _assert_active_head_for_delivery(
+        self,
+        session: AsyncSession,
+        outbox: orm.DispositionOutbox,
+        command: DispositionCommand,
+    ) -> bool:
+        """Pre-egress CAS: only the current active head may egress (ISSUE-273)."""
+        if command.intent_kind is not DispositionIntentKind.EVENT_STATUS_UPDATE:
+            return True
+        active_head_id = await session.scalar(
+            select(orm.DispositionOutbox.disposition_id)
+            .where(
+                orm.DispositionOutbox.event_id == outbox.event_id,
+                orm.DispositionOutbox.closure_cycle == outbox.closure_cycle,
+                orm.DispositionOutbox.intent_kind == command.intent_kind.value,
+                orm.DispositionOutbox.logical_slot == outbox.logical_slot,
+                orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+            )
+            .limit(1)
+        )
+        return active_head_id == outbox.disposition_id
+
     async def _mark_delivery_waiting_retry(
         self,
         outbox_id: str,
@@ -1767,6 +1893,7 @@ class OutboxWorker:
                     await session.scalars(
                         select(orm.DispositionOutbox)
                         .where(
+                            orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
                             or_(
                                 and_(
                                     orm.DispositionOutbox.delivery_status
@@ -1795,7 +1922,7 @@ class OutboxWorker:
                                         orm.DispositionOutbox.lease_expires_at <= now,
                                     ),
                                 ),
-                            )
+                            ),
                         )
                         .order_by(orm.DispositionOutbox.created_at.asc())
                         .limit(limit)
@@ -1803,6 +1930,8 @@ class OutboxWorker:
                     )
                 ).all()
                 for row in rows:
+                    if row.superseded_by_disposition_id is not None:
+                        continue
                     current = OutboxDeliveryStatus(row.delivery_status)
                     if current is OutboxDeliveryStatus.WAITING_RETRY and row.next_retry_at is None:
                         backoff_attempt = max(1, int(row.attempt) + 1)
