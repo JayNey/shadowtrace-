@@ -150,10 +150,10 @@ async def _build_authoritative_context(
     has_entity_side_effect_actions = False
     if response_actions:
         response_actions_are_disposition_only = all(
-            a.action_name == TERMINAL_DISPOSITION_TOOL for a in response_actions
+            a.tool_name == TERMINAL_DISPOSITION_TOOL for a in response_actions
         )
         has_entity_side_effect_actions = any(
-            a.action_name != TERMINAL_DISPOSITION_TOOL for a in response_actions
+            a.tool_name != TERMINAL_DISPOSITION_TOOL for a in response_actions
         )
 
     # --- CLOSED gate projections ---
@@ -217,7 +217,7 @@ async def _build_terminal_writeback_view(
         .where(
             orm.Action.event_id == event_id,
             orm.Action.plan_revision == current_revision,
-            orm.Action.action_name == TERMINAL_DISPOSITION_TOOL,
+            orm.Action.tool_name == TERMINAL_DISPOSITION_TOOL,
             orm.Action.execution_phase == ActionExecutionPhase.POST_VERIFY.value,
             orm.Action.superseded_by_revision.is_(None),
         )

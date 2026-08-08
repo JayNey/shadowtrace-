@@ -678,6 +678,15 @@ def test_remaining_route_truth_tables() -> None:
         route_after_report(_base_state(disposition_policy=DispositionPolicy.REQUIRED.value))
         == ROUTE_HALT
     )
+    assert (
+        route_after_report(
+            _base_state(
+                disposition_policy=DispositionPolicy.REQUIRED.value,
+                verify_overall_status=VerificationOverallStatus.SUCCESS.value,
+            )
+        )
+        == ROUTE_CLOSE
+    )
     assert route_after_report(_base_state()) == ROUTE_CLOSE
     assert route_after_report(_base_state(generate_report=False)) == ROUTE_HALT
     assert (

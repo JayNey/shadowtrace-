@@ -53,6 +53,15 @@ def _record_hash(canonical: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_bytes(canonical)).hexdigest()
 
 
+def _record_hash_payload(record: DecisionRecord) -> dict[str, Any]:
+    """Return stable decision content, excluding generated persistence identity."""
+    canonical = TraceProjection.project(record.model_dump(mode="json"))
+    assert isinstance(canonical, dict)
+    for field in ("created_at", "record_hash", "record_id", "trace_ref"):
+        canonical.pop(field, None)
+    return canonical
+
+
 def _validate_ref_id(ref_id: str) -> bool:
     return bool(_REF_ID_PATTERN.match(ref_id.strip()))
 
@@ -193,6 +202,35 @@ def _idempotency_key(
     if isinstance(plan_id, str) and plan_id.strip():
         revision = output_data.get("revision", 0)
         return f"{event_id}:{stage.value}:{agent_name}:{plan_id.strip()}:rev{revision}"
+    if stage is DecisionStage.VERIFY:
+        # Verify is intentionally repeatable as external effects and writebacks
+        # converge. Distinguish semantic outcomes while keeping an exact replay
+        # of the same outcome idempotent.
+        variant = {
+            "verification_phase": output_data.get("verification_phase"),
+            "overall_status": output_data.get("overall_status"),
+            "results": output_data.get("results") or [],
+            "failed_actions": sorted(
+                str(item) for item in (output_data.get("failed_actions") or [])
+            ),
+            "failed_writebacks": sorted(
+                str(item) for item in (output_data.get("failed_writebacks") or [])
+            ),
+            "blocked_writebacks": sorted(
+                str(item) for item in (output_data.get("blocked_writebacks") or [])
+            ),
+            "need_action_replan": bool(output_data.get("need_action_replan")),
+            "need_writeback_recovery": bool(output_data.get("need_writeback_recovery")),
+            "need_manual_resolution": bool(output_data.get("need_manual_resolution")),
+            "recoverable_writeback_ids": sorted(
+                str(item) for item in (output_data.get("recoverable_writeback_ids") or [])
+            ),
+            "pending_writeback_action_ids": sorted(
+                str(item) for item in (output_data.get("pending_writeback_action_ids") or [])
+            ),
+        }
+        variant_hash = hashlib.sha256(_canonical_bytes(variant)).hexdigest()[:16]
+        return f"{event_id}:{stage.value}:{agent_name}:outcome-{variant_hash}:r1"
     return f"{event_id}:{stage.value}:{agent_name}:r1"
 
 
@@ -595,10 +633,7 @@ def _build_record_payload(
         owner=agent_name,
         created_at=datetime.now(UTC),
     )
-    canonical = TraceProjection.project(record.model_dump(mode="json", exclude={"record_hash"}))
-    assert isinstance(canonical, dict)
-    canonical.pop("created_at", None)
-    record.record_hash = _record_hash(canonical)
+    record.record_hash = _record_hash(_record_hash_payload(record))
     return record
 
 
@@ -812,10 +847,7 @@ class DecisionRecordService:
             owner="workflow_runtime",
             created_at=datetime.now(UTC),
         )
-        canonical = TraceProjection.project(record.model_dump(mode="json", exclude={"record_hash"}))
-        assert isinstance(canonical, dict)
-        canonical.pop("created_at", None)
-        record.record_hash = _record_hash(canonical)
+        record.record_hash = _record_hash(_record_hash_payload(record))
         return await self.persist_in_session(session, record)
 
     async def assert_auto_disposition_allowed(

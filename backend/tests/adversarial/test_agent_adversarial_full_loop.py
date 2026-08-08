@@ -8,7 +8,7 @@ ISSUE-203 quality gates (hard failures):
 - ``response_agent``/``verify_agent`` traces (snake_case agent_name)
 - Response plan targets cover ``GROUND_TRUTH.must_response_targets``
 - Mock writeback ``CONFIRMED(readback_verified)`` + terminal outbox enqueued
-- ``shims_used`` must be empty (ISSUE-204: no runner hooks or sunset shims).
+- ``sunset_shims_used`` must be empty; intentional adversarial DI is reported separately.
 
 Default runner timeout: ~120s (Mock). Override with ``ADVERSARIAL_FULL_LOOP_TIMEOUT_S``
 (Live ``LLM_MODE=openai_compatible`` defaults to 600s unless overridden).
@@ -187,7 +187,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "execution_job_count": obs.execution_job_count,
         "execution_ran": loop_result.execution_ran,
         "resume_attempts": loop_result.resume_attempts,
-        "shims_used": list(loop_result.shims_used),
+        "sunset_shims_used": list(loop_result.sunset_shims_used),
+        "adversarial_di_overrides": list(loop_result.adversarial_di_overrides),
         "disposition_target_gaps": disposition_gaps,
         "status_sequence_includes_closed": EventStatus.CLOSED.value in status_sequence,
         "status_sequence_includes_reporting": EventStatus.REPORTING.value in status_sequence,
@@ -208,7 +209,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "verification_context_present": loop_result.verification_present,
         "disposition_writeback_ok": loop_result.writeback_confirmed,
         "disposition_targets_aligned": not disposition_gaps,
-        "no_test_shims": len(loop_result.shims_used) == 0,
+        "no_sunset_shims": len(loop_result.sunset_shims_used) == 0,
         "tools_invoked": loop_result.tool_call_count > 0,
         "llm_invoked": loop_result.llm_call_count > 0,
     }
@@ -227,8 +228,9 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     print(f"[adversarial-full-loop] artifact → {ARTIFACT_PATH}")
 
     prod = report["production_checks"]
-    assert prod["no_test_shims"], (
-        f"ISSUE-204: shims_used must be empty, got {loop_result.shims_used}"
+    assert prod["no_sunset_shims"], (
+        "ISSUE-204: sunset_shims_used must be empty, "
+        f"got {loop_result.sunset_shims_used}"
     )
     assert prod["response_agent_ran"], "expected response_agent trace"
     assert prod["execution_ran"], "expected ActionExecution jobs after approval"
@@ -242,10 +244,9 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         "expected CONFIRMED+readback_verified disposition receipt on Mock path"
     )
     assert loop_result.terminal_outbox_enqueued, "expected terminal EVENT_STATUS_UPDATE outbox row"
-    assert event_final.status in {
-        EventStatus.REPORTING,
-        EventStatus.CLOSED,
-    }
+    assert event_final.status is EventStatus.CLOSED
+    assert EventStatus.REPORTING.value in status_sequence
+    assert EventStatus.CLOSED.value in status_sequence
     assert _report_excerpt(report_ctx).strip(), (
         "ISSUE-196: full loop must reach REPORTING/CLOSED with non-empty report"
     )

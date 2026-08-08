@@ -1103,10 +1103,11 @@ class DispositionSyncService:
             )
         if isinstance(substate_raw, dict) and set(substate_raw) == {"_scalar"}:
             substate_raw = substate_raw["_scalar"]
-        if substate_raw in {
+        should_resume = substate_raw in {
             ExecutionSubstate.WAITING_WRITEBACK.value,
             ExecutionSubstate.WAITING_EXECUTION.value,
-        }:
+        }
+        if should_resume:
             try:
                 await self._resume(event_id)
             except Exception as exc:

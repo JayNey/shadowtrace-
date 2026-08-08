@@ -289,7 +289,7 @@ def route_after_risk(state: InvestigationState) -> str:
 
 
 def route_after_report(state: InvestigationState) -> str:
-    """End analysis at REPORTING for required policy; close when not required.
+    """Close after a successful Verify result; otherwise halt at REPORTING.
 
     ISSUE-204: REPORTING means the report phase is reachable, not that report
     bytes exist. When ``generate_report`` is False, halt at REPORTING regardless
@@ -300,7 +300,10 @@ def route_after_report(state: InvestigationState) -> str:
     policy = DispositionPolicy(
         state.get("disposition_policy", DispositionPolicy.NOT_REQUIRED.value)
     )
-    if policy is DispositionPolicy.REQUIRED:
+    if (
+        policy is DispositionPolicy.REQUIRED
+        and state.get("verify_overall_status") != VerificationOverallStatus.SUCCESS.value
+    ):
         return ROUTE_HALT
     return ROUTE_CLOSE
 
@@ -683,6 +686,7 @@ def _verification_result_state_update(
 ) -> dict[str, Any]:
     """Project VerifyAgent output into the graph recovery contract."""
     return {
+        "verify_overall_status": verification_result.overall_status.value,
         "verify_need_action_replan": verification_result.need_action_replan,
         "verify_need_writeback_recovery": verification_result.need_writeback_recovery,
         "verify_need_manual_resolution": verification_result.need_manual_resolution,

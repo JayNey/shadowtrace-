@@ -47,7 +47,7 @@ from tests.system.helpers import seed_source_object_for_event
 
 logger = logging.getLogger(__name__)
 
-# Sunset registry — must never reappear in ``shims_used``.
+# Sunset registry — must never reappear in ``sunset_shims_used``.
 _REMOVED_SHIMS = (
     "_sanitize_actions_for_verify",
     "_ensure_writeback_activation_ready",
@@ -56,6 +56,11 @@ _REMOVED_SHIMS = (
 )
 _DEFAULT_MOCK_TIMEOUT_S = 120.0
 _DEFAULT_LIVE_TIMEOUT_S = 600.0
+_ADVERSARIAL_DI_OVERRIDES = (
+    "AdversarialDispositionSyncService",
+    "AdversarialTerminalDispositionResolver",
+    "XdrManagedVerifyToolExecutor",
+)
 
 
 def resolve_full_loop_timeout_s() -> float:
@@ -90,7 +95,8 @@ class ProductionFullLoopResult:
     resume_attempts: int
     elapsed_s: float
     response_plan_actions: tuple[dict[str, Any], ...]
-    shims_used: tuple[str, ...]
+    sunset_shims_used: tuple[str, ...]
+    adversarial_di_overrides: tuple[str, ...]
     notes: list[str] = field(default_factory=list)
 
 
@@ -132,11 +138,6 @@ def _wire_production_monkeypatches(
 
     monkeypatch.setattr("app.api.v1.deps.get_disposition_sync", _disposition_sync)
     monkeypatch.setattr("app.api.v1.deps.get_event_disposition_service", _event_disposition)
-
-    from tests.adversarial.xdr_verify_observation import AdversarialVerifyAgent
-
-    monkeypatch.setattr("app.agents.verify_agent.VerifyAgent", AdversarialVerifyAgent)
-
 
 async def _resume_investigation_graph(
     session_factory: async_sessionmaker[AsyncSession],
@@ -225,26 +226,46 @@ async def _writeback_flags(
     event_id: str,
 ) -> tuple[bool, bool]:
     async with session_factory() as session:
+        current_revision = await session.scalar(
+            select(func.max(orm.Action.plan_revision)).where(
+                orm.Action.event_id == event_id,
+                orm.Action.superseded_by_revision.is_(None),
+            )
+        )
+        if current_revision is None:
+            return False, False
+        active_terminal_filters = (
+            orm.DispositionOutbox.event_id == event_id,
+            orm.DispositionOutbox.intent_kind
+            == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+            orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+            orm.Action.plan_revision == current_revision,
+            orm.Action.superseded_by_revision.is_(None),
+        )
         confirmed = await session.scalar(
             select(orm.DispositionReceipt)
-            .join(orm.Action, orm.Action.action_id == orm.DispositionReceipt.action_id)
+            .join(
+                orm.DispositionOutbox,
+                orm.DispositionOutbox.writeback_id == orm.DispositionReceipt.writeback_id,
+            )
+            .join(orm.Action, orm.Action.action_id == orm.DispositionOutbox.action_id)
             .where(
-                orm.Action.event_id == event_id,
+                *active_terminal_filters,
                 orm.DispositionReceipt.status == WritebackStatus.CONFIRMED.value,
                 orm.DispositionReceipt.confirmation_evidence
                 == ConfirmationEvidence.READBACK_VERIFIED.value,
             )
         )
-        terminal_outbox = await session.scalar(
-            select(orm.DispositionOutbox)
-            .where(
-                orm.DispositionOutbox.event_id == event_id,
-                orm.DispositionOutbox.intent_kind
-                == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+        terminal_outbox_count = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(orm.DispositionOutbox)
+                .join(orm.Action, orm.Action.action_id == orm.DispositionOutbox.action_id)
+                .where(*active_terminal_filters)
             )
-            .limit(1)
+            or 0
         )
-    return confirmed is not None, terminal_outbox is not None
+    return confirmed is not None, terminal_outbox_count == 1
 
 
 def _loop_quiescent(
@@ -254,11 +275,7 @@ def _loop_quiescent(
     pending_outbox_count: int,
 ) -> bool:
     """Return True when the production loop has no further progress to make."""
-    terminal_statuses = {
-        EventStatus.REPORTING.value,
-        EventStatus.CLOSED.value,
-        EventStatus.FAILED.value,
-    }
+    terminal_statuses = {EventStatus.CLOSED.value, EventStatus.FAILED.value}
     if snap.pending_action_count != 0:
         return False
     if waiting_approval_count > 0:
@@ -329,100 +346,23 @@ async def _deliver_all_ready_outboxes(
     event_id: str,
     adversarial_disposition_sync_service: Any,
     notes: list[str],
-    max_rounds: int = 12,
+    deadline: float,
 ) -> int:
     """Deliver ready outboxes without resuming the graph (pre-verify staging)."""
     delivered_total = 0
-    for round_idx in range(max_rounds):
-        delivered_any = False
-        for _ in range(5):
-            if await _drain_disposition_outboxes(
-                session_factory=session_factory,
-                event_id=event_id,
-                adversarial_disposition_sync_service=adversarial_disposition_sync_service,
-                notes=notes,
-            ):
-                delivered_any = True
-                delivered_total += 1
-            else:
-                break
-            await asyncio.sleep(0.1)
-        if not delivered_any:
+    while time.monotonic() < deadline:
+        if await _count_pending_outboxes(session_factory, event_id) == 0:
             break
-        notes.append(f"pre_verify_outbox_drain_round_{round_idx + 1}")
-    return delivered_total
-
-
-async def _build_adversarial_verify_agent() -> Any:
-    from app.agents.verify_agent import VerifyAgent
-    from app.api.v1.deps import (
-        _get_event_bus,
-        _get_investigation_stack,
-        get_disposition_sync,
-        get_event_disposition_service,
-    )
-
-    stack = await _get_investigation_stack()
-    wm = stack["wm"]
-    return VerifyAgent(
-        tool_executor=stack["tool_executor"],
-        working_memory=wm.for_writer("VerifyAgent"),
-        trace_service=stack["trace_service"],
-        event_bus=_get_event_bus(),
-        session_factory=stack["session_factory"],
-        event_disposition_service=await get_event_disposition_service(),
-        disposition_sync_service=await get_disposition_sync(),
-        output_guard=stack["output_guard"],
-    )
-
-
-async def _rerun_production_verify_after_writebacks(
-    *,
-    session_factory: async_sessionmaker[AsyncSession],
-    context_store: Any,
-    event_id: str,
-    adversarial_disposition_sync_service: Any,
-    notes: list[str],
-) -> bool:
-    """Re-run VerifyAgent after entity writebacks are observable (ISSUE-204).
-
-    Graph ``execute_node → verify_node`` often starts verify while containment
-    actions are still EXECUTING.  ISSUE-196 resume reconcile may also route toward
-    REPORTING when entity outboxes reach ACCEPTED without activating the deferred
-    terminal writeback.  Invoke VerifyAgent again once SUCCESS rows exist so
-    phase2 can call ``EventDispositionService.activate_and_submit``.
-    """
-    _writeback_ok, terminal_outbox = await _writeback_flags(session_factory, event_id)
-    if terminal_outbox and _writeback_ok:
-        return False
-
-    from app.agents.verify_agent import VerifyAgentInput
-    from app.models.agent_io import ResponsePlan, VerificationPhase
-
-    response_plan_raw = await context_store.get(event_id, "response_plan")
-    if not response_plan_raw:
-        notes.append("production_verify_rerun: skipped (no response_plan)")
-        return False
-
-    verify_agent = await _build_adversarial_verify_agent()
-    result = await verify_agent.execute(
-        VerifyAgentInput(
+        delivered = await _drain_disposition_outboxes(
+            session_factory=session_factory,
             event_id=event_id,
-            response_plan=ResponsePlan.model_validate(response_plan_raw),
-            verification_phase=VerificationPhase.EFFECT,
+            adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+            notes=notes,
         )
-    )
-    notes.append(
-        "production_verify_rerun_after_writebacks: "
-        f"overall={getattr(result, 'overall_status', None)!s}"
-    )
-    await _deliver_all_ready_outboxes(
-        session_factory=session_factory,
-        event_id=event_id,
-        adversarial_disposition_sync_service=adversarial_disposition_sync_service,
-        notes=notes,
-    )
-    return True
+        if delivered == 0:
+            break
+        delivered_total += delivered
+    return delivered_total
 
 
 async def _wait_for_execution_settle(
@@ -473,31 +413,23 @@ async def _drain_outboxes_until_stable(
     event_id: str,
     adversarial_disposition_sync_service: Any,
     notes: list[str],
-    resume_hook: Any,
-    max_rounds: int = 12,
+    deadline: float,
 ) -> int:
-    """Deliver ready outboxes and resume graph between passes."""
-    resume_count = 0
-    for round_idx in range(max_rounds):
-        delivered_any = False
-        for _ in range(5):
-            if await _drain_disposition_outboxes(
-                session_factory=session_factory,
-                event_id=event_id,
-                adversarial_disposition_sync_service=adversarial_disposition_sync_service,
-                notes=notes,
-            ):
-                delivered_any = True
-            else:
-                break
-            await asyncio.sleep(0.1)
-        if not delivered_any:
+    """Drain observable outbox progress; service callbacks own graph resume."""
+    delivered_total = 0
+    while time.monotonic() < deadline:
+        if await _count_pending_outboxes(session_factory, event_id) == 0:
             break
-        notes.append(f"post_execution_outbox_drain_round_{round_idx + 1}")
-        resume_count += 1
-        await resume_hook(event_id)
-        await asyncio.sleep(0.25)
-    return resume_count
+        delivered = await _drain_disposition_outboxes(
+            session_factory=session_factory,
+            event_id=event_id,
+            adversarial_disposition_sync_service=adversarial_disposition_sync_service,
+            notes=notes,
+        )
+        if delivered == 0:
+            break
+        delivered_total += delivered
+    return delivered_total
 
 
 async def _count_waiting_approval(
@@ -522,19 +454,19 @@ async def _drain_disposition_outboxes(
     event_id: str,
     adversarial_disposition_sync_service: Any,
     notes: list[str],
-) -> bool:
+) -> int:
     """Deliver ready disposition outboxes via production DispositionSync."""
     pending = await _count_pending_outboxes(session_factory, event_id)
     if pending <= 0:
-        return False
+        return 0
     try:
         delivered = await adversarial_disposition_sync_service.process_ready_outboxes(limit=10)
     except Exception:
         logger.exception("process_ready_outboxes failed event=%s", event_id)
-        return False
+        return 0
     if delivered:
         notes.append(f"delivered_outboxes={delivered}")
-    return bool(delivered)
+    return int(delivered)
 
 
 def _normalize_action_rows(raw: Any) -> tuple[dict[str, Any], ...]:
@@ -570,13 +502,16 @@ async def run_production_full_loop(
     if timeout_s is None:
         timeout_s = resolve_full_loop_timeout_s()
 
-    shims_used: list[str] = []
+    sunset_shims_used: list[str] = []
     notes: list[str] = [
         f"shim_sunset: removed={list(_REMOVED_SHIMS)}",
         f"timeout_s={timeout_s}",
     ]
+    resume_attempts = 0
 
     async def _resume_hook(resume_event_id: str) -> None:
+        nonlocal resume_attempts
+        resume_attempts += 1
         await _resume_investigation_graph(session_factory, resume_event_id)
 
     _wire_production_monkeypatches(
@@ -589,7 +524,6 @@ async def run_production_full_loop(
     )
 
     started = time.perf_counter()
-    resume_attempts = 0
 
     event = await event_service.get_event(event_id)
     if event is None:
@@ -625,9 +559,8 @@ async def run_production_full_loop(
             approval_rounds += 1
             approved_ids.extend(newly_approved)
             notes.append(f"approval_round_{approval_rounds}: {len(newly_approved)} action(s)")
-            notes.append("approval_resume: deferred until writebacks drained")
-            resume_attempts += 1
-            await _resume_investigation_graph(session_factory, event_id)
+            notes.append("approval_resume: runner owns the disabled approval callback")
+            await _resume_hook(event_id)
             await _wait_for_execution_settle(session_factory, event_id)
             await _wait_for_containment_actions_success(session_factory, event_id)
             await _deliver_all_ready_outboxes(
@@ -635,25 +568,16 @@ async def run_production_full_loop(
                 event_id=event_id,
                 adversarial_disposition_sync_service=adversarial_disposition_sync_service,
                 notes=notes,
+                deadline=deadline,
             )
-            await _rerun_production_verify_after_writebacks(
-                session_factory=session_factory,
-                context_store=context_store,
-                event_id=event_id,
-                adversarial_disposition_sync_service=adversarial_disposition_sync_service,
-                notes=notes,
-            )
-            resume_attempts += 1
-            notes.append("post_writeback_verify_resume")
-            await _resume_investigation_graph(session_factory, event_id)
-            resume_attempts += await _drain_outboxes_until_stable(
+            await _drain_outboxes_until_stable(
                 session_factory=session_factory,
                 event_id=event_id,
                 adversarial_disposition_sync_service=adversarial_disposition_sync_service,
                 notes=notes,
-                resume_hook=_resume_investigation_graph,
+                deadline=deadline,
             )
-            for _ in range(40):
+            while time.monotonic() < deadline:
                 snap = await collect_observability(session_factory, event_id)
                 if snap.pending_action_count == 0:
                     break
@@ -661,15 +585,13 @@ async def run_production_full_loop(
             idle_rounds = 0
             continue
 
-        if await _drain_disposition_outboxes(
+        delivered = await _drain_disposition_outboxes(
             session_factory=session_factory,
             event_id=event_id,
             adversarial_disposition_sync_service=adversarial_disposition_sync_service,
             notes=notes,
-        ):
-            resume_attempts += 1
-            await _resume_investigation_graph(session_factory, event_id)
-            await asyncio.sleep(0.25)
+        )
+        if delivered:
             idle_rounds = 0
             continue
 
@@ -694,12 +616,12 @@ async def run_production_full_loop(
 
         await asyncio.sleep(0.5)
 
-    resume_attempts += await _drain_outboxes_until_stable(
+    await _drain_outboxes_until_stable(
         session_factory=session_factory,
         event_id=event_id,
         adversarial_disposition_sync_service=adversarial_disposition_sync_service,
         notes=notes,
-        resume_hook=_resume_investigation_graph,
+        deadline=deadline,
     )
 
     observability = await collect_observability(session_factory, event_id)
@@ -739,6 +661,7 @@ async def run_production_full_loop(
         resume_attempts=resume_attempts,
         elapsed_s=elapsed,
         response_plan_actions=response_plan_actions,
-        shims_used=tuple(shims_used),
+        sunset_shims_used=tuple(sunset_shims_used),
+        adversarial_di_overrides=_ADVERSARIAL_DI_OVERRIDES,
         notes=notes,
     )

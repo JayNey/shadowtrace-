@@ -42,6 +42,7 @@ class InvestigationState(TypedDict, total=False):
     verify_need_manual_resolution: bool
     verify_need_writeback_recovery: bool
     verify_need_action_replan: bool
+    verify_overall_status: str | None
     verify_failed_actions: list[str] | None
     verify_failed_writebacks: list[str] | None
     # ISSUE-259: typed recovery queues — recovery handler MUST consume

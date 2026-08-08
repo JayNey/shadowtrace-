@@ -141,10 +141,11 @@ test and call `build_super_agent(scenario_id=None)` from integration fixtures.
 | Test | Artifact | Terminal state |
 |------|----------|----------------|
 | `test_agent_adversarial_audit.py` | `artifacts/latest_audit.json` | `REPORTING` |
-| `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | `REPORTING`/`CLOSED` + Mock writeback `CONFIRMED(readback_verified)` + aligned response targets |
+| `test_agent_adversarial_full_loop.py` | `artifacts/latest_full_loop_audit.json` | `CLOSED` + Mock terminal writeback `CONFIRMED(readback_verified)` + aligned response targets |
 
-Full-loop artifact includes `response_plan_actions`, `shims_used` (must be empty per
-ISSUE-204), and `disposition_target_gaps`. Sunset shims removed in ISSUE-203/204:
+Full-loop artifact includes `response_plan_actions`, `sunset_shims_used` (must be
+empty), explicit `adversarial_di_overrides`, and `disposition_target_gaps`. Sunset
+shims removed in ISSUE-203/204:
 verify_tail, writeback_activation seeding, minimum disposition audit seed, and
 post-loop ``final_disposition_activate``.
 

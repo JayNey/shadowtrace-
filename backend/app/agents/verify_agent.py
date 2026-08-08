@@ -347,7 +347,6 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             actions=actions,
             jobs_map=jobs_map,
         )
-
         # EventDispositionService.after_effect_resolution_ready reads
         # verification_result from EventContext.  Persist phase-1 outcome
         # before phase-2 activation so the first verify pass can activate
@@ -823,7 +822,10 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 )
 
         # Build writeback fields for this action.
-        wb_required = action.writeback_required
+        # Phase-1 reports the entity action's own writeback obligation.  An
+        # event-level requirement can legitimately be non-applicable here and
+        # is discharged by the deferred terminal action in phase 2.
+        wb_required = action.writeback_required and action.writeback_applicable
         wb_readiness = action.writeback_readiness
         wb_status = action.writeback_status
 
@@ -838,6 +840,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
             # we couldn't observe the entity effect, not that the writeback
             # status changed.  Losing PENDING/SENDING/CONFIRMED state here
             # would silently break downstream writeback recovery paths.
+            wb_required = action.writeback_required
             wb_readiness = WritebackReadiness.NOT_REQUIRED
             wb_status = action.writeback_status
 

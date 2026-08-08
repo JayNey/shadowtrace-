@@ -222,9 +222,10 @@ class EventDispositionService:
             )
 
         approved = _approved_list(deferred)
+        verification = _verification_from_context(context)
         resolve = self._resolver.resolve(
             final_verdict=FinalVerdict(event_row.final_verdict),
-            verification=_verification_from_context(context),
+            verification=verification,
             approved_terminal_dispositions=approved,
             disposition_only=bool(context.disposition_only_intent),
             disposition_policy=DispositionPolicy(event_row.disposition_policy),
@@ -250,11 +251,12 @@ class EventDispositionService:
                 skipped_reason="effect_not_ready",
             )
 
-        if not await self._after_effect_resolution_ready(
+        effect_resolution_ready = await self._after_effect_resolution_ready(
             event_row=event_row,
             context=context,
             plan_revision=plan_revision,
-        ):
+        )
+        if not effect_resolution_ready:
             return DispositionActivationResult(
                 action_id=deferred.action_id,
                 activated=False,

@@ -238,7 +238,7 @@ async def build_closed_gate_actions(
                 all_required_intents_confirmed=all_confirmed,
                 worst_unconfirmed_outbox_status=worst_outbox,
                 execution_phase=exec_phase,
-                tool_name=action_row.action_name,
+                tool_name=action_row.tool_name,
                 approved_terminal_dispositions=approved_terminal,
                 superseded=bool(action_row.superseded_by_revision),
                 rejected=action_row.status == ActionStatus.REJECTED.value,

@@ -497,7 +497,6 @@ async def resume_investigation_from_checkpoint(
     agent = await get_super_agent()
     graph = getattr(agent, "_investigation_graph", None)
     status_value = await _read_event_status(session_factory, event_id)
-
     if status_value in _NO_FULL_GRAPH_RESTART_STATUSES:
         if status_value in {EventStatus.CLOSED.value, EventStatus.FAILED.value}:
             logger.info(

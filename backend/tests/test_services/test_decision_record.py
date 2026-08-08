@@ -665,6 +665,191 @@ async def test_idempotency_hash_mismatch_sets_degraded(
 
 
 @pytest.mark.asyncio
+async def test_idempotent_replay_ignores_generated_record_and_trace_identity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    degraded_calls: list[tuple[str, str, bool, str]] = []
+
+    class FakeDegradedFlags:
+        async def set_flag(
+            self,
+            event_id: str,
+            flag_name: str,
+            value: bool,
+            writer: str,
+        ) -> list[str]:
+            degraded_calls.append((event_id, flag_name, value, writer))
+            return [f"{flag_name}=true"]
+
+    service = DecisionRecordService(
+        session_factory,
+        degraded_flag_service=FakeDegradedFlags(),
+    )
+    payload = {
+        "stage": "verify",
+        "overall_status": "success",
+        "verification_phase": "effect",
+        "results": [],
+    }
+    first = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-replay-a",
+        input_data={"event_id": event_id},
+        output_data=payload,
+    )
+    second = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-replay-b",
+        input_data={"event_id": event_id},
+        output_data=payload,
+    )
+
+    assert second == first
+    assert degraded_calls == []
+
+
+@pytest.mark.asyncio
+async def test_verify_outcome_transition_creates_distinct_audit_records(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    degraded_calls: list[tuple[str, str, bool, str]] = []
+
+    class FakeDegradedFlags:
+        async def set_flag(
+            self,
+            event_id: str,
+            flag_name: str,
+            value: bool,
+            writer: str,
+        ) -> list[str]:
+            degraded_calls.append((event_id, flag_name, value, writer))
+            return [f"{flag_name}=true"]
+
+    service = DecisionRecordService(
+        session_factory,
+        degraded_flag_service=FakeDegradedFlags(),
+    )
+    common = {
+        "stage": "verify",
+        "verification_phase": "effect",
+        "results": [],
+    }
+    waiting = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-outcome-waiting",
+        input_data={"event_id": event_id},
+        output_data={
+            **common,
+            "overall_status": "waiting",
+            "need_writeback_recovery": True,
+            "recoverable_writeback_ids": ["wbk-1234abcd"],
+        },
+    )
+    success = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-outcome-success",
+        input_data={"event_id": event_id},
+        output_data={**common, "overall_status": "success"},
+    )
+
+    assert waiting is not None
+    assert success is not None
+    assert success != waiting
+    assert degraded_calls == []
+
+
+@pytest.mark.asyncio
+async def test_verify_result_change_creates_distinct_audit_records(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    service = DecisionRecordService(session_factory)
+    common = {
+        "stage": "verify",
+        "verification_phase": "effect",
+        "overall_status": "success",
+    }
+    first = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-result-a",
+        input_data={"event_id": event_id},
+        output_data={
+            **common,
+            "results": [{"action_id": "act-1234abcd", "effect_status": "verified"}],
+        },
+    )
+    second = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="verify_agent",
+        trace_id="trc-result-b",
+        input_data={"event_id": event_id},
+        output_data={
+            **common,
+            "results": [{"action_id": "act-1234abcd", "effect_status": "failed"}],
+        },
+    )
+
+    assert first is not None
+    assert second is not None
+    assert second != first
+
+
+@pytest.mark.asyncio
+async def test_non_material_replay_mismatch_degrades_decision_audit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = _event_id()
+    degraded_calls: list[tuple[str, str, bool, str]] = []
+
+    class FakeDegradedFlags:
+        async def set_flag(
+            self,
+            event_id: str,
+            flag_name: str,
+            value: bool,
+            writer: str,
+        ) -> list[str]:
+            degraded_calls.append((event_id, flag_name, value, writer))
+            return [f"{flag_name}=true"]
+
+    service = DecisionRecordService(
+        session_factory,
+        degraded_flag_service=FakeDegradedFlags(),
+    )
+    common = {
+        "stage": "other",
+        "reason_code": "graph_built",
+        "selected_action": "graph:persist",
+    }
+    first = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="graph_agent",
+        trace_id="trc-graph-a",
+        input_data={"event_id": event_id},
+        output_data={**common, "decision_summary": "first graph projection"},
+    )
+    second = await service.persist_from_agent_trace(
+        event_id=event_id,
+        agent_name="graph_agent",
+        trace_id="trc-graph-b",
+        input_data={"event_id": event_id},
+        output_data={**common, "decision_summary": "refreshed graph projection"},
+    )
+
+    assert first is not None
+    assert second == first
+    assert degraded_calls
+    assert degraded_calls[0][1] == "decision_audit_degraded"
+
+
+@pytest.mark.asyncio
 async def test_auto_disposition_blocked_when_audit_degraded(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

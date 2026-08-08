@@ -428,6 +428,7 @@ async def _seed_terminal_writeback_fixture(
     target_disposition: SourceDisposition = SourceDisposition.CONTAINED,
     command_payload: dict[str, object] | None = None,
     receipt_simulated: bool | None = None,
+    action_name: str = TERMINAL_DISPOSITION_TOOL,
 ) -> str:
     action_id = f"act-term-{_sfx()}"
     writeback_id = f"wbk-{_sfx()}"
@@ -459,7 +460,7 @@ async def _seed_terminal_writeback_fixture(
                     plan_revision=plan_revision,
                     action_fingerprint=f"fp-{action_id}",
                     action_category="response",
-                    action_name=TERMINAL_DISPOSITION_TOOL,
+                    action_name=action_name,
                     tool_name=TERMINAL_DISPOSITION_TOOL,
                     action_level="l4",
                     execution_phase=ActionExecutionPhase.POST_VERIFY.value,
@@ -1382,6 +1383,29 @@ async def test_build_terminal_writeback_view_reads_nested_target_disposition(
     assert view.approved_disposition is SourceDisposition.CONTAINED
     assert view.actual_disposition is SourceDisposition.CONTAINED
     assert view.receipt_status is WritebackStatus.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_build_terminal_writeback_view_matches_canonical_tool_name(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+    )
+    await _seed_terminal_writeback_fixture(
+        session_factory,
+        event_id,
+        action_name="Deferred terminal disposition",
+    )
+
+    async with session_factory() as session:
+        view = await _build_terminal_writeback_view(session, event_id, 1)
+
+    assert view is not None
+    assert view.intent_kind is DispositionIntentKind.EVENT_STATUS_UPDATE
 
 
 @pytest.mark.asyncio

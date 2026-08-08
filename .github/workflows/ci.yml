@@ -136,6 +136,33 @@ jobs:
           uv run --frozen pytest --cov=app --cov-report=term
           --cov-report=xml:coverage.xml
 
+      - name: ISSUE-261 production and adversarial closure gates
+        run: |
+          production_rc=0
+          adversarial_rc=0
+          uv run --frozen pytest \
+            tests/integration/test_production_full_loop_disposition.py \
+            -m integration -v --tb=short -o addopts= \
+            --junitxml=issue-261-production.xml || production_rc=$?
+          uv run --frozen pytest \
+            tests/adversarial/test_agent_adversarial_full_loop.py \
+            -m adversarial_audit -v --tb=short -o addopts= \
+            --junitxml=issue-261-adversarial.xml || adversarial_rc=$?
+          if [ "${production_rc}" -ne 0 ] || [ "${adversarial_rc}" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload ISSUE-261 closure diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-261-closure-diagnostics
+          path: |
+            backend/issue-261-production.xml
+            backend/issue-261-adversarial.xml
+            backend/tests/adversarial/artifacts/latest_full_loop_audit.json
+          if-no-files-found: warn
+
       - name: ISSUE-055 orchestration coverage gate
         run: >
           uv run --frozen coverage report
