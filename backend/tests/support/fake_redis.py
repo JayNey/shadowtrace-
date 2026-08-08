@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,14 +21,15 @@ class _RedisEntry:
 class InMemoryFakeRedis:
     """Minimal async Redis fake for lease and metadata tests."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] | None = None) -> None:
         self._entries: dict[str, _RedisEntry] = {}
+        self._clock = clock or time.monotonic
 
     def _purge_expired(self, key: str) -> None:
         entry = self._entries.get(key)
         if entry is None or entry.expires_at is None:
             return
-        if time.monotonic() >= entry.expires_at:
+        if self._clock() >= entry.expires_at:
             del self._entries[key]
 
     async def set(
@@ -40,11 +41,13 @@ class InMemoryFakeRedis:
         ex: int | None = None,
         **kwargs: object,
     ) -> bool:
-        del kwargs
+        if kwargs:
+            unsupported = ", ".join(sorted(kwargs))
+            raise TypeError(f"unsupported fake Redis SET options: {unsupported}")
         self._purge_expired(key)
         if nx and key in self._entries:
             return False
-        expires_at = time.monotonic() + ex if ex is not None else None
+        expires_at = self._clock() + ex if ex is not None else None
         self._entries[key] = _RedisEntry(value=value, expires_at=expires_at)
         return True
 
@@ -56,6 +59,7 @@ class InMemoryFakeRedis:
         return entry.value.encode("utf-8")
 
     async def delete(self, key: str) -> int:
+        self._purge_expired(key)
         existed = key in self._entries
         self._entries.pop(key, None)
         return 1 if existed else 0
@@ -65,7 +69,7 @@ class InMemoryFakeRedis:
         entry = self._entries.get(key)
         if entry is None:
             return False
-        entry.expires_at = time.monotonic() + ttl
+        entry.expires_at = self._clock() + ttl
         return True
 
     def register_script(self, _script: str) -> Any:
@@ -116,15 +120,3 @@ def patch_redis_client(
     monkeypatch.setattr(RedisClient, "get_client", _get_client)
     monkeypatch.setattr(RedisClient, "aclose", _aclose)
     return fake
-
-
-@pytest.fixture
-def fake_redis_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryFakeRedis:
-    """Shared in-memory Redis fake with NX/EX lease semantics."""
-    return patch_redis_client(monkeypatch)
-
-
-@pytest.fixture
-def fake_redis_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[InMemoryFakeRedisClient]:
-    fake = patch_redis_client(monkeypatch)
-    yield InMemoryFakeRedisClient(fake)

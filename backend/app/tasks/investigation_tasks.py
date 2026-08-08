@@ -234,13 +234,14 @@ def publish_investigation_for_intent(
 
     Raises broker connectivity errors to the caller; ingest paths must catch.
     """
+    kwargs = build_investigation_dispatch_kwargs(
+        include_response_execution=include_response_execution,
+        generate_report=generate_report,
+        intent_id=intent_id,
+    )
     run_investigation.apply_async(
         args=[event_id],
-        kwargs={
-            "include_response_execution": bool(include_response_execution),
-            "generate_report": bool(generate_report),
-            "intent_id": intent_id,
-        },
+        kwargs=kwargs,
         task_id=task_id,
         queue=TASK_QUEUE,
     )

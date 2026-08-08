@@ -22,6 +22,7 @@ from app.core.errors import (
 )
 from app.models.enums import EventStatus
 from app.tasks import investigation_tasks as tasks
+from tests.support.investigation_task_doubles import make_run_analysis_only_body_double
 
 
 @pytest.mark.asyncio
@@ -1246,20 +1247,11 @@ def test_run_analysis_only_honors_delivery_info_redelivered_flag(
     from celery.app.task import Context
 
     captured: dict[str, Any] = {}
-
-    async def _fake_body(
-        event_id: str,
-        *,
-        generate_report: bool,
-        owner_id: str,
-        redelivered: bool,
-        lease_acquired: bool = False,
-    ) -> dict[str, str]:
-        captured["redelivered"] = redelivered
-        captured["owner_id"] = owner_id
-        return {"status": "completed", "event_id": event_id}
-
-    monkeypatch.setattr(tasks, "_run_analysis_only_body", _fake_body)
+    monkeypatch.setattr(
+        tasks,
+        "_run_analysis_only_body",
+        make_run_analysis_only_body_double(captured),
+    )
 
     ctx = Context(id="task-ao-redelivery-flag", delivery_info={"redelivered": True}, retries=0)
     tasks.run_analysis_only_investigation.request_stack.push(ctx)
@@ -1271,6 +1263,7 @@ def test_run_analysis_only_honors_delivery_info_redelivered_flag(
     assert result["status"] == "completed"
     assert captured["redelivered"] is True
     assert captured["owner_id"] == celery_task_owner_id("task-ao-redelivery-flag")
+    assert captured["generate_report"] is True
 
 
 @pytest.mark.asyncio

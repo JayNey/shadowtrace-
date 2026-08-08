@@ -25,6 +25,7 @@ from app.orchestration.lease import EventLease, generate_owner_id
 from app.tasks import investigation_tasks as tasks
 from app.tasks.investigation_task_contract import build_investigation_dispatch_kwargs
 from app.tasks.investigation_tasks import TASK_QUEUE
+from tests.support.fake_redis import InMemoryFakeRedis, patch_redis_client
 from tests.support.investigation_task_doubles import (
     make_execute_investigation_double,
     make_run_investigation_body_double,
@@ -116,9 +117,10 @@ def test_run_investigation_uses_task_id_owner(
 @pytest.mark.asyncio
 async def test_redelivery_skips_when_lease_still_held(
     monkeypatch: pytest.MonkeyPatch,
-    redis_client: RedisClient,
 ) -> None:
     """Crash-before-ack redelivery while the first delivery still holds the lease."""
+    patch_redis_client(monkeypatch)
+    redis_client = RedisClient()
     lease = EventLease(redis_client)
     event_id = "evt-redelivery-skip"
     task_id = "task-redelivery-skip"
@@ -167,21 +169,30 @@ async def test_redelivery_skips_when_lease_still_held(
 @pytest.mark.asyncio
 async def test_redelivery_runs_after_lease_expires(
     monkeypatch: pytest.MonkeyPatch,
-    redis_client: RedisClient,
 ) -> None:
-    """After the original delivery releases, the same celery owner id can acquire again."""
+    """After TTL expiry, a redelivery with the same Celery owner can acquire again."""
+    now = [100.0]
+    fake = InMemoryFakeRedis(clock=lambda: now[0])
+    patch_redis_client(monkeypatch, raw=fake)
+    redis_client = RedisClient()
     lease = EventLease(redis_client)
     event_id = "evt-redelivery-retry"
     task_id = "task-redelivery-retry"
     owner_id = celery_task_owner_id(task_id)
 
     assert await lease.acquire(event_id, owner_id, ttl_s=60)
-    assert await lease.release(event_id, owner_id)
-    assert await lease.acquire(event_id, owner_id, ttl_s=60) is True
+    now[0] += 60
 
     calls: list[str] = []
 
-    async def _investigate(event_id: str, **_kwargs: Any) -> None:
+    async def _investigate(
+        event_id: str,
+        *,
+        owner_id: str | None = None,
+        **_kwargs: Any,
+    ) -> None:
+        assert owner_id is not None
+        assert await lease.acquire(event_id, owner_id, ttl_s=60) is True
         calls.append(event_id)
 
     async def _fake_super_agent() -> Any:
@@ -473,13 +484,11 @@ def test_run_investigation_non_eager_worker_forwards_generate_report(
     from celery.contrib.testing.worker import start_worker
 
     captured: dict[str, Any] = {}
-
-    async def _fake_execute(event_id: str, **kwargs: Any) -> dict[str, str]:
-        captured.update(kwargs)
-        captured["event_id"] = event_id
-        return {"status": "completed", "event_id": event_id}
-
-    monkeypatch.setattr(tasks, "execute_investigation", _fake_execute)
+    monkeypatch.setattr(
+        tasks,
+        "execute_investigation",
+        make_execute_investigation_double(captured),
+    )
 
     previous = {
         "task_always_eager": celery_app.conf.task_always_eager,
@@ -496,7 +505,7 @@ def test_run_investigation_non_eager_worker_forwards_generate_report(
         with start_worker(celery_app, perform_ping_check=False, pool="solo"):
             async_result = tasks.run_investigation.apply_async(
                 args=["evt-non-eager-smoke"],
-                kwargs={"generate_report": False},
+                kwargs=build_investigation_dispatch_kwargs(generate_report=False),
                 task_id="task-non-eager-smoke",
                 queue=TASK_QUEUE,
             )
@@ -510,3 +519,6 @@ def test_run_investigation_non_eager_worker_forwards_generate_report(
     assert result["status"] == "completed"
     assert captured["generate_report"] is False
     assert captured["event_id"] == "evt-non-eager-smoke"
+    assert captured["owner_id"] == celery_task_owner_id("task-non-eager-smoke")
+    assert captured["include_response_execution"] is False
+    assert captured["lease_acquired"] is False
