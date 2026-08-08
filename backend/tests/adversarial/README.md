@@ -159,13 +159,12 @@ Harness-only helpers (ISSUE-204, ``tests/adversarial/xdr_verify_observation.py``
 | Component | Role |
 |-----------|------|
 | ``XdrManagedVerifyToolExecutor`` | Routes ``check_*`` to DB-backed XDR writeback facts |
-| ``AdversarialVerifyAgent`` | Phase-1 ``VERIFIED`` for ``writeback_applicable=false`` entity actions |
+| ``AdversarialVerifyAgent`` | Unit-test helper only; the full-loop runner uses production ``VerifyAgent`` |
 | ``AdversarialTerminalDispositionResolver`` | Non-verifiable SKIPPED actions (e.g. ``create_ticket``) do not block ``CONTAINED`` |
-| ``AdversarialDispositionSyncService`` | Multi-pass outbox drain for async Mock delivery |
 
-After approval the runner waits for containment SUCCESS, drains entity outboxes,
-re-runs production ``VerifyAgent`` once (orchestration harness — not a sunset shim),
-then resumes the graph for terminal ``EVENT_STATUS_UPDATE`` delivery.
+Approval resumes through the production ``ApprovalEngine`` callback. The runner
+simulates worker delivery by calling production ``DispositionSyncService``; confirmed
+outboxes resume the graph through the service callback.
 
 **Note:** ``AdversarialTerminalDispositionResolver`` aligns harness terminal mapping
 with non-verifiable SKIPPED actions (e.g. ``create_ticket``). Production

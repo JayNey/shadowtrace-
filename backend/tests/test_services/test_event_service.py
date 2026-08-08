@@ -28,6 +28,7 @@ from app.core.errors import (
 from app.core.event_bus import EventBus
 from app.core.redis_client import RedisClient
 from app.db import models as orm
+from app.models.action import TERMINAL_DISPOSITION_TOOL
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -1123,6 +1124,43 @@ async def test_set_final_verdict_rejects_forged_trusted_context(
         row = await session.get(orm.SecurityEvent, created.event_id)
         assert row is not None
         assert row.final_verdict == FinalVerdict.NONE.value
+
+
+@pytest.mark.asyncio
+async def test_authoritative_verdict_context_uses_canonical_tool_name(
+    event_service: EventService,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sfx = _sfx()
+    created = await event_service.ingest_source_object(
+        IngestableSource(
+            reference=_ref(kind=SourceObjectKind.INCIDENT, object_id=f"INC-canonical-{sfx}"),
+            source_type="mock_xdr",
+        )
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Action(
+                    action_id=f"act-{sfx}",
+                    event_id=created.event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="Deferred terminal disposition",
+                    tool_name=TERMINAL_DISPOSITION_TOOL,
+                    action_level=ActionLevel.L2.value,
+                )
+            )
+
+    async with session_factory() as session:
+        context = await event_service._authoritative_verdict_context(  # noqa: SLF001
+            session,
+            created.event_id,
+        )
+
+    assert context.response_actions_are_disposition_only is True
+    assert context.has_entity_side_effect_actions is False
 
 
 @pytest.mark.asyncio

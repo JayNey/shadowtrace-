@@ -35,7 +35,6 @@ from tests.adversarial.scenario_credential_db_staging_exfil import (
     build_adversarial_credential_db_staging_exfil,
 )
 from tests.adversarial.xdr_verify_observation import (
-    AdversarialDispositionSyncService,
     AdversarialTerminalDispositionResolver,
     XdrManagedVerifyToolExecutor,
 )
@@ -148,7 +147,7 @@ async def adversarial_disposition_sync_service(
     session_factory: async_sessionmaker[AsyncSession],
     context_store: EventContextStore,
     adversarial_mock_client: httpx.AsyncClient,
-) -> AdversarialDispositionSyncService:
+) -> DispositionSyncService:
     adapter = MockXDRDispositionAdapter(
         base_url="http://mock-xdr",
         read_token="mock-read-token",
@@ -158,7 +157,7 @@ async def adversarial_disposition_sync_service(
     )
     registry = DispositionAdapterRegistry()
     registry.register("mock_xdr", adapter)
-    return AdversarialDispositionSyncService(
+    return DispositionSyncService(
         session_factory,
         context_store=context_store,
         adapter_registry=registry,

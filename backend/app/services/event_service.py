@@ -1990,10 +1990,10 @@ class EventService:
         has_entity_side_effect_actions = False
         if response_actions:
             response_actions_are_disposition_only = all(
-                action.action_name == TERMINAL_DISPOSITION_TOOL for action in response_actions
+                action.tool_name == TERMINAL_DISPOSITION_TOOL for action in response_actions
             )
             has_entity_side_effect_actions = any(
-                action.action_name != TERMINAL_DISPOSITION_TOOL for action in response_actions
+                action.tool_name != TERMINAL_DISPOSITION_TOOL for action in response_actions
             )
 
         return TransitionContext(

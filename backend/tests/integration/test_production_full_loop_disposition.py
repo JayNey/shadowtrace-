@@ -349,6 +349,25 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
         closed = await event_service.get_event(event_id)
         assert closed is not None
         assert closed.status is EventStatus.CLOSED
+        async with session_factory() as session:
+            status_sequence = list(
+                await session.scalars(
+                    select(orm.EventAuditLog.to_status)
+                    .where(
+                        orm.EventAuditLog.event_id == event_id,
+                        orm.EventAuditLog.to_status.is_not(None),
+                    )
+                    .order_by(
+                        orm.EventAuditLog.created_at.asc(),
+                        orm.EventAuditLog.id.asc(),
+                    )
+                )
+            )
+        assert EventStatus.REPORTING.value in status_sequence
+        assert EventStatus.CLOSED.value in status_sequence
+        assert status_sequence.index(EventStatus.REPORTING.value) < status_sequence.index(
+            EventStatus.CLOSED.value
+        )
     finally:
         deps.reset_deps()
         get_settings.cache_clear()

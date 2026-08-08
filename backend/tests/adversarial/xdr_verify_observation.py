@@ -12,7 +12,6 @@ without sunset shims or post-hoc verification seeding.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from sqlalchemy import func, select
@@ -25,7 +24,6 @@ from app.models.agent_io import EffectStatus, VerificationActionResult, Verifica
 from app.models.enums import ActionCategory, ActionStatus, WritebackStatus
 from app.models.ids import new_call_id
 from app.models.tool_meta import ToolResult, ToolResultStatus
-from app.services.disposition_sync_service import DispositionSyncService
 from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 
 _PROVIDER_NAME = "mock_xdr_writeback_observation"
@@ -64,20 +62,6 @@ class AdversarialTerminalDispositionResolver(TerminalDispositionResolver):
                 "verification": verification.model_copy(update={"results": filtered}),
             }
         return super().resolve(**kwargs)
-
-
-class AdversarialDispositionSyncService(DispositionSyncService):
-    """DispositionSync with multi-pass outbox drain for adversarial full loop (ISSUE-204)."""
-
-    async def process_ready_outboxes(self, *, limit: int = 10) -> int:
-        delivered = 0
-        for _ in range(16):
-            batch = await super().process_ready_outboxes(limit=limit)
-            delivered += batch
-            if batch == 0:
-                break
-            await asyncio.sleep(0.05)
-        return delivered
 
 
 async def verified_via_xdr_writeback(
@@ -221,7 +205,6 @@ class XdrManagedVerifyToolExecutor:
 
 
 __all__ = [
-    "AdversarialDispositionSyncService",
     "AdversarialTerminalDispositionResolver",
     "AdversarialVerifyAgent",
     "XdrManagedVerifyToolExecutor",

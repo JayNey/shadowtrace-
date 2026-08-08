@@ -243,6 +243,13 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert prod["disposition_writeback_ok"], (
         "expected CONFIRMED+readback_verified disposition receipt on Mock path"
     )
+    assert "AdversarialDispositionSyncService" not in loop_result.adversarial_di_overrides
+    assert any(note == "approval_resume: production callback" for note in loop_result.notes)
+    assert not any(
+        marker in note
+        for note in loop_result.notes
+        for marker in ("runner owns", "production_verify_rerun", "legal_close_after")
+    )
     assert loop_result.terminal_outbox_enqueued, "expected terminal EVENT_STATUS_UPDATE outbox row"
     assert event_final.status is EventStatus.CLOSED
     assert EventStatus.REPORTING.value in status_sequence

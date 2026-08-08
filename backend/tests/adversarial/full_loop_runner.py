@@ -57,7 +57,6 @@ _REMOVED_SHIMS = (
 _DEFAULT_MOCK_TIMEOUT_S = 120.0
 _DEFAULT_LIVE_TIMEOUT_S = 600.0
 _ADVERSARIAL_DI_OVERRIDES = (
-    "AdversarialDispositionSyncService",
     "AdversarialTerminalDispositionResolver",
     "XdrManagedVerifyToolExecutor",
 )
@@ -159,34 +158,29 @@ async def _approve_all_pending(
     engine: Any,
     session_factory: async_sessionmaker[AsyncSession],
     event_id: str,
-) -> tuple[list[str], bool]:
-    """Approve pending actions; defer graph resume until writebacks are drained."""
+) -> list[str]:
+    """Approve pending actions through the production approval/resume callback."""
     approver = Principal(subject="adversarial-approver", roles=["approver"])
     approved: list[str] = []
-    saved_resume = getattr(engine, "_resume", None)
-    engine._resume = None  # noqa: SLF001 — runner controls resume timing (ISSUE-203)
-    try:
-        async with session_factory() as session:
-            rows = list(
-                await session.scalars(
-                    select(orm.Action).where(
-                        orm.Action.event_id == event_id,
-                        orm.Action.status == ActionStatus.WAITING_APPROVAL.value,
-                    )
+    async with session_factory() as session:
+        rows = list(
+            await session.scalars(
+                select(orm.Action).where(
+                    orm.Action.event_id == event_id,
+                    orm.Action.status == ActionStatus.WAITING_APPROVAL.value,
                 )
             )
-        for row in rows:
-            decision_id = f"dec-adv-{uuid.uuid4().hex[:12]}"
-            await engine.approve(
-                row.action_id,
-                approver,
-                "adversarial production full-loop approval",
-                decision_id,
-            )
-            approved.append(row.action_id)
-    finally:
-        engine._resume = saved_resume  # noqa: SLF001
-    return approved, bool(approved)
+        )
+    for row in rows:
+        decision_id = f"dec-adv-{uuid.uuid4().hex[:12]}"
+        await engine.approve(
+            row.action_id,
+            approver,
+            "adversarial production full-loop approval",
+            decision_id,
+        )
+        approved.append(row.action_id)
+    return approved
 
 
 async def _context_flag(context_store: Any, event_id: str, key: str) -> bool:
@@ -461,9 +455,10 @@ async def _drain_disposition_outboxes(
         return 0
     try:
         delivered = await adversarial_disposition_sync_service.process_ready_outboxes(limit=10)
-    except Exception:
+    except Exception as exc:
+        notes.append(f"outbox_delivery_failed={type(exc).__name__}")
         logger.exception("process_ready_outboxes failed event=%s", event_id)
-        return 0
+        raise
     if delivered:
         notes.append(f"delivered_outboxes={delivered}")
     return int(delivered)
@@ -547,10 +542,9 @@ async def run_production_full_loop(
     approved_ids: list[str] = []
     approval_rounds = 0
     deadline = time.monotonic() + timeout_s
-    idle_rounds = 0
 
     while time.monotonic() < deadline:
-        newly_approved, _needs_manual_resume = await _approve_all_pending(
+        newly_approved = await _approve_all_pending(
             engine,
             session_factory,
             event_id,
@@ -559,8 +553,7 @@ async def run_production_full_loop(
             approval_rounds += 1
             approved_ids.extend(newly_approved)
             notes.append(f"approval_round_{approval_rounds}: {len(newly_approved)} action(s)")
-            notes.append("approval_resume: runner owns the disabled approval callback")
-            await _resume_hook(event_id)
+            notes.append("approval_resume: production callback")
             await _wait_for_execution_settle(session_factory, event_id)
             await _wait_for_containment_actions_success(session_factory, event_id)
             await _deliver_all_ready_outboxes(
@@ -582,7 +575,6 @@ async def run_production_full_loop(
                 if snap.pending_action_count == 0:
                     break
                 await asyncio.sleep(0.25)
-            idle_rounds = 0
             continue
 
         delivered = await _drain_disposition_outboxes(
@@ -592,7 +584,6 @@ async def run_production_full_loop(
             notes=notes,
         )
         if delivered:
-            idle_rounds = 0
             continue
 
         waiting_approval = await _count_waiting_approval(session_factory, event_id)
@@ -605,16 +596,15 @@ async def run_production_full_loop(
         ):
             break
 
-        idle_rounds += 1
-        if idle_rounds >= 24 and snap.event_status in {
-            EventStatus.REPORTING.value,
-            EventStatus.CLOSED.value,
-            EventStatus.FAILED.value,
-        }:
-            notes.append("loop_idle_cap: terminal status with no approval/outbox progress")
-            break
-
         await asyncio.sleep(0.5)
+    else:
+        snap = await collect_observability(session_factory, event_id)
+        notes.append(
+            "loop_timeout: "
+            f"status={snap.event_status}, pending_actions={snap.pending_action_count}, "
+            f"waiting_approval={await _count_waiting_approval(session_factory, event_id)}, "
+            f"pending_outboxes={await _count_pending_outboxes(session_factory, event_id)}"
+        )
 
     await _drain_outboxes_until_stable(
         session_factory=session_factory,
