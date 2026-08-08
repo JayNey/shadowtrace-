@@ -9,6 +9,7 @@ from app.agents.rules.response_plan_quality_gate import (
     apply_containment_quality_gate,
     apply_evidence_sufficiency_gate,
     evidence_blocks_high_impact_actions,
+    evidence_insufficiency_reason_code,
     has_actionable_containment_targets,
     requires_threat_aligned_containment,
 )
@@ -170,6 +171,44 @@ def test_evidence_blocks_on_collection_failed() -> None:
     assert evidence_blocks_high_impact_actions(
         evidence_output=evidence,
         risk_assessment=_risk(score=90, evidence_limited=True),
+    )
+
+
+def test_evidence_blocks_on_collection_failed_even_with_items() -> None:
+    """ISSUE-248: failed collection blocks L2+ even when evidence_list is non-empty."""
+    evidence = EvidenceOutput(
+        evidence_list=[
+            Evidence(
+                evidence_id="ev-partial",
+                event_id="evt-1",
+                source=EvidenceSource.ENDPOINT,
+                evidence_type="process",
+                description="partial artifact before failure",
+                confidence=0.4,
+            )
+        ],
+        collection_status=CollectionStatus.FAILED,
+        overall_confidence=0.4,
+    )
+    assert evidence_blocks_high_impact_actions(
+        evidence_output=evidence,
+        risk_assessment=_risk(score=90, evidence_limited=False),
+    )
+    assert evidence_insufficiency_reason_code(evidence_output=evidence) == "collection_failed"
+
+
+def test_evidence_blocks_when_output_missing_and_limited() -> None:
+    """ISSUE-248: missing evidence payload + evidence_limited fails closed."""
+    assert evidence_blocks_high_impact_actions(
+        evidence_output=None,
+        risk_assessment=_risk(score=85, evidence_limited=True),
+    )
+    assert (
+        evidence_insufficiency_reason_code(
+            evidence_output=None,
+            risk_assessment=_risk(score=85, evidence_limited=True),
+        )
+        == "zero_evidence_limited"
     )
 
 
