@@ -35,6 +35,7 @@ def _base_kwargs(**overrides: object) -> dict[str, object]:
         "LLM_MODE": "openai_compatible",
         "EMBEDDING_MODE": "remote",
         "SIMULATION_ENABLED": False,
+        "SOCKETIO_CORS_ALLOWED_ORIGINS": "https://app.example",
     }
     kwargs.update(overrides)
     return kwargs
@@ -195,6 +196,44 @@ def test_production_accepts_trusted_proxy_with_explicit_allowlist() -> None:
         )
     )
     assert settings.trusted_proxy_fail_closed_violations() == []
+
+
+def test_production_rejects_empty_socketio_cors_origins() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(
+            **_base_kwargs(
+                SOCKETIO_CORS_ALLOWED_ORIGINS="",
+            )
+        )
+    violations = exc_info.value.details["violations"]
+    assert any("SOCKETIO_CORS_ALLOWED_ORIGINS" in v for v in violations)
+
+
+def test_production_rejects_wildcard_socketio_cors_origins() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(
+            **_base_kwargs(
+                SOCKETIO_CORS_ALLOWED_ORIGINS="https://app.example,*",
+            )
+        )
+    violations = exc_info.value.details["violations"]
+    assert any("wildcard" in v for v in violations)
+
+
+def test_development_defaults_socketio_cors_to_localhost() -> None:
+    settings = Settings(APP_ENV="development")
+    origins = settings.resolved_socketio_cors_origins()
+    assert "http://localhost:5173" in origins
+    assert "*" not in origins
+
+
+def test_production_accepts_explicit_socketio_cors_origins() -> None:
+    settings = Settings(
+        **_base_kwargs(
+            SOCKETIO_CORS_ALLOWED_ORIGINS="https://app.example,https://soc.example",
+        )
+    )
+    assert settings.socketio_fail_closed_violations() == []
 
 
 def test_production_rejects_dev_auth_tokens(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -40,11 +40,13 @@ import socketio
 import uvicorn
 from fastapi import FastAPI
 
+from app.core.config import get_settings
 from app.core.event_bus import SOCKET_MESSAGE_TYPES, EventBus
 from app.core.redis_client import RedisClient
 from app.core.socketio_events import (
     GLOBAL_ROOM,
     SOCKETIO_NAMESPACE,
+    SocketIOSessionRegistry,
     _event_room,
     register_handlers,
 )
@@ -58,6 +60,43 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 SCHEMA_PATH = Path(__file__).resolve().parents[3] / "contracts" / "socketio" / "events.schema.json"
 
 EXPECTED_EVENT_TYPES = sorted(SOCKET_MESSAGE_TYPES)
+
+_DEV_AUTH_TOKENS = json.dumps(
+    {
+        "analyst-token": {"subject": "analyst-1", "roles": ["analyst"]},
+        "norole-token": {"subject": "norole-1", "roles": []},
+    }
+)
+_ALLOWED_TEST_ORIGIN = "http://127.0.0.1:5173"
+
+
+@pytest.fixture(autouse=True)
+def _socketio_dev_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dev bearer tokens + permissive CORS for Socket.IO integration tests."""
+    monkeypatch.setenv("DEV_AUTH_TOKENS", _DEV_AUTH_TOKENS)
+    monkeypatch.setenv("SOCKETIO_CORS_ALLOWED_ORIGINS", "*")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _auth_environ(*, origin: str = _ALLOWED_TEST_ORIGIN) -> dict[str, str]:
+    return {
+        "HTTP_AUTHORIZATION": "Bearer analyst-token",
+        "HTTP_ORIGIN": origin,
+        "REMOTE_ADDR": "127.0.0.1",
+    }
+
+
+def _socket_auth() -> dict[str, str]:
+    return {"token": "analyst-token"}
+
+
+def _socket_headers(*, origin: str = _ALLOWED_TEST_ORIGIN) -> dict[str, str]:
+    return {
+        "Authorization": "Bearer analyst-token",
+        "Origin": origin,
+    }
 
 # ---------------------------------------------------------------------------
 # Redis fixture (skipped when unreachable)
@@ -229,26 +268,100 @@ def _connect_session(sio: socketio.AsyncServer, sid: str) -> None:
 class TestEventHandlers:
     """Unit tests for connect / disconnect / subscribe handlers."""
 
+    @pytest.fixture(autouse=True)
+    def _stub_event_service(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _StubEvent:
+            pass
+
+        class _StubEventService:
+            async def get_event(self, event_id: str) -> _StubEvent:
+                return _StubEvent()
+
+        async def _service() -> _StubEventService:
+            return _StubEventService()
+
+        monkeypatch.setattr("app.api.v1.deps.get_event_service", _service)
+
     @pytest.fixture
-    def sio(self) -> socketio.AsyncServer:
+    def sessions(self) -> SocketIOSessionRegistry:
+        return SocketIOSessionRegistry()
+
+    @pytest.fixture
+    def sio(self, sessions: SocketIOSessionRegistry) -> socketio.AsyncServer:
         srv = socketio.AsyncServer(async_mode="asgi", logger=False)
-        register_handlers(srv)
+        register_handlers(srv, sessions=sessions)
         return srv
 
     @pytest.mark.asyncio
-    async def test_connect_auto_joins_global_room(self, sio: socketio.AsyncServer) -> None:
-        """On connect, the client is placed in the 'global' room."""
+    async def test_connect_auto_joins_global_room(
+        self,
+        sio: socketio.AsyncServer,
+        sessions: SocketIOSessionRegistry,
+    ) -> None:
+        """On connect, an analyst client is placed in the 'global' room."""
         sid = _fake_sid()
         _connect_session(sio, sid)
 
         handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
         assert handler is not None, "connect handler not registered"
-        await handler(sid, {})
+        accepted = await handler(sid, _auth_environ(), None)
+        assert accepted is True
 
-        # Verify room membership via the internal rooms structure.
         ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
         assert GLOBAL_ROOM in ns_rooms, f"Global room not in {list(ns_rooms)}"
         assert sid in ns_rooms[GLOBAL_ROOM]
+        assert sessions.get(sid) is not None
+
+    @pytest.mark.asyncio
+    async def test_connect_rejects_unauthenticated(
+        self,
+        sio: socketio.AsyncServer,
+        sessions: SocketIOSessionRegistry,
+    ) -> None:
+        sid = _fake_sid()
+        _connect_session(sio, sid)
+        handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert handler is not None
+        accepted = await handler(sid, {"REMOTE_ADDR": "127.0.0.1"}, None)
+        assert accepted is False
+        assert sessions.get(sid) is None
+
+    @pytest.mark.asyncio
+    async def test_connect_without_role_skips_global_room(
+        self,
+        sio: socketio.AsyncServer,
+        sessions: SocketIOSessionRegistry,
+    ) -> None:
+        sid = _fake_sid()
+        _connect_session(sio, sid)
+        handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert handler is not None
+        environ = {
+            "HTTP_AUTHORIZATION": "Bearer norole-token",
+            "REMOTE_ADDR": "127.0.0.1",
+        }
+        accepted = await handler(sid, environ, None)
+        assert accepted is True
+        ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+        assert sid not in ns_rooms.get(GLOBAL_ROOM, {})
+
+    @pytest.mark.asyncio
+    async def test_disconnect_clears_session_registry(
+        self,
+        sio: socketio.AsyncServer,
+        sessions: SocketIOSessionRegistry,
+    ) -> None:
+        sid = _fake_sid()
+        _connect_session(sio, sid)
+        connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+        assert connect_handler is not None
+        await connect_handler(sid, _auth_environ(), None)
+        assert sessions.get(sid) is not None
+
+        disconnect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("disconnect")
+        assert disconnect_handler is not None
+        await disconnect_handler(sid)
+        assert sessions.get(sid) is None
 
     @pytest.mark.asyncio
     async def test_disconnect_handler_is_registered(self, sio: socketio.AsyncServer) -> None:
@@ -271,7 +384,7 @@ class TestEventHandlers:
         _connect_session(sio, sid)
         connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
         assert connect_handler is not None
-        await connect_handler(sid, {})
+        await connect_handler(sid, _auth_environ(), None)
 
         handler = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
         assert handler is not None, "subscribe handler not registered"
@@ -292,7 +405,7 @@ class TestEventHandlers:
         _connect_session(sio, sid)
         connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
         assert connect_handler is not None
-        await connect_handler(sid, {})
+        await connect_handler(sid, _auth_environ(), None)
 
         sub_h = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
         assert sub_h is not None
@@ -317,7 +430,7 @@ class TestEventHandlers:
         _connect_session(sio, sid)
         connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
         assert connect_handler is not None
-        await connect_handler(sid, {})
+        await connect_handler(sid, _auth_environ(), None)
 
         handler = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
         assert handler is not None
@@ -343,7 +456,7 @@ class TestEventHandlers:
             _connect_session(sio, sid)
             connect_h = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
             assert connect_h is not None
-            await connect_h(sid, {})
+            await connect_h(sid, _auth_environ(), None)
 
             sub_h = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
             assert sub_h is not None
@@ -453,7 +566,13 @@ async def test_socket_client_receives_state_change_within_one_second(
 
     client = socketio.AsyncClient()
     client.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
-    await client.connect(base_url, namespaces=[SOCKETIO_NAMESPACE], wait_timeout=5)
+    await client.connect(
+        base_url,
+        namespaces=[SOCKETIO_NAMESPACE],
+        auth=_socket_auth(),
+        headers=_socket_headers(),
+        wait_timeout=5,
+    )
     try:
         await client.emit("subscribe", {"event_id": event_id}, namespace=SOCKETIO_NAMESPACE)
         await asyncio.sleep(0.05)
@@ -489,7 +608,13 @@ async def test_subscribed_client_receives_event_once_not_twice(
 
     client = socketio.AsyncClient()
     client.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
-    await client.connect(base_url, namespaces=[SOCKETIO_NAMESPACE], wait_timeout=5)
+    await client.connect(
+        base_url,
+        namespaces=[SOCKETIO_NAMESPACE],
+        auth=_socket_auth(),
+        headers=_socket_headers(),
+        wait_timeout=5,
+    )
     try:
         await client.emit("subscribe", {"event_id": event_id}, namespace=SOCKETIO_NAMESPACE)
         await asyncio.sleep(0.05)
@@ -521,7 +646,13 @@ async def test_global_only_client_receives_broadcast(
 
     client = socketio.AsyncClient()
     client.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
-    await client.connect(base_url, namespaces=[SOCKETIO_NAMESPACE], wait_timeout=5)
+    await client.connect(
+        base_url,
+        namespaces=[SOCKETIO_NAMESPACE],
+        auth=_socket_auth(),
+        headers=_socket_headers(),
+        wait_timeout=5,
+    )
     try:
         await asyncio.sleep(0.05)
         ok = await event_bus.publish_event(
@@ -572,7 +703,8 @@ async def test_bridge_dispatch_emits_valid_envelope(redis_required: RedisClient)
         from app.core.socketio_manager import _sequence_key
 
         sio = socketio.AsyncServer(async_mode="asgi", logger=False)
-        register_handlers(sio)
+        sessions = SocketIOSessionRegistry()
+        register_handlers(sio, sessions=sessions)
         manager = SocketIOManager(client)
         manager._sio = sio  # type: ignore[assignment]
 
@@ -710,7 +842,13 @@ async def test_two_socket_clients_in_event_room_both_receive_broadcast(
 
         c = socketio.AsyncClient()
         c.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
-        await c.connect(base_url, namespaces=[SOCKETIO_NAMESPACE], wait_timeout=5)
+        await c.connect(
+            base_url,
+            namespaces=[SOCKETIO_NAMESPACE],
+            auth=_socket_auth(),
+            headers=_socket_headers(),
+            wait_timeout=5,
+        )
         await c.emit("subscribe", {"event_id": event_id}, namespace=SOCKETIO_NAMESPACE)
         return c
 
@@ -785,6 +923,147 @@ async def test_publish_failure_graceful_without_redis(
         assert ok is False
     finally:
         await dead.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_socket_client_is_rejected(
+    socketio_server: tuple[SocketIOManager, EventBus, str],
+) -> None:
+    """ISSUE-258: connections without credentials fail before joining rooms."""
+    _manager, _event_bus, base_url = socketio_server
+    client = socketio.AsyncClient()
+    with pytest.raises(socketio.exceptions.ConnectionError):
+        await client.connect(
+            base_url,
+            namespaces=[SOCKETIO_NAMESPACE],
+            headers={"Origin": _ALLOWED_TEST_ORIGIN},
+            wait_timeout=5,
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_allowlisted_origin_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    redis_required: RedisClient,  # noqa: ARG001
+) -> None:
+    """ISSUE-258: Engine.IO rejects handshakes from origins outside the allowlist."""
+    monkeypatch.setenv("SOCKETIO_CORS_ALLOWED_ORIGINS", "http://allowed-only.example")
+    get_settings.cache_clear()
+
+    redis = RedisClient(url=REDIS_URL)
+    try:
+        manager = SocketIOManager(redis)
+        asgi_app = manager.mount(FastAPI())
+        await manager.start()
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+
+        config = uvicorn.Config(asgi_app, host="127.0.0.1", port=port, log_level="error")
+        server = uvicorn.Server(config)
+        serve_task = asyncio.create_task(server.serve())
+        for _ in range(100):
+            if server.started:
+                break
+            await asyncio.sleep(0.05)
+
+        base_url = f"http://127.0.0.1:{port}"
+        client = socketio.AsyncClient()
+        try:
+            with pytest.raises(socketio.exceptions.ConnectionError):
+                await client.connect(
+                    base_url,
+                    namespaces=[SOCKETIO_NAMESPACE],
+                    auth=_socket_auth(),
+                    headers=_socket_headers(origin="http://evil.example"),
+                    wait_timeout=5,
+                )
+        finally:
+            await client.disconnect()
+            server.should_exit = True
+            await serve_task
+            await manager.stop()
+    finally:
+        await redis.aclose()
+        get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_subscribe_rejects_missing_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-258: subscribe to a non-existent event is rejected."""
+    sessions = SocketIOSessionRegistry()
+    sio = socketio.AsyncServer(async_mode="asgi", logger=False)
+    register_handlers(sio, sessions=sessions)
+    sid = _fake_sid()
+    _connect_session(sio, sid)
+
+    class _MissingEventService:
+        async def get_event(self, event_id: str) -> None:
+            return None
+
+    from app.api.v1.deps import get_event_service as _real_get_event_service  # noqa: F401
+
+    async def _missing_event_service() -> _MissingEventService:
+        return _MissingEventService()
+
+    monkeypatch.setattr(
+        "app.api.v1.deps.get_event_service",
+        _missing_event_service,
+    )
+
+    connect_handler = sio.handlers[SOCKETIO_NAMESPACE].get("connect")
+    assert connect_handler is not None
+    await connect_handler(sid, _auth_environ(), None)
+
+    handler = sio.handlers[SOCKETIO_NAMESPACE].get("subscribe")
+    assert handler is not None
+    await handler(sid, {"event_id": "evt-20260712-deadbeef"})
+
+    ns_rooms = sio.manager.rooms.get(SOCKETIO_NAMESPACE, {})
+    room = _event_room("evt-20260712-deadbeef")
+    assert room not in ns_rooms or sid not in ns_rooms.get(room, {})
+
+
+@pytest.mark.asyncio
+async def test_roleless_client_does_not_receive_global_broadcast(
+    socketio_server: tuple[SocketIOManager, EventBus, str],
+) -> None:
+    """ISSUE-258: authenticated principals without platform roles skip global room."""
+    _manager, event_bus, base_url = socketio_server
+    event_id = _event_id("norole01")
+    received: list[dict] = []
+
+    async def _on_event(data: dict) -> None:
+        received.append(data)
+
+    client = socketio.AsyncClient()
+    client.on("event", _on_event, namespace=SOCKETIO_NAMESPACE)
+    await client.connect(
+        base_url,
+        namespaces=[SOCKETIO_NAMESPACE],
+        auth={"token": "norole-token"},
+        headers={
+            "Authorization": "Bearer norole-token",
+            "Origin": _ALLOWED_TEST_ORIGIN,
+        },
+        wait_timeout=5,
+    )
+    try:
+        await asyncio.sleep(0.05)
+        ok = await event_bus.publish_event(
+            event_id,
+            "state_change",
+            _example_payload("state_change"),
+        )
+        assert ok is True
+        await asyncio.sleep(0.3)
+    finally:
+        await client.disconnect()
+
+    assert received == []
 
 
 # ---------------------------------------------------------------------------

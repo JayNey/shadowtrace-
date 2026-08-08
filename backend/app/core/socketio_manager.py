@@ -27,11 +27,13 @@ import jsonschema
 import socketio
 from fastapi import FastAPI
 
+from app.core.config import get_settings
 from app.core.event_bus import SOCKET_MESSAGE_TYPES, sanitize_payload
 from app.core.redis_client import RedisClient
 from app.core.socketio_events import (
     GLOBAL_ROOM,
     SOCKETIO_NAMESPACE,
+    SocketIOSessionRegistry,
     _event_room,
     register_handlers,
 )
@@ -80,9 +82,12 @@ class SocketIOManager:
 
     def __init__(self, redis: RedisClient) -> None:
         self._redis = redis
+        self._sessions = SocketIOSessionRegistry()
+        settings = get_settings()
         self._sio = socketio.AsyncServer(
             async_mode="asgi",
-            cors_allowed_origins="*",
+            cors_allowed_origins=settings.resolved_socketio_cors_origins(),
+            cors_credentials=True,
             logger=False,
         )
         self._listener_task: asyncio.Task[None] | None = None
@@ -90,7 +95,7 @@ class SocketIOManager:
         self._consecutive_failures = 0
         self._bridge_degraded = False
 
-        register_handlers(self._sio)
+        register_handlers(self._sio, sessions=self._sessions)
 
     # ------------------------------------------------------------------ #
     # Properties
@@ -155,6 +160,7 @@ class SocketIOManager:
             await self._sio.disconnect()
         except Exception:
             logger.warning("SocketIOManager disconnect raised", exc_info=True)
+        self._sessions = SocketIOSessionRegistry()
         self._bridge_degraded = False
         logger.info("SocketIOManager stopped")
 
@@ -344,9 +350,8 @@ class SocketIOManager:
             )
             return
 
-        # Subscribed detail clients leave ``global`` on subscribe, so they
-        # receive once via ``event:{event_id}``; dashboard clients stay in
-        # ``global`` only and receive once via the global emit.
+        # Authorized delivery: clients only receive messages for rooms they joined
+        # after handshake auth and subscribe / join_global checks (ISSUE-258).
         event_room = _event_room(event_id)
         results = await asyncio.gather(
             self._sio.emit(
