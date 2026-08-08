@@ -11,7 +11,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from app.api.v1.deps import _get_investigation_stack, get_event_service
 from app.api.v1.errors import EventNotFoundError, ResourceNotFoundError
-from app.core.auth import CurrentPrincipal
+from app.core.auth import ReadPrincipal
 from app.core.errors import DependencyUnavailableError
 from app.core.errors import ValidationError as DomainValidationError
 from app.core.llm.base import LLMInvalidJSONError, LLMProviderError, LLMTimeoutError
@@ -62,7 +62,7 @@ async def get_event_qa_service() -> EventQAService:
 async def event_chat(
     event_id: str,
     request: ChatRequest,
-    principal: CurrentPrincipal,
+    principal: ReadPrincipal,
     event_service: Annotated[_EventReader, Depends(get_event_service)],
     qa_service: Annotated[_QAService, Depends(get_event_qa_service)],
 ) -> ChatAnswer:
