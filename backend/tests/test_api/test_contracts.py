@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from app.api.v1 import schemas as s
 from app.api.v1.deps import _get_context_store as _real_get_context_store
 from app.api.v1.deps import _get_session_factory as _real_get_session_factory
+from app.api.v1.deps import get_knowledge_query_service as _real_get_knowledge_query_service
 from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
 from app.api.v1.deps import get_event_service as _real_get_event_service
 from app.api.v1.deps import get_execution_job_query_service as _real_get_execution_job_query
@@ -142,6 +143,9 @@ def client() -> TestClient:
     app.dependency_overrides[_real_get_disposition_sync] = _mock_disposition_sync
     app.dependency_overrides[_real_get_execution_job_query] = _mock_execution_job_query
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
+    app.dependency_overrides[_real_get_knowledge_query_service] = (
+        lambda: _MockKnowledgeQueryService()
+    )
     client = TestClient(app)
     client.mock_disposition_sync = mock_disposition_sync  # type: ignore[attr-defined]
     yield client
@@ -163,6 +167,30 @@ class _EmptyAsyncSession:
 
 def _empty_session_factory() -> _EmptyAsyncSession:
     return _EmptyAsyncSession()
+
+
+class _MockKnowledgeQueryService:
+    """Contract double returns a non-empty sample so /knowledge cannot green on static []."""
+
+    async def list_knowledge(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 20,
+        kb_name: str | None = None,
+        q: str | None = None,
+        tenant_id: str | None = None,
+    ) -> tuple[int, list[dict[str, Any]]]:
+        _ = (page, page_size, kb_name, q, tenant_id)
+        return 1, [
+            {
+                "chunk_id": "chk-contract01",
+                "kb_name": "attack_kb",
+                "content": "Contract catalog sample chunk",
+                "metadata": {"source": "contract_mock"},
+                "created_at": "2026-01-01T00:00:00+00:00",
+            }
+        ]
 
 
 def _hdr(role: str = "analyst") -> dict[str, str]:
@@ -547,6 +575,16 @@ def test_placeholder_get_endpoints_validate(
     # 200 implies the placeholder passed its response_model validation.
     resp = client.get(path, headers=_hdr("analyst"))
     assert resp.status_code == 200, resp.text
+
+
+def test_knowledge_contract_returns_service_items_not_static_empty(client: TestClient) -> None:
+    """ISSUE-279: contract path must not accept unconditional 200+[] as success."""
+    resp = client.get("/api/v1/knowledge", headers=_hdr("analyst"))
+    assert resp.status_code == 200, resp.text
+    payload = resp.json()
+    assert payload["total"] >= 1
+    assert payload["items"], "contract mock must return at least one catalog item"
+    assert payload["items"][0]["chunk_id"] == "chk-contract01"
 
 
 def test_event_list_declares_mandated_query_params() -> None:

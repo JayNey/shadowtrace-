@@ -53,6 +53,7 @@ _tool_call_log: Any = None  # ToolCallLogService
 _graph_sync_service: Any = None  # GraphSyncService (ISSUE-082)
 _neo4j_client: Any = None  # Neo4jClient (ISSUE-082)
 _memory_governance: Any = None  # MemoryGovernance (ISSUE-081)
+_knowledge_query_service: Any = None  # KnowledgeQueryService (ISSUE-279)
 _detection_governance: Any = None  # DetectionGovernanceService (ISSUE-125)
 _detection_promotion: Any = None  # DetectionPromotionService (ISSUE-124)
 _detection_context_projector: Any = None  # DetectionContextProjector (ISSUE-127)
@@ -298,6 +299,54 @@ def get_memory_governance() -> Any:
 
 
 MemoryGovernanceDep = Annotated[Any, Depends(get_memory_governance)]
+
+
+class _LazyEmbeddingService:
+    """Defer embedding client construction until a vector path actually needs it.
+
+    Catalog list/count/keyword search never touch embeddings; constructing the
+    client eagerly would make ``GET /knowledge`` fail when embedding config is
+    missing (ISSUE-279 review).
+    """
+
+    def __init__(self, settings: Any) -> None:
+        self._settings = settings
+        self._resolved: Any = None
+
+    def _resolve(self) -> Any:
+        if self._resolved is None:
+            from app.core.embedding.factory import get_embedding_client
+
+            self._resolved = get_embedding_client(settings=self._settings)
+        return self._resolved
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._resolve(), name)
+
+
+def get_knowledge_query_service() -> Any:
+    """Return the shared knowledge catalog query service (ISSUE-279)."""
+    global _knowledge_query_service
+    if _knowledge_query_service is None:
+        from app.core.config import get_settings
+        from app.services.knowledge_query_service import KnowledgeQueryService
+        from app.services.knowledge_store import KnowledgeStore
+
+        settings = get_settings()
+        tenant_isolation_strict = settings.is_production()
+        store = KnowledgeStore(
+            _get_session_factory(),
+            _LazyEmbeddingService(settings),  # type: ignore[arg-type]
+            tenant_isolation_strict=tenant_isolation_strict,
+        )
+        _knowledge_query_service = KnowledgeQueryService(
+            store,
+            require_tenant=tenant_isolation_strict,
+        )
+    return _knowledge_query_service
+
+
+KnowledgeQueryDep = Annotated[Any, Depends(get_knowledge_query_service)]
 
 
 def get_detection_governance_service() -> Any:
@@ -1117,13 +1166,13 @@ def reset_loop_bound_redis_resources() -> None:
     global _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
     global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
     global _behavior_observation_service
-    global _disposition_sync, _action_execution, _rollback_service
+    global _disposition_sync, _action_execution, _manual_resolution, _rollback_service
     global _adapter_registry, _workflow_runtime, _event_disposition
     global _impact_assessment_service
     global _tool_call_grant_service, _agent_task_service
-    global _memory_governance, _detection_governance, _detection_promotion
-    global _detection_context_projector, _detection_context_service
-    global _decision_record_service
+    global _memory_governance, _knowledge_query_service, _detection_governance
+    global _detection_promotion, _detection_context_projector, _detection_context_service
+    global _decision_record_service, _execution_job_query
 
     client = _redis_client
     _redis_client = None
@@ -1152,6 +1201,7 @@ def reset_loop_bound_redis_resources() -> None:
     _tool_call_grant_service = None
     _agent_task_service = None
     _memory_governance = None
+    _knowledge_query_service = None
     _detection_governance = None
     _detection_promotion = None
     _detection_context_projector = None
@@ -1185,6 +1235,7 @@ def reset_deps() -> None:
     global _graph_sync_service, _neo4j_client
     global \
         _memory_governance, \
+        _knowledge_query_service, \
         _detection_governance, \
         _detection_promotion, \
         _detection_context_projector, \
