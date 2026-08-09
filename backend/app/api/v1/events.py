@@ -11,7 +11,7 @@ import socket
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, status
 from sqlalchemy import exc as sa_exc
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +23,7 @@ from app.api.v1.deps import (
     _get_session_factory,
     get_event_lease,
     get_event_service,
+    get_investigation_intent_service,
     get_pipeline,
     get_state_machine,
     get_super_agent,
@@ -44,7 +45,7 @@ from app.core.auth import (
     ReadPrincipal,
     require_roles,
 )
-from app.core.config import get_settings
+from app.core.config import TaskMode, get_settings
 from app.core.errors import (
     DependencyUnavailableError,
     InvestigationInProgressError,
@@ -62,6 +63,7 @@ from app.models.enums import (
     EventStatus,
     EventType,
     FinalVerdict,
+    InvestigationIntentStatus,
     Severity,
     SourceObjectKind,
     WritebackReadiness,
@@ -75,6 +77,10 @@ from app.services.investigation_guidance import (
     full_loop_available,
     record_investigation_workflow_path,
     workflow_path_from_request,
+)
+from app.services.investigation_intent_service import (
+    InvestigationIntentService,
+    http_investigation_payload_sha256,
 )
 
 if TYPE_CHECKING:
@@ -792,12 +798,15 @@ async def _acquire_investigation_lease(event_id: str) -> tuple[Any, str]:
 async def _schedule_investigation(
     *,
     event_id: str,
+    intent_id: str,
+    task_id: str,
     background: BackgroundTasks,
     state_machine: StateMachineService,
+    intent_service: InvestigationIntentService,
     include_response: bool = False,
     generate_report: bool = True,
 ) -> str:
-    """Acquire lease and schedule analysis (shared by investigate + reinvestigate)."""
+    """Dispatch a committed intent; background execution is dev/test-only."""
     settings = get_settings()
     mode = (settings.orchestration_mode or "graph").strip().lower()
     task_mode = (settings.task_mode or "background").strip().lower()
@@ -808,6 +817,10 @@ async def _schedule_investigation(
             error_code="full_loop_unavailable",
             details={"orchestration_mode": mode},
         )
+
+    if task_mode == TaskMode.CELERY.value:
+        intent_service.schedule_dispatch()
+        return task_id
 
     workflow_path = workflow_path_from_request(
         include_response_execution=include_response,
@@ -828,24 +841,20 @@ async def _schedule_investigation(
                 exc_info=True,
             )
 
+    lease, owner_id = await _acquire_investigation_lease(event_id)
+    try:
+        inline_task_id = await intent_service.mark_inline_started(intent_id)
+    except Exception:
+        await lease.release(event_id, owner_id)
+        raise
+    if inline_task_id != task_id:
+        await lease.release(event_id, owner_id)
+        raise InvestigationInProgressError(
+            "investigation intent generation changed before inline execution",
+            details={"event_id": event_id, "intent_id": intent_id},
+        )
+
     if mode == "analysis_only":
-        if task_mode == "celery":
-            from app.tasks.investigation_tasks import dispatch_analysis_only_investigation
-
-            lease, owner_id = await _acquire_investigation_lease(event_id)
-            try:
-                return await dispatch_analysis_only_investigation(
-                    event_id,
-                    generate_report=generate_report,
-                    owner_id=owner_id,
-                    lease_acquired=True,
-                )
-            except Exception:
-                await lease.release(event_id, owner_id)
-                raise
-
-        lease, owner_id = await _acquire_investigation_lease(event_id)
-
         async def _run_pipeline() -> None:
             try:
                 from app.services.evidence_projection import (
@@ -858,11 +867,28 @@ async def _schedule_investigation(
                 with bind_evidence_projection(projection):
                     await pipeline.run(event_id, generate_report=generate_report)
                 await _record_workflow_path()
-            except (InvestigationInProgressError, InvalidStateTransitionError) as exc:
+                await intent_service.mark_terminal(intent_id, broker_task_id=task_id)
+            except InvestigationInProgressError as exc:
                 logger.warning(
-                    "AnalysisOnlyPipeline skipped for event=%s (concurrent or stale): %s",
+                    "AnalysisOnlyPipeline lease contention for event=%s: %s",
                     event_id,
                     exc,
+                )
+                await intent_service.mark_retry(
+                    intent_id,
+                    error="inline_execution_stale",
+                    broker_task_id=task_id,
+                )
+            except InvalidStateTransitionError as exc:
+                logger.warning(
+                    "AnalysisOnlyPipeline skipped for event=%s (stale transition): %s",
+                    event_id,
+                    exc,
+                )
+                await intent_service.mark_skipped(
+                    intent_id,
+                    reason="inline_execution_stale",
+                    broker_task_id=task_id,
                 )
             except Exception as exc:
                 logger.error(
@@ -879,30 +905,16 @@ async def _schedule_investigation(
                     )
                 except Exception:
                     logger.exception("Failed to mark event as FAILED: %s", event_id)
+                await intent_service.mark_dead(
+                    intent_id,
+                    error=str(exc),
+                    broker_task_id=task_id,
+                )
             finally:
                 await lease.release(event_id, owner_id)
 
         background.add_task(_run_pipeline)
-        return event_id
-
-    if task_mode == "celery":
-        from app.tasks.investigation_tasks import dispatch_investigation
-
-        lease, owner_id = await _acquire_investigation_lease(event_id)
-
-        try:
-            return await dispatch_investigation(
-                event_id,
-                include_response_execution=include_response,
-                generate_report=generate_report,
-                owner_id=owner_id,
-                lease_acquired=True,
-            )
-        except Exception:
-            await lease.release(event_id, owner_id)
-            raise
-
-    lease, owner_id = await _acquire_investigation_lease(event_id)
+        return task_id
 
     async def _run_super_agent() -> None:
         investigate_started = False
@@ -924,16 +936,27 @@ async def _schedule_investigation(
                     generate_report=generate_report,
                 )
             await _record_workflow_path()
+            await intent_service.mark_terminal(intent_id, broker_task_id=task_id)
         except InvestigationInProgressError:
             logger.warning(
                 "SuperAgent lost lease for event=%s before start",
                 event_id,
             )
             await lease.release(event_id, owner_id)
+            await intent_service.mark_retry(
+                intent_id,
+                error="inline_execution_stale",
+                broker_task_id=task_id,
+            )
         except InvestigationLeaseLostError:
             logger.info(
                 "SuperAgent stopped — lease lost mid-run event=%s",
                 event_id,
+            )
+            await intent_service.mark_retry(
+                intent_id,
+                error="investigation_lease_lost",
+                broker_task_id=task_id,
             )
         except Exception as exc:
             logger.error(
@@ -950,12 +973,17 @@ async def _schedule_investigation(
                 )
             except Exception:
                 logger.exception("Failed to mark event as FAILED: %s", event_id)
+            await intent_service.mark_dead(
+                intent_id,
+                error=str(exc),
+                broker_task_id=task_id,
+            )
         finally:
             if not investigate_started:
                 await lease.release(event_id, owner_id)
 
     background.add_task(_run_super_agent)
-    return event_id
+    return task_id
 
 
 # --------------------------------------------------------------------------- #
@@ -987,6 +1015,7 @@ async def update_event_classification(
     principal: Annotated[Principal, require_roles(ROLE_ANALYST)],
     event_service: EventService = Depends(get_event_service),
     state_machine: StateMachineService = Depends(get_state_machine),
+    intent_service: InvestigationIntentService = Depends(get_investigation_intent_service),
 ) -> s.ClassificationUpdateResponse:
     """Override ``event_type`` with audit trail; optional controlled reinvestigate.
 
@@ -1020,21 +1049,60 @@ async def update_event_classification(
     reinvestigate_started = False
     if body.reinvestigate:
         if updated.status is EventStatus.NEW:
-            await _schedule_investigation(
+            settings = get_settings()
+            orchestration_mode = (settings.orchestration_mode or "graph").strip().lower()
+            request_key = f"classification:{event_id}:{updated.row_version}"
+            payload_sha256 = http_investigation_payload_sha256(
                 event_id=event_id,
-                background=background,
-                state_machine=state_machine,
-                include_response=False,
+                force_replan=True,
+                include_response_execution=False,
+                generate_report=False,
+                orchestration_mode=orchestration_mode,
+            )
+            intent = await intent_service.create_or_replay_http_intent(
+                event_id,
+                requested_by=principal.subject,
+                request_idempotency_key=request_key,
+                request_payload_sha256=payload_sha256,
+                orchestration_mode=orchestration_mode,
+                include_response_execution=False,
                 generate_report=False,
             )
-            reinvestigate_started = True
-            side_effects.extend(
-                [
-                    "investigation_lease_acquired",
-                    "analysis_pipeline_scheduled",
-                    "note:subsequent_response_plan_bumps_plan_revision",
-                ]
-            )
+            if intent.created or intent.status in {
+                InvestigationIntentStatus.PENDING,
+                InvestigationIntentStatus.RETRY,
+            }:
+                try:
+                    await _schedule_investigation(
+                        event_id=event_id,
+                        intent_id=intent.intent_id,
+                        task_id=intent.task_id,
+                        background=background,
+                        state_machine=state_machine,
+                        intent_service=intent_service,
+                        include_response=False,
+                        generate_report=False,
+                    )
+                    side_effects.extend(
+                        [
+                            "investigation_intent_accepted",
+                            "analysis_pipeline_scheduled",
+                            "note:subsequent_response_plan_bumps_plan_revision",
+                        ]
+                    )
+                except InvestigationInProgressError:
+                    # Durable intent already committed; lease contention is recoverable.
+                    side_effects.extend(
+                        [
+                            "investigation_intent_accepted",
+                            "dispatch_deferred_lease_contention",
+                            "note:subsequent_response_plan_bumps_plan_revision",
+                        ]
+                    )
+                reinvestigate_started = True
+            else:
+                side_effects.append("investigation_intent_replayed_no_reschedule")
+                reinvestigate_started = True
         else:
             side_effects.append(
                 "reinvestigate_not_started:status_not_new;"
@@ -1069,8 +1137,10 @@ async def investigate_event(
     background: BackgroundTasks,
     principal: Annotated[Principal, require_roles(ROLE_ANALYST)],
     body: s.InvestigateRequest | None = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     event_service: EventService = Depends(get_event_service),
     state_machine: StateMachineService = Depends(get_state_machine),
+    intent_service: InvestigationIntentService = Depends(get_investigation_intent_service),
 ) -> s.InvestigateResponse:
     event = await event_service.get_event(event_id)
     if event is None:
@@ -1079,26 +1149,64 @@ async def investigate_event(
     settings = get_settings()
     include_response = bool(body.include_response_execution) if body else False
     generate_report = body.generate_report if body is not None else True
-
-    if event.status is not EventStatus.NEW:
-        raise InvalidStateTransitionError(
-            f"event must be in NEW status to start investigation, current: {event.status.value}",
-            current=event.status,
-            target=EventStatus.TRIAGING,
-            details={"event_id": event_id},
+    force_replan = bool(body.force_replan) if body else False
+    orchestration_mode = (settings.orchestration_mode or "graph").strip().lower()
+    if orchestration_mode == "analysis_only" and include_response:
+        raise ValidationError(
+            "include_response_execution is unavailable when ORCHESTRATION_MODE=analysis_only",
+            error_code="full_loop_unavailable",
+            details={"orchestration_mode": orchestration_mode},
         )
 
-    task_id = await _schedule_investigation(
+    request_key = (
+        idempotency_key.strip()
+        if idempotency_key is not None
+        else f"http-investigate:{event_id}"
+    )
+    payload_sha256 = http_investigation_payload_sha256(
         event_id=event_id,
-        background=background,
-        state_machine=state_machine,
-        include_response=include_response,
+        force_replan=force_replan,
+        include_response_execution=include_response,
+        generate_report=generate_report,
+        orchestration_mode=orchestration_mode,
+    )
+    intent = await intent_service.create_or_replay_http_intent(
+        event_id,
+        requested_by=principal.subject,
+        request_idempotency_key=request_key,
+        request_payload_sha256=payload_sha256,
+        orchestration_mode=orchestration_mode,
+        include_response_execution=include_response,
         generate_report=generate_report,
     )
-
+    task_id = intent.task_id
+    if intent.created or intent.status in {
+        InvestigationIntentStatus.PENDING,
+        InvestigationIntentStatus.RETRY,
+    }:
+        try:
+            task_id = await _schedule_investigation(
+                event_id=event_id,
+                intent_id=intent.intent_id,
+                task_id=intent.task_id,
+                background=background,
+                state_machine=state_machine,
+                intent_service=intent_service,
+                include_response=include_response,
+                generate_report=generate_report,
+            )
+        except InvestigationInProgressError:
+            # Intent row is already durable truth; lease contention must not
+            # turn an accepted intake into HTTP 409.
+            logger.warning(
+                "investigate accepted intent=%s event=%s but lease contention deferred dispatch",
+                intent.intent_id,
+                event_id,
+            )
     return s.InvestigateResponse(
         event_id=event_id,
         task_id=task_id,
+        intent_id=intent.intent_id,
         status=event.status,
         include_response_execution=include_response,
         generate_report=generate_report,

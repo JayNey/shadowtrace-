@@ -47,6 +47,7 @@ RUN_INVESTIGATION_TASK_KWARG_NAMES: Final = frozenset(
         "include_response_execution",
         "generate_report",
         "intent_id",
+        "resume_from_checkpoint",
         "owner_id",
         "lease_acquired",
     }
@@ -55,6 +56,8 @@ RUN_INVESTIGATION_TASK_KWARG_NAMES: Final = frozenset(
 RUN_ANALYSIS_ONLY_TASK_KWARG_NAMES: Final = frozenset(
     {
         "generate_report",
+        "intent_id",
+        "resume_from_checkpoint",
         "owner_id",
         "lease_acquired",
     }
@@ -66,6 +69,7 @@ class InvestigationDispatchPayload:
     include_response_execution: bool = False
     generate_report: bool = True
     intent_id: str | None = None
+    resume_from_checkpoint: bool = False
     owner_id: str | None = None
     lease_acquired: bool = False
 
@@ -78,6 +82,8 @@ class InvestigationDispatchPayload:
             kwargs["owner_id"] = self.owner_id
         if self.intent_id is not None:
             kwargs["intent_id"] = self.intent_id
+        if self.resume_from_checkpoint:
+            kwargs["resume_from_checkpoint"] = True
         if self.lease_acquired:
             kwargs["lease_acquired"] = True
         return kwargs
@@ -86,11 +92,17 @@ class InvestigationDispatchPayload:
 @dataclass(frozen=True, slots=True)
 class AnalysisOnlyDispatchPayload:
     generate_report: bool = True
+    intent_id: str | None = None
+    resume_from_checkpoint: bool = False
     owner_id: str | None = None
     lease_acquired: bool = False
 
     def to_apply_async_kwargs(self) -> dict[str, object]:
         kwargs: dict[str, object] = {"generate_report": self.generate_report}
+        if self.intent_id is not None:
+            kwargs["intent_id"] = self.intent_id
+        if self.resume_from_checkpoint:
+            kwargs["resume_from_checkpoint"] = True
         if self.owner_id is not None:
             kwargs["owner_id"] = self.owner_id
         if self.lease_acquired:
@@ -103,6 +115,7 @@ def build_investigation_dispatch_kwargs(
     include_response_execution: bool = False,
     generate_report: bool = True,
     intent_id: str | None = None,
+    resume_from_checkpoint: bool = False,
     owner_id: str | None = None,
     lease_acquired: bool = False,
 ) -> dict[str, object]:
@@ -110,6 +123,7 @@ def build_investigation_dispatch_kwargs(
         include_response_execution=include_response_execution,
         generate_report=generate_report,
         intent_id=intent_id,
+        resume_from_checkpoint=resume_from_checkpoint,
         owner_id=owner_id,
         lease_acquired=lease_acquired,
     ).to_apply_async_kwargs()
@@ -118,11 +132,15 @@ def build_investigation_dispatch_kwargs(
 def build_analysis_only_dispatch_kwargs(
     *,
     generate_report: bool = True,
+    intent_id: str | None = None,
+    resume_from_checkpoint: bool = False,
     owner_id: str | None = None,
     lease_acquired: bool = False,
 ) -> dict[str, object]:
     return AnalysisOnlyDispatchPayload(
         generate_report=generate_report,
+        intent_id=intent_id,
+        resume_from_checkpoint=resume_from_checkpoint,
         owner_id=owner_id,
         lease_acquired=lease_acquired,
     ).to_apply_async_kwargs()

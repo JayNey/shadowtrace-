@@ -9,8 +9,9 @@ starting.
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
-from app.core.config import Settings
+from app.core.config import Settings, TaskMode
 from app.core.errors import ConfigurationError
 
 
@@ -36,6 +37,7 @@ def _base_kwargs(**overrides: object) -> dict[str, object]:
         "EMBEDDING_MODE": "remote",
         "SIMULATION_ENABLED": False,
         "SOCKETIO_CORS_ALLOWED_ORIGINS": "https://app.example",
+        "TASK_MODE": "celery",
     }
     kwargs.update(overrides)
     return kwargs
@@ -57,6 +59,28 @@ def test_development_allows_mock_and_simulation() -> None:
         SIMULATION_ENABLED=True,
     )
     assert settings.production_fail_closed_violations() == []
+
+
+def test_unknown_task_mode_fails_settings_construction() -> None:
+    with pytest.raises(PydanticValidationError):
+        Settings(TASK_MODE="celrey")
+
+
+@pytest.mark.parametrize("raw_mode", ["CELERY", " celery "])
+def test_task_mode_preserves_case_and_whitespace_compatibility(raw_mode: str) -> None:
+    settings = Settings(TASK_MODE=raw_mode)
+    assert settings.task_mode is TaskMode.CELERY
+
+
+def test_development_allows_explicit_volatile_task_mode() -> None:
+    settings = Settings(APP_ENV="development", TASK_MODE="background")
+    assert settings.task_mode is TaskMode.BACKGROUND
+
+
+def test_production_rejects_volatile_task_mode() -> None:
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings(**_base_kwargs(TASK_MODE="background"))
+    assert "task_mode=background" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(

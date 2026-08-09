@@ -375,6 +375,255 @@ def test_publish_investigation_for_intent_forwards_generate_report_false(
     }
 
 
+def test_publish_analysis_only_for_intent_forwards_durable_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_apply_async(*_args: Any, **kwargs: Any) -> MagicMock:
+        captured.update(kwargs)
+        return MagicMock(id=kwargs["task_id"])
+
+    monkeypatch.setattr(tasks.run_analysis_only_investigation, "apply_async", _fake_apply_async)
+
+    tasks.publish_analysis_only_investigation_for_intent(
+        event_id="evt-analysis-intent",
+        task_id="task-analysis-intent",
+        intent_id="iin-analysis-intent",
+        generate_report=False,
+    )
+
+    assert captured["args"] == ["evt-analysis-intent"]
+    assert captured["kwargs"] == {
+        "generate_report": False,
+        "intent_id": "iin-analysis-intent",
+    }
+    assert captured["task_id"] == "task-analysis-intent"
+
+
+def test_analysis_only_intent_delivery_finalizes_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    from app.db import models as orm
+    from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+
+    intent_id = f"iin-analysis-terminal-{uuid4().hex[:8]}"
+    event_id = f"evt-analysis-terminal-{uuid4().hex[:8]}"
+    task_id = f"task-analysis-terminal-{uuid4().hex[:8]}"
+
+    async def _seed() -> None:
+        async with session_factory() as session:
+            async with session.begin():
+                session.add(
+                    orm.SecurityEvent(
+                        event_id=event_id,
+                        event_type="malicious_process",
+                        title="Analysis-only durable delivery",
+                        description="",
+                        status=EventStatus.NEW.value,
+                        severity=Severity.HIGH.value,
+                        final_verdict="none",
+                        creation_source_ref={"source_product": "mock_xdr"},
+                        source_reference_snapshots=[],
+                        disposition_policy="not_required",
+                        raw_alert_ids=[],
+                        source_type="mock_xdr",
+                    )
+                )
+                await session.flush()
+                session.add(
+                    orm.InvestigationIntent(
+                        intent_id=intent_id,
+                        event_id=event_id,
+                        intent_kind="http_investigate",
+                        intent_version="issue276_v1",
+                        status=InvestigationIntentStatus.ENQUEUED.value,
+                        revision=1,
+                        attempt=0,
+                        broker_task_id=task_id,
+                        orchestration_mode="analysis_only",
+                    )
+                )
+
+    asyncio.run(_seed())
+
+    async def _execute(*_args: object, **_kwargs: object) -> dict[str, str]:
+        return {"status": "completed", "event_id": event_id}
+
+    monkeypatch.setattr(tasks, "_run_analysis_only_body", _execute)
+    result = tasks.run_analysis_only_investigation.apply(
+        args=[event_id],
+        kwargs={"intent_id": intent_id},
+        task_id=task_id,
+    ).get()
+    assert result["status"] == "completed"
+
+    async def _verify() -> None:
+        async with session_factory() as session:
+            row = await session.get(orm.InvestigationIntent, intent_id)
+            assert row is not None
+            assert row.status == InvestigationIntentStatus.TERMINAL.value
+
+    asyncio.run(_verify())
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_setup_failure_releases_acquired_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[tuple[str, str]] = []
+
+    class _Lease:
+        async def acquire(self, _event_id: str, _owner_id: str, ttl_s: int = 600) -> bool:
+            return True
+
+        async def start_renewal(
+            self,
+            _event_id: str,
+            _owner_id: str,
+            *,
+            on_renewal_failed: asyncio.Event,
+        ) -> asyncio.Task[None]:
+            del on_renewal_failed
+            raise RuntimeError("renewal setup failed")
+
+        async def release(self, event_id: str, owner_id: str) -> bool:
+            released.append((event_id, owner_id))
+            return True
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
+
+    with pytest.raises(RuntimeError, match="renewal setup failed"):
+        await tasks.execute_analysis_only_investigation(
+            "evt-analysis-setup-fail",
+            owner_id="owner-analysis-setup-fail",
+        )
+
+    assert released == [("evt-analysis-setup-fail", "owner-analysis-setup-fail")]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_in_progress_result_marks_started_intent_retry(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db import models as orm
+    from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+
+    intent_id = f"iin-duplicate-active-{uuid4().hex[:8]}"
+    event_id = f"evt-duplicate-active-{uuid4().hex[:8]}"
+    broker_task_id = f"task-duplicate-active-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Duplicate delivery fencing",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="http_investigate",
+                    intent_version="issue276_v1",
+                    status=InvestigationIntentStatus.STARTED.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id=broker_task_id,
+                )
+            )
+
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: session_factory)
+    await tasks._finalize_intent_from_result(
+        intent_id,
+        {
+            "status": "skipped",
+            "event_id": event_id,
+            "reason": "investigation_in_progress",
+        },
+        broker_task_id=broker_task_id,
+    )
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.RETRY.value
+        assert row.last_error == "investigation_in_progress"
+        assert row.skip_reason is None
+
+
+@pytest.mark.asyncio
+async def test_stale_delivery_cannot_finalize_newer_started_generation(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.db import models as orm
+    from app.models.enums import EventStatus, InvestigationIntentStatus, Severity
+
+    intent_id = f"iin-stale-finalize-{uuid4().hex[:8]}"
+    event_id = f"evt-stale-finalize-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Stale finalization fence",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="http_investigate",
+                    intent_version="issue276_v1",
+                    status=InvestigationIntentStatus.STARTED.value,
+                    revision=2,
+                    attempt=1,
+                    broker_task_id=(current_task := f"task-generation-2-{uuid4().hex[:8]}"),
+                )
+            )
+
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: session_factory)
+    await tasks._finalize_intent_from_result(
+        intent_id,
+        {"status": "completed", "event_id": event_id},
+        broker_task_id=f"task-generation-1-{uuid4().hex[:8]}",
+    )
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.STARTED.value
+        assert row.broker_task_id == current_task
+
+
 @pytest.mark.asyncio
 async def test_dispatch_investigation_returns_celery_task_id(
     monkeypatch: pytest.MonkeyPatch,
@@ -411,6 +660,75 @@ async def test_resolve_task_state_reads_registered_event_id(
     state, event_id = await tasks.resolve_task_state(task_id)
     assert event_id == "evt-status"
     assert state in {"SUCCESS", "PENDING", "STARTED", "FAILURE", "UNKNOWN"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_task_state_falls_back_to_committed_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import Settings
+    from app.db import models as orm
+    from app.models.enums import EventStatus, Severity
+    from app.services.investigation_intent_service import (
+        InvestigationIntentService,
+        http_investigation_payload_sha256,
+    )
+
+    event_id = f"evt-resolve-intent-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Immediate task lookup",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    intent = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-task-lookup",
+        request_idempotency_key=f"req-task-lookup:{event_id}",
+        request_payload_sha256=http_investigation_payload_sha256(
+            event_id=event_id,
+            force_replan=False,
+            include_response_execution=False,
+            generate_report=True,
+            orchestration_mode="graph",
+        ),
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+
+    class _PendingResult:
+        state = "PENDING"
+        info = None
+        args: tuple[()] = ()
+
+    async def _missing_metadata(_task_id: str) -> str | None:
+        return None
+
+    monkeypatch.setattr(tasks, "lookup_task_event_id", _missing_metadata)
+    monkeypatch.setattr("celery.result.AsyncResult", lambda *_args, **_kwargs: _PendingResult())
+    monkeypatch.setattr("app.db.session.get_session_factory", lambda: session_factory)
+
+    state, resolved_event_id = await tasks.resolve_task_state(intent.task_id)
+    assert state == "PENDING"
+    assert resolved_event_id == event_id
 
 
 @pytest.mark.asyncio
@@ -488,6 +806,7 @@ def test_run_investigation_unhandled_exception_marks_intent_dead(
 
     intent_id = f"iin-dead-{uuid4().hex[:8]}"
     event_id = f"evt-dead-{uuid4().hex[:8]}"
+    broker_task_id = f"task-dead-{uuid4().hex[:8]}"
 
     async def _seed() -> None:
         async with session_factory() as session:
@@ -518,7 +837,7 @@ def test_run_investigation_unhandled_exception_marks_intent_dead(
                         status=InvestigationIntentStatus.ENQUEUED.value,
                         revision=1,
                         attempt=0,
-                        broker_task_id="task-dead",
+                        broker_task_id=broker_task_id,
                     )
                 )
 
@@ -533,7 +852,7 @@ def test_run_investigation_unhandled_exception_marks_intent_dead(
         tasks.run_investigation.apply(
             args=[event_id],
             kwargs={"intent_id": intent_id},
-            task_id="task-dead",
+            task_id=broker_task_id,
         ).get()
 
     async def _verify() -> None:
@@ -557,8 +876,8 @@ def test_run_investigation_skips_body_when_broker_task_superseded(
 
     intent_id = f"iin-skip-body-{uuid4().hex[:8]}"
     event_id = f"evt-skip-body-{uuid4().hex[:8]}"
-    current_task = "task-current"
-    stale_task = "task-stale"
+    current_task = f"task-current-{uuid4().hex[:8]}"
+    stale_task = f"task-stale-{uuid4().hex[:8]}"
 
     async def _seed() -> None:
         async with session_factory() as session:
@@ -706,6 +1025,7 @@ def test_celery_retries_exhausted_marks_intent_retry(
 
     intent_id = f"iin-exhaust-{uuid4().hex[:8]}"
     event_id = f"evt-exhaust-{uuid4().hex[:8]}"
+    broker_task_id = f"task-exhaust-{uuid4().hex[:8]}"
 
     async def _seed() -> None:
         async with session_factory() as session:
@@ -736,7 +1056,7 @@ def test_celery_retries_exhausted_marks_intent_retry(
                         status=InvestigationIntentStatus.ENQUEUED.value,
                         revision=1,
                         attempt=0,
-                        broker_task_id="task-exhaust",
+                        broker_task_id=broker_task_id,
                     )
                 )
 
@@ -750,7 +1070,7 @@ def test_celery_retries_exhausted_marks_intent_retry(
     from app.core.celery_delivery import CELERY_REDELIVERY_MAX_RETRIES
 
     ctx = Context(
-        id="task-exhaust",
+        id=broker_task_id,
         delivery_info={},
         retries=CELERY_REDELIVERY_MAX_RETRIES,
     )
@@ -1282,7 +1602,7 @@ def test_run_analysis_only_honors_delivery_info_redelivered_flag(
 async def test_schedule_investigation_analysis_only_celery_routes_to_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ISSUE-225: _schedule_investigation uses dispatch_analysis_only_investigation."""
+    """Celery intake triggers the durable dispatcher without taking an HTTP lease."""
     from fastapi import BackgroundTasks
 
     from app.api.v1.events import _schedule_investigation
@@ -1294,48 +1614,17 @@ async def test_schedule_investigation_analysis_only_celery_routes_to_dispatch(
 
     captured: dict[str, object] = {}
 
-    class _TrackingLease:
-        async def acquire(self, _event_id: str, owner_id: str, ttl_s: int = 600) -> bool:
-            captured["owner_id"] = owner_id
-            return True
-
-        async def release(self, ev_id: str, owner_id: str) -> bool:
-            captured["released"] = (ev_id, owner_id)
-            return True
-
-    async def _dispatch(
-        event_id: str,
-        *,
-        generate_report: bool = True,
-        owner_id: str | None = None,
-        lease_acquired: bool = False,
-    ) -> str:
-        captured["event_id"] = event_id
-        captured["generate_report"] = generate_report
-        captured["dispatch_owner_id"] = owner_id
-        captured["lease_acquired"] = lease_acquired
-        return "task-analysis-only-schedule"
-
-    async def _noop_record(*_args: object, **_kwargs: object) -> None:
-        return None
-
-    monkeypatch.setattr("app.api.v1.events.get_event_lease", lambda: _TrackingLease())
-    monkeypatch.setattr(
-        "app.tasks.investigation_tasks.dispatch_analysis_only_investigation",
-        _dispatch,
-    )
-    monkeypatch.setattr(
-        "app.api.v1.events.record_investigation_workflow_path",
-        _noop_record,
-    )
+    class _IntentService:
+        def schedule_dispatch(self) -> None:
+            captured["scheduled"] = True
 
     task_id = await _schedule_investigation(
         event_id="evt-schedule-ao",
+        intent_id="iin-schedule-ao",
+        task_id="task-analysis-only-schedule",
         background=BackgroundTasks(),
         state_machine=MagicMock(),
+        intent_service=_IntentService(),  # type: ignore[arg-type]
     )
     assert task_id == "task-analysis-only-schedule"
-    assert captured["event_id"] == "evt-schedule-ao"
-    assert captured["lease_acquired"] is True
-    assert captured["dispatch_owner_id"] == captured["owner_id"]
-    assert "released" not in captured
+    assert captured == {"scheduled": True}

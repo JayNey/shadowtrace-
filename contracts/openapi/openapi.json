@@ -402,6 +402,22 @@
               "type": "string",
               "title": "Event Id"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Idempotency-Key"
+            }
           }
         ],
         "requestBody": {
@@ -2193,6 +2209,23 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RetryWritebackRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -6142,6 +6175,11 @@
             },
             "type": "array",
             "title": "Target Results"
+          },
+          "legacy_target_results": {
+            "type": "boolean",
+            "title": "Legacy Target Results",
+            "default": false
           }
         },
         "type": "object",
@@ -6854,6 +6892,17 @@
           "task_id": {
             "type": "string",
             "title": "Task Id"
+          },
+          "intent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent Id"
           },
           "status": {
             "$ref": "#/components/schemas/EventStatus"
@@ -7673,6 +7722,37 @@
         ],
         "title": "ResponsePhaseState",
         "description": "Derived UX phase for analysis vs response (ISSUE-103)."
+      },
+      "RetryWritebackRequest": {
+        "properties": {
+          "operation_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Operation Id",
+            "description": "Optional idempotency key for operator retry replay (ISSUE-274)."
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "Optional operator note recorded in audit log."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "RetryWritebackRequest"
       },
       "ScoringMode": {
         "type": "string",

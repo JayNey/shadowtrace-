@@ -12,7 +12,7 @@ import logging
 from celery import Celery
 from celery.signals import worker_process_init, worker_process_shutdown
 
-from app.core.config import get_settings
+from app.core.config import TaskMode, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ def _build_beat_schedule() -> dict[str, dict[str, object]]:
             "schedule": float(settings.ingestion_poll_interval_s),
             "options": {"queue": "ingestion"},
         }
-    if settings.auto_investigate_enabled:
+    if settings.task_mode is TaskMode.CELERY:
         schedule["shadowtrace-dispatch-investigation-intents"] = {
             "task": "shadowtrace.dispatch_investigation_intents",
             "schedule": float(settings.auto_investigate_dispatch_interval_s),

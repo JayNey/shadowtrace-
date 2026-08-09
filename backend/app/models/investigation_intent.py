@@ -9,6 +9,8 @@ from app.models.enums import InvestigationIntentStatus
 
 INTENT_KIND_AUTO_INVESTIGATE = "auto_investigate"
 INTENT_VERSION_ISSUE108_V1 = "issue108_v1"
+INTENT_KIND_HTTP_INVESTIGATE = "http_investigate"
+INTENT_VERSION_ISSUE276_V1 = "issue276_v1"
 PROVISIONAL_LINK_ROLE = "provisional"
 PRIMARY_LINK_ROLE = "primary"
 UNKNOWN_LINK_ROLE = "unknown"
@@ -63,8 +65,10 @@ INTENT_TRANSITIONS: dict[InvestigationIntentStatus, frozenset[InvestigationInten
         }
     ),
     InvestigationIntentStatus.TERMINAL: frozenset(),
-    InvestigationIntentStatus.SKIPPED: frozenset(),
-    InvestigationIntentStatus.DEAD: frozenset(),
+    # Same-key / operator HTTP replay may re-arm skipped durable intake (ISSUE-276).
+    InvestigationIntentStatus.SKIPPED: frozenset({InvestigationIntentStatus.RETRY}),
+    # Explicit same-key HTTP replay may re-arm a failed durable request.
+    InvestigationIntentStatus.DEAD: frozenset({InvestigationIntentStatus.RETRY}),
 }
 
 TERMINAL_INTENT_STATUSES = frozenset(
@@ -103,12 +107,18 @@ class InvestigationIntentRecord:
     broker_task_id: str | None
     skip_reason: str | None
     last_error: str | None
+    request_idempotency_key: str | None = None
+    request_payload_sha256: str | None = None
+    requested_by: str | None = None
+    orchestration_mode: str = "graph"
 
 
 __all__ = [
     "INTENT_KIND_AUTO_INVESTIGATE",
+    "INTENT_KIND_HTTP_INVESTIGATE",
     "INTENT_TRANSITIONS",
     "INTENT_VERSION_ISSUE108_V1",
+    "INTENT_VERSION_ISSUE276_V1",
     "PRIMARY_LINK_ROLE",
     "PROVISIONAL_LINK_ROLE",
     "IntentDeliveryAdmission",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -12,13 +13,21 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.config import Settings, get_settings
-from app.core.errors import DependencyUnavailableError
+from app.core.config import Settings, TaskMode, get_settings
+from app.core.errors import (
+    DependencyUnavailableError,
+    IdempotencyKeyReuseError,
+    InvestigationInProgressError,
+    InvalidStateTransitionError,
+    ValidationError,
+)
 from app.db import models as orm
 from app.models.enums import EventStatus, InvestigationIntentStatus
 from app.models.investigation_intent import (
     INTENT_KIND_AUTO_INVESTIGATE,
+    INTENT_KIND_HTTP_INVESTIGATE,
     INTENT_VERSION_ISSUE108_V1,
+    INTENT_VERSION_ISSUE276_V1,
     PRIMARY_LINK_ROLE,
     PROVISIONAL_LINK_ROLE,
     TERMINAL_INTENT_STATUSES,
@@ -40,7 +49,7 @@ _DISPATCH_WORKER_ID = "intent-dispatcher-1"
 # Event left NEW while intent is STARTED beyond this window → worker crash / retry.
 _STARTED_STALE_MIN_S = 660
 
-_EVENT_INVESTIGATION_UNDERWAY = frozenset(
+_EVENT_INVESTIGATION_RESUMABLE = frozenset(
     {
         EventStatus.TRIAGING.value,
         EventStatus.COLLECTING_EVIDENCE.value,
@@ -51,6 +60,11 @@ _EVENT_INVESTIGATION_UNDERWAY = frozenset(
         EventStatus.EXECUTING_RESPONSE.value,
         EventStatus.VERIFYING.value,
         EventStatus.REPLANNING.value,
+    }
+)
+
+_EVENT_INVESTIGATION_COMPLETED = frozenset(
+    {
         EventStatus.CONTAINED.value,
         EventStatus.REPORTING.value,
         EventStatus.CLOSED.value,
@@ -96,6 +110,37 @@ class _EnqueuedPublishTarget(NamedTuple):
     intent_id: str
     include_response_execution: bool
     generate_report: bool
+    orchestration_mode: str
+    resume_from_checkpoint: bool
+
+
+class HttpInvestigationIntentResult(NamedTuple):
+    intent_id: str
+    event_id: str
+    task_id: str
+    revision: int
+    status: InvestigationIntentStatus
+    created: bool
+
+
+def http_investigation_payload_sha256(
+    *,
+    event_id: str,
+    force_replan: bool,
+    include_response_execution: bool,
+    generate_report: bool,
+    orchestration_mode: str,
+) -> str:
+    """Hash the complete semantic HTTP investigation request deterministically."""
+    payload = {
+        "event_id": event_id,
+        "force_replan": bool(force_replan),
+        "generate_report": bool(generate_report),
+        "include_response_execution": bool(include_response_execution),
+        "orchestration_mode": orchestration_mode,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class InvestigationIntentService:
@@ -125,6 +170,321 @@ class InvestigationIntentService:
     @property
     def auto_response_policy(self) -> AutoResponsePolicyService:
         return self._auto_response
+
+    async def create_or_replay_http_intent(
+        self,
+        event_id: str,
+        *,
+        requested_by: str,
+        request_idempotency_key: str,
+        request_payload_sha256: str,
+        orchestration_mode: str,
+        include_response_execution: bool,
+        generate_report: bool,
+    ) -> HttpInvestigationIntentResult:
+        """Commit or replay one durable HTTP intake intent before returning 202."""
+        key = request_idempotency_key.strip()
+        subject = requested_by.strip()
+        if not key or len(key) > 200:
+            raise ValidationError(
+                "Idempotency-Key must contain 1 to 200 characters",
+                details={"field": "Idempotency-Key"},
+            )
+        if not subject:
+            raise ValidationError("authenticated principal subject is required")
+
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    existing = await session.scalar(
+                        select(orm.InvestigationIntent)
+                        .where(
+                            orm.InvestigationIntent.requested_by == subject,
+                            orm.InvestigationIntent.request_idempotency_key == key,
+                        )
+                        .with_for_update()
+                    )
+                    if existing is not None:
+                        return self._replay_http_intent(
+                            existing,
+                            event_id=event_id,
+                            request_payload_sha256=request_payload_sha256,
+                        )
+
+                    event = await session.scalar(
+                        select(orm.SecurityEvent)
+                        .where(orm.SecurityEvent.event_id == event_id)
+                        .with_for_update()
+                    )
+                    if event is None:
+                        raise ValidationError(
+                            f"event {event_id} not found",
+                            error_code="event_not_found",
+                            details={"event_id": event_id},
+                        )
+                    # A same-key contender may have committed while this
+                    # transaction waited on the event row lock.
+                    existing = await session.scalar(
+                        select(orm.InvestigationIntent)
+                        .where(
+                            orm.InvestigationIntent.requested_by == subject,
+                            orm.InvestigationIntent.request_idempotency_key == key,
+                        )
+                        .with_for_update()
+                    )
+                    if existing is not None:
+                        return self._replay_http_intent(
+                            existing,
+                            event_id=event_id,
+                            request_payload_sha256=request_payload_sha256,
+                        )
+                    if event.status != EventStatus.NEW.value:
+                        raise InvalidStateTransitionError(
+                            "event must be in NEW status to start investigation, "
+                            f"current: {event.status}",
+                            current=EventStatus(event.status),
+                            target=EventStatus.TRIAGING,
+                            details={"event_id": event_id},
+                        )
+
+                    active = await session.scalar(
+                        select(orm.InvestigationIntent)
+                        .where(
+                            orm.InvestigationIntent.event_id == event_id,
+                            orm.InvestigationIntent.intent_kind
+                            == INTENT_KIND_HTTP_INVESTIGATE,
+                            orm.InvestigationIntent.intent_version
+                            == INTENT_VERSION_ISSUE276_V1,
+                        )
+                        .with_for_update()
+                    )
+                    if active is not None:
+                        status = InvestigationIntentStatus(active.status)
+                        if status in {
+                            InvestigationIntentStatus.DEAD,
+                            InvestigationIntentStatus.SKIPPED,
+                        }:
+                            return self._rearm_http_intent(
+                                active,
+                                request_idempotency_key=key,
+                                request_payload_sha256=request_payload_sha256,
+                                requested_by=subject,
+                                orchestration_mode=orchestration_mode,
+                                include_response_execution=include_response_execution,
+                                generate_report=generate_report,
+                            )
+                        raise InvestigationInProgressError(
+                            "investigation already accepted for this event",
+                            details={
+                                "event_id": event_id,
+                                "intent_id": active.intent_id,
+                            },
+                        )
+
+                    # ISSUE-276: HTTP intake is the operator-authoritative path —
+                    # supersede any non-terminal auto_investigate siblings first.
+                    await self.skip_active_intents_for_event_in_session(
+                        session,
+                        event_id,
+                        reason="superseded_by_http_investigate",
+                    )
+
+                    intent_id = new_intent_id()
+                    row = orm.InvestigationIntent(
+                        intent_id=intent_id,
+                        event_id=event_id,
+                        intent_kind=INTENT_KIND_HTTP_INVESTIGATE,
+                        intent_version=INTENT_VERSION_ISSUE276_V1,
+                        status=InvestigationIntentStatus.PENDING.value,
+                        revision=1,
+                        broker_task_id=deterministic_investigation_task_id(intent_id, 1),
+                        request_idempotency_key=key,
+                        request_payload_sha256=request_payload_sha256,
+                        requested_by=subject,
+                        orchestration_mode=orchestration_mode,
+                        attempt=0,
+                        include_response_execution=include_response_execution,
+                        generate_report=generate_report,
+                    )
+                    session.add(row)
+                    await session.flush()
+                    return self._http_intent_result(row, created=True)
+        except IntegrityError:
+            # A concurrent request may win either the request-key or per-event
+            # unique constraint after our initial locked lookups.
+            async with self._session_factory() as session:
+                async with session.begin():
+                    existing = await session.scalar(
+                        select(orm.InvestigationIntent)
+                        .where(
+                            orm.InvestigationIntent.requested_by == subject,
+                            orm.InvestigationIntent.request_idempotency_key == key,
+                        )
+                        .with_for_update()
+                    )
+                    if existing is not None:
+                        return self._replay_http_intent(
+                            existing,
+                            event_id=event_id,
+                            request_payload_sha256=request_payload_sha256,
+                        )
+                    active = await session.scalar(
+                        select(orm.InvestigationIntent)
+                        .where(
+                            orm.InvestigationIntent.event_id == event_id,
+                            orm.InvestigationIntent.intent_kind == INTENT_KIND_HTTP_INVESTIGATE,
+                            orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE276_V1,
+                        )
+                        .with_for_update()
+                    )
+                    if active is not None:
+                        status = InvestigationIntentStatus(active.status)
+                        if status in {
+                            InvestigationIntentStatus.DEAD,
+                            InvestigationIntentStatus.SKIPPED,
+                        }:
+                            return self._rearm_http_intent(
+                                active,
+                                request_idempotency_key=key,
+                                request_payload_sha256=request_payload_sha256,
+                                requested_by=subject,
+                                orchestration_mode=orchestration_mode,
+                                include_response_execution=include_response_execution,
+                                generate_report=generate_report,
+                            )
+                        raise InvestigationInProgressError(
+                            "investigation already accepted for this event",
+                            details={"event_id": event_id, "intent_id": active.intent_id},
+                        )
+            raise
+
+    async def mark_inline_started(self, intent_id: str) -> str:
+        """Fence a dev/test inline worker using the durable status/revision ledger."""
+        now = datetime.now(UTC)
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.scalar(
+                    select(orm.InvestigationIntent)
+                    .where(orm.InvestigationIntent.intent_id == intent_id)
+                    .with_for_update()
+                )
+                if row is None:
+                    raise ValidationError(
+                        "investigation intent not found",
+                        details={"intent_id": intent_id},
+                    )
+                current = InvestigationIntentStatus(row.status)
+                if current not in {
+                    InvestigationIntentStatus.PENDING,
+                    InvestigationIntentStatus.RETRY,
+                }:
+                    raise InvestigationInProgressError(
+                        "investigation intent is not available for inline claim",
+                        details={"intent_id": intent_id, "status": current.value},
+                    )
+                validate_intent_transition(current, InvestigationIntentStatus.CLAIMED)
+                row.status = InvestigationIntentStatus.CLAIMED.value
+                row.claim_owner = f"http-inline-{secrets.token_hex(8)}"
+                row.claim_expires_at = now + timedelta(
+                    seconds=int(self._settings.auto_investigate_claim_lease_s)
+                )
+                task_id = deterministic_investigation_task_id(
+                    row.intent_id,
+                    int(row.revision or 1),
+                )
+                validate_intent_transition(
+                    InvestigationIntentStatus.CLAIMED,
+                    InvestigationIntentStatus.ENQUEUED,
+                )
+                row.status = InvestigationIntentStatus.ENQUEUED.value
+                row.broker_task_id = task_id
+                validate_intent_transition(
+                    InvestigationIntentStatus.ENQUEUED,
+                    InvestigationIntentStatus.STARTED,
+                )
+                row.status = InvestigationIntentStatus.STARTED.value
+                row.claim_owner = None
+                row.claim_expires_at = None
+                return task_id
+
+    @staticmethod
+    def _http_intent_result(
+        row: orm.InvestigationIntent,
+        *,
+        created: bool,
+    ) -> HttpInvestigationIntentResult:
+        revision = int(row.revision or 1)
+        return HttpInvestigationIntentResult(
+            intent_id=row.intent_id,
+            event_id=row.event_id,
+            task_id=deterministic_investigation_task_id(row.intent_id, revision),
+            revision=revision,
+            status=InvestigationIntentStatus(row.status),
+            created=created,
+        )
+
+    def _replay_http_intent(
+        self,
+        row: orm.InvestigationIntent,
+        *,
+        event_id: str,
+        request_payload_sha256: str,
+    ) -> HttpInvestigationIntentResult:
+        if row.event_id != event_id or row.request_payload_sha256 != request_payload_sha256:
+            raise IdempotencyKeyReuseError(
+                "Idempotency-Key was already used with a different investigation request",
+                details={
+                    "event_id": event_id,
+                    "existing_event_id": row.event_id,
+                    "intent_id": row.intent_id,
+                },
+            )
+        status = InvestigationIntentStatus(row.status)
+        if row.intent_kind == INTENT_KIND_HTTP_INVESTIGATE and status in {
+            InvestigationIntentStatus.DEAD,
+            InvestigationIntentStatus.SKIPPED,
+        }:
+            return self._rearm_http_intent(row)
+        return self._http_intent_result(row, created=False)
+
+    def _rearm_http_intent(
+        self,
+        row: orm.InvestigationIntent,
+        *,
+        request_idempotency_key: str | None = None,
+        request_payload_sha256: str | None = None,
+        requested_by: str | None = None,
+        orchestration_mode: str | None = None,
+        include_response_execution: bool | None = None,
+        generate_report: bool | None = None,
+    ) -> HttpInvestigationIntentResult:
+        """Re-arm a DEAD/SKIPPED HTTP intent so durable intake can retry."""
+        current = InvestigationIntentStatus(row.status)
+        validate_intent_transition(current, InvestigationIntentStatus.RETRY)
+        row.status = InvestigationIntentStatus.RETRY.value
+        row.revision = int(row.revision or 1) + 1
+        row.attempt = 0
+        row.broker_task_id = deterministic_investigation_task_id(
+            row.intent_id,
+            int(row.revision),
+        )
+        row.claim_owner = None
+        row.claim_expires_at = None
+        row.skip_reason = None
+        row.last_error = None
+        if request_idempotency_key is not None:
+            row.request_idempotency_key = request_idempotency_key
+        if request_payload_sha256 is not None:
+            row.request_payload_sha256 = request_payload_sha256
+        if requested_by is not None:
+            row.requested_by = requested_by
+        if orchestration_mode is not None:
+            row.orchestration_mode = orchestration_mode
+        if include_response_execution is not None:
+            row.include_response_execution = include_response_execution
+        if generate_report is not None:
+            row.generate_report = generate_report
+        return self._http_intent_result(row, created=False)
 
     async def maybe_create_pending_in_session(
         self,
@@ -188,8 +548,8 @@ class InvestigationIntentService:
         return intent_id
 
     def schedule_dispatch(self) -> None:
-        """Best-effort async dispatch trigger; must never raise to ingest callers."""
-        if not self._policy.enabled:
+        """Best-effort trigger for any committed pending intent; never raises."""
+        if self._settings.task_mode is not TaskMode.CELERY:
             return
         try:
             from app.tasks.investigation_intent_tasks import dispatch_pending_investigation_intents
@@ -268,7 +628,11 @@ class InvestigationIntentService:
         """Admit or reject a Celery delivery against the durable intent ledger."""
         async with self._session_factory() as session:
             async with session.begin():
-                row = await session.get(orm.InvestigationIntent, intent_id)
+                row = await session.get(
+                    orm.InvestigationIntent,
+                    intent_id,
+                    with_for_update=True,
+                )
                 if row is None:
                     return IntentDeliveryAdmission.MISSING
                 current = InvestigationIntentStatus(row.status)
@@ -315,32 +679,63 @@ class InvestigationIntentService:
                 row.claim_expires_at = None
                 return IntentDeliveryAdmission.ACCEPTED
 
-    async def mark_terminal(self, intent_id: str) -> None:
-        await self._transition(intent_id, InvestigationIntentStatus.TERMINAL, clear_claim=True)
+    async def mark_terminal(
+        self,
+        intent_id: str,
+        *,
+        broker_task_id: str | None = None,
+    ) -> bool:
+        return await self._transition(
+            intent_id,
+            InvestigationIntentStatus.TERMINAL,
+            clear_claim=True,
+            expected_broker_task_id=broker_task_id,
+        )
 
-    async def mark_skipped(self, intent_id: str, *, reason: str) -> None:
-        await self._transition(
+    async def mark_skipped(
+        self,
+        intent_id: str,
+        *,
+        reason: str,
+        broker_task_id: str | None = None,
+    ) -> bool:
+        return await self._transition(
             intent_id,
             InvestigationIntentStatus.SKIPPED,
             skip_reason=reason,
             clear_claim=True,
+            expected_broker_task_id=broker_task_id,
         )
 
-    async def mark_retry(self, intent_id: str, *, error: str) -> None:
-        await self._transition(
+    async def mark_retry(
+        self,
+        intent_id: str,
+        *,
+        error: str,
+        broker_task_id: str | None = None,
+    ) -> bool:
+        return await self._transition(
             intent_id,
             InvestigationIntentStatus.RETRY,
             last_error=error,
             increment_attempt=True,
             clear_claim=True,
+            expected_broker_task_id=broker_task_id,
         )
 
-    async def mark_dead(self, intent_id: str, *, error: str) -> None:
-        await self._transition(
+    async def mark_dead(
+        self,
+        intent_id: str,
+        *,
+        error: str,
+        broker_task_id: str | None = None,
+    ) -> bool:
+        return await self._transition(
             intent_id,
             InvestigationIntentStatus.DEAD,
             last_error=error,
             clear_claim=True,
+            expected_broker_task_id=broker_task_id,
         )
 
     async def reconcile_stale(self, *, limit: int = 20) -> int:
@@ -349,6 +744,7 @@ class InvestigationIntentService:
         max_attempts = int(self._settings.auto_investigate_max_attempts)
         started_stale_s = max(lease_seconds * 4, _STARTED_STALE_MIN_S)
         reconciled = 0
+        abandoned_task_ids: list[str] = []
         async with self._session_factory() as session:
             async with session.begin():
                 rows = (
@@ -379,6 +775,7 @@ class InvestigationIntentService:
                     ):
                         continue
                     event = await session.get(orm.SecurityEvent, row.event_id)
+                    previous_task_id = row.broker_task_id
                     if await self._reconcile_stale_row(
                         row,
                         status=status,
@@ -386,6 +783,20 @@ class InvestigationIntentService:
                         max_attempts=max_attempts,
                     ):
                         reconciled += 1
+                        if previous_task_id and row.broker_task_id != previous_task_id:
+                            abandoned_task_ids.append(previous_task_id)
+        if abandoned_task_ids:
+            from app.tasks.investigation_tasks import delete_task_metadata
+
+            for task_id in abandoned_task_ids:
+                try:
+                    await delete_task_metadata(task_id)
+                except Exception:
+                    logger.warning(
+                        "failed to delete stale investigation task metadata task=%s",
+                        task_id,
+                        exc_info=True,
+                    )
         if reconciled:
             self.schedule_dispatch()
         provisional_created = await self._materialize_provisional_intents(
@@ -419,7 +830,7 @@ class InvestigationIntentService:
         max_attempts: int,
     ) -> bool:
         if status is InvestigationIntentStatus.STARTED and event is not None:
-            if event.status in _EVENT_INVESTIGATION_UNDERWAY:
+            if event.status in _EVENT_INVESTIGATION_COMPLETED:
                 validate_intent_transition(status, InvestigationIntentStatus.TERMINAL)
                 row.status = InvestigationIntentStatus.TERMINAL.value
                 row.claim_owner = None
@@ -443,10 +854,14 @@ class InvestigationIntentService:
             row.status = InvestigationIntentStatus.RETRY.value
             row.attempt = next_attempt
             row.last_error = row.last_error or "stale_intent_reconciled"
-        row.broker_task_id = None
         row.claim_owner = None
         row.claim_expires_at = None
         row.revision = int(row.revision or 1) + 1
+        row.broker_task_id = (
+            deterministic_investigation_task_id(row.intent_id, int(row.revision))
+            if row.status == InvestigationIntentStatus.RETRY.value
+            else None
+        )
         return True
 
     async def lookup_by_broker_task_id(self, broker_task_id: str) -> orm.InvestigationIntent | None:
@@ -568,12 +983,20 @@ class InvestigationIntentService:
         """Persist ENQUEUED before broker publish so workers never see pre-commit rows."""
         async with self._session_factory() as session:
             async with session.begin():
-                row = await session.get(orm.InvestigationIntent, intent_id)
+                row = await session.get(
+                    orm.InvestigationIntent,
+                    intent_id,
+                    with_for_update=True,
+                )
                 if row is None:
                     return None
                 if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.CLAIMED:
                     return None
-                event = await session.get(orm.SecurityEvent, row.event_id)
+                event = await session.get(
+                    orm.SecurityEvent,
+                    row.event_id,
+                    with_for_update=True,
+                )
                 if event is None:
                     await self._set_status_in_session(
                         row,
@@ -581,36 +1004,63 @@ class InvestigationIntentService:
                         skip_reason="event_missing",
                     )
                     return None
-                if event.status != EventStatus.NEW.value:
+                resume_from_checkpoint = (
+                    int(row.revision or 1) > 1
+                    and event.status in _EVENT_INVESTIGATION_RESUMABLE
+                )
+                if event.status != EventStatus.NEW.value and not resume_from_checkpoint:
                     await self._set_status_in_session(
                         row,
                         InvestigationIntentStatus.SKIPPED,
                         skip_reason="event_not_new",
                     )
                     return None
-                source_product = None
-                if event.creation_source_ref:
-                    raw = event.creation_source_ref.get("source_product")
-                    if isinstance(raw, str):
-                        source_product = raw
-                link_role = await _resolve_response_link_role(session, event.event_id)
-                response_decision = self._auto_response.evaluate(
-                    event,
-                    link_role=link_role,
-                    source_product=source_product,
-                )
-                include_response = response_decision.eligible
-                row.include_response_execution = include_response
-                if self._auto_response.enabled:
-                    session.add(
-                        orm.EventAuditLog(
-                            event_id=event.event_id,
-                            from_status=event.status,
-                            to_status=event.status,
-                            operator="AutoResponsePolicyService",
-                            reason=format_auto_response_audit_reason(response_decision),
-                        )
+                sibling_blocking = await session.scalar(
+                    select(orm.InvestigationIntent.intent_id).where(
+                        orm.InvestigationIntent.event_id == row.event_id,
+                        orm.InvestigationIntent.intent_id != row.intent_id,
+                        orm.InvestigationIntent.status.in_(
+                            (
+                                InvestigationIntentStatus.CLAIMED.value,
+                                InvestigationIntentStatus.ENQUEUED.value,
+                                InvestigationIntentStatus.STARTED.value,
+                            )
+                        ),
                     )
+                )
+                if sibling_blocking is not None:
+                    await self._set_status_in_session(
+                        row,
+                        InvestigationIntentStatus.RETRY,
+                        last_error="sibling_intent_active",
+                        increment_attempt=True,
+                    )
+                    return None
+                include_response = bool(row.include_response_execution)
+                if row.intent_kind == INTENT_KIND_AUTO_INVESTIGATE:
+                    source_product = None
+                    if event.creation_source_ref:
+                        raw = event.creation_source_ref.get("source_product")
+                        if isinstance(raw, str):
+                            source_product = raw
+                    link_role = await _resolve_response_link_role(session, event.event_id)
+                    response_decision = self._auto_response.evaluate(
+                        event,
+                        link_role=link_role,
+                        source_product=source_product,
+                    )
+                    include_response = response_decision.eligible
+                    row.include_response_execution = include_response
+                    if self._auto_response.enabled:
+                        session.add(
+                            orm.EventAuditLog(
+                                event_id=event.event_id,
+                                from_status=event.status,
+                                to_status=event.status,
+                                operator="AutoResponsePolicyService",
+                                reason=format_auto_response_audit_reason(response_decision),
+                            )
+                        )
                 task_id = deterministic_investigation_task_id(row.intent_id, int(row.revision))
                 validate_intent_transition(
                     InvestigationIntentStatus.CLAIMED,
@@ -627,6 +1077,8 @@ class InvestigationIntentService:
                     row.intent_id,
                     include_response,
                     bool(row.generate_report),
+                    str(row.orchestration_mode or "graph"),
+                    resume_from_checkpoint,
                 )
 
     async def _revert_enqueued_after_publish_failure(
@@ -642,7 +1094,6 @@ class InvestigationIntentService:
                 if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.ENQUEUED:
                     return
                 await self._handle_publish_transient_failure(row, exc)
-                row.broker_task_id = None
 
     async def _revert_enqueued_after_unexpected_failure(
         self,
@@ -672,19 +1123,30 @@ class InvestigationIntentService:
 
         from app.tasks.investigation_tasks import (
             delete_task_metadata,
+            publish_analysis_only_investigation_for_intent,
             publish_investigation_for_intent,
             register_task_metadata,
         )
 
         try:
             await register_task_metadata(target.task_id, target.event_id)
-            publish_investigation_for_intent(
-                event_id=target.event_id,
-                task_id=target.task_id,
-                intent_id=target.intent_id,
-                include_response_execution=target.include_response_execution,
-                generate_report=target.generate_report,
-            )
+            if target.orchestration_mode == "analysis_only":
+                publish_analysis_only_investigation_for_intent(
+                    event_id=target.event_id,
+                    task_id=target.task_id,
+                    intent_id=target.intent_id,
+                    generate_report=target.generate_report,
+                    resume_from_checkpoint=target.resume_from_checkpoint,
+                )
+            else:
+                publish_investigation_for_intent(
+                    event_id=target.event_id,
+                    task_id=target.task_id,
+                    intent_id=target.intent_id,
+                    include_response_execution=target.include_response_execution,
+                    generate_report=target.generate_report,
+                    resume_from_checkpoint=target.resume_from_checkpoint,
+                )
         except DependencyUnavailableError as exc:
             await delete_task_metadata(target.task_id)
             logger.warning(
@@ -746,15 +1208,33 @@ class InvestigationIntentService:
         last_error: str | None = None,
         increment_attempt: bool = False,
         clear_claim: bool = False,
-    ) -> None:
+        expected_broker_task_id: str | None = None,
+    ) -> bool:
         async with self._session_factory() as session:
             async with session.begin():
-                row = await session.get(orm.InvestigationIntent, intent_id)
+                row = await session.get(
+                    orm.InvestigationIntent,
+                    intent_id,
+                    with_for_update=True,
+                )
                 if row is None:
-                    return
+                    return False
                 current = InvestigationIntentStatus(row.status)
+                if expected_broker_task_id is not None and (
+                    current is not InvestigationIntentStatus.STARTED
+                    or row.broker_task_id != expected_broker_task_id
+                ):
+                    logger.info(
+                        "stale intent completion ignored intent=%s current=%s "
+                        "expected_task=%s actual_task=%s",
+                        intent_id,
+                        current.value,
+                        expected_broker_task_id,
+                        row.broker_task_id,
+                    )
+                    return False
                 if current in TERMINAL_INTENT_STATUSES:
-                    return
+                    return False
                 validate_intent_transition(current, target)
                 row.status = target.value
                 if broker_task_id is not None:
@@ -766,9 +1246,18 @@ class InvestigationIntentService:
                 if increment_attempt:
                     row.attempt = int(row.attempt or 0) + 1
                     row.revision = int(row.revision or 1) + 1
+                    row.broker_task_id = (
+                        deterministic_investigation_task_id(
+                            row.intent_id,
+                            int(row.revision),
+                        )
+                        if target is InvestigationIntentStatus.RETRY
+                        else None
+                    )
                 if clear_claim:
                     row.claim_owner = None
                     row.claim_expires_at = None
+                return True
 
     async def _set_status_in_session(
         self,
@@ -789,6 +1278,14 @@ class InvestigationIntentService:
         if increment_attempt:
             row.attempt = int(row.attempt or 0) + 1
             row.revision = int(row.revision or 1) + 1
+            row.broker_task_id = (
+                deterministic_investigation_task_id(
+                    row.intent_id,
+                    int(row.revision),
+                )
+                if target is InvestigationIntentStatus.RETRY
+                else None
+            )
         row.claim_owner = None
         row.claim_expires_at = None
 

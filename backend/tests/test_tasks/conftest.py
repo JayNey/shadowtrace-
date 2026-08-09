@@ -9,6 +9,8 @@ import pytest
 from app.core.celery_app import celery_app
 from app.db.session_provider import init_worker_session_provider, reset_session_provider
 
+pytestmark = pytest.mark.usefixtures("clean_state")
+
 
 @pytest.fixture
 def celery_eager() -> Iterator[None]:

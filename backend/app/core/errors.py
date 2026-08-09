@@ -516,6 +516,15 @@ class InvestigationInProgressError(ShadowTraceError):
     default_retryable = False
 
 
+class IdempotencyKeyReuseError(ShadowTraceError):
+    """An idempotency key was replayed with a different request payload."""
+
+    status_code = 409
+    default_error_code = "idempotency_key_reuse"
+    default_category = ErrorCategory.USER_INPUT
+    default_retryable = False
+
+
 class ClassificationConflictError(ShadowTraceError):
     """Classification PATCH blocked during active response/verify (ISSUE-209)."""
 

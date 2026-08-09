@@ -116,6 +116,13 @@ def test_shared_dispatch_builders_include_generate_report() -> None:
         "intent_id": "iin-contract",
     }
     assert build_analysis_only_dispatch_kwargs()["generate_report"] is True
+    assert build_analysis_only_dispatch_kwargs(
+        generate_report=False,
+        intent_id="iin-analysis-contract",
+    ) == {
+        "generate_report": False,
+        "intent_id": "iin-analysis-contract",
+    }
 
 
 @pytest.mark.asyncio

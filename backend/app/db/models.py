@@ -1036,6 +1036,19 @@ class InvestigationIntent(Base):
         ),
         Index("ix_investigation_intent_status_updated", "status", "updated_at"),
         Index("ix_investigation_intent_claim_expires", "claim_expires_at"),
+        Index(
+            "uq_investigation_intent_broker_task_id",
+            "broker_task_id",
+            unique=True,
+            postgresql_where=text("broker_task_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_investigation_intent_request_key",
+            "requested_by",
+            "request_idempotency_key",
+            unique=True,
+            postgresql_where=text("request_idempotency_key IS NOT NULL"),
+        ),
     )
 
     intent_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1049,6 +1062,10 @@ class InvestigationIntent(Base):
     intent_version: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, index=True)
     revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    request_idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    request_payload_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_by: Mapped[str | None] = mapped_column(String, nullable=True)
+    orchestration_mode: Mapped[str] = mapped_column(String, default="graph", nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     claim_owner: Mapped[str | None] = mapped_column(String, nullable=True)
     claim_expires_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)

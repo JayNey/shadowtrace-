@@ -238,6 +238,7 @@ class EventDetailResponse(BaseModel):
 class InvestigateResponse(BaseModel):
     event_id: str
     task_id: str
+    intent_id: str | None = None
     status: EventStatus
     include_response_execution: bool = False
     generate_report: bool = True

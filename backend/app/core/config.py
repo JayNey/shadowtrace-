@@ -1,6 +1,7 @@
 """Application settings (pydantic-settings)."""
 
 import os
+from enum import StrEnum
 from functools import lru_cache
 
 from pydantic import Field, field_validator
@@ -12,6 +13,13 @@ from app.models.workflow import AUTO_APPROVABLE_ACTION_LEVELS, parse_action_leve
 
 def _looks_mock(value: str) -> bool:
     return "mock" in value.strip().lower()
+
+
+class TaskMode(StrEnum):
+    """Investigation execution mode; volatile mode is non-production only."""
+
+    BACKGROUND = "background"
+    CELERY = "celery"
 
 
 class Settings(BaseSettings):
@@ -340,7 +348,15 @@ class Settings(BaseSettings):
         ge=30.0,
         le=86400.0,
     )
-    task_mode: str = Field(default="background", alias="TASK_MODE")
+    task_mode: TaskMode = Field(default=TaskMode.BACKGROUND, alias="TASK_MODE")
+
+    @field_validator("task_mode", mode="before")
+    @classmethod
+    def normalize_task_mode(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
     celery_broker_url: str = Field(default="", alias="CELERY_BROKER_URL")
     approval_timeout_minutes: int = Field(default=30, alias="APPROVAL_TIMEOUT_MINUTES")
 
@@ -547,6 +563,8 @@ class Settings(BaseSettings):
             violations.append("playbook_fixture_fallback=true")
         if self.execution_job_fixture_enabled:
             violations.append("execution_job_fixture_enabled=true")
+        if self.task_mode is TaskMode.BACKGROUND:
+            violations.append("task_mode=background: volatile execution forbidden in production")
         if self.react_enabled and not self.tool_call_grant_required:
             violations.append("react_enabled=true requires tool_call_grant_required=true")
         if self.react_shadow_pivot_enabled and not self.tool_call_grant_required:

@@ -225,6 +225,11 @@
       "title": "Target Results",
       "type": "array"
     },
+    "legacy_target_results": {
+      "default": false,
+      "title": "Legacy Target Results",
+      "type": "boolean"
+    },
     "provider_code": {
       "anyOf": [
         {

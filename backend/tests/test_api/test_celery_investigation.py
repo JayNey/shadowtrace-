@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +19,7 @@ from app.models.enums import (
     DispositionPolicy,
     EventStatus,
     EventType,
+    InvestigationIntentStatus,
     Severity,
     SourceObjectKind,
 )
@@ -53,6 +55,42 @@ def fake_redis_store(monkeypatch: pytest.MonkeyPatch) -> InMemoryFakeRedis:
 
 def _hdr() -> dict[str, str]:
     return {"Authorization": "Bearer analyst-token"}
+
+
+def _durable_intent_double(
+    event_id: str,
+    *,
+    on_schedule_dispatch: Any | None = None,
+) -> object:
+    class _IntentService:
+        def __init__(self) -> None:
+            self.schedule_calls = 0
+
+        async def create_or_replay_http_intent(
+            self,
+            _event_id: str,
+            **_kwargs: object,
+        ) -> SimpleNamespace:
+            return SimpleNamespace(
+                intent_id=f"iin-{event_id}",
+                event_id=event_id,
+                task_id=f"task-{event_id}",
+                revision=1,
+                status=InvestigationIntentStatus.PENDING,
+                created=True,
+            )
+
+        def schedule_dispatch(self) -> None:
+            """Mirror production: trigger dispatch best-effort and never raise."""
+            self.schedule_calls += 1
+            if on_schedule_dispatch is None:
+                return
+            try:
+                on_schedule_dispatch()
+            except Exception:
+                return
+
+    return _IntentService()
 
 
 @pytest.mark.asyncio
@@ -169,9 +207,12 @@ async def test_investigate_celery_mode_returns_task_id(
         async def get_event(self, eid: str) -> SecurityEvent | None:
             return await _fake_get_event(eid)
 
-    from app.api.v1.deps import get_event_service
+    from app.api.v1.deps import get_event_service, get_investigation_intent_service
 
     app.dependency_overrides[get_event_service] = lambda: _EventService()
+    app.dependency_overrides[get_investigation_intent_service] = lambda: _durable_intent_double(
+        event_id
+    )
 
     def _fake_apply_async(*_args: Any, **kwargs: Any) -> MagicMock:
         return MagicMock(id=kwargs["task_id"])
@@ -195,13 +236,14 @@ async def test_investigate_celery_mode_returns_task_id(
 
 
 @pytest.mark.asyncio
-async def test_investigate_celery_broker_unavailable_returns_503(
+async def test_investigate_celery_broker_unavailable_keeps_accepted_intent(
     fake_redis_store: InMemoryFakeRedis,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from kombu.exceptions import OperationalError
 
     event_id = "evt-broker-down"
+    del fake_redis_store  # fixture patches redis; unused body
 
     async def _fake_get_event(_event_id: str) -> SecurityEvent:
         return SecurityEvent(
@@ -225,17 +267,14 @@ async def test_investigate_celery_broker_unavailable_returns_503(
         async def get_event(self, eid: str) -> SecurityEvent | None:
             return await _fake_get_event(eid)
 
-    from app.api.v1.deps import get_event_service
+    from app.api.v1.deps import get_event_service, get_investigation_intent_service
 
-    app.dependency_overrides[get_event_service] = lambda: _EventService()
-
-    def _boom(*_args: Any, **_kwargs: Any) -> None:
+    def _boom() -> None:
         raise OperationalError("broker down")
 
-    monkeypatch.setattr(
-        "app.tasks.investigation_tasks.run_investigation.apply_async",
-        _boom,
-    )
+    intent_double = _durable_intent_double(event_id, on_schedule_dispatch=_boom)
+    app.dependency_overrides[get_event_service] = lambda: _EventService()
+    app.dependency_overrides[get_investigation_intent_service] = lambda: intent_double
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
@@ -244,8 +283,9 @@ async def test_investigate_celery_broker_unavailable_returns_503(
         resp = await client.post(f"/api/v1/events/{event_id}/investigate", headers=_hdr())
 
     app.dependency_overrides.clear()
-    assert resp.status_code == 503, resp.text
-    assert resp.json()["error_code"] == "task_unavailable"
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["intent_id"] == f"iin-{event_id}"
+    assert intent_double.schedule_calls == 1
 
 
 @pytest.mark.asyncio
@@ -278,9 +318,12 @@ async def test_investigate_celery_zero_workers_still_returns_202(
         async def get_event(self, eid: str) -> SecurityEvent | None:
             return await _fake_get_event(eid)
 
-    from app.api.v1.deps import get_event_service
+    from app.api.v1.deps import get_event_service, get_investigation_intent_service
 
     app.dependency_overrides[get_event_service] = lambda: _EventService()
+    app.dependency_overrides[get_investigation_intent_service] = lambda: _durable_intent_double(
+        event_id
+    )
 
     def _fake_apply_async(*_args: Any, **kwargs: Any) -> MagicMock:
         return MagicMock(id=kwargs["task_id"])

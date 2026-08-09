@@ -239,6 +239,7 @@ def publish_investigation_for_intent(
     intent_id: str,
     include_response_execution: bool = False,
     generate_report: bool = True,
+    resume_from_checkpoint: bool = False,
 ) -> None:
     """Publish a deterministic Celery task for a claimed investigation intent.
 
@@ -254,12 +255,35 @@ def publish_investigation_for_intent(
         include_response_execution=include_response_execution,
         generate_report=generate_report,
         intent_id=intent_id,
+        resume_from_checkpoint=resume_from_checkpoint,
     )
     run_investigation.apply_async(
         args=[event_id],
         kwargs=kwargs,
         task_id=task_id,
         queue=TASK_QUEUE,
+    )
+
+
+def publish_analysis_only_investigation_for_intent(
+    *,
+    event_id: str,
+    task_id: str,
+    intent_id: str,
+    generate_report: bool = True,
+    resume_from_checkpoint: bool = False,
+) -> None:
+    """Publish an analysis-only worker delivery fenced by a durable intent."""
+    kwargs = build_analysis_only_dispatch_kwargs(
+        generate_report=generate_report,
+        intent_id=intent_id,
+        resume_from_checkpoint=resume_from_checkpoint,
+    )
+    run_analysis_only_investigation.apply_async(
+        args=[event_id],
+        kwargs=kwargs,
+        task_id=task_id,
+        queue=ANALYSIS_ONLY_TASK_QUEUE,
     )
 
 
@@ -457,19 +481,38 @@ async def _handle_redelivered_investigation(
     )
 
 
-async def _finalize_intent_from_result(intent_id: str, result: dict[str, str]) -> None:
+async def _finalize_intent_from_result(
+    intent_id: str,
+    result: dict[str, str],
+    *,
+    broker_task_id: str,
+) -> None:
     from app.db.session import get_session_factory
     from app.services.investigation_intent_service import InvestigationIntentService
 
     service = InvestigationIntentService(get_session_factory())
     status = str(result.get("status") or "")
     if status == "skipped":
+        reason = str(result.get("reason") or "investigation_skipped")
+        if reason in {"investigation_in_progress", "investigation_lease_lost"}:
+            # Lease contention / loss before this delivery owns execution — keep
+            # the durable intent recoverable instead of a terminal SKIPPED hole.
+            await service.mark_retry(
+                intent_id,
+                error=reason,
+                broker_task_id=broker_task_id,
+            )
+            return
         await service.mark_skipped(
             intent_id,
-            reason=str(result.get("reason") or "investigation_skipped"),
+            reason=reason,
+            broker_task_id=broker_task_id,
         )
     else:
-        await service.mark_terminal(intent_id)
+        await service.mark_terminal(
+            intent_id,
+            broker_task_id=broker_task_id,
+        )
 
 
 async def resolve_task_state(task_id: str) -> tuple[str, str | None]:
@@ -482,6 +525,15 @@ async def resolve_task_state(task_id: str) -> tuple[str, str | None]:
         event_id = result.info.get("event_id")
     if event_id is None and result.args:
         event_id = str(result.args[0])
+    if event_id is None:
+        from app.db.session import get_session_factory
+        from app.services.investigation_intent_service import InvestigationIntentService
+
+        intent = await InvestigationIntentService(
+            get_session_factory()
+        ).lookup_by_broker_task_id(task_id)
+        if intent is not None:
+            event_id = intent.event_id
     return normalize_public_task_state(result.state), event_id
 
 
@@ -530,6 +582,7 @@ def run_investigation(
     include_response_execution: bool = False,
     generate_report: bool = True,
     intent_id: str | None = None,
+    resume_from_checkpoint: bool = False,
     owner_id: str | None = None,
     lease_acquired: bool = False,
 ) -> dict[str, str]:
@@ -576,13 +629,19 @@ def run_investigation(
                     generate_report=bool(generate_report),
                     owner_id=resolved_owner,
                     task_id=task_id,
-                    redelivered=redelivered,
+                    redelivered=redelivered or resume_from_checkpoint,
                     lease_acquired=lease_acquired,
                     request_headers=request_headers,
                 )
             )
             if intent_id:
-                asyncio.run(_finalize_intent_from_result(intent_id, result))
+                asyncio.run(
+                    _finalize_intent_from_result(
+                        intent_id,
+                        result,
+                        broker_task_id=task_id,
+                    )
+                )
             return result
         finally:
             _release_celery_task_loop_resources()
@@ -609,6 +668,7 @@ def run_investigation(
                 InvestigationIntentService(get_session_factory()).mark_dead(
                     intent_id,
                     error="soft_time_limit_exceeded",
+                    broker_task_id=task_id,
                 )
             )
         raise
@@ -629,6 +689,7 @@ def run_investigation(
                 InvestigationIntentService(get_session_factory()).mark_retry(
                     intent_id,
                     error=str(exc),
+                    broker_task_id=task_id,
                 )
             )
             raise
@@ -649,6 +710,7 @@ def run_investigation(
                 InvestigationIntentService(get_session_factory()).mark_dead(
                     intent_id,
                     error=str(exc),
+                    broker_task_id=task_id,
                 )
             )
         raise
@@ -727,30 +789,32 @@ async def execute_analysis_only_investigation(
     from app.services.investigation_guidance import record_investigation_workflow_path
 
     lease = get_event_lease()
-    if not lease_acquired:
-        acquired = await lease.acquire(event_id, owner_id)
-        if not acquired:
-            raise InvestigationInProgressError(
-                message="investigation already in progress for this event",
-                error_code="investigation_in_progress",
-                details={"event_id": event_id},
-            )
-
-    # Start background renewal so the lease does not expire during a long
-    # pipeline run (ISSUE-225).  Mirrors SuperAgent.investigate().
     renewal_failed: asyncio.Event | None = None
     renewal_task: asyncio.Task[None] | None = None
-    if lease is not None:
-        renewal_failed = asyncio.Event()
-        renewal_task = await lease.start_renewal(
-            event_id,
-            owner_id,
-            on_renewal_failed=renewal_failed,
-        )
-
-    pipeline = await get_pipeline()
-    projection = EvidenceProjection(_get_session_factory())
+    owns_lease = bool(lease_acquired)
     try:
+        if not lease_acquired:
+            acquired = await lease.acquire(event_id, owner_id)
+            if not acquired:
+                raise InvestigationInProgressError(
+                    message="investigation already in progress for this event",
+                    error_code="investigation_in_progress",
+                    details={"event_id": event_id},
+                )
+            owns_lease = True
+
+        # Start background renewal so the lease does not expire during a long
+        # pipeline run (ISSUE-225).  Mirrors SuperAgent.investigate().
+        if lease is not None:
+            renewal_failed = asyncio.Event()
+            renewal_task = await lease.start_renewal(
+                event_id,
+                owner_id,
+                on_renewal_failed=renewal_failed,
+            )
+
+        pipeline = await get_pipeline()
+        projection = EvidenceProjection(_get_session_factory())
         with bind_evidence_projection(projection):
             await _run_orchestration_with_renewal_watch(
                 pipeline.run(event_id, generate_report=generate_report),
@@ -808,7 +872,8 @@ async def execute_analysis_only_investigation(
             renewal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await renewal_task
-        await lease.release(event_id, owner_id)
+        if owns_lease:
+            await lease.release(event_id, owner_id)
 
 
 async def dispatch_analysis_only_investigation(
@@ -861,6 +926,8 @@ def run_analysis_only_investigation(
     self: Any,
     event_id: str,
     generate_report: bool = True,
+    intent_id: str | None = None,
+    resume_from_checkpoint: bool = False,
     owner_id: str | None = None,
     lease_acquired: bool = False,
 ) -> dict[str, str]:
@@ -880,6 +947,17 @@ def run_analysis_only_investigation(
             self.request.id,
             resolved_owner,
         )
+    if intent_id:
+        from app.models.investigation_intent import IntentDeliveryAdmission
+
+        admission = asyncio.run(_admit_intent_delivery(intent_id, task_id))
+        if admission is not IntentDeliveryAdmission.ACCEPTED:
+            reason = {
+                IntentDeliveryAdmission.STALE_SUPERSEDED: "stale_broker_task",
+                IntentDeliveryAdmission.ALREADY_TERMINAL: "intent_already_terminal",
+                IntentDeliveryAdmission.MISSING: "intent_missing",
+            }[admission]
+            return _skipped_delivery_result(event_id, reason=reason)
     try:
         try:
             result = asyncio.run(
@@ -888,11 +966,19 @@ def run_analysis_only_investigation(
                     generate_report=bool(generate_report),
                     owner_id=resolved_owner,
                     task_id=task_id,
-                    redelivered=redelivered,
+                    redelivered=redelivered or resume_from_checkpoint,
                     lease_acquired=lease_acquired,
                     request_headers=request_headers,
                 )
             )
+            if intent_id:
+                asyncio.run(
+                    _finalize_intent_from_result(
+                        intent_id,
+                        result,
+                        broker_task_id=task_id,
+                    )
+                )
             return result
         finally:
             _release_celery_task_loop_resources()
@@ -911,9 +997,26 @@ def run_analysis_only_investigation(
                 resolved_owner,
                 exc_info=True,
             )
+        if intent_id:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            asyncio.run(
+                InvestigationIntentService(get_session_factory()).mark_dead(
+                    intent_id,
+                    error="soft_time_limit_exceeded",
+                    broker_task_id=task_id,
+                )
+            )
         raise
     except (RedeliveryLookupRetry, RedeliveryDeferRetry) as exc:
         _celery_redelivery_retry(self, exc, request_headers=request_headers)
+    except InvestigationInProgressError:
+        logger.info(
+            "run_analysis_only skipped for event=%s — lease already held",
+            event_id,
+        )
+        return _skipped_delivery_result(event_id, reason="investigation_in_progress")
     except (DependencyUnavailableError, OperationalError, OSError, ConnectionError) as exc:
         logger.warning(
             "run_analysis_only transient failure for event=%s; retry=%s",
@@ -921,13 +1024,37 @@ def run_analysis_only_investigation(
             self.request.retries,
             exc_info=True,
         )
+        if intent_id and self.request.retries >= self.max_retries:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            asyncio.run(
+                InvestigationIntentService(get_session_factory()).mark_retry(
+                    intent_id,
+                    error=str(exc),
+                    broker_task_id=task_id,
+                )
+            )
+            raise
         raise self.retry(exc=exc) from exc
-    except Exception:
+    except Exception as exc:
         logger.error(
-            "run_analysis_only failed for event=%s",
+            "run_analysis_only failed for event=%s intent=%s",
             event_id,
+            intent_id,
             exc_info=True,
         )
+        if intent_id:
+            from app.db.session import get_session_factory
+            from app.services.investigation_intent_service import InvestigationIntentService
+
+            asyncio.run(
+                InvestigationIntentService(get_session_factory()).mark_dead(
+                    intent_id,
+                    error=str(exc),
+                    broker_task_id=task_id,
+                )
+            )
         raise
 
 
@@ -942,6 +1069,7 @@ __all__ = [
     "execute_analysis_only_investigation",
     "execute_investigation",
     "lookup_task_event_id",
+    "publish_analysis_only_investigation_for_intent",
     "publish_investigation_for_intent",
     "register_task_metadata",
     "resolve_task_state",

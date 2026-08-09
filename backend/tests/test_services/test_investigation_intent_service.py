@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings
+from app.core.errors import IdempotencyKeyReuseError, InvestigationInProgressError
 from app.db import models as orm
 from app.models.enums import EventStatus, InvestigationIntentStatus, Severity, SourceObjectKind
 from app.models.investigation_intent import (
@@ -26,6 +28,7 @@ from app.services.degraded_flag_service import DegradedFlagService
 from app.services.investigation_intent_service import (
     InvestigationIntentService,
     deterministic_investigation_task_id,
+    http_investigation_payload_sha256,
 )
 
 
@@ -40,6 +43,35 @@ def _suppress_background_intent_dispatch(
         "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
         lambda: None,
     )
+
+
+async def _seed_http_intake_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    event_id = f"evt-http-intake-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="HTTP durable intake",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                    row_version=3,
+                )
+            )
+            await session.flush()
+            loaded = await session.get(orm.SecurityEvent, event_id)
+            assert loaded is not None, f"failed to seed event {event_id}"
+    return event_id
 
 
 def test_intent_transition_validation() -> None:
@@ -63,6 +95,14 @@ def test_intent_transition_validation() -> None:
         InvestigationIntentStatus.RETRY,
         InvestigationIntentStatus.SKIPPED,
     )
+    validate_intent_transition(
+        InvestigationIntentStatus.DEAD,
+        InvestigationIntentStatus.RETRY,
+    )
+    validate_intent_transition(
+        InvestigationIntentStatus.SKIPPED,
+        InvestigationIntentStatus.RETRY,
+    )
     with pytest.raises(InvestigationIntentTransitionError):
         validate_intent_transition(
             InvestigationIntentStatus.PENDING,
@@ -76,6 +116,385 @@ def test_deterministic_task_id_stable() -> None:
     third = deterministic_investigation_task_id("iin-abc", 3)
     assert first == second
     assert first != third
+
+
+@pytest.mark.asyncio
+async def test_http_intent_commit_replay_and_payload_conflict(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_http_intake_event(session_factory)
+    settings = Settings(TASK_MODE="celery")
+    service = InvestigationIntentService(session_factory, settings=settings)
+    payload_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=True,
+        orchestration_mode="graph",
+    )
+
+    first = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-1",
+        request_idempotency_key=f"req-http-1:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+    replay = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-1",
+        request_idempotency_key=f"req-http-1:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+
+    assert first.created is True
+    assert replay.created is False
+    assert replay.intent_id == first.intent_id
+    assert replay.task_id == first.task_id
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, first.intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.PENDING.value
+        assert row.request_payload_sha256 == payload_hash
+        assert row.requested_by == "analyst-1"
+
+    changed_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=False,
+        orchestration_mode="graph",
+    )
+    with pytest.raises(IdempotencyKeyReuseError):
+        await service.create_or_replay_http_intent(
+            event_id,
+            requested_by="analyst-1",
+            request_idempotency_key=f"req-http-1:{event_id}",
+            request_payload_sha256=changed_hash,
+            orchestration_mode="graph",
+            include_response_execution=False,
+            generate_report=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_http_intent_different_key_for_same_event_is_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_http_intake_event(session_factory)
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    payload_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=True,
+        orchestration_mode="graph",
+    )
+    await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-1",
+        request_idempotency_key=f"req-http-first:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+
+    with pytest.raises(InvestigationInProgressError):
+        await service.create_or_replay_http_intent(
+            event_id,
+            requested_by="analyst-1",
+            request_idempotency_key=f"req-http-second:{event_id}",
+            request_payload_sha256=payload_hash,
+            orchestration_mode="graph",
+            include_response_execution=False,
+            generate_report=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_dead_http_intent_same_key_replay_rearms_original_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_http_intake_event(session_factory)
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    payload_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=True,
+        orchestration_mode="graph",
+    )
+    original = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-dead-replay",
+        request_idempotency_key=f"req-http-dead-replay:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.InvestigationIntent, original.intent_id)
+            assert row is not None
+            row.status = InvestigationIntentStatus.DEAD.value
+            row.attempt = 3
+            row.last_error = "broker unavailable"
+
+    replay = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-dead-replay",
+        request_idempotency_key=f"req-http-dead-replay:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+
+    assert replay.created is False
+    assert replay.intent_id == original.intent_id
+    assert replay.status is InvestigationIntentStatus.RETRY
+    assert replay.revision == original.revision + 1
+    assert replay.task_id != original.task_id
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, original.intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.RETRY.value
+        assert row.attempt == 0
+        assert row.broker_task_id == replay.task_id
+
+
+@pytest.mark.asyncio
+async def test_skipped_http_intent_same_key_replay_rearms_original_intent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_http_intake_event(session_factory)
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    payload_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=True,
+        orchestration_mode="graph",
+    )
+    original = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-skipped-replay",
+        request_idempotency_key=f"req-http-skipped-replay:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.InvestigationIntent, original.intent_id)
+            assert row is not None
+            row.status = InvestigationIntentStatus.SKIPPED.value
+            row.skip_reason = "inline_execution_stale"
+
+    replay = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-skipped-replay",
+        request_idempotency_key=f"req-http-skipped-replay:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+    assert replay.intent_id == original.intent_id
+    assert replay.status is InvestigationIntentStatus.RETRY
+
+
+@pytest.mark.asyncio
+async def test_http_intake_skips_pending_auto_intent_same_event(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_http_intake_event(session_factory)
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=f"iin-auto-{event_id[-8:]}",
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.PENDING.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id=f"task-auto-{event_id[-8:]}",
+                )
+            )
+    payload_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=True,
+        orchestration_mode="graph",
+    )
+    http_intent = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-http-supersede",
+        request_idempotency_key=f"req-http-supersede:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+    assert http_intent.created is True
+    async with session_factory() as session:
+        auto = await session.scalar(
+            select(orm.InvestigationIntent).where(
+                orm.InvestigationIntent.event_id == event_id,
+                orm.InvestigationIntent.intent_kind == "auto_investigate",
+            )
+        )
+        assert auto is not None
+        assert auto.status == InvestigationIntentStatus.SKIPPED.value
+        assert auto.skip_reason == "superseded_by_http_investigate"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_same_key_http_intake_has_one_commit_and_one_replay(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_http_intake_event(session_factory)
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    payload_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=True,
+        orchestration_mode="graph",
+    )
+
+    async def _submit():
+        return await service.create_or_replay_http_intent(
+            event_id,
+            requested_by="analyst-concurrent",
+                request_idempotency_key=f"req-http-concurrent:{event_id}",
+            request_payload_sha256=payload_hash,
+            orchestration_mode="graph",
+            include_response_execution=False,
+            generate_report=True,
+        )
+
+    first, second = await asyncio.gather(_submit(), _submit())
+    assert first.intent_id == second.intent_id
+    assert first.task_id == second.task_id
+    assert sorted([first.created, second.created]) == [False, True]
+
+
+@pytest.mark.asyncio
+async def test_inline_http_intent_claim_persists_started_generation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_http_intake_event(session_factory)
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="background"),
+    )
+    payload_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=True,
+        orchestration_mode="graph",
+    )
+    intent = await service.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-1",
+        request_idempotency_key=f"req-http-inline:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+
+    task_id = await service.mark_inline_started(intent.intent_id)
+    assert task_id == intent.task_id
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.STARTED.value
+        assert row.broker_task_id == task_id
+        assert row.claim_owner is None
+        assert row.claim_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_http_intent_survives_api_restart_and_dispatches(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_id = await _seed_http_intake_event(session_factory)
+    settings = Settings(TASK_MODE="celery")
+    api_process = InvestigationIntentService(session_factory, settings=settings)
+    payload_hash = http_investigation_payload_sha256(
+        event_id=event_id,
+        force_replan=False,
+        include_response_execution=False,
+        generate_report=True,
+        orchestration_mode="graph",
+    )
+    committed = await api_process.create_or_replay_http_intent(
+        event_id,
+        requested_by="analyst-1",
+        request_idempotency_key=f"req-http-restart:{event_id}",
+        request_payload_sha256=payload_hash,
+        orchestration_mode="graph",
+        include_response_execution=False,
+        generate_report=True,
+    )
+
+    published: list[dict[str, object]] = []
+
+    async def _register(_task_id: str, _event_id: str) -> None:
+        return None
+
+    def _publish(**kwargs: object) -> None:
+        published.append(kwargs)
+
+    monkeypatch.setattr("app.tasks.investigation_tasks.register_task_metadata", _register)
+    monkeypatch.setattr("app.tasks.investigation_tasks.publish_investigation_for_intent", _publish)
+
+    restarted_worker = InvestigationIntentService(session_factory, settings=settings)
+    assert await restarted_worker.claim_and_publish_batch(limit=100) >= 1
+    assert {
+        "event_id": event_id,
+        "task_id": committed.task_id,
+        "intent_id": committed.intent_id,
+        "include_response_execution": False,
+        "generate_report": True,
+        "resume_from_checkpoint": False,
+    } in published
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, committed.intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.ENQUEUED.value
+        assert row.broker_task_id == committed.task_id
 
 
 @pytest.mark.asyncio
@@ -255,13 +674,14 @@ async def test_mark_started_and_terminal(
                 created_or_promoted=True,
             )
     assert intent_id is not None
+    broker_task_id = f"task-123-{uuid4().hex[:8]}"
     async with session_factory() as session:
         async with session.begin():
             row = await session.get(orm.InvestigationIntent, intent_id)
             assert row is not None
             row.status = InvestigationIntentStatus.ENQUEUED.value
-            row.broker_task_id = "task-123"
-    await service.mark_started(intent_id, broker_task_id="task-123")
+            row.broker_task_id = broker_task_id
+    await service.mark_started(intent_id, broker_task_id=broker_task_id)
     await service.mark_terminal(intent_id)
     async with session_factory() as session:
         row = await session.get(orm.InvestigationIntent, intent_id)
@@ -276,6 +696,7 @@ async def test_reconcile_stale_enqueued_to_retry(
     settings = Settings(
         AUTO_INVESTIGATE_ENABLED=True,
         SOURCE_MODE="mock_xdr",
+        TASK_MODE="celery",
         AUTO_INVESTIGATE_CLAIM_LEASE_S=5,
     )
     service = InvestigationIntentService(
@@ -312,7 +733,7 @@ async def test_reconcile_stale_enqueued_to_retry(
                     status=InvestigationIntentStatus.ENQUEUED.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id="task-stale",
+                    broker_task_id=f"task-stale-{uuid4().hex[:8]}",
                     updated_at=datetime.now(UTC) - timedelta(minutes=10),
                 )
             )
@@ -363,11 +784,11 @@ async def test_mark_started_is_idempotent_for_same_broker_task(
                     status=InvestigationIntentStatus.ENQUEUED.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id="task-idem",
+                    broker_task_id=(broker_task_id := f"task-idem-{uuid4().hex[:8]}"),
                 )
             )
-    await service.mark_started(intent_id, broker_task_id="task-idem")
-    again = await service.mark_started(intent_id, broker_task_id="task-idem")
+    await service.mark_started(intent_id, broker_task_id=broker_task_id)
+    again = await service.mark_started(intent_id, broker_task_id=broker_task_id)
     assert again is IntentDeliveryAdmission.ACCEPTED
     async with session_factory() as session:
         row = await session.get(orm.InvestigationIntent, intent_id)
@@ -463,7 +884,7 @@ async def test_reconcile_stale_started_event_new_goes_retry(
                     status=InvestigationIntentStatus.STARTED.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id="task-started",
+                    broker_task_id=f"task-started-{uuid4().hex[:8]}",
                     updated_at=datetime.now(UTC) - timedelta(minutes=15),
                 )
             )
@@ -472,16 +893,18 @@ async def test_reconcile_stale_started_event_new_goes_retry(
         row = await session.get(orm.InvestigationIntent, intent_id)
         assert row is not None
         assert row.status == InvestigationIntentStatus.RETRY.value
-        assert row.broker_task_id is None
+        assert row.broker_task_id == deterministic_investigation_task_id(intent_id, 2)
 
 
 @pytest.mark.asyncio
-async def test_reconcile_stale_started_event_triaging_goes_terminal(
+async def test_reconcile_stale_started_event_triaging_retries_for_resume(
     session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = Settings(
         AUTO_INVESTIGATE_ENABLED=True,
         SOURCE_MODE="mock_xdr",
+        TASK_MODE="celery",
         AUTO_INVESTIGATE_CLAIM_LEASE_S=5,
     )
     service = InvestigationIntentService(
@@ -519,7 +942,7 @@ async def test_reconcile_stale_started_event_triaging_goes_terminal(
                     status=InvestigationIntentStatus.STARTED.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id="task-triage",
+                    broker_task_id=f"task-triage-{uuid4().hex[:8]}",
                     updated_at=datetime.now(UTC) - timedelta(minutes=15),
                 )
             )
@@ -527,7 +950,26 @@ async def test_reconcile_stale_started_event_triaging_goes_terminal(
     async with session_factory() as session:
         row = await session.get(orm.InvestigationIntent, intent_id)
         assert row is not None
-        assert row.status == InvestigationIntentStatus.TERMINAL.value
+        assert row.status == InvestigationIntentStatus.RETRY.value
+        assert row.revision == 2
+
+    published: list[dict[str, object]] = []
+
+    async def _register(_task_id: str, _event_id: str) -> None:
+        return None
+
+    monkeypatch.setattr("app.tasks.investigation_tasks.register_task_metadata", _register)
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.publish_investigation_for_intent",
+        lambda **kwargs: published.append(kwargs),
+    )
+    claimed = await service._claim_batch(limit=100)
+    assert intent_id in claimed
+    assert await service._publish_claimed_intent(intent_id) is True
+    assert any(
+        call["intent_id"] == intent_id and call["resume_from_checkpoint"] is True
+        for call in published
+    )
 
 
 @pytest.mark.asyncio
@@ -723,7 +1165,7 @@ async def test_reconcile_stale_enqueued_max_attempts_goes_dead(
                     status=InvestigationIntentStatus.ENQUEUED.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id="task-dead-enq",
+                    broker_task_id=f"task-dead-enq-{uuid4().hex[:8]}",
                     updated_at=datetime.now(UTC) - timedelta(minutes=10),
                 )
             )
@@ -844,18 +1286,19 @@ async def test_mark_started_accepts_current_revision_task_id(
         assert row.broker_task_id == current_task
 
 
-def test_beat_schedule_excludes_auto_investigate_when_disabled(
+def test_beat_schedule_keeps_http_intent_recovery_when_auto_investigate_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.core.config import get_settings
 
     monkeypatch.setenv("AUTO_INVESTIGATE_ENABLED", "false")
+    monkeypatch.setenv("TASK_MODE", "celery")
     get_settings.cache_clear()
     from app.core.celery_app import _build_beat_schedule
 
     schedule = _build_beat_schedule()
-    assert "shadowtrace-dispatch-investigation-intents" not in schedule
-    assert "shadowtrace-reconcile-investigation-intents" not in schedule
+    assert "shadowtrace-dispatch-investigation-intents" in schedule
+    assert "shadowtrace-reconcile-investigation-intents" in schedule
     get_settings.cache_clear()
 
 
@@ -865,6 +1308,7 @@ def test_beat_schedule_includes_auto_investigate_when_enabled(
     from app.core.config import get_settings
 
     monkeypatch.setenv("AUTO_INVESTIGATE_ENABLED", "true")
+    monkeypatch.setenv("TASK_MODE", "celery")
     monkeypatch.setenv("AUTO_INVESTIGATE_DISPATCH_INTERVAL_S", "20")
     monkeypatch.setenv("AUTO_INVESTIGATE_RECONCILE_INTERVAL_S", "90")
     get_settings.cache_clear()
@@ -972,7 +1416,7 @@ async def test_mark_started_returns_stale_for_retry_state_without_dead(
                     attempt=1,
                 )
             )
-    admission = await service.mark_started(intent_id, broker_task_id="task-old")
+    admission = await service.mark_started(intent_id, broker_task_id=f"task-old-{uuid4().hex[:8]}")
     assert admission is IntentDeliveryAdmission.STALE_SUPERSEDED
     async with session_factory() as session:
         row = await session.get(orm.InvestigationIntent, intent_id)
@@ -1139,6 +1583,7 @@ async def test_reconcile_stale_schedules_dispatch(
     settings = Settings(
         AUTO_INVESTIGATE_ENABLED=True,
         SOURCE_MODE="mock_xdr",
+        TASK_MODE="celery",
         AUTO_INVESTIGATE_CLAIM_LEASE_S=5,
     )
     service = InvestigationIntentService(
@@ -1148,6 +1593,7 @@ async def test_reconcile_stale_schedules_dispatch(
     )
     intent_id = f"iin-dispatch-{uuid4().hex[:8]}"
     event_id = f"evt-dispatch-{uuid4().hex[:8]}"
+    broker_task_id = f"task-dispatch-{uuid4().hex[:8]}"
     async with session_factory() as session:
         async with session.begin():
             session.add(
@@ -1176,21 +1622,30 @@ async def test_reconcile_stale_schedules_dispatch(
                     status=InvestigationIntentStatus.ENQUEUED.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id="task-dispatch",
+                    broker_task_id=broker_task_id,
                     updated_at=datetime.now(UTC) - timedelta(minutes=10),
                 )
             )
     calls: list[str] = []
+    deleted_metadata: list[str] = []
 
     def _delay() -> None:
         calls.append("dispatch")
+
+    async def _delete_metadata(task_id: str) -> None:
+        deleted_metadata.append(task_id)
 
     monkeypatch.setattr(
         "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
         _delay,
     )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.delete_task_metadata",
+        _delete_metadata,
+    )
     assert await service.reconcile_stale(limit=5) >= 1
     assert calls == ["dispatch"]
+    assert broker_task_id in deleted_metadata
 
 
 @pytest.mark.asyncio
