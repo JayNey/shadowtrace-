@@ -1,9 +1,8 @@
 """Production approval_wait → END → resume_investigation CI regression (ISSUE-194).
 
-Unlike ``test_autonomous_mock_full_loop_e2e`` scenario B (which uses
-``build_approval_engine()`` without ``resume_investigation`` and manually calls
-``ActionExecutionService.execute_action``), this test wires production deps and
-asserts the graph continues through execute/verify after ``engine.approve()``.
+ISSUE-282 / ID-REL-001 adds isolated consecutive probes for the SUSPECTED
+``needs_approval_wait=false`` + ``halted=true`` tail-chain anomaly after
+production approval resume. Diagnostics-only: no speculative product patch.
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ from app.models.enums import ActionLevel, ActionStatus, EventStatus, ExecutionSu
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL_WAIT,
     NODE_EXECUTE,
-    NODE_MANUAL_HOLD,
     NODE_VERIFY,
 )
 from app.services.context_service import EventContextStore
@@ -38,6 +36,20 @@ from tests.integration.autonomous_e2e.helpers import (
     select_human_gated_action,
     unique_id,
 )
+from tests.integration.resume_isolation_support import (
+    ISOLATION_PASSES,
+    IsolationRunRecord,
+    assert_not_reproduced,
+    assert_resume_snapshot_coherent,
+    build_artifact,
+    capture_graph_checkpoint_snapshot,
+    default_artifact_path,
+    summarize_consecutive_runs,
+)
+from tests.test_support.db_isolation import (
+    clear_shadowtrace_redis_keys,
+    truncate_business_tables,
+)
 
 pytestmark = [
     pytest.mark.integration,
@@ -47,35 +59,15 @@ pytestmark = [
 ]
 
 
-async def _checkpoint_snapshot(event_id: str) -> dict[str, Any]:
-    agent = await get_super_agent()
-    graph = getattr(agent, "_investigation_graph", None)
-    if graph is None:
-        return {"graph_wired": False}
-    config = {"configurable": {"thread_id": event_id}}
-    snap = await graph.aget_state(config)
-    if snap is None or not snap.values:
-        return {"graph_wired": True, "checkpoint_present": False}
-    return {
-        "graph_wired": True,
-        "checkpoint_present": True,
-        "halted": snap.values.get("halted"),
-        "needs_approval_wait": snap.values.get("needs_approval_wait"),
-        "execution_substate": snap.values.get("execution_substate"),
-        "event_status": snap.values.get("event_status"),
-        "next": list(snap.next or ()),
-        "node_trace": list(snap.values.get("node_trace") or []),
-    }
-
-
-@pytest.mark.asyncio
-async def test_production_resume_hook_after_real_approval_wait_halt(
+async def _run_production_approval_wait_resume_probe(
+    *,
     monkeypatch: pytest.MonkeyPatch,
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
     context_store: EventContextStore,
-) -> None:
-    """CI contract: approve triggers deps resume hook — no manual execute_action bypass."""
+    run_index: int,
+) -> IsolationRunRecord:
+    """Single isolated production approval_wait → approve → resume probe."""
     reset_deps()
     get_settings.cache_clear()
     monkeypatch.setenv("ORCHESTRATION_MODE", "graph")
@@ -89,7 +81,7 @@ async def test_production_resume_hook_after_real_approval_wait_halt(
         settings=settings,
     )
     ingest = await events.ingest_source_object(
-        incident_source(object_id=unique_id("inc-prod-resume-ci"))
+        incident_source(object_id=unique_id(f"inc-prod-resume-{run_index}"))
     )
     event_id = ingest.event_id
     patch_production_session_factory(monkeypatch, session_factory)
@@ -114,35 +106,68 @@ async def test_production_resume_hook_after_real_approval_wait_halt(
         ActionLevel.L5.value,
     }
 
-    pre_checkpoint = await _checkpoint_snapshot(event_id)
-    assert pre_checkpoint.get("checkpoint_present") is True
-    assert pre_checkpoint.get("halted") is True
-    assert pre_checkpoint.get("execution_substate") == ExecutionSubstate.WAITING_APPROVAL.value
-    assert pre_checkpoint.get("next") == []
-    pre_trace = pre_checkpoint.get("node_trace") or []
-    assert NODE_APPROVAL_WAIT in pre_trace
-    assert NODE_EXECUTE not in pre_trace
+    agent = await get_super_agent()
+    graph = getattr(agent, "_investigation_graph", None)
+    pre_resume = await capture_graph_checkpoint_snapshot(
+        graph=graph,
+        event_id=event_id,
+        phase="pre_resume",
+        session_factory=session_factory,
+        graph_wired=graph is not None,
+    )
+    assert pre_resume.checkpoint_present is True
+    assert pre_resume.halted is True
+    assert pre_resume.execution_substate == ExecutionSubstate.WAITING_APPROVAL.value
+    assert pre_resume.next_nodes == ()
+    assert NODE_APPROVAL_WAIT in pre_resume.node_trace
+    assert NODE_EXECUTE not in pre_resume.node_trace
 
     from app.api.v1 import deps
 
     resume_hook_calls: list[str] = []
     real_resume = deps._resume_investigation
 
-    async def _tracking_resume(event_id: str) -> None:
-        resume_hook_calls.append(event_id)
-        await real_resume(event_id)
+    async def _tracking_resume(resume_event_id: str) -> None:
+        resume_hook_calls.append(resume_event_id)
+        await real_resume(resume_event_id)
 
     monkeypatch.setattr(deps, "_resume_investigation", _tracking_resume)
     reset_deps()
     get_settings.cache_clear()
 
     engine = await get_approval_engine()
-    await engine.approve(
+    outcome = await engine.approve(
         target.action_id,
         Principal(subject="ci-resume-approver", roles=["approver"]),
         "production resume hook regression",
         f"dec-resume-{uuid.uuid4().hex[:10]}",
     )
+    assert outcome.resume_status == "ok", (
+        f"approve must resume graph; outcome={outcome!r} pre={pre_resume.to_dict()}"
+    )
+    assert resume_hook_calls == [event_id], (
+        "approve must invoke production resume_investigation hook"
+    )
+
+    agent_after = await get_super_agent()
+    graph_after = getattr(agent_after, "_investigation_graph", None)
+    post_resume = await capture_graph_checkpoint_snapshot(
+        graph=graph_after,
+        event_id=event_id,
+        phase="post_resume",
+        session_factory=session_factory,
+        graph_wired=graph_after is not None,
+    )
+    artifact = build_artifact(
+        phenomenon="approval_resume_halted_stale",
+        pre_resume=pre_resume,
+        post_resume=post_resume,
+        run_index=run_index,
+        resume_path="production_resume_investigation",
+    )
+
+    verification = await context_store.get(event_id, "verification_result")
+    node_trace = post_resume.node_trace
 
     async with session_factory() as session:
         db_status_after = await session.scalar(
@@ -158,27 +183,56 @@ async def test_production_resume_hook_after_real_approval_wait_halt(
             select(orm.Action.status).where(orm.Action.action_id == target.action_id)
         )
 
-    post_checkpoint = await _checkpoint_snapshot(event_id)
-    verification = await context_store.get(event_id, "verification_result")
-    node_trace = post_checkpoint.get("node_trace") or []
-
+    # Continuity / production hook assertions (not the SUSPECTED halt-pair detector).
     assert approved_status == ActionStatus.APPROVED.value
-    assert resume_hook_calls == [event_id], (
-        "approve must invoke production resume_investigation hook"
-    )
     assert db_status_after != EventStatus.FAILED.value, (
         f"status={db_status_after} trace={node_trace}"
     )
-    assert post_checkpoint.get("needs_approval_wait") is False, post_checkpoint
     assert NODE_EXECUTE in node_trace, node_trace
     assert NODE_VERIFY in node_trace or verify_trace is not None or bool(verification), (
         f"resume must reach verify tail; trace={node_trace}"
     )
-    # Resume must clear the approval-wait halt. Verify may still route to
-    # manual_hold (effect_not_ready) and re-set halted — that is not an
-    # approval-resume regression.
-    if NODE_MANUAL_HOLD not in node_trace:
-        assert post_checkpoint.get("halted") is False, post_checkpoint
+    assert_resume_snapshot_coherent(post_resume)
 
     reset_deps()
     get_settings.cache_clear()
+    return IsolationRunRecord(run_index=run_index, artifact=artifact)
+
+
+@pytest.mark.asyncio
+async def test_production_resume_hook_after_real_approval_wait_halt(
+    monkeypatch: pytest.MonkeyPatch,
+    session_factory: async_sessionmaker[AsyncSession],
+    redis_client: Any,
+    context_store: EventContextStore,
+) -> None:
+    """ISSUE-282 / ID-REL-001: isolated production approval_wait resume probe.
+
+    Wires production deps (not runner-owned resume bypass), records resume
+    before/after snapshots, and runs ``ISOLATION_PASSES`` consecutive probes.
+    """
+    records: list[IsolationRunRecord] = []
+    for run_index in range(1, ISOLATION_PASSES + 1):
+        if run_index > 1:
+            await truncate_business_tables(session_factory)
+            await clear_shadowtrace_redis_keys(redis_client)
+            reset_deps()
+            get_settings.cache_clear()
+        record = await _run_production_approval_wait_resume_probe(
+            monkeypatch=monkeypatch,
+            session_factory=session_factory,
+            redis_client=redis_client,
+            context_store=context_store,
+            run_index=run_index,
+        )
+        assert_not_reproduced(record.artifact)
+        records.append(record)
+
+    summary = summarize_consecutive_runs(records)
+    assert summary.verdict == "NOT_REPRODUCED"
+    assert summary.environment.get("resume_path") == "production_resume_investigation"
+    artifact_path = default_artifact_path("approval_resume_halted_stale")
+    summary.write_json(artifact_path)
+    assert artifact_path.is_file()
+    saved = artifact_path.read_text(encoding="utf-8")
+    assert '"verdict": "NOT_REPRODUCED"' in saved
