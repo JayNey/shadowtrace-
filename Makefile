@@ -377,6 +377,8 @@ autonomous-mock-e2e-worker-sigkill:
 	@set -eu; \
 	project="$(CELERY_SIGKILL_PROJECT_NAME)"; \
 	artifact_dir="$(CELERY_SIGKILL_ARTIFACT_DIR)"; \
+	rm -rf "$$artifact_dir"; \
+	mkdir -p "$$artifact_dir"; \
 	compose() { \
 		COMPOSE_PROJECT_NAME="$$project" \
 		POSTGRES_PORT="$(POSTGRES_PORT)" REDIS_PORT="$(REDIS_PORT)" \

@@ -1,5 +1,7 @@
 # ISSUE-283 dedicated real-worker fault-injection override.
-# Imported test tasks are never loaded by the normal production worker.
+# Probe lives under backend/scripts (copied into the ISSUE-278 image); production
+# workers never load this app. Concurrency must stay 1 so visibility_timeout=5
+# cannot race a second consumer while the first is paused for SIGKILL.
 services:
   worker:
     environment:
@@ -10,7 +12,7 @@ services:
     command:
       [
         "python", "-m", "celery",
-        "-A", "tests.fault_injection.celery_sigkill_tasks:celery_app",
+        "-A", "scripts.celery_sigkill_tasks:celery_app",
         "worker",
         "-Q", "issue283-sigkill",
         "-n", "issue283@%h",
@@ -22,7 +24,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "python -m celery -A tests.fault_injection.celery_sigkill_tasks:celery_app inspect ping -d issue283@$(hostname) -t 3 | grep -q OK",
+          "python -m celery -A scripts.celery_sigkill_tasks:celery_app inspect ping -d issue283@$(hostname) -t 3 | grep -q OK",
         ]
       interval: 5s
       timeout: 5s

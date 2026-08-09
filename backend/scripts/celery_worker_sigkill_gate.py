@@ -1,9 +1,12 @@
 """ISSUE-283 real Celery worker SIGKILL/redelivery gate.
 
 The gate starts from an already healthy dedicated Compose stack.  For each
-durability boundary it publishes one late-ack task, waits for a durable marker,
-SIGKILLs the actual worker container, restarts it, and validates the broker,
-lease and Mock XDR artifacts after redelivery.
+durability boundary it publishes one late-ack **synthetic probe** task, waits
+for a durable marker, SIGKILLs the actual worker container, restarts it, and
+validates the broker, lease and Mock XDR artifacts after redelivery.
+
+Coverage is probe-only (``synthetic_probe_not_product_pipeline``); it does not
+prove production ``run_investigation`` / outbox CAS uniqueness.
 """
 
 from __future__ import annotations
@@ -22,7 +25,6 @@ import httpx
 from celery.result import AsyncResult
 from redis import Redis
 
-from app.core.celery_app import celery_app
 from app.data_generators.scenarios import build_scenario
 from app.models.disposition import (
     DispositionCommand,
@@ -34,14 +36,22 @@ from app.models.enums import (
     ExecutionOwner,
     SourceDisposition,
     SourceObjectKind,
+    WritebackStatus,
 )
-from tests.fault_injection.celery_sigkill_tasks import (
+from scripts.celery_sigkill_tasks import (
+    COVERAGE_SCOPE,
     FAULT_POINTS,
     PROBE_QUEUE,
+    celery_app,
     celery_sigkill_probe,
     marker_key,
     probe_key,
 )
+
+_SUCCESS_RECEIPT_STATUSES = frozenset(
+    {WritebackStatus.ACCEPTED.value, WritebackStatus.CONFIRMED.value}
+)
+_TERMINAL_TASK_STATES = frozenset({"SUCCESS", "FAILURE", "REVOKED"})
 
 
 def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -182,6 +192,9 @@ def _run_scenario(
     artifact: dict[str, Any] = {
         "audit_id": "ID-REL-003",
         "issue": "ISSUE-283/#879",
+        "coverage_scope": COVERAGE_SCOPE,
+        "synthetic_probe": True,
+        "product_pipeline": False,
         "fault_point": point,
         "run_id": run_id,
         "task_id": task_id,
@@ -201,12 +214,14 @@ def _run_scenario(
         )
         marker = _wait_for_marker(redis, run_id, point, args.marker_timeout)
         worker_before = _worker_container(args)
+        task_state_before = result.state
         artifact["before_sigkill"] = {
             "marker": marker,
             "worker_container": worker_before,
-            "task_state": result.state,
+            "task_state": task_state_before,
             "lease_owner": redis.get(f"shadowtrace:lease:event:{run_id}"),
         }
+        assert task_state_before not in _TERMINAL_TASK_STATES, artifact["before_sigkill"]
 
         _run(["docker", "kill", "--signal=KILL", worker_before])
         killed_logs = _run(
@@ -257,12 +272,20 @@ def _run_scenario(
         }
 
         assert final_result["status"] == "completed"
+        assert final_result.get("coverage_scope") == COVERAGE_SCOPE
+        assert state.get("coverage", {}).get("coverage_scope") == COVERAGE_SCOPE
         assert state["attempts"] == 2, state
         assert state["terminal_writes"] == 1, state
         assert owner is None, owner
         assert len(worker_attempts) == 2, worker_attempts
         assert worker_attempts[0]["redelivered"] is False, worker_attempts
         assert worker_attempts[1]["redelivered"] is True, worker_attempts
+        # Compose restarts the same killed container (--no-recreate); the Linux
+        # PID namespace resets, so ForkPoolWorker can reuse pid 8. Prove the
+        # crash/redelivery pair via exit 137 + redelivered flags instead.
+        assert int(artifact["sigkill"]["worker_exit_code"]) == 137
+        assert worker_attempts[0]["attempt"] == 1, worker_attempts
+        assert worker_attempts[1]["attempt"] == 2, worker_attempts
         assert all(
             name in state for name in ("event", "action", "job", "outbox", "receipt", "terminal")
         )
@@ -271,6 +294,8 @@ def _run_scenario(
         assert state["action"]["status"] == "success", state
         assert state["job"]["status"] == "success", state
         assert state["outbox"]["delivery_status"] == "delivered", state
+        assert state["receipt"]["status"] in _SUCCESS_RECEIPT_STATUSES, state["receipt"]
+        assert state["outbox"].get("latest_writeback_status") in _SUCCESS_RECEIPT_STATUSES, state
         assert len(provider_requests) == 1, provider_requests
         artifact["result"] = "PASS"
     except BaseException as exc:
@@ -330,7 +355,8 @@ def main() -> int:
         source_object_id, concurrency_token = _seed_mock_xdr(client)
         for index, point in enumerate(FAULT_POINTS, start=1):
             print(
-                f"[ISSUE-283] fault point {point}: enqueue → SIGKILL → redelivery",
+                f"[ISSUE-283] fault point {point}: enqueue → SIGKILL → redelivery "
+                f"(coverage={COVERAGE_SCOPE})",
                 flush=True,
             )
             _run_scenario(

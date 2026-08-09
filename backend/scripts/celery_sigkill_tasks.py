@@ -1,8 +1,12 @@
-"""ISSUE-283 real-worker SIGKILL probe task.
+"""ISSUE-283 real-worker SIGKILL probe task (synthetic durability scaffold).
 
-This module is imported only by the dedicated fault-injection worker.  It uses
-the production Celery app, Redis ``EventLease`` and Mock XDR HTTP adapter while
-keeping all probe artifacts under an isolated Redis prefix.
+Loaded only by the dedicated fault-injection worker via
+``infra/docker-compose.celery-sigkill.yml``. Lives under ``backend/scripts/`` so
+the ISSUE-278 production image (no ``backend/tests/``) can import it.
+
+Coverage scope is intentionally **synthetic**: Redis-hash stand-ins for
+event/action/job/outbox/receipt/terminal plus real ``EventLease`` and Mock XDR
+HTTP. This does **not** exercise ``run_investigation`` / production outbox CAS.
 """
 
 from __future__ import annotations
@@ -14,10 +18,14 @@ import socket
 import time
 from typing import Any, Literal
 
+from celery import Celery
+
 from app.adapters.mock_xdr import MockXDRDispositionAdapter
-from app.core.celery_app import celery_app
+from app.core.celery_delivery import celery_task_owner_id
+from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 from app.models.disposition import DispositionCommand, DispositionReceipt
+from app.models.enums import WritebackStatus
 from app.orchestration.lease import EventLease
 
 FAULT_POINTS = ("action", "outbox", "receipt", "terminal")
@@ -25,15 +33,38 @@ FaultPoint = Literal["action", "outbox", "receipt", "terminal"]
 PROBE_QUEUE = "issue283-sigkill"
 PROBE_TASK_NAME = "shadowtrace.issue283_celery_sigkill_probe"
 PROBE_KEY_PREFIX = "shadowtrace:issue283:sigkill:"
+COVERAGE_SCOPE = "synthetic_probe_not_product_pipeline"
+_SUCCESS_RECEIPT_STATUSES = frozenset(
+    {WritebackStatus.ACCEPTED.value, WritebackStatus.CONFIRMED.value}
+)
 _FAULT_WAIT_TIMEOUT_S = 180.0
 
-# Redis transport normally keeps an unacked message invisible for 15 minutes.
-# The dedicated worker makes it eligible after five seconds; Kombu's periodic
-# restore sweep can add roughly 100 seconds before the message is requeued.
-celery_app.conf.broker_transport_options = {
-    **dict(celery_app.conf.broker_transport_options or {}),
-    "visibility_timeout": int(os.environ.get("ISSUE283_VISIBILITY_TIMEOUT_S", "5")),
-}
+
+def _resolve_broker_url() -> str:
+    settings = get_settings()
+    broker = (settings.celery_broker_url or "").strip()
+    return broker or settings.redis_url
+
+
+# Dedicated app: do not mutate ``app.core.celery_app.celery_app``.
+celery_app = Celery("shadowtrace-issue283-sigkill")
+celery_app.conf.update(
+    broker_url=_resolve_broker_url(),
+    result_backend=_resolve_broker_url(),
+    task_default_queue=PROBE_QUEUE,
+    task_routes={PROBE_TASK_NAME: {"queue": PROBE_QUEUE}},
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    task_track_started=True,
+    worker_prefetch_multiplier=1,
+    broker_transport_options={
+        # Redis transport unacked visibility; keep short so redelivery is prompt.
+        # Kombu restore sweep may still add ~100s before requeue.
+        "visibility_timeout": int(os.environ.get("ISSUE283_VISIBILITY_TIMEOUT_S", "5")),
+    },
+    # Task is registered by ``-A scripts.celery_sigkill_tasks:celery_app`` load.
+    imports=(),
+)
 
 
 def probe_key(run_id: str) -> str:
@@ -75,10 +106,7 @@ async def _pause_for_external_sigkill(
         return
     await redis.set(marker_key(run_id, point), _json(payload), ex=900)
     deadline = time.monotonic() + _FAULT_WAIT_TIMEOUT_S
-    release_key = f"{probe_key(run_id)}:release:{point}"
     while time.monotonic() < deadline:
-        if await redis.get(release_key) is not None:
-            return
         await asyncio.sleep(0.2)
     raise TimeoutError(f"external SIGKILL not observed for {point} within timeout")
 
@@ -99,7 +127,7 @@ async def _run_probe(
     lease = EventLease(redis_client)
     command = DispositionCommand.model_validate(command_payload)
     task_id = str(task.request.id)
-    owner_id = f"celery-{task_id}"
+    owner_id = celery_task_owner_id(task_id)
     key = probe_key(run_id)
     adapter = MockXDRDispositionAdapter(
         base_url=mock_xdr_base_url,
@@ -108,6 +136,16 @@ async def _run_probe(
         max_retries=0,
     )
     try:
+        await _set_artifact(
+            redis,
+            key,
+            "coverage",
+            {
+                "coverage_scope": COVERAGE_SCOPE,
+                "synthetic_probe": True,
+                "product_pipeline": False,
+            },
+        )
         attempt = int(await redis.hincrby(key, "attempts", 1))
         redelivered = bool(getattr(task.request, "delivery_info", {}).get("redelivered"))
         worker_attempt = {
@@ -116,6 +154,7 @@ async def _run_probe(
             "pid": os.getpid(),
             "redelivered": redelivered,
             "task_id": task_id,
+            "owner_id": owner_id,
         }
         await redis.rpush(f"{key}:worker_attempts", _json(worker_attempt))
         await _set_artifact(
@@ -151,6 +190,7 @@ async def _run_probe(
                 "run_id": run_id,
                 "terminal_writes": int(await redis.hget(key, "terminal_writes") or 0),
                 "replayed_terminal": True,
+                "coverage_scope": COVERAGE_SCOPE,
             }
 
         action = await _get_artifact(redis, key, "action")
@@ -206,6 +246,10 @@ async def _run_probe(
             if receipt is None:
                 receipt = await adapter.submit(command)
                 provider_path = "submit"
+            if receipt.status.value not in _SUCCESS_RECEIPT_STATUSES:
+                raise RuntimeError(
+                    f"probe expected successful Mock receipt, got {receipt.status.value}"
+                )
             if point == "receipt":
                 await _pause_for_external_sigkill(
                     redis,
@@ -221,6 +265,10 @@ async def _run_probe(
             await _set_artifact(redis, key, "receipt", receipt_payload)
         else:
             receipt = DispositionReceipt.model_validate(receipt_payload)
+            if receipt.status.value not in _SUCCESS_RECEIPT_STATUSES:
+                raise RuntimeError(
+                    f"probe expected successful Mock receipt, got {receipt.status.value}"
+                )
 
         action["status"] = "success"
         job["status"] = "success"
@@ -254,6 +302,7 @@ async def _run_probe(
             "run_id": run_id,
             "terminal_writes": int(await redis.hget(key, "terminal_writes") or 0),
             "replayed_terminal": False,
+            "coverage_scope": COVERAGE_SCOPE,
         }
     finally:
         await adapter.aclose()
@@ -288,10 +337,12 @@ def celery_sigkill_probe(
 
 
 __all__ = [
+    "COVERAGE_SCOPE",
     "FAULT_POINTS",
     "PROBE_KEY_PREFIX",
     "PROBE_QUEUE",
     "PROBE_TASK_NAME",
+    "celery_app",
     "celery_sigkill_probe",
     "marker_key",
     "probe_key",
