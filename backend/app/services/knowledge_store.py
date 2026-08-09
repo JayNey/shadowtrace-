@@ -478,7 +478,7 @@ class KnowledgeStore:
         search_params = {**params, "limit": page_size, "offset": offset}
         search_sql = text(
             f"""
-            SELECT chunk_id, kb_name, content, metadata,
+            SELECT chunk_id, kb_name, content, metadata, created_at,
                    GREATEST(
                        ts_rank(to_tsvector('simple', content),
                                plainto_tsquery('simple', :q)),
@@ -503,6 +503,7 @@ class KnowledgeStore:
                     metadata=row.metadata or {},
                     score=float(row.score),
                     retrieval_method="keyword",
+                    created_at=row.created_at,
                 )
                 for row in rows
             ]

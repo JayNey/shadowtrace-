@@ -59,6 +59,52 @@ def test_rejects_unknown_kb_name() -> None:
         asyncio.run(service.list_knowledge(kb_name="unknown_kb"))
 
 
+def test_rejects_missing_tenant_when_required() -> None:
+    service = KnowledgeQueryService(store=object(), require_tenant=True)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="tenant_id is required"):
+        asyncio.run(service.list_knowledge())
+
+
+def test_rejects_blank_query() -> None:
+    service = KnowledgeQueryService(store=object())  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="non-whitespace"):
+        asyncio.run(service.list_knowledge(q="   "))
+
+
+def test_catalog_item_shape_includes_created_at_for_list_and_search() -> None:
+    from datetime import UTC, datetime
+
+    from app.models.knowledge import ListedKnowledgeChunk, RetrievedChunk
+    from app.services.knowledge_query_service import _listed_item, _retrieved_item
+
+    listed = _listed_item(
+        ListedKnowledgeChunk(
+            chunk_id="chk-list0001",
+            kb_name="attack_kb",
+            content="list body",
+            metadata={},
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+    )
+    retrieved = _retrieved_item(
+        RetrievedChunk(
+            chunk_id="chk-search01",
+            kb_name="attack_kb",
+            content="search body",
+            metadata={},
+            score=0.9,
+            retrieval_method="keyword",
+            created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+    )
+    assert listed["created_at"] is not None
+    assert retrieved["created_at"] is not None
+    assert "score" in retrieved
+    assert "score" not in listed
+    assert {"chunk_id", "kb_name", "content", "metadata", "created_at"} <= set(listed)
+    assert {"chunk_id", "kb_name", "content", "metadata", "created_at"} <= set(retrieved)
+
+
 @pytest.fixture(scope="module")
 def migrated() -> None:
     if not _postgres_reachable():

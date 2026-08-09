@@ -33,7 +33,15 @@ DATABASE_URL = os.environ.get(
 
 _DEV_TOKENS = json.dumps(
     {
-        "analyst-token": {"subject": "analyst-1", "roles": ["analyst"]},
+        "analyst-token": {
+            "subject": "analyst-1",
+            "roles": ["analyst"],
+            "tenant_id": "tenant-a",
+        },
+        "analyst-no-tenant-token": {
+            "subject": "analyst-2",
+            "roles": ["analyst"],
+        },
     }
 )
 
@@ -86,6 +94,7 @@ class _RecordingKnowledgeQueryService:
                 "kb_name": "attack_kb",
                 "content": "Delegated chunk body",
                 "metadata": {"source": "service"},
+                "created_at": "2026-01-01T00:00:00+00:00",
             }
         ]
 
@@ -137,9 +146,40 @@ def test_knowledge_list_delegates_to_query_service() -> None:
             "page_size": 10,
             "kb_name": "attack_kb",
             "q": None,
-            "tenant_id": None,
+            "tenant_id": "tenant-a",
         }
     ]
+
+
+def test_knowledge_list_rejects_invalid_kb_name() -> None:
+    client = _client(KnowledgeQueryService(store=object(), require_tenant=False))  # type: ignore[arg-type]
+    response = client.get("/api/v1/knowledge?kb_name=not_a_real_kb", headers=_hdr())
+    assert response.status_code == 422
+
+
+def test_knowledge_list_rejects_blank_q() -> None:
+    client = _client(KnowledgeQueryService(store=object(), require_tenant=False))  # type: ignore[arg-type]
+    response = client.get("/api/v1/knowledge?q=%20%20%20", headers=_hdr())
+    assert response.status_code == 422
+
+
+def test_knowledge_list_rejects_missing_tenant_when_required() -> None:
+    """Production DI sets require_tenant=True; missing tenant must not unscoped-list."""
+    client = _client(KnowledgeQueryService(store=object(), require_tenant=True))  # type: ignore[arg-type]
+    response = client.get(
+        "/api/v1/knowledge",
+        headers={"Authorization": "Bearer analyst-no-tenant-token"},
+    )
+    assert response.status_code == 422
+    assert "tenant" in response.text.lower()
+
+
+def test_knowledge_list_passes_tenant_when_present() -> None:
+    service = _RecordingKnowledgeQueryService()
+    client = _client(service)
+    response = client.get("/api/v1/knowledge", headers=_hdr())
+    assert response.status_code == 200
+    assert service.calls[0]["tenant_id"] == "tenant-a"
 
 
 def test_knowledge_openapi_declares_catalog_query_params() -> None:

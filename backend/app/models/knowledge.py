@@ -46,6 +46,10 @@ class RetrievedChunk(BaseModel):
     score: float = Field(..., description="Normalized 0-1 relevance score (RRF or rerank)")
     retrieval_method: str = Field(..., description="'vector', 'keyword', 'hybrid', or 'reranked'")
     raw_rrf_score: float = Field(default=0.0, description="Raw RRF score before normalization")
+    created_at: datetime | None = Field(
+        default=None,
+        description="Chunk create time when available (catalog / keyword pagination).",
+    )
 
 
 class Citation(BaseModel):
