@@ -42,6 +42,7 @@ _approval_engine: Any = None  # ApprovalEngine
 _impact_assessment_service: Any = None  # ImpactAssessmentService
 _disposition_sync: Any = None  # DispositionSyncService
 _action_execution: Any = None  # ActionExecutionService
+_manual_resolution: Any = None  # ManualResolutionService
 _rollback_service: Any = None  # RollbackService
 _adapter_registry: Any = None  # DispositionAdapterRegistry
 _workflow_runtime: Any = None  # WorkflowRuntimeService
@@ -412,6 +413,19 @@ async def _resume_investigation(event_id: str) -> None:
     )
 
 
+async def get_manual_resolution_service() -> Any:
+    global _manual_resolution
+    if _manual_resolution is None:
+        from app.services.manual_resolution_service import ManualResolutionService
+
+        _manual_resolution = ManualResolutionService(
+            _get_session_factory(),
+            workflow_runtime=await _get_workflow_runtime(),
+            resume_runner=_resume_investigation,
+        )
+    return _manual_resolution
+
+
 async def get_disposition_sync() -> Any:
     global _disposition_sync
     if _disposition_sync is None:
@@ -425,6 +439,7 @@ async def get_disposition_sync() -> Any:
             outbound_guard=OutboundDispositionGuard(),
             event_bus=_get_event_bus(),
             resume_investigation=_resume_investigation,
+            manual_resolution=await get_manual_resolution_service(),
         )
     return _disposition_sync
 
@@ -506,6 +521,7 @@ async def _build_production_investigation_graph(
         "action_execution": await get_action_execution(),
         "disposition_sync": await get_disposition_sync(),
         "event_disposition": await get_event_disposition_service(),
+        "manual_resolution": await get_manual_resolution_service(),
         "convergence_guard": convergence_guard,
         "agent_task_service": _get_agent_task_service(),
         "agent_artifact_service": _get_agent_artifact_service(),
@@ -549,6 +565,7 @@ async def get_action_execution() -> Any:
             context_store=_get_context_store(),
             event_bus=_get_event_bus(),
             workflow_runtime=await _get_workflow_runtime(),
+            manual_resolution=await get_manual_resolution_service(),
         )
     return _action_execution
 
@@ -1127,6 +1144,7 @@ def reset_loop_bound_redis_resources() -> None:
     _impact_assessment_service = None
     _disposition_sync = None
     _action_execution = None
+    _manual_resolution = None
     _rollback_service = None
     _adapter_registry = None
     _workflow_runtime = None
@@ -1160,7 +1178,7 @@ def reset_deps() -> None:
     global _audit_log, _event_service, _state_machine, _event_bus, _pipeline, _approval_engine
     global _super_agent, _event_lease, _investigation_stack, _investigation_intent_service
     global _behavior_observation_service
-    global _disposition_sync, _action_execution, _rollback_service
+    global _disposition_sync, _action_execution, _manual_resolution, _rollback_service
     global _adapter_registry, _workflow_runtime, _event_disposition
     global _impact_assessment_service
     global _opensearch_client, _search_service, _tool_call_log
@@ -1188,6 +1206,7 @@ def reset_deps() -> None:
     reset_evidence_projection_default()
     reset_loop_bound_redis_resources()
     _audit_log = None
+    _manual_resolution = None
     _opensearch_client = None
     _search_service = None
     _tool_call_log = None

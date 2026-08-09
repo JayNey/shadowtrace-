@@ -872,12 +872,48 @@ def build_investigation_graph(
             readiness,
             writer="DegradedFlagService",
         )
+        pending_ids = list(
+            dict.fromkeys(
+                [
+                    *(state.get("verify_failed_writebacks") or []),
+                    *(state.get("verify_recoverable_writeback_ids") or []),
+                    *(state.get("verify_pending_writeback_action_ids") or []),
+                    *(state.get("verify_failed_actions") or []),
+                ]
+            )
+        )
+        reason = "verify_need_manual_resolution"
+        if state.get("verify_need_manual_resolution"):
+            reason = "verify_need_manual_resolution"
+        elif any(str(flag).startswith("disposition_writeback_blocked=") for flag in flags):
+            reason = "disposition_writeback_blocked"
+        event_status = EventStatus(state.get("event_status", EventStatus.VERIFYING.value))
+        hold_service = services.get("manual_resolution")
+        generation = int(state.get("manual_hold_generation") or 0) + 1
+        if hold_service is not None:
+            snapshot = await hold_service.enter_manual_hold(
+                state["event_id"],
+                reason=reason,
+                pending_ids=pending_ids,
+                checkpoint_id=state["event_id"],
+                event_status=event_status,
+            )
+            generation = snapshot.generation
+        else:
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.MANUAL_RESOLUTION,
+                event_status=event_status,
+            )
         return _patch_state(
             _trace(NODE_MANUAL_HOLD),
             {
                 "degraded_flags": flags,
-                "execution_substate": ExecutionSubstate.NONE.value,
+                "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
                 "halted": True,
+                "manual_hold_generation": generation,
+                "manual_hold_reason": reason,
+                "manual_hold_pending_ids": pending_ids,
             },
         )
 

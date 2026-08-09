@@ -196,6 +196,7 @@ class ActionExecutionService:
         command_factory: DispositionCommandFactory | None = None,
         event_bus: EventBus | None = None,
         workflow_runtime: Any | None = None,
+        manual_resolution: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._sync = disposition_sync
@@ -205,6 +206,7 @@ class ActionExecutionService:
         self._factory = command_factory or DispositionCommandFactory()
         self._bus = event_bus
         self._workflow_runtime = workflow_runtime
+        self._manual_resolution = manual_resolution
         self._job_store = DbExecutionJobStore(session_factory)
         if self._executor.job_store is None:
             self._executor.job_store = self._job_store
@@ -288,6 +290,7 @@ class ActionExecutionService:
         principal: str,
         comment: str,
         evidence_ref: str | None = None,
+        operation_id: str | None = None,
     ) -> Action:
         mapping = {
             "mark_success": ActionStatus.SUCCESS,
@@ -303,6 +306,9 @@ class ActionExecutionService:
                 details={"resolution": resolution},
             )
         target = mapping[resolution]
+        event_id: str
+        should_dispatch = False
+        already_resolved = False
         async with self._session_factory() as session:
             async with session.begin():
                 row = await session.get(orm.Action, action_id, with_for_update=True)
@@ -312,29 +318,90 @@ class ActionExecutionService:
                         details={"action_id": action_id},
                     )
                 current = ActionStatus(row.status)
+                event_id = row.event_id
                 if current is not ActionStatus.UNKNOWN:
-                    raise InvalidStateTransitionError(
-                        "resolve_unknown requires UNKNOWN action",
-                        current=current,
-                        target=target,
+                    # ISSUE-277: idempotent replay of a completed adjudication may
+                    # still need to re-schedule a durable resume intent.
+                    if current is target:
+                        already_resolved = True
+                    else:
+                        raise InvalidStateTransitionError(
+                            "resolve_unknown requires UNKNOWN action",
+                            current=current,
+                            target=target,
+                        )
+                else:
+                    validate_action_status_transition(
+                        ActionCategory(row.action_category),
+                        current,
+                        target,
                     )
-                validate_action_status_transition(
-                    ActionCategory(row.action_category),
-                    current,
-                    target,
-                )
-                row.status = target.value
-                row.executed_at = datetime.now(UTC)
-                row.updated_at = datetime.now(UTC)
-                session.add(
-                    orm.EventAuditLog(
-                        event_id=row.event_id,
-                        from_status=current.value,
-                        to_status=target.value,
-                        operator=principal,
-                        reason=f"resolve_unknown:{resolution}:{comment}",
+                    row.status = target.value
+                    row.executed_at = datetime.now(UTC)
+                    row.updated_at = datetime.now(UTC)
+                    session.add(
+                        orm.EventAuditLog(
+                            event_id=row.event_id,
+                            from_status=current.value,
+                            to_status=target.value,
+                            operator=principal,
+                            reason=f"resolve_unknown:{resolution}:{comment}",
+                        )
                     )
+                    if self._manual_resolution is not None:
+                        from app.services.manual_resolution_service import (
+                            RESOLUTION_SOURCE_ACTION_UNKNOWN,
+                            SUBJECT_KIND_ACTION,
+                        )
+
+                        try:
+                            await self._manual_resolution.create_or_replay_resume_intent_in_session(
+                                session,
+                                event_id,
+                                resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
+                                subject_kind=SUBJECT_KIND_ACTION,
+                                subject_id=action_id,
+                                resolution=resolution,
+                                principal=principal,
+                                comment=comment,
+                                evidence_ref=evidence_ref,
+                                operation_id=operation_id,
+                            )
+                            should_dispatch = True
+                        except ValidationError as exc:
+                            # Not on MANUAL_RESOLUTION hold — adjudication still succeeds.
+                            logger.info(
+                                "resolve_unknown skipped resume intent action=%s: %s",
+                                action_id,
+                                exc,
+                            )
+        if already_resolved and self._manual_resolution is not None:
+            from app.core.errors import IdempotencyKeyReuseError
+            from app.services.manual_resolution_service import (
+                RESOLUTION_SOURCE_ACTION_UNKNOWN,
+                SUBJECT_KIND_ACTION,
+            )
+
+            try:
+                await self._manual_resolution.create_or_replay_resume_intent(
+                    event_id,
+                    resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
+                    subject_kind=SUBJECT_KIND_ACTION,
+                    subject_id=action_id,
+                    resolution=resolution,
+                    principal=principal,
+                    comment=comment,
+                    evidence_ref=evidence_ref,
+                    operation_id=operation_id,
                 )
+                should_dispatch = True
+            except IdempotencyKeyReuseError:
+                raise
+            except ValidationError:
+                if await self._manual_resolution.has_schedulable_intent(event_id):
+                    should_dispatch = True
+        if should_dispatch and self._manual_resolution is not None:
+            self._manual_resolution.schedule_dispatch()
         async with self._session_factory() as session:
             row = await session.get(orm.Action, action_id)
             assert row is not None

@@ -82,6 +82,16 @@ def _build_beat_schedule() -> dict[str, dict[str, object]]:
             "schedule": float(settings.auto_investigate_reconcile_interval_s),
             "options": {"queue": "investigation"},
         }
+        schedule["shadowtrace-dispatch-graph-resume-intents"] = {
+            "task": "shadowtrace.dispatch_graph_resume_intents",
+            "schedule": float(settings.graph_resume_intent_dispatch_interval_s),
+            "options": {"queue": "investigation"},
+        }
+        schedule["shadowtrace-reconcile-graph-resume-intents"] = {
+            "task": "shadowtrace.reconcile_graph_resume_intents",
+            "schedule": float(settings.graph_resume_intent_reconcile_interval_s),
+            "options": {"queue": "investigation"},
+        }
     if settings.behavior_observation_retry_enabled:
         schedule["shadowtrace-behavior-observation-retry-pending"] = {
             "task": "shadowtrace.behavior_observation.retry_pending",
@@ -113,6 +123,8 @@ celery_app.conf.update(
         "shadowtrace.poll_sources": {"queue": "ingestion"},
         "shadowtrace.dispatch_investigation_intents": {"queue": "investigation"},
         "shadowtrace.reconcile_investigation_intents": {"queue": "investigation"},
+        "shadowtrace.dispatch_graph_resume_intents": {"queue": "investigation"},
+        "shadowtrace.reconcile_graph_resume_intents": {"queue": "investigation"},
         "shadowtrace.behavior_observation.retry_pending": {"queue": "ingestion"},
         "shadowtrace.detection_governance.expire_active_approvals": {"queue": "investigation"},
         "shadowtrace.reconcile_stale_executions": {"queue": "investigation"},
@@ -128,6 +140,7 @@ celery_app.conf.update(
     imports=(
         "app.tasks.investigation_tasks",
         "app.tasks.investigation_intent_tasks",
+        "app.tasks.graph_resume_intent_tasks",
         "app.tasks.worker_tasks",
         "app.tasks.ingestion_tasks",
         "app.tasks.behavior_observation_tasks",

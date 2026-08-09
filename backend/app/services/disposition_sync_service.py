@@ -161,6 +161,7 @@ class DispositionSyncService:
         outbound_guard: OutboundDispositionGuard | None = None,
         event_bus: EventBus | None = None,
         resume_investigation: ResumeInvestigationHook | None = None,
+        manual_resolution: Any | None = None,
         worker_id: str = "outbox-worker-1",
     ) -> None:
         self._session_factory = session_factory
@@ -170,6 +171,7 @@ class DispositionSyncService:
         self._guard = outbound_guard or OutboundDispositionGuard()
         self._bus = event_bus
         self._resume = resume_investigation or _NullResumeHook()
+        self._manual_resolution = manual_resolution
         self._worker_id = worker_id
 
     def _adapter_label(self, outbox: orm.DispositionOutbox) -> str:
@@ -799,6 +801,7 @@ class DispositionSyncService:
         principal: str,
         comment: str,
         evidence_ref: str | None = None,
+        operation_id: str | None = None,
     ) -> WritebackStatus:
         if resolution not in {"manual_confirmed", "mark_failed", "abandon"}:
             raise ValidationError(
@@ -815,6 +818,11 @@ class DispositionSyncService:
             if resolution == "manual_confirmed"
             else WritebackStatus.FAILED
         )
+        should_dispatch = False
+        fallthrough_resume = False
+        already_terminal = False
+        event_id = ""
+        adapter_label = "unknown"
         async with self._session_factory() as session:
             async with session.begin():
                 outbox = await session.scalar(
@@ -830,39 +838,114 @@ class DispositionSyncService:
                 current_status = WritebackStatus(
                     outbox.latest_writeback_status or WritebackStatus.UNKNOWN.value
                 )
+                event_id = outbox.event_id
+                adapter_label = self._adapter_label(outbox)
                 # Idempotency guard (ISSUE-064): If the outbox already
                 # reached the target terminal status (e.g. CONFIRMED from
                 # synchronous delivery in activate_and_submit), the
                 # transition is a no-op.  CONFIRMED → CONFIRMED is NOT
                 # in the transition matrix because CONFIRMED is terminal;
                 # we short-circuit here to keep the resolve call safe.
+                # ISSUE-277: still re-dispatch durable resume intents that
+                # were committed before a process kill.
                 if current_status is target:
-                    return current_status
-                validate_writeback_status_transition(
-                    current_status,
-                    target,
-                    evidence_adjudication=True,
+                    already_terminal = True
+                else:
+                    validate_writeback_status_transition(
+                        current_status,
+                        target,
+                        evidence_adjudication=True,
+                    )
+                    await self._append_receipt(
+                        session,
+                        outbox,
+                        status=target,
+                        confirmation_evidence=(
+                            ConfirmationEvidence.MANUAL_CONFIRMED
+                            if target is WritebackStatus.CONFIRMED
+                            else None
+                        ),
+                        provider_message=comment,
+                    )
+                    outbox.latest_writeback_status = target.value
+                    outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                    action = await session.get(
+                        orm.Action, outbox.action_id, with_for_update=True
+                    )
+                    _mirror_writeback_status_to_action(action, target.value)
+                    if self._manual_resolution is not None:
+                        from app.core.errors import IdempotencyKeyReuseError
+                        from app.services.manual_resolution_service import (
+                            RESOLUTION_SOURCE_WRITEBACK_MANUAL,
+                            SUBJECT_KIND_WRITEBACK,
+                        )
+
+                        try:
+                            await self._manual_resolution.create_or_replay_resume_intent_in_session(
+                                session,
+                                event_id,
+                                resolution_source=RESOLUTION_SOURCE_WRITEBACK_MANUAL,
+                                subject_kind=SUBJECT_KIND_WRITEBACK,
+                                subject_id=writeback_id,
+                                resolution=resolution,
+                                principal=principal,
+                                comment=comment,
+                                evidence_ref=evidence_ref,
+                                operation_id=operation_id,
+                            )
+                            should_dispatch = True
+                        except IdempotencyKeyReuseError:
+                            raise
+                        except ValidationError:
+                            # Non-manual holds fall through to classic _maybe_resume.
+                            fallthrough_resume = True
+                            logger.info(
+                                "resolve_writeback did not enqueue manual resume "
+                                "intent writeback=%s",
+                                writeback_id,
+                                exc_info=True,
+                            )
+                    else:
+                        fallthrough_resume = True
+        if already_terminal:
+            if self._manual_resolution is not None:
+                from app.core.errors import IdempotencyKeyReuseError
+                from app.services.manual_resolution_service import (
+                    RESOLUTION_SOURCE_WRITEBACK_MANUAL,
+                    SUBJECT_KIND_WRITEBACK,
                 )
-                await self._append_receipt(
-                    session,
-                    outbox,
-                    status=target,
-                    confirmation_evidence=(
-                        ConfirmationEvidence.MANUAL_CONFIRMED
-                        if target is WritebackStatus.CONFIRMED
-                        else None
-                    ),
-                    provider_message=comment,
+
+                try:
+                    await self._manual_resolution.create_or_replay_resume_intent(
+                        event_id,
+                        resolution_source=RESOLUTION_SOURCE_WRITEBACK_MANUAL,
+                        subject_kind=SUBJECT_KIND_WRITEBACK,
+                        subject_id=writeback_id,
+                        resolution=resolution,
+                        principal=principal,
+                        comment=comment,
+                        evidence_ref=evidence_ref,
+                        operation_id=operation_id,
+                    )
+                    self._manual_resolution.schedule_dispatch()
+                except IdempotencyKeyReuseError:
+                    raise
+                except ValidationError:
+                    if await self._manual_resolution.has_schedulable_intent(event_id):
+                        self._manual_resolution.schedule_dispatch()
+            if self._bus is not None:
+                await self._bus.publish_event(
+                    event_id,
+                    "writeback_updated",
+                    {"writeback_id": writeback_id, "status": target.value},
                 )
-                outbox.latest_writeback_status = target.value
-                outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-                _mirror_writeback_status_to_action(action, target.value)
-                event_id = outbox.event_id
-                adapter_label = self._adapter_label(outbox)
+            return target
         record_writeback(status=target.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
-        await self._maybe_resume(event_id)
+        if should_dispatch and self._manual_resolution is not None:
+            self._manual_resolution.schedule_dispatch()
+        elif fallthrough_resume:
+            await self._maybe_resume(event_id)
         if self._bus is not None:
             await self._bus.publish_event(
                 event_id,
@@ -1581,6 +1664,30 @@ class DispositionSyncService:
             ExecutionSubstate.WAITING_WRITEBACK.value,
             ExecutionSubstate.WAITING_EXECUTION.value,
         }
+        is_manual = substate_raw == ExecutionSubstate.MANUAL_RESOLUTION.value
+        if is_manual and self._manual_resolution is not None:
+            from app.services.manual_resolution_service import (
+                RESOLUTION_SOURCE_WRITEBACK_AUTO,
+                SUBJECT_KIND_EVENT,
+            )
+
+            try:
+                await self._manual_resolution.create_or_replay_resume_intent(
+                    event_id,
+                    resolution_source=RESOLUTION_SOURCE_WRITEBACK_AUTO,
+                    subject_kind=SUBJECT_KIND_EVENT,
+                    subject_id=event_id,
+                    resolution="writeback_progress",
+                    principal="DispositionSyncService",
+                )
+                self._manual_resolution.schedule_dispatch()
+            except Exception:
+                logger.warning(
+                    "failed to enqueue durable graph resume intent event=%s",
+                    event_id,
+                    exc_info=True,
+                )
+            return
         if should_resume:
             try:
                 await self._resume(event_id)

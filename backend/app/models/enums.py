@@ -119,6 +119,18 @@ class InvestigationIntentStatus(StrEnum):
     DEAD = "dead"
 
 
+class GraphResumeIntentStatus(StrEnum):
+    """Durable manual-resolution graph resume ledger (ISSUE-277 / #873)."""
+
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    STARTED = "started"
+    TERMINAL = "terminal"
+    SKIPPED = "skipped"
+    RETRY = "retry"
+    DEAD = "dead"
+
+
 class BusinessDisruption(StrEnum):
     """Business impact disruption level (ISSUE-079)."""
 
@@ -444,6 +456,7 @@ DECLARED_ENUMS: dict[str, type[Enum]] = {
     "TargetWritebackStatus": TargetWritebackStatus,
     "ExecutionOwner": ExecutionOwner,
     "ExecutionSubstate": ExecutionSubstate,
+    "GraphResumeIntentStatus": GraphResumeIntentStatus,
     "ResponsePhaseState": ResponsePhaseState,
     "NextRecommendedAction": NextRecommendedAction,
     "DispositionIntentKind": DispositionIntentKind,

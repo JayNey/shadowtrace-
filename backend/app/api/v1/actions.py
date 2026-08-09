@@ -74,6 +74,7 @@ async def resolve_unknown_action(
         principal=principal.subject,
         comment=body.comment,
         evidence_ref=body.evidence_ref,
+        operation_id=body.operation_id,
     )
     return s.ActionOperationResponse(
         action_id=action_id,

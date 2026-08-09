@@ -145,12 +145,20 @@ class ResolveUnknownRequest(_StrictRequest):
     ]
     comment: str
     evidence_ref: str | None = None
+    operation_id: str | None = Field(
+        default=None,
+        description="Optional idempotency key for manual resolution resume (ISSUE-277).",
+    )
 
 
 class ResolveWritebackRequest(_StrictRequest):
     resolution: Literal["manual_confirmed", "mark_failed", "abandon"]
     comment: str
     evidence_ref: str | None = None
+    operation_id: str | None = Field(
+        default=None,
+        description="Optional idempotency key for manual resolution resume (ISSUE-277).",
+    )
 
 
 class RetryWritebackRequest(_StrictRequest):

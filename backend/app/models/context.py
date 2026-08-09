@@ -58,6 +58,8 @@ class EventContext(BaseModel):
     approval_records: list[dict[str, Any]] = Field(default_factory=list)
     disposition_only_intent: bool = False
     execution_substate: ExecutionSubstate = ExecutionSubstate.NONE
+    # ISSUE-277: durable manual-hold metadata (generation/reason/pending/checkpoint).
+    manual_hold: dict[str, Any] | None = None
 
     # --- action effect family ---
     execution_summary: ExecutionSummary | None = None

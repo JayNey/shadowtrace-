@@ -45,6 +45,7 @@ FIELD_OWNERSHIP: dict[str, str] = {
     "approval_records": "ApprovalEngine",
     "disposition_only_intent": "WorkflowRuntimeService",
     "execution_substate": "WorkflowRuntimeService",
+    "manual_hold": "ManualResolutionService",
     "execution_summary": "ActionExecutionService",
     "execution_jobs": "ActionExecutionService",
     "verification_result": "VerifyAgent",

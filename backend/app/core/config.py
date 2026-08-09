@@ -427,6 +427,16 @@ class Settings(BaseSettings):
         alias="AUTO_INVESTIGATE_MATERIALIZE_BATCH_SIZE",
         ge=1,
     )
+    graph_resume_intent_dispatch_interval_s: int = Field(
+        default=15,
+        alias="GRAPH_RESUME_INTENT_DISPATCH_INTERVAL_S",
+        ge=5,
+    )
+    graph_resume_intent_reconcile_interval_s: int = Field(
+        default=60,
+        alias="GRAPH_RESUME_INTENT_RECONCILE_INTERVAL_S",
+        ge=10,
+    )
 
     auto_response_enabled: bool = Field(default=False, alias="AUTO_RESPONSE_ENABLED")
     auto_response_min_severity: str = Field(

@@ -75,6 +75,10 @@ class InvestigationState(TypedDict, total=False):
     # ISSUE-204: when False, report_node skips ReportAgent and persists report_generated=false.
     generate_report: bool
     needs_approval_wait: bool
+    # ISSUE-277: durable manual-hold fencing mirrored into the checkpoint.
+    manual_hold_generation: int
+    manual_hold_reason: str
+    manual_hold_pending_ids: list[str] | None
     # ISSUE-566: initial HTTP investigate (via build_initial_investigation_state)
     # defers response/approval/execute/verify; analysis completes at report
     # (REQUIRED→REPORTING, NOT_REQUIRED→CLOSED). Full P0 response execution

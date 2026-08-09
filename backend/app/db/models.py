@@ -1081,6 +1081,61 @@ class InvestigationIntent(Base):
     )
 
 
+class GraphResumeIntent(Base):
+    """PostgreSQL durable manual-resolution graph resume intent (ISSUE-277 / #873)."""
+
+    __tablename__ = "graph_resume_intent"
+    __table_args__ = (
+        Index("ix_graph_resume_intent_status_updated", "status", "updated_at"),
+        Index("ix_graph_resume_intent_claim_expires", "claim_expires_at"),
+        Index(
+            "uq_graph_resume_intent_operation_id",
+            "operation_id",
+            unique=True,
+            postgresql_where=text("operation_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_graph_resume_intent_active_hold",
+            "event_id",
+            "hold_generation",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'claimed', 'started', 'retry')"),
+        ),
+    )
+
+    intent_id: Mapped[str] = mapped_column(String, primary_key=True)
+    event_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("security_event.event_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    intent_kind: Mapped[str] = mapped_column(String, nullable=False)
+    intent_version: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    hold_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    checkpoint_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    operation_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    resolution_source: Mapped[str] = mapped_column(String, nullable=False)
+    subject_kind: Mapped[str] = mapped_column(String, nullable=False)
+    subject_id: Mapped[str] = mapped_column(String, nullable=False)
+    resolution: Mapped[str | None] = mapped_column(String, nullable=True)
+    principal: Mapped[str | None] = mapped_column(String, nullable=True)
+    comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    evidence_ref: Mapped[str | None] = mapped_column(String, nullable=True)
+    payload_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    claim_owner: Mapped[str | None] = mapped_column(String, nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(_TS, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    skip_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(_TS, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TS, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class KnowledgeReleaseORM(Base):
     """ATT&CK STIX knowledge release registry (ISSUE-128 / #634)."""
 

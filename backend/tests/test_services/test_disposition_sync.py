@@ -180,6 +180,7 @@ async def cleanup(
                 orm.EventContextFieldVersion,
                 orm.ActionTargetResult,
                 orm.ActionExecutionJob,
+                orm.GraphResumeIntent,
                 orm.DispositionReceipt,
                 orm.DispositionOutbox,
                 orm.Action,

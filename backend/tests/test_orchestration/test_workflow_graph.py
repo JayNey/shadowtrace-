@@ -1780,6 +1780,156 @@ async def test_prepare_graph_resume_clears_stale_manual_when_writeback_confirmed
 
 
 @pytest.mark.asyncio
+async def test_issue277_hold_resolve_intent_claim_resume_reaches_report_via_verify(
+    session_factory: Any,
+) -> None:
+    """ISSUE-277: durable intent claim/run → prepare → Verify → report/close.
+
+    Must exercise ManualResolutionService (not seed+prepare alone).
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from app.db import models as orm
+    from app.models.enums import GraphResumeIntentStatus, Severity
+    from app.orchestration.graph_resume import prepare_graph_resume_state
+    from app.orchestration.workflow_graph import invoke_investigation_graph
+    from app.services.manual_resolution_service import (
+        RESOLUTION_SOURCE_ACTION_UNKNOWN,
+        SUBJECT_KIND_ACTION,
+        ManualResolutionService,
+    )
+
+    assert isinstance(session_factory, async_sessionmaker)
+
+    from uuid import uuid4
+
+    redis = FakeRedisClient()
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    event_id = f"evt-277-hold-resolve-report-{uuid4().hex[:8]}"
+
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    services = _services(machine)
+    graph = build_investigation_graph(_agents(), services, checkpointer=saver)
+    config = {"configurable": {"thread_id": event_id}}
+
+    evidence = EvidenceOutput(collection_status=CollectionStatus.COMPLETED)
+    risk = RiskAssessment(
+        risk_score=80,
+        severity=Severity.HIGH,
+        confidence=0.9,
+        scoring_mode=ScoringMode.RULE_ONLY,
+    )
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        reasoning="investigate",
+    )
+    halted_state = _base_state(
+        event_id=event_id,
+        event_status=EventStatus.VERIFYING.value,
+        execution_substate=ExecutionSubstate.MANUAL_RESOLUTION.value,
+        halted=True,
+        verify_need_writeback_recovery=False,
+        verify_need_action_replan=False,
+        verify_need_manual_resolution=True,
+        degraded_flags=["verify_degraded=True"],
+        evidence_output=evidence.model_dump(mode="json"),
+        risk_assessment=risk.model_dump(mode="json"),
+        triage_result=triage.model_dump(mode="json"),
+        plan_revision=1,
+        replan_count=0,
+        escalated=False,
+        manual_hold_generation=0,
+        manual_hold_reason="verify_need_manual_resolution",
+    )
+    await graph.aupdate_state(config, halted_state, as_node=NODE_VERIFY)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="ISSUE-277 resume",
+                    description="",
+                    status=EventStatus.VERIFYING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+
+    runner_calls: list[str] = []
+
+    async def _resume_runner(eid: str) -> None:
+        runner_calls.append(eid)
+        await prepare_graph_resume_state(
+            _ResumeSessionFactory(
+                EventStatus.VERIFYING.value,
+                outbox_rows=[
+                    (
+                        DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                        WritebackStatus.CONFIRMED.value,
+                    )
+                ],
+            ),
+            graph,
+            eid,
+            services["workflow_runtime"],
+        )
+
+    manual = ManualResolutionService(session_factory, resume_runner=_resume_runner)
+    await manual.enter_manual_hold(
+        event_id,
+        reason="verify_need_manual_resolution",
+        pending_ids=["act-1"],
+        checkpoint_id=event_id,
+        event_status=EventStatus.VERIFYING,
+    )
+    intent = await manual.create_or_replay_resume_intent(
+        event_id,
+        resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
+        subject_kind=SUBJECT_KIND_ACTION,
+        subject_id="act-1",
+        resolution="mark_success",
+        principal="analyst-1",
+        operation_id=f"op-277-e2e-{uuid4().hex[:8]}",
+    )
+    assert intent.status is GraphResumeIntentStatus.PENDING
+    claimed = await manual._claim_batch(limit=100)
+    assert intent.intent_id in claimed
+    assert await manual._run_claimed_intent(intent.intent_id) is True
+    assert event_id in runner_calls
+
+    post_snap = await graph.aget_state(config)
+    assert post_snap is not None
+    assert post_snap.values.get("halted") is False
+    assert post_snap.values.get("verify_need_manual_resolution") is False
+
+    final = await invoke_investigation_graph(graph, None, config)
+    assert final["halted"] is False
+    assert NODE_VERIFY in final["node_trace"], final["node_trace"]
+    assert NODE_MANUAL_HOLD not in final["node_trace"], final["node_trace"]
+    assert NODE_REPORT in final["node_trace"] or NODE_CLOSE in final["node_trace"], final[
+        "node_trace"
+    ]
+    assert machine.status in {EventStatus.REPORTING, EventStatus.CLOSED}
+
+    async with session_factory() as session:
+        row = await session.get(orm.GraphResumeIntent, intent.intent_id)
+        assert row is not None
+        assert row.status == GraphResumeIntentStatus.TERMINAL.value
+
+
+@pytest.mark.asyncio
 async def test_prepare_graph_resume_keeps_manual_for_entity_only_writebacks() -> None:
     """ISSUE-205: entity outbox ACCEPTED alone must not clear manual on required policy."""
     from app.orchestration.graph_resume import prepare_graph_resume_state
