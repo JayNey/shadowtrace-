@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import time
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,16 +24,12 @@ from app.models.enums import (
 )
 from app.models.security_event import EventSummary
 from app.models.workflow import MAX_AGENT_RETRIES
-from app.orchestration.workflow_graph import NODE_CLOSE, NODE_RISK
+from app.orchestration.workflow_graph import NODE_RISK
 from app.services.agent_trace_service import AgentTraceService
 from app.services.context_service import EventContextStore
 from app.services.event_service import EventService
 from app.services.evidence_projection import bind_evidence_projection
 from app.services.state_machine_service import StateMachineService
-from tests.integration.integration_fixtures import (
-    _clear_shadowtrace_keys,
-    _truncate_business_tables,
-)
 from tests.integration.resume_isolation_support import (
     ISOLATION_PASSES,
     IsolationRunRecord,
@@ -42,7 +37,12 @@ from tests.integration.resume_isolation_support import (
     assert_resume_snapshot_coherent,
     build_artifact,
     capture_graph_checkpoint_snapshot,
+    default_artifact_path,
     summarize_consecutive_runs,
+)
+from tests.test_support.db_isolation import (
+    clear_shadowtrace_redis_keys,
+    truncate_business_tables,
 )
 from tests.test_orchestration.orchestration_fixtures import (
     GOLDEN_ORCHESTRATION_MAX_SECONDS,
@@ -213,13 +213,10 @@ async def _run_checkpoint_resume_isolated_probe(
     )
     assert pre_resume.checkpoint_present is True
 
+    # Runner-owned interrupt→ainvoke path (not production resume_investigation).
+    # Artifact resume_path records that boundary explicitly.
     second_graph = workflow_graph_factory(checkpointer=redis_checkpointer)
     final = await second_graph.ainvoke(None, config)
-
-    assert NODE_CLOSE in final["node_trace"]
-    assert final["node_trace"].count(NODE_RISK) == 1
-    assert final["node_trace"].count("triage_node") == 1
-    assert final["node_trace"].count("evidence_node") == 1
 
     post_resume = await capture_graph_checkpoint_snapshot(
         graph=second_graph,
@@ -227,15 +224,19 @@ async def _run_checkpoint_resume_isolated_probe(
         phase="post_resume",
         session_factory=session_factory,
     )
-    assert_resume_snapshot_coherent(post_resume)
-    await assert_valid_audit_transitions(session_factory, event_id)
-
     artifact = build_artifact(
         phenomenon="checkpoint_resume_close_node",
         pre_resume=pre_resume,
         post_resume=post_resume,
         run_index=run_index,
+        resume_path="interrupt_ainvoke",
     )
+    # Continuity checks are independent of the close_node anomaly detector.
+    assert final["node_trace"].count(NODE_RISK) == 1
+    assert final["node_trace"].count("triage_node") == 1
+    assert final["node_trace"].count("evidence_node") == 1
+    assert_resume_snapshot_coherent(post_resume)
+    await assert_valid_audit_transitions(session_factory, event_id)
     return IsolationRunRecord(run_index=run_index, artifact=artifact)
 
 
@@ -249,19 +250,19 @@ async def test_checkpoint_resume_skips_completed_nodes(
     workflow_graph_factory,
     redis_checkpointer,
     redis_client: Any,
-    tmp_path: Path,
 ) -> None:
     """ISSUE-282 / ID-REL-001: isolated checkpoint resume tail-chain probe.
 
-    Runs ``ISOLATION_PASSES`` consecutive isolated probes on dedicated
-    PostgreSQL/Redis. Records resume before/after snapshots; marks
-    ``NOT_REPRODUCED`` when ``close_node`` is present and halt flags are coherent.
+    Runner-owned ``interrupt_before`` + ``ainvoke`` path (not production
+    ``resume_investigation``). Runs ``ISOLATION_PASSES`` consecutive isolated
+    probes; writes a reviewable ``NOT_REPRODUCED`` artifact when close_node
+    anomalies are absent.
     """
     records: list[IsolationRunRecord] = []
     for run_index in range(1, ISOLATION_PASSES + 1):
         if run_index > 1:
-            await _truncate_business_tables(session_factory)
-            await _clear_shadowtrace_keys(redis_client)
+            await truncate_business_tables(session_factory)
+            await clear_shadowtrace_redis_keys(redis_client)
         record = await _run_checkpoint_resume_isolated_probe(
             event_service=event_service,
             context_store=context_store,
@@ -276,8 +277,12 @@ async def test_checkpoint_resume_skips_completed_nodes(
 
     summary = summarize_consecutive_runs(records)
     assert summary.verdict == "NOT_REPRODUCED"
-    artifact_path = tmp_path / "issue-282-checkpoint-resume-artifact.json"
+    assert summary.environment.get("resume_path") == "interrupt_ainvoke"
+    artifact_path = default_artifact_path("checkpoint_resume_close_node")
     summary.write_json(artifact_path)
+    assert artifact_path.is_file()
+    saved = artifact_path.read_text(encoding="utf-8")
+    assert '"verdict": "NOT_REPRODUCED"' in saved
 
 
 @pytest.mark.usefixtures("clean_state")

@@ -2,13 +2,12 @@
 
 ISSUE-282 / ID-REL-001 adds isolated consecutive probes for the SUSPECTED
 ``needs_approval_wait=false`` + ``halted=true`` tail-chain anomaly after
-production approval resume.
+production approval resume. Diagnostics-only: no speculative product patch.
 """
 
 from __future__ import annotations
 
 import uuid
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -23,7 +22,6 @@ from app.models.enums import ActionLevel, ActionStatus, EventStatus, ExecutionSu
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL_WAIT,
     NODE_EXECUTE,
-    NODE_MANUAL_HOLD,
     NODE_VERIFY,
 )
 from app.services.context_service import EventContextStore
@@ -45,7 +43,12 @@ from tests.integration.resume_isolation_support import (
     assert_resume_snapshot_coherent,
     build_artifact,
     capture_graph_checkpoint_snapshot,
+    default_artifact_path,
     summarize_consecutive_runs,
+)
+from tests.test_support.db_isolation import (
+    clear_shadowtrace_redis_keys,
+    truncate_business_tables,
 )
 
 pytestmark = [
@@ -155,6 +158,14 @@ async def _run_production_approval_wait_resume_probe(
         session_factory=session_factory,
         graph_wired=graph_after is not None,
     )
+    artifact = build_artifact(
+        phenomenon="approval_resume_halted_stale",
+        pre_resume=pre_resume,
+        post_resume=post_resume,
+        run_index=run_index,
+        resume_path="production_resume_investigation",
+    )
+
     verification = await context_store.get(event_id, "verification_result")
     node_trace = post_resume.node_trace
 
@@ -172,31 +183,19 @@ async def _run_production_approval_wait_resume_probe(
             select(orm.Action.status).where(orm.Action.action_id == target.action_id)
         )
 
+    # Continuity / production hook assertions (not the SUSPECTED halt-pair detector).
     assert approved_status == ActionStatus.APPROVED.value
     assert db_status_after != EventStatus.FAILED.value, (
         f"status={db_status_after} trace={node_trace}"
     )
-    assert post_resume.needs_approval_wait is False, post_resume.to_dict()
     assert NODE_EXECUTE in node_trace, node_trace
     assert NODE_VERIFY in node_trace or verify_trace is not None or bool(verification), (
         f"resume must reach verify tail; trace={node_trace}"
     )
-    # Resume must clear the approval-wait halt. Verify may still route to
-    # manual_hold (effect_not_ready) and re-set halted — that is not an
-    # approval-resume regression. Snapshot coherence still applies either way.
-    if NODE_MANUAL_HOLD not in node_trace:
-        assert post_resume.halted is False, post_resume.to_dict()
     assert_resume_snapshot_coherent(post_resume)
 
     reset_deps()
     get_settings.cache_clear()
-
-    artifact = build_artifact(
-        phenomenon="approval_resume_halted_stale",
-        pre_resume=pre_resume,
-        post_resume=post_resume,
-        run_index=run_index,
-    )
     return IsolationRunRecord(run_index=run_index, artifact=artifact)
 
 
@@ -206,23 +205,17 @@ async def test_production_resume_hook_after_real_approval_wait_halt(
     session_factory: async_sessionmaker[AsyncSession],
     redis_client: Any,
     context_store: EventContextStore,
-    tmp_path: Path,
 ) -> None:
     """ISSUE-282 / ID-REL-001: isolated production approval_wait resume probe.
 
     Wires production deps (not runner-owned resume bypass), records resume
     before/after snapshots, and runs ``ISOLATION_PASSES`` consecutive probes.
     """
-    from tests.integration.integration_fixtures import (
-        _clear_shadowtrace_keys,
-        _truncate_business_tables,
-    )
-
     records: list[IsolationRunRecord] = []
     for run_index in range(1, ISOLATION_PASSES + 1):
         if run_index > 1:
-            await _truncate_business_tables(session_factory)
-            await _clear_shadowtrace_keys(redis_client)
+            await truncate_business_tables(session_factory)
+            await clear_shadowtrace_redis_keys(redis_client)
             reset_deps()
             get_settings.cache_clear()
         record = await _run_production_approval_wait_resume_probe(
@@ -237,4 +230,9 @@ async def test_production_resume_hook_after_real_approval_wait_halt(
 
     summary = summarize_consecutive_runs(records)
     assert summary.verdict == "NOT_REPRODUCED"
-    summary.write_json(tmp_path / "issue-282-approval-resume-artifact.json")
+    assert summary.environment.get("resume_path") == "production_resume_investigation"
+    artifact_path = default_artifact_path("approval_resume_halted_stale")
+    summary.write_json(artifact_path)
+    assert artifact_path.is_file()
+    saved = artifact_path.read_text(encoding="utf-8")
+    assert '"verdict": "NOT_REPRODUCED"' in saved

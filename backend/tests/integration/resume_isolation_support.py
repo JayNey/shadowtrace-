@@ -10,6 +10,9 @@ Two SUSPECTED tail-chain anomalies (not proven same root cause):
 Tests run on dedicated PostgreSQL/Redis fixtures (``clean_state``) with fixed
 config; no parallel DB probes. Artifacts record resume before/after snapshots
 for audit and local review.
+
+Product semantics are intentionally unchanged until a stable REPRODUCED baseline
+exists; these helpers are diagnostics-only.
 """
 
 from __future__ import annotations
@@ -28,19 +31,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.db import models as orm
 from app.models.enums import ActionStatus, EventStatus, ExecutionSubstate
-from app.orchestration.workflow_graph import (
-    NODE_CLOSE,
-    NODE_HALT,
-    NODE_MANUAL_HOLD,
-    NODE_WRITEBACK_RECOVERY,
-)
+from app.orchestration.workflow_graph import NODE_CLOSE, NODE_MANUAL_HOLD
 
 ISSUE_ID = "ISSUE-282"
 AUDIT_ID = "ID-REL-001"
 ISOLATION_PASSES = 10
 
+ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts" / "issue-282"
+
 Phenomenon = Literal["checkpoint_resume_close_node", "approval_resume_halted_stale"]
 Verdict = Literal["REPRODUCED", "NOT_REPRODUCED"]
+ResumePath = Literal["interrupt_ainvoke", "production_resume_investigation"]
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ class ResumeIsolationArtifact:
     audit_id: str = AUDIT_ID
     anomaly_detail: str | None = None
     run_index: int | None = None
+    resume_path: ResumePath | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -105,9 +107,9 @@ def git_head_short() -> str:
         return "unknown"
 
 
-def isolation_environment() -> dict[str, str]:
+def isolation_environment(*, resume_path: ResumePath | None = None) -> dict[str, str]:
     """Record non-secret environment markers for artifact replay."""
-    return {
+    env = {
         "python": sys.version.split()[0],
         "platform": platform.platform(),
         "database_url_host": _redact_url_host(os.environ.get("DATABASE_URL", "")),
@@ -115,6 +117,13 @@ def isolation_environment() -> dict[str, str]:
         "orchestration_mode": os.environ.get("ORCHESTRATION_MODE", ""),
         "task_mode": os.environ.get("TASK_MODE", ""),
     }
+    if resume_path is not None:
+        env["resume_path"] = resume_path
+    return env
+
+
+def default_artifact_path(phenomenon: Phenomenon) -> Path:
+    return ARTIFACTS_DIR / f"{phenomenon}-summary.json"
 
 
 def _redact_url_host(url: str) -> str:
@@ -237,34 +246,28 @@ def detect_checkpoint_close_node_anomaly(snapshot: ResumeIsolationSnapshot) -> s
     """Return anomaly detail when a legal not-required tail lacks close_node."""
     if not snapshot.checkpoint_present:
         return "checkpoint missing at post-resume tail evaluation"
-    if snapshot.halted is True:
-        return None
     if NODE_CLOSE in snapshot.node_trace:
         return None
-    # Legal not-required analysis tail should include close_node once reporting completes.
+    # Halted mid-flight without a reporting/closed status is not the SUSPECTED tail.
+    # Once DB/graph status reaches reporting/closed (or triage with a non-empty trace),
+    # missing close_node is anomalous even if halted=true.
     if snapshot.event_status in {
         EventStatus.REPORTING.value,
         EventStatus.CLOSED.value,
     }:
         return (
             f"post-resume tail missing {NODE_CLOSE} "
-            f"(event_status={snapshot.event_status}, trace={list(snapshot.node_trace)})"
+            f"(event_status={snapshot.event_status}, halted={snapshot.halted}, "
+            f"trace={list(snapshot.node_trace)})"
         )
     if snapshot.event_status == EventStatus.TRIAGING.value and snapshot.node_trace:
+        if snapshot.halted is True:
+            return None
         return (
             f"post-resume graph trace ended without {NODE_CLOSE} "
             f"(event_status={snapshot.event_status}, trace={list(snapshot.node_trace)})"
         )
     return None
-
-
-_LEGITIMATE_HALT_TAIL_NODES = frozenset(
-    {
-        NODE_MANUAL_HOLD,
-        NODE_HALT,
-        NODE_WRITEBACK_RECOVERY,
-    }
-)
 
 
 def detect_approval_halted_stale_anomaly(snapshot: ResumeIsolationSnapshot) -> str | None:
@@ -284,10 +287,10 @@ def detect_approval_halted_stale_anomaly(snapshot: ResumeIsolationSnapshot) -> s
             f"trace_tail={list(snapshot.node_trace)[-5:]}"
         )
     if snapshot.needs_approval_wait is False and snapshot.halted is True:
-        trace_tail = list(snapshot.node_trace)
-        last_node = trace_tail[-1] if trace_tail else None
-        if last_node in _LEGITIMATE_HALT_TAIL_NODES:
+        # Align with production resume assertion: only manual_hold may re-halt.
+        if NODE_MANUAL_HOLD in snapshot.node_trace:
             return None
+        trace_tail = list(snapshot.node_trace)
         return (
             "incoherent halt flags after approval resume: "
             f"needs_approval_wait={snapshot.needs_approval_wait} halted={snapshot.halted} "
@@ -318,6 +321,7 @@ def build_artifact(
     pre_resume: ResumeIsolationSnapshot,
     post_resume: ResumeIsolationSnapshot,
     run_index: int | None = None,
+    resume_path: ResumePath | None = None,
 ) -> ResumeIsolationArtifact:
     if phenomenon == "checkpoint_resume_close_node":
         anomaly = detect_checkpoint_close_node_anomaly(post_resume)
@@ -327,13 +331,14 @@ def build_artifact(
     return ResumeIsolationArtifact(
         phenomenon=phenomenon,
         verdict="REPRODUCED" if anomaly else "NOT_REPRODUCED",
-        consecutive_passes=ISOLATION_PASSES,
+        consecutive_passes=1,
         git_commit=git_head_short(),
-        environment=isolation_environment(),
+        environment=isolation_environment(resume_path=resume_path),
         pre_resume=pre_resume,
         post_resume=post_resume,
         anomaly_detail=anomaly,
         run_index=run_index,
+        resume_path=resume_path,
     )
 
 
@@ -364,16 +369,18 @@ def summarize_consecutive_runs(records: list[IsolationRunRecord]) -> ResumeIsola
     last = records[-1].artifact
     if reproduced:
         first_fail = reproduced[0].artifact
+        streak_before = reproduced[0].run_index - 1
         return ResumeIsolationArtifact(
             phenomenon=last.phenomenon,
             verdict="REPRODUCED",
-            consecutive_passes=len(records),
+            consecutive_passes=streak_before,
             git_commit=last.git_commit,
             environment=last.environment,
             pre_resume=first_fail.pre_resume,
             post_resume=first_fail.post_resume,
             anomaly_detail=first_fail.anomaly_detail,
             run_index=reproduced[0].run_index,
+            resume_path=last.resume_path,
         )
     return ResumeIsolationArtifact(
         phenomenon=last.phenomenon,
@@ -385,4 +392,5 @@ def summarize_consecutive_runs(records: list[IsolationRunRecord]) -> ResumeIsola
         post_resume=last.post_resume,
         anomaly_detail=None,
         run_index=ISOLATION_PASSES,
+        resume_path=last.resume_path,
     )
