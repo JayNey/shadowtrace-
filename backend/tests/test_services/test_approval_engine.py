@@ -702,6 +702,90 @@ async def test_decision_id_cross_operation_conflict(
 
 
 @pytest.mark.asyncio
+async def test_decision_id_approve_after_reject_same_key_returns_409(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    engine: ApprovalEngine,
+    fake_bus: FakeEventBus,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    principal = Principal(subject="approver-1", roles=["approver"])
+    await engine.reject(action.action_id, principal, "no", "dec-cross-rev")
+    with pytest.raises(ApprovalDecisionConflictError) as exc_info:
+        await engine.approve(action.action_id, principal, "ok", "dec-cross-rev")
+    assert "operation or payload mismatch" in str(exc_info.value)
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action.action_id)
+        assert row is not None
+        assert row.status == ActionStatus.REJECTED.value
+    approval_updates = [item for item in fake_bus.published if item[1] == "approval_updated"]
+    assert len(approval_updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_decision_id_replay_after_lifecycle_advance_still_returns_approved(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    engine: ApprovalEngine,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(event_id=event_id, action_level=ActionLevel.L4),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    principal = Principal(subject="approver-1", roles=["approver"])
+    first = await engine.approve(action.action_id, principal, "ok", "dec-lifecycle")
+    assert first.persisted_status is ActionStatus.APPROVED
+
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action.action_id)
+        assert row is not None
+        row.status = ActionStatus.EXECUTING.value
+        await session.commit()
+
+    second = await engine.approve(action.action_id, principal, "ok", "dec-lifecycle")
+    assert second.idempotent_replay is True
+    assert second.persisted_status is ActionStatus.APPROVED
+
+
+@pytest.mark.asyncio
+async def test_decision_id_replay_skips_hard_gate_when_binding_matches(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    engine: ApprovalEngine,
+) -> None:
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            action_level=ActionLevel.L4,
+            tool_name="block_ip",
+        ),
+    )
+    await engine.evaluate(action, _risk(), approval_cycle=0)
+    principal = Principal(subject="approver-1", roles=["approver"])
+    first = await engine.approve(action.action_id, principal, "ok", "dec-gate")
+    assert first.persisted_status is ActionStatus.APPROVED
+
+    engine._manifest = build_mock_capability_manifest(
+        disabled_tools=frozenset({"block_ip"}),
+    )
+    second = await engine.approve(action.action_id, principal, "ok", "dec-gate")
+    assert second.idempotent_replay is True
+    assert second.persisted_status is ActionStatus.APPROVED
+
+
+@pytest.mark.asyncio
 async def test_decision_id_payload_mismatch_conflict(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,

@@ -63,6 +63,17 @@ APPROVAL_ENGINE_OPERATOR = "ApprovalEngine"
 ResumeHook = Callable[[str], Awaitable[None]]
 
 _APPROVAL_TERMINAL = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
+# Lifecycle statuses reachable after a human approve (not the decision itself).
+_POST_APPROVE_LIFECYCLE = frozenset(
+    {
+        ActionStatus.EXECUTING,
+        ActionStatus.PARTIAL_SUCCESS,
+        ActionStatus.SUCCESS,
+        ActionStatus.FAILED,
+        ActionStatus.UNKNOWN,
+        ActionStatus.ROLLED_BACK,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -107,6 +118,11 @@ def _approval_operation(target_status: ActionStatus) -> ApprovalOperation:
     return "approve" if target_status is ActionStatus.APPROVED else "reject"
 
 
+def _decision_status_for_operation(operation: ApprovalOperation) -> ActionStatus:
+    """Map idempotency operation to persisted approval decision (not lifecycle)."""
+    return ActionStatus.APPROVED if operation == "approve" else ActionStatus.REJECTED
+
+
 def _normalize_approval_comment(comment: str | None) -> str:
     if comment is None:
         return ""
@@ -130,10 +146,12 @@ def _idempotency_binding_from_record(
             operation=cast(ApprovalOperation, stored["operation"]),
             payload_hash=str(stored["payload_hash"]),
         )
-    if action_status is ActionStatus.APPROVED:
-        operation: ApprovalOperation = "approve"
-    elif action_status is ActionStatus.REJECTED:
-        operation = "reject"
+    # Legacy rows without detail.idempotency: derive operation from decision-ish status.
+    # Post-approve lifecycle (executing/…) still means the original decision was approve.
+    if action_status is ActionStatus.REJECTED:
+        operation: ApprovalOperation = "reject"
+    elif action_status is ActionStatus.APPROVED or action_status in _POST_APPROVE_LIFECYCLE:
+        operation = "approve"
     else:
         operation = "approve"
     return _ApprovalIdempotencyBinding(
@@ -558,6 +576,20 @@ class ApprovalEngine:
                     )
                 action = _action_from_orm(row)
 
+                # Idempotent replay must win before first-decision hard-gates/bindings
+                # so same-key safe retries are not blocked by later capability drift.
+                if decision_id:
+                    replay_outcome = await self._resolve_idempotent_replay(
+                        session,
+                        action_id=action_id,
+                        decision_id=decision_id,
+                        operation=operation,
+                        payload_hash=payload_hash,
+                        action_row=row,
+                    )
+                    if replay_outcome is not None:
+                        return replay_outcome
+
                 if target_status is ActionStatus.APPROVED:
                     gate = evaluate_hard_gates(action, manifest=self._manifest)
                     if gate is not None:
@@ -574,18 +606,6 @@ class ApprovalEngine:
                     pending = await self._load_pending_record_row(session, action_id)
                     if pending is not None and isinstance(pending.detail, dict):
                         validate_approval_binding(action, pending.detail)
-
-                if decision_id:
-                    replay_outcome = await self._resolve_idempotent_replay(
-                        session,
-                        action_id=action_id,
-                        decision_id=decision_id,
-                        operation=operation,
-                        payload_hash=payload_hash,
-                        action_row=row,
-                    )
-                    if replay_outcome is not None:
-                        return replay_outcome
 
                 record = await self._load_pending_record_row(session, action_id)
 
@@ -719,8 +739,9 @@ class ApprovalEngine:
                     "requested_operation": operation,
                 },
             )
+        decision_status = _decision_status_for_operation(stored.operation)
         return ApprovalOutcome(
-            persisted_status=ActionStatus(action_row.status),
+            persisted_status=decision_status,
             decision_id=decision_id,
             idempotent_replay=True,
         )

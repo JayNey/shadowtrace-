@@ -9,10 +9,27 @@ from fastapi import APIRouter
 from app.api.v1 import schemas as s
 from app.api.v1.deps import ActionExecutionDep, ApprovalEngineDep
 from app.core.auth import ROLE_ADMIN, ROLE_APPROVER, Principal, require_roles
+from app.core.errors import InternalError
 from app.models.enums import ActionStatus
-from app.services.approval_engine import approval_status_label
+from app.services.approval_engine import ApprovalOutcome, approval_status_label
 
 router = APIRouter(tags=["actions"])
+
+_DECISION_STATUSES = frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED})
+
+
+def _project_decision_status(outcome: ApprovalOutcome, *, action_id: str) -> str:
+    """Project API status from engine persisted decision only (ISSUE-281)."""
+    status = outcome.persisted_status
+    if status is None or status not in _DECISION_STATUSES:
+        raise InternalError(
+            "approval outcome missing persisted decision status",
+            details={
+                "action_id": action_id,
+                "persisted_status": None if status is None else status.value,
+            },
+        )
+    return approval_status_label(status)
 
 
 @router.post("/actions/{action_id}/approve", response_model=s.ActionOperationResponse)
@@ -29,9 +46,7 @@ async def approve_action(
         body.decision_id,
     )
     await engine.scan_timeouts()
-    status = approval_status_label(
-        outcome.persisted_status or ActionStatus.APPROVED,
-    )
+    status = _project_decision_status(outcome, action_id=action_id)
     return s.ActionOperationResponse(
         action_id=action_id,
         status=status,
@@ -56,9 +71,7 @@ async def reject_action(
         body.decision_id,
     )
     await engine.scan_timeouts()
-    status = approval_status_label(
-        outcome.persisted_status or ActionStatus.REJECTED,
-    )
+    status = _project_decision_status(outcome, action_id=action_id)
     return s.ActionOperationResponse(
         action_id=action_id,
         status=status,

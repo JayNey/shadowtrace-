@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.api.v1.deps import get_approval_engine
 from app.core.config import get_settings
+from app.core.errors import ApprovalDecisionConflictError
 from app.main import app
 from app.models.enums import ActionStatus
 from app.services.approval_engine import ApprovalOutcome
@@ -48,8 +49,6 @@ def test_reject_after_approve_same_decision_id_returns_409(
             )
 
         async def reject(self, *args: object, **kwargs: object) -> ApprovalOutcome:
-            from app.core.errors import ApprovalDecisionConflictError
-
             raise ApprovalDecisionConflictError(
                 "decision_id replay operation or payload mismatch",
                 details={"decision_id": "dec-shared"},
@@ -81,9 +80,53 @@ def test_reject_after_approve_same_decision_id_returns_409(
     assert reject_resp.status_code == 409, reject_resp.text
 
 
-def test_idempotent_replay_projects_persisted_status(
+def test_approve_after_reject_same_decision_id_returns_409(
     client: TestClient,
 ) -> None:
+    class _CrossOperationEngine:
+        async def reject(self, *args: object, **kwargs: object) -> ApprovalOutcome:
+            return ApprovalOutcome(
+                persisted_status=ActionStatus.REJECTED,
+                decision_id="dec-shared-rev",
+            )
+
+        async def approve(self, *args: object, **kwargs: object) -> ApprovalOutcome:
+            raise ApprovalDecisionConflictError(
+                "decision_id replay operation or payload mismatch",
+                details={"decision_id": "dec-shared-rev"},
+            )
+
+        async def scan_timeouts(self) -> list[str]:
+            return []
+
+    async def _engine() -> _CrossOperationEngine:
+        return _CrossOperationEngine()
+
+    app.dependency_overrides[get_approval_engine] = _engine
+    try:
+        reject_resp = client.post(
+            "/api/v1/actions/act-cross-rev/reject",
+            headers=_hdr(),
+            json={"comment": "no", "decision_id": "dec-shared-rev"},
+        )
+        approve_resp = client.post(
+            "/api/v1/actions/act-cross-rev/approve",
+            headers=_hdr(),
+            json={"comment": "ok", "decision_id": "dec-shared-rev"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_approval_engine, None)
+
+    assert reject_resp.status_code == 200, reject_resp.text
+    assert reject_resp.json()["status"] == "rejected"
+    assert approve_resp.status_code == 409, approve_resp.text
+
+
+def test_idempotent_approve_replay_projects_persisted_decision(
+    client: TestClient,
+) -> None:
+    """Same-key approve replay must project decision status, never lifecycle."""
+
     class _ReplayEngine:
         async def approve(self, *args: object, **kwargs: object) -> ApprovalOutcome:
             return ApprovalOutcome(
@@ -93,10 +136,9 @@ def test_idempotent_replay_projects_persisted_status(
             )
 
         async def reject(self, *args: object, **kwargs: object) -> ApprovalOutcome:
-            return ApprovalOutcome(
-                persisted_status=ActionStatus.REJECTED,
-                decision_id="dec-replay",
-                idempotent_replay=True,
+            raise ApprovalDecisionConflictError(
+                "decision_id replay operation or payload mismatch",
+                details={"decision_id": "dec-replay"},
             )
 
         async def scan_timeouts(self) -> list[str]:
@@ -107,12 +149,17 @@ def test_idempotent_replay_projects_persisted_status(
 
     app.dependency_overrides[get_approval_engine] = _engine
     try:
-        approve_resp = client.post(
+        first = client.post(
             "/api/v1/actions/act-replay/approve",
             headers=_hdr(),
             json={"comment": "ok", "decision_id": "dec-replay"},
         )
-        reject_resp = client.post(
+        second = client.post(
+            "/api/v1/actions/act-replay/approve",
+            headers=_hdr(),
+            json={"comment": "ok", "decision_id": "dec-replay"},
+        )
+        cross = client.post(
             "/api/v1/actions/act-replay/reject",
             headers=_hdr(),
             json={"comment": "no", "decision_id": "dec-replay"},
@@ -120,7 +167,64 @@ def test_idempotent_replay_projects_persisted_status(
     finally:
         app.dependency_overrides.pop(get_approval_engine, None)
 
-    assert approve_resp.status_code == 200, approve_resp.text
-    assert approve_resp.json()["status"] == "approved"
-    assert reject_resp.status_code == 200, reject_resp.text
-    assert reject_resp.json()["status"] == "rejected"
+    assert first.status_code == 200, first.text
+    assert first.json()["status"] == "approved"
+    assert second.status_code == 200, second.text
+    assert second.json()["status"] == "approved"
+    assert cross.status_code == 409, cross.text
+
+
+def test_approve_rejects_missing_persisted_decision_status(
+    client: TestClient,
+) -> None:
+    class _MissingStatusEngine:
+        async def approve(self, *args: object, **kwargs: object) -> ApprovalOutcome:
+            return ApprovalOutcome(decision_id="dec-missing")
+
+        async def scan_timeouts(self) -> list[str]:
+            return []
+
+    async def _engine() -> _MissingStatusEngine:
+        return _MissingStatusEngine()
+
+    app.dependency_overrides[get_approval_engine] = _engine
+    try:
+        resp = client.post(
+            "/api/v1/actions/act-missing/approve",
+            headers=_hdr(),
+            json={"comment": "ok", "decision_id": "dec-missing"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_approval_engine, None)
+
+    assert resp.status_code == 500, resp.text
+
+
+def test_approve_rejects_lifecycle_status_projection(
+    client: TestClient,
+) -> None:
+    class _LifecycleEngine:
+        async def approve(self, *args: object, **kwargs: object) -> ApprovalOutcome:
+            return ApprovalOutcome(
+                persisted_status=ActionStatus.EXECUTING,
+                decision_id="dec-life",
+                idempotent_replay=True,
+            )
+
+        async def scan_timeouts(self) -> list[str]:
+            return []
+
+    async def _engine() -> _LifecycleEngine:
+        return _LifecycleEngine()
+
+    app.dependency_overrides[get_approval_engine] = _engine
+    try:
+        resp = client.post(
+            "/api/v1/actions/act-life/approve",
+            headers=_hdr(),
+            json={"comment": "ok", "decision_id": "dec-life"},
+        )
+    finally:
+        app.dependency_overrides.pop(get_approval_engine, None)
+
+    assert resp.status_code == 500, resp.text
