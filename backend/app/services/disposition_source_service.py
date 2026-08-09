@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.registry import DispositionAdapterRegistry
 from app.core.errors import (
+    AdapterNotFoundError,
     DependencyUnavailableError,
     DispositionPermissionDenied,
     EventNotFoundError,
@@ -36,6 +37,7 @@ _TRANSIENT_DB_ERRORS = (
     TimeoutError,
     socket.gaierror,
     sa_exc.OperationalError,
+    sa_exc.InterfaceError,
 )
 
 
@@ -259,7 +261,15 @@ class DispositionSourceService:
 
             locator = SourceObjectLocator.model_validate(row.disposition_source_ref)
             connector = await session.get(orm.SourceConnector, locator.connector_id)
-            adapter = self._resolve_adapter(locator)
+            try:
+                adapter = self._resolve_adapter(locator)
+            except AdapterNotFoundError:
+                return DispositionReadinessRecheckResult(
+                    event_id=event_id,
+                    writeback_readiness=WritebackReadiness.CAPABILITY_UNKNOWN,
+                    blocked_reason="adapter_not_found",
+                    event_version=current_version,
+                )
             readiness, blocked = await self._readiness.resolve_for_locator(
                 locator=locator,
                 connector=connector,
@@ -292,5 +302,10 @@ class DispositionSourceService:
             )
 
     def _resolve_adapter(self, locator: SourceObjectLocator) -> Any:
-        product = str(locator.source_product or "mock_xdr")
+        product = str(locator.source_product or "").strip()
+        if not product:
+            raise AdapterNotFoundError(
+                "disposition source_product is required",
+                details={"connector_id": locator.connector_id},
+            )
         return self._adapters.get(product)

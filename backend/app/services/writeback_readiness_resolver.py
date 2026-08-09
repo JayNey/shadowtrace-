@@ -7,6 +7,7 @@ connectivity, and credential availability — never a fixed placeholder.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from app.adapters.disposition.base import BaseDispositionAdapter
@@ -17,6 +18,9 @@ from app.models.enums import (
     DispositionIntentKind,
     WritebackReadiness,
 )
+
+# Env-style credential refs match adapter config conventions (uppercase NAME).
+_ENV_CREDENTIAL_REF = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
 
 class WritebackReadinessResolver:
@@ -29,6 +33,10 @@ class WritebackReadinessResolver:
         connector: Any | None,
         adapter: BaseDispositionAdapter,
     ) -> tuple[WritebackReadiness, str | None]:
+        _ = locator  # locator retained for call-site symmetry / future typed filters
+        if connector is None:
+            return WritebackReadiness.CONNECTOR_UNAVAILABLE, "connector_missing"
+
         blocked = self._credential_block_reason(connector)
         if blocked is not None:
             return WritebackReadiness.PERMISSION_DENIED, blocked
@@ -53,12 +61,16 @@ class WritebackReadinessResolver:
         return WritebackReadiness.CAPABILITY_UNKNOWN, "capability_unknown"
 
     @staticmethod
-    def _credential_block_reason(connector: Any | None) -> str | None:
-        if connector is None:
-            return None
+    def _credential_block_reason(connector: Any) -> str | None:
         cred_ref = getattr(connector, "disposition_credential_ref", None)
         if not cred_ref:
             return None
-        if cred_ref not in os.environ:
+        ref = str(cred_ref).strip()
+        if not ref:
+            return None
+        # Managed secret URIs (e.g. secret://…) are not env names — do not short-circuit.
+        if "://" in ref or not _ENV_CREDENTIAL_REF.fullmatch(ref):
+            return None
+        if ref not in os.environ:
             return "credential_unavailable"
         return None
