@@ -1,0 +1,69 @@
+# ISSUE-278: shrink backend root build context — exclude local deps, caches, and
+# non-runtime trees so Compose multi-service builds do not re-upload ~900MB.
+
+# --- VCS / automation / IDE / worktrees ---
+.git
+.github
+.gitignore
+.cursor
+.idea
+.vscode
+.worktrees/
+.planning/
+*.swp
+.DS_Store
+
+# --- Secrets (never in build context) ---
+.env
+.env.*
+!.env.example
+.github_token
+*.local
+
+# --- Frontend: separate build context (infra/docker-compose.yml → ../frontend) ---
+frontend/
+
+# --- Python local env, caches, tests, coverage ---
+# Root-level names (Docker ** can match 0 dirs; keep explicit forms for clarity).
+.venv/
+.venv
+.venv*/
+venv/
+venv
+**/.venv
+**/.venv*
+**/venv
+**/venv*
+**/__pycache__
+**/*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+**/.mypy_cache
+**/.ruff_cache
+**/.pytest_cache
+**/.coverage
+**/coverage.xml
+htmlcov/
+**/htmlcov
+**/*.cover
+backend/tests/
+backend/tests/**
+
+# --- Node / frontend artifacts (belt-and-suspenders when paths overlap) ---
+**/node_modules
+.pnpm-store/
+**/.pnpm-store
+**/dist
+**/.vite
+
+# --- Docs, plans, large non-runtime files ---
+docs/
+artifacts/
+*.md
+*.pdf
+PR_BODY_*.md
+
+# --- Infra / local temp (not COPY'd by backend/Dockerfile) ---
+infra/
+tmp/
