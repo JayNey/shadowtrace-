@@ -32,6 +32,7 @@ from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
 from app.core.config import get_settings
 from app.core.errors import (
+    DependencyUnavailableError,
     InvestigationInProgressError,
     InvestigationLeaseLostError,
     ShadowTraceError,
@@ -678,6 +679,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             if not report.report_id:
                 report.report_id = report_id_for_event(event_id)
 
+        # ISSUE-266: persist analysis_only_complete before CLOSED so the frozen
+        # snapshot cannot capture a false journal/overlay race.
+        await self._persist_analysis_only_complete(event_id)
         await self._transition(
             event_id,
             EventStatus.CLOSED,
@@ -847,6 +851,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             need_inv: bool | None = None
             if triage_data is not None:
                 need_inv = TriageResult.model_validate(triage_data).need_investigation
+            # ISSUE-266: same pre-CLOSED persist contract as close_node / graph.
+            await self._persist_analysis_only_complete(event_id)
             await self._transition(
                 event_id,
                 EventStatus.CLOSED,
@@ -1487,7 +1493,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
 
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
         if self.context_store is None:
-            return
+            raise DependencyUnavailableError(
+                "analysis_only_complete persistence requires context_store"
+            )
         degraded = getattr(self, "_degraded_flags", None)
         await persist_analysis_only_complete_authoritative(
             event_id,

@@ -225,6 +225,21 @@ class _MockEventService:
     async def get_event(self, event_id: str) -> dict[str, object] | None:
         return self.events.get(event_id)
 
+    async def merge_analysis_only_complete_context_snapshot(
+        self,
+        event_id: str,
+        complete: bool,
+    ) -> None:
+        entry = self.events.get(event_id)
+        if entry is None:
+            return
+        snapshot = entry.get("context_snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+            entry["context_snapshot"] = snapshot
+        if complete or snapshot.get("analysis_only_complete") is True:
+            snapshot["analysis_only_complete"] = True
+
 
 class _FlakyTransitionEventService(_MockEventService):
     """Fails the first *fail_count* ``transition_status`` calls, then succeeds."""
@@ -519,12 +534,13 @@ def _build_super_agent(
     lease: _InMemoryEventLease | None = None,
     event_service: _MockEventService | None = None,
     event_bus: Any | None = None,
-    context_store: Any | None = None,
+    context_store: Any | None = ...,
     react_enabled: bool = False,
     transition_max_retries: int = 3,
     transition_retry_backoff_seconds: float = 0.0,
 ) -> SuperAgent:
     """Build a SuperAgent with stub agents for isolated testing."""
+    resolved_store = _RecordingContextStore() if context_store is ... else context_store
     return SuperAgent(
         triage_agent=_StubTriageAgent(triage or _make_triage()),
         evidence_agent=_StubEvidenceAgent(evidence or _make_evidence(event_id)),
@@ -535,7 +551,7 @@ def _build_super_agent(
         lease=lease,  # type: ignore[arg-type]
         event_service=event_service,  # type: ignore[arg-type]
         event_bus=event_bus,
-        context_store=context_store,
+        context_store=resolved_store,
         react_enabled=react_enabled,
         transition_max_retries=transition_max_retries,
         transition_retry_backoff_seconds=transition_retry_backoff_seconds,
@@ -1086,9 +1102,17 @@ class TestEventLeaseInterface:
 class _RecordingContextStore:
     def __init__(self) -> None:
         self.sets: list[tuple[str, str, object]] = []
+        self.values: dict[tuple[str, str], object] = {}
+
+    async def get(self, event_id: str, key: str) -> object | None:
+        return self.values.get((event_id, key))
 
     async def set(self, event_id: str, key: str, value: object) -> None:
         self.sets.append((event_id, key, value))
+        self.values[(event_id, key)] = value
+
+    async def refresh_closed_snapshot(self, event_id: str) -> None:
+        del event_id
 
 
 class TestAnalysisOnlyCompleteFlag:
@@ -1120,6 +1144,84 @@ class TestAnalysisOnlyCompleteFlag:
         )
         await agent.investigate(_EVENT_ID, include_response_execution=True)
         assert not any(key == "analysis_only_complete" for _event_id, key, _value in store.sets)
+
+    async def test_legacy_fast_close_persists_before_closed(self) -> None:
+        """ISSUE-266: journal must be true at the CLOSED transition boundary."""
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {
+                "status": EventStatus.NEW,
+                "disposition_policy": DispositionPolicy.NOT_REQUIRED,
+            },
+        }
+        store = _RecordingContextStore()
+        event_service = _MockEventService(events)
+        journal_at_closed: list[object | None] = []
+
+        original_transition = event_service.transition_status
+
+        async def _capture_closed(
+            event_id: str,
+            target: EventStatus,
+            *,
+            context: object | None = None,
+            operator: str | None = None,
+            reason: str | None = None,
+        ) -> None:
+            if target is EventStatus.CLOSED:
+                journal_at_closed.append(await store.get(event_id, "analysis_only_complete"))
+            await original_transition(
+                event_id,
+                target,
+                context=context,
+                operator=operator,
+                reason=reason,
+            )
+
+        event_service.transition_status = _capture_closed  # type: ignore[method-assign]
+        triage = TriageResult(
+            event_type=EventType.OTHER,
+            severity=Severity.LOW,
+            need_investigation=False,
+            reasoning="known benign",
+        )
+        agent = _build_super_agent(
+            triage=triage,
+            event_service=event_service,
+            context_store=store,
+        )
+        await agent.investigate(_EVENT_ID)
+
+        assert events[_EVENT_ID]["status"] is EventStatus.CLOSED
+        assert journal_at_closed == [True]
+        assert events[_EVENT_ID].get("context_snapshot", {}).get("analysis_only_complete") is True
+
+    async def test_legacy_fast_close_blocks_closed_when_persist_fails(self) -> None:
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {
+                "status": EventStatus.NEW,
+                "disposition_policy": DispositionPolicy.NOT_REQUIRED,
+            },
+        }
+
+        class _FailingStore(_RecordingContextStore):
+            async def set(self, event_id: str, key: str, value: object) -> None:
+                if key == "analysis_only_complete":
+                    raise RuntimeError("journal unavailable")
+                await super().set(event_id, key, value)
+
+        agent = _build_super_agent(
+            triage=TriageResult(
+                event_type=EventType.OTHER,
+                severity=Severity.LOW,
+                need_investigation=False,
+                reasoning="known benign",
+            ),
+            event_service=_MockEventService(events),
+            context_store=_FailingStore(),
+        )
+        with pytest.raises(DependencyUnavailableError):
+            await agent.investigate(_EVENT_ID)
+        assert events[_EVENT_ID]["status"] is not EventStatus.CLOSED
 
 
 class TestGraphWithoutLease:

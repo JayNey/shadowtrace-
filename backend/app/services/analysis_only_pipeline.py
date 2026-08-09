@@ -28,6 +28,7 @@ from app.agents.triage_agent import TriageAgent
 from app.core.config import Settings, get_settings
 from app.core.errors import (
     ConfigurationError,
+    DependencyUnavailableError,
     InvalidStateTransitionError,
     ShadowTraceError,
 )
@@ -820,7 +821,9 @@ class AnalysisOnlyPipeline:
     async def _persist_analysis_only_complete(self, event_id: str) -> None:
         await self._evaluate_quality_scores(event_id)
         if self._context_store is None:
-            return
+            raise DependencyUnavailableError(
+                "analysis_only_complete persistence requires context_store"
+            )
         await persist_analysis_only_complete_authoritative(
             event_id,
             context_store=self._context_store,

@@ -543,6 +543,10 @@ async def test_low_risk_not_required_short_circuit_closed(
     event = await event_service.get_event(event_id)
     assert event is not None
     assert event.status is EventStatus.CLOSED
+    analysis_only_complete = await context_store.get(event_id, "analysis_only_complete")
+    assert analysis_only_complete is True
+    assert event.event_context_snapshot is not None
+    assert event.event_context_snapshot.get("analysis_only_complete") is True
 
     observed = await _audit_status_sequence(session_factory, event_id)
     for status in SHORT_CIRCUIT_STATUS_SEQUENCE:

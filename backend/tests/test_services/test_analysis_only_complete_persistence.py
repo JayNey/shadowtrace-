@@ -186,3 +186,22 @@ async def test_persist_analysis_only_complete_requires_context_store() -> None:
             context_store=None,
             refresh_closed_snapshot=False,
         )
+
+
+@pytest.mark.asyncio
+async def test_persist_analysis_only_complete_fails_closed_on_merge_error() -> None:
+    store = MagicMock(spec=_LegacyContextStore)
+    store.get = AsyncMock(return_value=False)
+    store.set = AsyncMock(return_value=SimpleNamespace(redis_ok=True, version=1))
+    event_service = AsyncMock()
+    event_service.merge_analysis_only_complete_context_snapshot = AsyncMock(
+        side_effect=RuntimeError("snapshot merge unavailable")
+    )
+
+    with pytest.raises(DependencyUnavailableError):
+        await persist_analysis_only_complete_authoritative(
+            "evt-aoc-merge-failure",
+            context_store=store,
+            event_service=event_service,
+            refresh_closed_snapshot=False,
+        )

@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.core.errors import DependencyUnavailableError
 from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
 from app.services.false_positive_matcher import build_fp_close_reason
 
@@ -45,6 +46,13 @@ async def test_read_false_positive_match_returns_dict_from_store() -> None:
 async def test_read_false_positive_match_returns_none_without_store() -> None:
     pipeline = _pipeline(context_store=None)
     assert await pipeline._read_false_positive_match("evt-fp-002") is None
+
+
+@pytest.mark.asyncio
+async def test_persist_analysis_only_complete_requires_context_store() -> None:
+    pipeline = _pipeline(context_store=None)
+    with pytest.raises(DependencyUnavailableError):
+        await pipeline._persist_analysis_only_complete("evt-fp-no-store")
 
 
 @pytest.mark.asyncio

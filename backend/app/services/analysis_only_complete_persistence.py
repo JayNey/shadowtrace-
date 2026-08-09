@@ -147,6 +147,8 @@ async def persist_analysis_only_complete_authoritative(
                 event_id,
                 exc_info=True,
             )
+            # Non-atomic path: journal alone is insufficient without durable snapshot.
+            durable_ok = False
 
     if durable_ok and refresh_closed_snapshot and event_service is not None:
         try:
