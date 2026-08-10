@@ -1,4 +1,4 @@
-"""Docker build context guards (ISSUE-278)."""
+"""Docker build context guards (ISSUE-278, ISSUE-294)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,9 @@ import importlib.util
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -181,6 +183,75 @@ def test_context_fails_when_over_max_bytes() -> None:
     )
     assert proc.returncode == 1
     assert "exceeds limit" in (proc.stderr or proc.stdout)
+
+
+def test_canonical_compose_image_ref_matches_compose_default_tag() -> None:
+    mod = _load_check_module()
+    assert mod.canonical_compose_image_ref("shadowtrace-ci-42-1", "backend") == (
+        "shadowtrace-ci-42-1-backend"
+    )
+
+
+def test_resolve_compose_service_image_prefers_label_query() -> None:
+    mod = _load_check_module()
+    with (
+        mock.patch.object(mod, "shutil_which", return_value="/usr/bin/docker"),
+        mock.patch.object(
+            mod,
+            "_resolve_by_compose_labels",
+            return_value="sha256:from-labels",
+        ) as labels,
+        mock.patch.object(mod, "_image_id_from_ref") as canonical,
+        mock.patch.object(mod, "_resolve_by_compose_images") as compose_images,
+    ):
+        image_id = mod.resolve_compose_service_image(
+            project_name="shadowtrace-ci-99-1",
+            service="backend",
+        )
+    assert image_id == "sha256:from-labels"
+    labels.assert_called_once_with("shadowtrace-ci-99-1", "backend")
+    canonical.assert_not_called()
+    compose_images.assert_not_called()
+
+
+def test_resolve_compose_service_image_falls_back_to_canonical_ref() -> None:
+    mod = _load_check_module()
+    with (
+        mock.patch.object(mod, "shutil_which", return_value="/usr/bin/docker"),
+        mock.patch.object(mod, "_resolve_by_compose_labels", return_value=None),
+        mock.patch.object(mod, "_image_id_from_ref", return_value="sha256:from-ref") as canonical,
+        mock.patch.object(mod, "_resolve_by_compose_images", return_value=None),
+    ):
+        image_id = mod.resolve_compose_service_image(
+            project_name="shadowtrace-ci-99-1",
+            service="backend",
+        )
+    assert image_id == "sha256:from-ref"
+    canonical.assert_called_once_with("shadowtrace-ci-99-1-backend")
+
+
+def test_resolve_compose_service_image_prints_diagnostics_on_miss() -> None:
+    mod = _load_check_module()
+    with (
+        mock.patch.object(mod, "shutil_which", return_value="/usr/bin/docker"),
+        mock.patch.object(mod, "_resolve_by_compose_labels", return_value=None),
+        mock.patch.object(mod, "_image_id_from_ref", return_value=None),
+        mock.patch.object(mod, "_resolve_by_compose_images", return_value=None),
+        mock.patch.object(mod, "print_compose_image_diagnostics") as diagnostics,
+    ):
+        with pytest.raises(SystemExit) as exc:
+            mod.resolve_compose_service_image(
+                project_name="shadowtrace-ci-99-1",
+                service="backend",
+            )
+    assert exc.value.code == 1
+    diagnostics.assert_called_once()
+
+
+def test_ci_docker_build_uses_compose_image_resolver() -> None:
+    ci_text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "--resolve-compose-image backend" in ci_text
+    assert "compose images -q backend" not in ci_text
 
 
 def test_seed_dirty_fails_when_ignore_empty(tmp_path: Path) -> None:
