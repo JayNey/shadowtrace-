@@ -140,6 +140,8 @@ def _retry_header_count(headers: dict[str, object] | None, key: str) -> int:
     if not headers:
         return 0
     raw = headers.get(key, 0)
+    if isinstance(raw, bool):
+        return int(raw)
     if isinstance(raw, int):
         return raw
     if isinstance(raw, float):

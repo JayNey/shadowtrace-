@@ -241,11 +241,14 @@ class AgentPublicationService:
         if not persist_report:
             return canonical
 
-        persisted = await self._event_service.publish_investigation_report(
-            canonical,
-            plan_revision=plan_revision,
-            operator="ReportAgent",
-            publication=publication,
+        persisted = cast(
+            InvestigationReport,
+            await self._event_service.publish_investigation_report(
+                canonical,
+                plan_revision=plan_revision,
+                operator="ReportAgent",
+                publication=publication,
+            ),
         )
 
         if working_memory is not None:
@@ -265,7 +268,7 @@ class AgentPublicationService:
 
         await self._publish_report_generated(persisted)
         await self._persist_report_generated_flag(event_id, True)
-        return cast(InvestigationReport, persisted)
+        return persisted
 
     async def _publish_report_generated(self, report: InvestigationReport) -> None:
         if self._event_bus is None:

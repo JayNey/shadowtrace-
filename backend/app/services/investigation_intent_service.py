@@ -309,7 +309,7 @@ class InvestigationIntentService:
                     session.add(row)
                     await session.flush()
                     return self._http_intent_result(row, created=True)
-        except IntegrityError:
+        except IntegrityError as exc:
             # A concurrent request may win either the request-key or per-event
             # unique constraint after our initial locked lookups.
             async with self._session_factory() as session:
@@ -355,7 +355,7 @@ class InvestigationIntentService:
                         raise InvestigationInProgressError(
                             "investigation already accepted for this event",
                             details={"event_id": event_id, "intent_id": active.intent_id},
-                        ) from None
+                        ) from exc
             raise
 
     async def mark_inline_started(self, intent_id: str) -> str:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from app.agents.base import BaseAgent
 from app.agents.confidence_calibration import DEFAULT_TEMPERATURE, calibrate_confidence
@@ -63,7 +63,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         audit_service: Any | None = None,
         event_bus: Any | None = None,
         event_service: Any | None = None,
-        publication_service: Any | None = None,
+        publication_service: AgentPublicationService | None = None,
         scoring_engine: RiskScoringEngine | None = None,
         verdict_resolver: VerdictResolver | None = None,
         calibration_temperature: float = DEFAULT_TEMPERATURE,
@@ -272,7 +272,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         from app.services.agent_publication_service import AgentPublicationService
 
         if self.publication_service is not None:
-            return cast(AgentPublicationService, self.publication_service)
+            return self.publication_service
         if self.event_service is None:
             return None
 

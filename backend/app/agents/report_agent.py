@@ -14,7 +14,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -122,7 +122,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         audit_service: Any | None = None,
         event_bus: Any | None = None,
         event_service: Any | None = None,
-        publication_service: Any | None = None,
+        publication_service: AgentPublicationService | None = None,
         detection_context_service: Any | None = None,
         section_builder: ReportSectionBuilder | None = None,
         scenario_id: str | None = None,
@@ -370,7 +370,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         from app.services.agent_publication_service import AgentPublicationService
 
         if self.publication_service is not None:
-            return cast(AgentPublicationService, self.publication_service)
+            return self.publication_service
         if self.event_service is None:
             return None
 

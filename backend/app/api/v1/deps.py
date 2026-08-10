@@ -10,7 +10,7 @@ circular imports with ``app.api.v1.schemas`` → ``app.services.context_service`
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,6 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.config import get_settings
 from app.core.redis_client import RedisClient
 from app.db.session_provider import get_session_provider, reset_session_provider
+
+if TYPE_CHECKING:
+    from app.services.execution_job_query_service import ExecutionJobQueryService
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +67,7 @@ _tool_call_grant_service: Any = None  # ToolCallGrantService (ISSUE-134)
 _agent_task_service: Any = None  # AgentTaskService (ISSUE-133)
 _agent_artifact_service: Any = None  # AgentArtifactService (ISSUE-133)
 _content_projection_service: Any = None  # ContentProjectionService (ISSUE-133)
-_execution_job_query: Any = None  # ExecutionJobQueryService (ISSUE-271)
+_execution_job_query: ExecutionJobQueryService | None = None
 
 
 def _get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -772,7 +775,7 @@ ActionExecutionDep = Annotated[Any, Depends(get_action_execution)]
 RollbackServiceDep = Annotated[Any, Depends(get_rollback_service)]
 
 
-def get_execution_job_query_service() -> Any:
+def get_execution_job_query_service() -> ExecutionJobQueryService:
     """Return the authoritative execution job read service (ISSUE-271)."""
     global _execution_job_query
     if _execution_job_query is None:
@@ -787,7 +790,7 @@ def get_execution_job_query_service() -> Any:
     return _execution_job_query
 
 
-ExecutionJobQueryDep = Annotated[Any, Depends(get_execution_job_query_service)]
+ExecutionJobQueryDep = Annotated["ExecutionJobQueryService", Depends(get_execution_job_query_service)]
 
 
 async def _get_wm() -> Any:

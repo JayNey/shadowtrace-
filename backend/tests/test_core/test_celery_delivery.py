@@ -12,6 +12,7 @@ from app.core.celery_delivery import (
     RedeliveryDecision,
     RedeliveryHandoffAction,
     RedeliveryLookupRetry,
+    _retry_header_count,
     celery_task_owner_id,
     evaluate_redelivered_investigation_decision,
     evaluate_redelivered_investigation_skip,
@@ -64,6 +65,15 @@ def test_normalize_public_task_state_defaults_pending() -> None:
 def test_lookup_retry_countdown_is_bounded() -> None:
     assert 2.0 <= lookup_retry_countdown(1) <= 62.6
     assert lookup_retry_countdown(10) <= 78.0
+
+
+def test_retry_header_count_coerces_common_types() -> None:
+    assert _retry_header_count({"x": 3}, "x") == 3
+    assert _retry_header_count({"x": "4"}, "x") == 4
+    assert _retry_header_count({"x": True}, "x") == 1
+    assert _retry_header_count({"x": False}, "x") == 0
+    assert _retry_header_count({"x": "bad"}, "x") == 0
+    assert _retry_header_count(None, "x") == 0
 
 
 def test_celery_redelivery_max_retries_covers_policy_budgets() -> None:
