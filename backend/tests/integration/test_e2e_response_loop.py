@@ -32,8 +32,12 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.adapters.mock_xdr import MockXDRDispositionAdapter
+from app.adapters.registry import DispositionAdapterRegistry
 from app.agents.response_agent import build_mock_capability_manifest, compute_template_hash
+from app.api.v1 import deps
 from app.core.auth import Principal
+from app.core.config import get_settings
 from app.core.errors import ValidationError
 from app.core.event_bus import EventBus
 from app.core.redis_client import RedisClient
@@ -83,6 +87,14 @@ from app.models.ids import (
     report_id_for_event,
 )
 from app.models.workflow import validate_action_status_transition
+from app.orchestration.workflow_graph import (
+    NODE_BEGIN_DISPOSITION_ONLY,
+    NODE_EXECUTE,
+    NODE_RESPONSE,
+    NODE_VERIFY,
+    build_initial_investigation_state,
+    invoke_investigation_graph,
+)
 from app.orchestration.workflow_runtime import WorkflowRuntimeService
 from app.services.approval_engine import ApprovalEngine
 from app.services.context_service import (
@@ -102,6 +114,7 @@ from app.services.event_service import EventService
 from app.services.state_machine_service import StateMachineService
 from app.services.terminal_disposition_resolver import TerminalDispositionResolver
 from tests.helpers.decision_audit import seed_minimum_disposition_audit
+from tests.integration.autonomous_e2e.helpers import patch_production_session_factory
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
 )
@@ -396,7 +409,7 @@ async def _seed_required_fp(
                     "recommendation": "close_as_fp",
                     "max_score": max_score,
                     "matched_window_id": "cw-test",
-                    "supporting_evidence_ids": ["evd-seed-001"],
+                    "supporting_evidence_ids": [],
                 },
             )
 
@@ -2557,32 +2570,80 @@ async def test_scenario_5_via_post_evidence_fp_adjudication(
     await assert_no_analysis_content_in_outbound(session_factory, event_id)
 
 
+async def _run_disposition_only_investigation_graph(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    event_id: str,
+    mock_xdr_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> dict[str, Any]:
+    """Drive disposition-only through the production investigation graph (ISSUE-288)."""
+    monkeypatch.setenv("SOURCE_MODE", "mock_xdr")
+    monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
+    monkeypatch.setenv("ORCHESTRATION_MODE", "graph")
+    monkeypatch.setenv("BUDGET_ENABLED", "false")
+    get_settings.cache_clear()
+    deps.reset_deps()
+    patch_production_session_factory(monkeypatch, session_factory)
+
+    registry = DispositionAdapterRegistry()
+    registry.register(
+        "mock_xdr",
+        MockXDRDispositionAdapter(
+            client=mock_xdr_client,
+            read_token="mock-read-token",
+            write_token="mock-write-token",
+        ),
+    )
+    monkeypatch.setattr(deps, "_adapter_registry", registry)
+
+    super_agent = await deps.get_super_agent()
+    graph = getattr(super_agent, "_investigation_graph", None)
+    assert graph is not None
+    runtime = await deps.get_workflow_runtime()
+    await runtime.begin_disposition_only(event_id)
+    async with session_factory() as session:
+        prebuilt_status = await session.scalar(
+            select(orm.Action.status).where(
+                orm.Action.event_id == event_id,
+                orm.Action.execution_phase == ActionExecutionPhase.POST_VERIFY.value,
+                orm.Action.tool_name == "update_source_event_disposition",
+            )
+        )
+    assert prebuilt_status == ActionStatus.APPROVED.value
+    initial = await build_initial_investigation_state(
+        event_id,
+        context_store=deps._get_context_store(),
+        defer_response_execution=False,
+        generate_report=True,
+    )
+    config = {"configurable": {"thread_id": event_id}}
+    final = await invoke_investigation_graph(graph, initial, config)
+    snapshot = await graph.aget_state(config)
+    return {
+        "final_state": final,
+        "node_trace": list(
+            (snapshot.values or {}).get("node_trace") or final.get("node_trace") or []
+        ),
+    }
+
+
 @pytest.mark.usefixtures("clean_state")
 async def test_scenario_5_disposition_only_false_positive_closed(
     session_factory: async_sessionmaker[AsyncSession],
-    context_store: EventContextStore,
-    event_service: EventService,
-    workflow_runtime_service: WorkflowRuntimeService,
-    event_disposition_service: EventDispositionService,
     disposition_resolver: TerminalDispositionResolver,
-    state_machine_service: StateMachineService,
     mock_xdr_state: MockXDRState,
+    mock_xdr_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Scenario 5: False positive → disposition-only path → IGNORED → CLOSED.
+    """Scenario 5: False positive → disposition-only graph path → IGNORED → CLOSED.
 
-    B4 fix: Explicitly asserts derived_disposition == IGNORED and
-    EventStatus == CLOSED; asserts zero IMMEDIATE actions created.
-
-    B6 fix: Tests EventType.INSIDER_THREAT guard (does not trigger
-    disposition_only incorrectly).
-
-    Blocker fix (ISSUE-064 review): begin_disposition_only keeps
-    disposition_policy=REQUIRED and creates a deferred POST_VERIFY
-    update_source_event_disposition Action (APPROVED, IGNORED).
-    The test drives the standard execute → VERIFYING →
-    activate_and_submit → EVENT_STATUS_UPDATE →
-    CONFIRMED(readback_verified) → CLOSED chain instead of
-    directly calling state_machine_service.transition.
+    ISSUE-288: the investigation graph must reach verify via
+    begin_disposition_only_node → planner → response (prebuilt plan) →
+    approval → execute → verify → report → close.  Manual
+    ``activate_and_submit`` in the test is not the primary closure path.
     """
     # --- Arrange: Create event in TRIAGING with REQUIRED policy ---
 
@@ -2642,16 +2703,29 @@ async def test_scenario_5_disposition_only_false_positive_closed(
     # Seed the fp_adjudication journal (required by begin_disposition_only)
     await _seed_required_fp(session_factory, event_id)
 
-    # --- Act: begin_disposition_only ---
-    await workflow_runtime_service.begin_disposition_only(event_id)
+    # --- Act: run disposition-only through the investigation graph ---
+    graph_result = await _run_disposition_only_investigation_graph(
+        session_factory=session_factory,
+        event_id=event_id,
+        mock_xdr_client=mock_xdr_client,
+        monkeypatch=monkeypatch,
+    )
+    node_trace = graph_result["node_trace"]
+    assert NODE_BEGIN_DISPOSITION_ONLY in node_trace
+    assert NODE_RESPONSE in node_trace
+    assert NODE_EXECUTE in node_trace
+    assert NODE_VERIFY in node_trace
+    assert node_trace.index(NODE_RESPONSE) < node_trace.index(NODE_EXECUTE)
+    assert node_trace.index(NODE_EXECUTE) < node_trace.index(NODE_VERIFY)
 
     # ISSUE-064 S7: Assert no evidence collection in disposition-only path
     async with session_factory() as session:
         evidence_journal_entries = await session.scalar(
             select(func.count())
-            .select_from(orm.DispositionOutbox)
+            .select_from(orm.EventContextJournal)
             .where(
-                orm.DispositionOutbox.event_id == event_id,
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == "evidence_output",
             )
         )
         evidence_journal_entries = evidence_journal_entries or 0
@@ -2689,8 +2763,8 @@ async def test_scenario_5_disposition_only_false_positive_closed(
         assert deferred_row is not None, (
             "begin_disposition_only must create a deferred update_source_event_disposition Action"
         )
-        assert deferred_row.status == ActionStatus.APPROVED.value, (
-            f"deferred action must be APPROVED, got {deferred_row.status}"
+        assert deferred_row.status == ActionStatus.SUCCESS.value, (
+            f"graph-completed deferred action must be SUCCESS, got {deferred_row.status}"
         )
         assert deferred_row.approved_terminal_dispositions == [SourceDisposition.IGNORED.value], (
             f"deferred action must pre-approve IGNORED, got "
@@ -2721,25 +2795,22 @@ async def test_scenario_5_disposition_only_false_positive_closed(
         f"False positive disposition_only must derive IGNORED, got {disposition.disposition}"
     )
 
-    # --- Blocker fix: Activate and submit the deferred action ---
-    # This runs the standard execute → VERIFYING → activate_and_submit →
-    # EVENT_STATUS_UPDATE → CONFIRMED(readback_verified) → CLOSED chain.
-    result = await event_disposition_service.activate_and_submit(
-        event_id,
-        plan_revision=1,
-        principal_or_system="test-scenario-5",
-    )
-
-    assert result.activated is True, f"activation must succeed, skipped: {result.skipped_reason}"
-    assert result.derived_disposition is SourceDisposition.IGNORED, (
-        f"derived_disposition must be IGNORED, got {result.derived_disposition}"
-    )
-
-    # --- Blocker fix: Assert CONFIRMED EVENT_STATUS_UPDATE in outbox ---
+    # --- Assert CONFIRMED EVENT_STATUS_UPDATE via graph-driven verify path ---
     async with session_factory() as session:
+        terminal_outbox = await session.scalar(
+            select(orm.DispositionOutbox).where(
+                orm.DispositionOutbox.event_id == event_id,
+                orm.DispositionOutbox.intent_kind
+                == DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+            )
+        )
+        assert terminal_outbox is not None, (
+            "Graph path must produce a terminal EVENT_STATUS_UPDATE outbox row"
+        )
         receipt = await session.scalar(
             select(orm.DispositionReceipt).where(
-                orm.DispositionReceipt.disposition_id == result.disposition_id,
+                orm.DispositionReceipt.writeback_id == terminal_outbox.writeback_id,
                 orm.DispositionReceipt.status == WritebackStatus.CONFIRMED.value,
                 orm.DispositionReceipt.confirmation_evidence
                 == ConfirmationEvidence.READBACK_VERIFIED.value,
@@ -2747,8 +2818,25 @@ async def test_scenario_5_disposition_only_false_positive_closed(
             )
         )
         assert receipt is not None, (
-            "P0: must have CONFIRMED receipt with readback_verified for "
-            f"disposition {result.disposition_id}"
+            "P0: graph path must reach CONFIRMED readback_verified terminal writeback"
+        )
+
+    await _assert_event_status(session_factory, event_id, EventStatus.CLOSED)
+
+    # --- Assert exactly one deferred terminal Action (no duplicate from ResponseAgent) ---
+    async with session_factory() as session:
+        deferred_count = await session.scalar(
+            select(func.count())
+            .select_from(orm.Action)
+            .where(
+                orm.Action.event_id == event_id,
+                orm.Action.execution_phase == ActionExecutionPhase.POST_VERIFY.value,
+                orm.Action.tool_name == "update_source_event_disposition",
+                orm.Action.superseded_by_revision.is_(None),
+            )
+        )
+        assert deferred_count == 1, (
+            f"Disposition-only must keep a single deferred terminal Action, got {deferred_count}"
         )
 
     # --- Assert zero IMMEDIATE response actions created ---
@@ -2758,6 +2846,7 @@ async def test_scenario_5_disposition_only_false_positive_closed(
             .select_from(orm.Action)
             .where(
                 orm.Action.event_id == event_id,
+                orm.Action.action_category == ActionCategory.RESPONSE.value,
                 orm.Action.execution_phase == ActionExecutionPhase.IMMEDIATE.value,
             )
         )

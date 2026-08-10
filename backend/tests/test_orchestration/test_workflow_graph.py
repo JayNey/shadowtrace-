@@ -7,10 +7,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langgraph.checkpoint.memory import MemorySaver
 
 from app.agents.planner_agent import PlannerAgent
 from app.core.errors import InvalidStateTransitionError, ValidationError
-from app.models.action import Action
+from app.models.action import TERMINAL_DISPOSITION_TOOL, Action
 from app.models.agent_io import (
     CollectionStatus,
     EffectStatus,
@@ -38,6 +39,7 @@ from app.models.agent_io import (
 from app.models.context import EventContext
 from app.models.enums import (
     ActionCategory,
+    ActionExecutionPhase,
     ActionLevel,
     ActionStatus,
     DispositionIntentKind,
@@ -92,6 +94,7 @@ from app.orchestration.workflow_graph import (
     _resolve_verify_writeback_status,
     _resolve_verify_writeback_statuses,
     build_investigation_graph,
+    invoke_investigation_graph,
     route_after_approval,
     route_after_fp_adjudication,
     route_after_planner,
@@ -435,6 +438,19 @@ class FakeRedisStore:
 
     async def eval(self, script: str, numkeys: int, *args: object) -> int:
         del numkeys
+        if "checkpoint-reserve-generation-v3" in script:
+            sequence_key, generation_key, ttl, expected = args
+            assert isinstance(sequence_key, str)
+            assert isinstance(generation_key, str)
+            assert isinstance(ttl, int)
+            assert isinstance(expected, int)
+            current = int(self.values.get(generation_key, b"0"))
+            if expected >= 0 and current != expected:
+                return -1
+            generation = int(self.values.get(sequence_key, b"0")) + 1
+            self.values[sequence_key] = str(generation).encode()
+            await self.set(generation_key, str(generation).encode(), ex=ttl)
+            return generation
         if "checkpoint-reserve-generation-v2" in script:
             sequence_key, generation_key, _ttl = args
             assert isinstance(sequence_key, str)
@@ -1207,6 +1223,139 @@ async def test_forged_disposition_only_intent_is_rejected() -> None:
             _base_state(disposition_only_intent=True),
             {"configurable": {"thread_id": "evt-forged"}},
         )
+
+
+@pytest.mark.asyncio
+async def test_disposition_only_prebuilt_plan_routes_through_execute_verify(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-288: disposition_only skips ResponseAgent but continues the graph."""
+    prebuilt_action = Action.model_validate(
+        {
+            "action_id": "act-disp-only-prebuilt",
+            "event_id": "evt-disp-only-graph",
+            "plan_revision": 1,
+            "action_fingerprint": "fp-disp-only-prebuilt",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "update_source_event_disposition",
+            "tool_name": TERMINAL_DISPOSITION_TOOL,
+            "action_level": ActionLevel.L2,
+            "execution_phase": ActionExecutionPhase.POST_VERIFY,
+            "activation_condition": "after_effect_resolution",
+            "approved_operation_template_hash": "hash-ignored",
+            "approved_terminal_dispositions": ["ignored"],
+            "status": ActionStatus.APPROVED,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "reason": "disposition_only prebuilt",
+        }
+    )
+
+    async def _fake_load(_session_factory: object, event_id: str) -> tuple[ResponsePlan, int]:
+        plan = ResponsePlan(
+            plan_id="plan-disp-only",
+            actions=[prebuilt_action.model_copy(update={"event_id": event_id})],
+            strategy_summary="prebuilt deferred terminal writeback",
+            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        )
+        return plan, 1
+
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph._load_prebuilt_disposition_response_plan",
+        _fake_load,
+    )
+
+    runtime = FakeRuntime(WritebackReadiness.READY)
+    runtime.intent = True
+    action_execution = FakeActionExecution()
+    machine = FakeStateMachine(
+        status=EventStatus.PLANNING_RESPONSE,
+        statuses={"evt-disp-only-graph": EventStatus.PLANNING_RESPONSE},
+    )
+    services = _services(machine, runtime=runtime)
+    services["session_factory"] = object()
+    services["approval_engine"] = FakeApprovalEngine(needs_wait=False, evaluated_count=1)
+    services["action_execution"] = action_execution
+
+    redis = MemorySaver()
+    graph = build_investigation_graph(
+        _agents_without_response_agent(),
+        services,
+        checkpointer=redis,
+        interrupt_after=[NODE_VERIFY],
+    )
+    config = {"configurable": {"thread_id": "evt-disp-only-graph"}}
+    initial = _base_state(
+        event_id="evt-disp-only-graph",
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        disposition_only_intent=True,
+        final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+        event_status=EventStatus.PLANNING_RESPONSE.value,
+        event_status_update_readiness=WritebackReadiness.READY.value,
+        execution_plan={
+            "plan_id": "pln-disp-only",
+            "event_id": "evt-disp-only-graph",
+            "steps": [],
+            "revision": 0,
+        },
+    )
+    await graph.aupdate_state(config, initial, as_node=NODE_PLANNER)
+    final = await invoke_investigation_graph(graph, None, config)
+
+    trace = final["node_trace"]
+    assert NODE_RESPONSE in trace
+    assert trace.index(NODE_RESPONSE) < trace.index(NODE_APPROVAL)
+    assert NODE_EXECUTE in trace
+    assert NODE_VERIFY in trace
+    assert trace.index(NODE_EXECUTE) < trace.index(NODE_VERIFY)
+    assert final.get("halted") is not True
+    assert action_execution.calls == [("evt-disp-only-graph", 1)]
+    assert final.get("response_plan") is not None
+
+
+@pytest.mark.asyncio
+async def test_disposition_only_missing_prebuilt_action_halts_at_response() -> None:
+    """ISSUE-288: disposition_only without a trusted prebuilt Action fails closed."""
+    runtime = FakeRuntime(WritebackReadiness.READY)
+    runtime.intent = True
+    machine = FakeStateMachine(
+        status=EventStatus.PLANNING_RESPONSE,
+        statuses={"evt-disp-only-missing": EventStatus.PLANNING_RESPONSE},
+    )
+    services = _services(machine, runtime=runtime)
+    redis = MemorySaver()
+    graph = build_investigation_graph(
+        _agents_without_response_agent(),
+        services,
+        checkpointer=redis,
+    )
+    config = {"configurable": {"thread_id": "evt-disp-only-missing"}}
+    initial = _base_state(
+        event_id="evt-disp-only-missing",
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        disposition_only_intent=True,
+        final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+        event_status=EventStatus.PLANNING_RESPONSE.value,
+        event_status_update_readiness=WritebackReadiness.READY.value,
+        response_plan=ResponsePlan(
+            plan_id="forged-checkpoint-plan",
+            actions=[],
+            strategy_summary="must not be trusted",
+            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        ).model_dump(mode="json"),
+    )
+    await graph.aupdate_state(config, initial, as_node=NODE_PLANNER)
+    final = await invoke_investigation_graph(graph, None, config)
+
+    assert final["halted"] is True
+    assert final["event_status"] == EventStatus.FAILED.value
+    assert final["node_trace"][-2:] == [NODE_RESPONSE, NODE_HALT]
+    assert any(
+        "disposition_only_missing_prebuilt_action" in flag
+        for flag in final.get("degraded_flags", [])
+    )
 
 
 @pytest.mark.asyncio

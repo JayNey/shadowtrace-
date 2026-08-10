@@ -13,8 +13,10 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
+from app.agents.response_agent import compute_template_hash, generate_response_plan_id
 from app.core.config import get_settings
 from app.core.errors import InvalidStateTransitionError, ValidationError
+from app.models.action import TERMINAL_DISPOSITION_TOOL
 from app.models.agent_io import (
     CollectionStatus,
     EffectStatus,
@@ -40,12 +42,18 @@ from app.models.agent_io import (
 )
 from app.models.context import EventContext
 from app.models.enums import (
+    ActionCategory,
+    ActionExecutionPhase,
+    ActionLevel,
+    ActionStatus,
     DispositionPolicy,
     EventStatus,
     EventType,
+    ExecutionOwner,
     ExecutionSubstate,
     FinalVerdict,
     Severity,
+    SourceDisposition,
     WritebackReadiness,
 )
 from app.models.security_event import EventSummary
@@ -63,6 +71,7 @@ from app.orchestration.writeback_recovery_handler import (
     resolve_writeback_statuses,
     writeback_recovery_graph_node,
 )
+from app.services.action_mapper import action_from_orm
 from app.services.agent_task_coordinator import (
     run_response_plan_with_ledger,
     run_risk_score_with_ledger,
@@ -156,6 +165,8 @@ P0_NODE_SEQUENCE = (
 ROUTE_CLOSE = "close"
 ROUTE_MANUAL_HOLD = "manual_hold"
 ROUTE_INVESTIGATE = "investigate"
+ROUTE_TRIAGE = "triage"
+ROUTE_DISPOSITION_ONLY = "disposition_only"
 ROUTE_RESPONSE = "response"
 ROUTE_EVIDENCE = "evidence"
 ROUTE_CONTINUE = "continue"
@@ -269,6 +280,13 @@ def route_after_triage(state: InvestigationState) -> str:
             return ROUTE_REPORT
         return ROUTE_CLOSE
     return ROUTE_INVESTIGATE
+
+
+def route_from_start(state: InvestigationState) -> str:
+    """Enter the trusted disposition-only continuation when intent is hydrated."""
+    if state.get("disposition_only_intent"):
+        return ROUTE_DISPOSITION_ONLY
+    return ROUTE_TRIAGE
 
 
 def route_after_fp_adjudication(state: InvestigationState) -> str:
@@ -726,6 +744,77 @@ def _plan_revision_from_state(state: InvestigationState) -> int:
     return 1
 
 
+async def _load_prebuilt_disposition_response_plan(
+    session_factory: Any,
+    event_id: str,
+) -> tuple[ResponsePlan, int] | None:
+    """Project the APPROVED deferred terminal Action from ``begin_disposition_only``.
+
+    Returns ``None`` when the trusted prebuilt action is missing or ambiguous.
+    """
+    from sqlalchemy import select
+
+    from app.db import models as orm
+
+    async with session_factory() as session:
+        rows = (
+            await session.scalars(
+                select(orm.Action).where(
+                    orm.Action.event_id == event_id,
+                    orm.Action.action_category == ActionCategory.RESPONSE.value,
+                    orm.Action.execution_phase == ActionExecutionPhase.POST_VERIFY.value,
+                    orm.Action.tool_name == TERMINAL_DISPOSITION_TOOL,
+                    orm.Action.status == ActionStatus.APPROVED.value,
+                    orm.Action.superseded_by_revision.is_(None),
+                )
+            )
+        ).all()
+    if len(rows) != 1:
+        return None
+    action = action_from_orm(rows[0])
+    approved_dispositions = [SourceDisposition.IGNORED]
+    if not (
+        action.event_id == event_id
+        and action.plan_revision == 1
+        and action.action_fingerprint == f"fp-disposition-only-{event_id}"
+        and action.action_category is ActionCategory.RESPONSE
+        and action.action_name == TERMINAL_DISPOSITION_TOOL
+        and action.tool_name == TERMINAL_DISPOSITION_TOOL
+        and action.action_level is ActionLevel.L2
+        and action.execution_phase is ActionExecutionPhase.POST_VERIFY
+        and action.activation_condition == "after_effect_resolution"
+        and action.approved_operation_template_hash == compute_template_hash(approved_dispositions)
+        and action.approved_terminal_dispositions == approved_dispositions
+        and action.status is ActionStatus.APPROVED
+        and action.execution_owner is ExecutionOwner.XDR_MANAGED
+        and action.writeback_required
+        and action.writeback_applicable
+        and action.writeback_readiness is WritebackReadiness.READY
+        and action.disposition_source_ref is not None
+        and action.superseded_by_revision is None
+    ):
+        return None
+    plan_revision = int(action.plan_revision)
+    plan = ResponsePlan(
+        plan_id=generate_response_plan_id(event_id, plan_revision),
+        actions=[action],
+        strategy_summary="disposition-only: prebuilt deferred terminal writeback",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    return plan, plan_revision
+
+
+async def _project_disposition_only_response_plan(
+    services: dict[str, Any],
+    state: InvestigationState,
+) -> tuple[ResponsePlan, int] | None:
+    """Project the canonical prebuilt plan from the authoritative Action row."""
+    session_factory = services.get("session_factory")
+    if session_factory is None:
+        return None
+    return await _load_prebuilt_disposition_response_plan(session_factory, state["event_id"])
+
+
 def build_investigation_graph(
     agents: dict[str, Any],
     services: dict[str, Any],
@@ -829,6 +918,11 @@ def build_investigation_graph(
     async def begin_disposition_only_node(
         state: InvestigationState,
     ) -> InvestigationState:
+        persisted = await runtime.read_disposition_only_intent(state["event_id"])
+        if not persisted:
+            raise InvalidStateTransitionError(
+                "disposition_only intent must be persisted by WorkflowRuntimeService"
+            )
         await runtime.begin_disposition_only(state["event_id"])
         current = EventStatus(state.get("event_status", EventStatus.TRIAGING.value))
         await runtime.assert_disposition_only_transition_allowed(
@@ -918,7 +1012,20 @@ def build_investigation_graph(
         )
 
     async def close_node(state: InvestigationState) -> InvestigationState:
-        triage = TriageResult.model_validate(state["triage_result"])
+        triage_raw = state.get("triage_result")
+        triage = TriageResult.model_validate(triage_raw) if triage_raw is not None else None
+        if triage is None and not state.get("disposition_only_intent"):
+            raise ValidationError(
+                "close_node requires triage_result outside disposition-only",
+                error_code="validation_error",
+                details={"event_id": state["event_id"]},
+            )
+        close_severity = (
+            triage.severity
+            if triage is not None
+            else Severity(state.get("severity", Severity.LOW.value))
+        )
+        need_investigation = triage.need_investigation if triage is not None else False
         final_verdict = state.get("final_verdict")
         short_circuit = state.get("risk_assessment") is None
         defer_response = bool(state.get("defer_response_execution"))
@@ -961,7 +1068,7 @@ def build_investigation_graph(
             )
             assessment = RiskAssessment(
                 risk_score=0,
-                severity=triage.severity,
+                severity=close_severity,
                 confidence=0.9,
                 risk_factors=[],
                 possible_false_positive=True,
@@ -1050,14 +1157,14 @@ def build_investigation_graph(
             state,
             EventStatus.CLOSED,
             context=TransitionContext(
-                need_investigation=triage.need_investigation,
+                need_investigation=need_investigation,
                 disposition_policy=DispositionPolicy(
                     state.get(
                         "disposition_policy",
                         DispositionPolicy.NOT_REQUIRED.value,
                     )
                 ),
-                severity=triage.severity,
+                severity=close_severity,
                 recommendation=((state.get("fp_adjudication") or {}).get("recommendation")),
                 final_verdict=FinalVerdict(final_verdict) if final_verdict else None,
                 report_exists=report_generated,
@@ -1303,9 +1410,57 @@ def build_investigation_graph(
 
     async def response_node(state: InvestigationState) -> InvestigationState:
         if state.get("disposition_only_intent"):
+            loaded = await _project_disposition_only_response_plan(services, state)
+            if loaded is None:
+                flags = await _persist_degraded_flag(
+                    state,
+                    "disposition_only_missing_prebuilt_action",
+                    event_id=state["event_id"],
+                    degraded_flags=degraded_flags,
+                )
+                status = await _transition_status(
+                    services,
+                    state,
+                    EventStatus.FAILED,
+                    context=TransitionContext(
+                        disposition_only_intent=True,
+                        final_verdict=FinalVerdict(
+                            state.get("final_verdict") or FinalVerdict.FALSE_POSITIVE.value
+                        ),
+                        disposition_policy=DispositionPolicy.REQUIRED,
+                    ),
+                    reason="investigation:disposition_only_missing_prebuilt_action",
+                )
+                return _patch_state(
+                    _trace(NODE_RESPONSE),
+                    status,
+                    {"halted": True, "degraded_flags": flags},
+                )
+            plan, plan_revision = loaded
+            transition_context = TransitionContext(
+                disposition_only_intent=True,
+                final_verdict=FinalVerdict(
+                    state.get("final_verdict") or FinalVerdict.FALSE_POSITIVE.value
+                ),
+                disposition_policy=DispositionPolicy.REQUIRED,
+                response_actions_are_disposition_only=True,
+            )
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.WAITING_APPROVAL,
+                context=transition_context,
+                reason="investigation:disposition_only_prebuilt_plan",
+            )
             return _patch_state(
                 _trace(NODE_RESPONSE),
-                {"halted": True},
+                status,
+                {
+                    "response_plan": plan.model_dump(mode="json"),
+                    "plan_revision": plan_revision,
+                    "halted": False,
+                    "needs_approval_wait": False,
+                },
             )
         plan_revision = _plan_revision_from_state(state)
         response_update: dict[str, Any] = {"plan_revision": plan_revision}
@@ -1413,9 +1568,56 @@ def build_investigation_graph(
         return _patch_state(_trace(NODE_RESPONSE), status, response_update)
 
     async def approval_node(state: InvestigationState) -> InvestigationState:
+        async def _enter_execution(plan_revision: int, *, reason: str) -> InvestigationState:
+            current = EventStatus(state.get("event_status", EventStatus.WAITING_APPROVAL.value))
+            await runtime.set_execution_substate(
+                state["event_id"],
+                ExecutionSubstate.NONE,
+                event_status=current,
+            )
+            update: dict[str, Any] = {
+                "execution_substate": ExecutionSubstate.NONE.value,
+                "needs_approval_wait": False,
+                "plan_revision": plan_revision,
+            }
+            if current is not EventStatus.EXECUTING_RESPONSE:
+                status = await _transition_status(
+                    services,
+                    state,
+                    EventStatus.EXECUTING_RESPONSE,
+                    reason=reason,
+                )
+                update.update(status)
+            return _patch_state(_trace(NODE_APPROVAL), update)
+
         approval_engine = services.get("approval_engine")
         if approval_engine is not None:
             plan_revision = _plan_revision_from_state(state)
+            if state.get("disposition_only_intent"):
+                loaded = await _project_disposition_only_response_plan(services, state)
+                if loaded is None:
+                    flags = await _persist_degraded_flag(
+                        state,
+                        "disposition_only_preapproval_invalid",
+                        event_id=state["event_id"],
+                        degraded_flags=degraded_flags,
+                    )
+                    status = await _transition_status(
+                        services,
+                        state,
+                        EventStatus.FAILED,
+                        reason="investigation:disposition_only_preapproval_invalid",
+                    )
+                    return _patch_state(
+                        _trace(NODE_APPROVAL),
+                        status,
+                        {"halted": True, "degraded_flags": flags},
+                    )
+                _, plan_revision = loaded
+                return await _enter_execution(
+                    plan_revision,
+                    reason="investigation:disposition_only_preapproved",
+                )
             risk = (
                 RiskAssessment.model_validate(state["risk_assessment"])
                 if state.get("risk_assessment") is not None
@@ -1442,25 +1644,10 @@ def build_investigation_graph(
                     },
                 )
             if result.evaluated_count > 0:
-                await runtime.set_execution_substate(
-                    state["event_id"],
-                    ExecutionSubstate.NONE,
-                    event_status=EventStatus.EXECUTING_RESPONSE,
+                return await _enter_execution(
+                    plan_revision,
+                    reason="investigation:approval_decided",
                 )
-                current = EventStatus(state.get("event_status", EventStatus.WAITING_APPROVAL.value))
-                update: dict[str, Any] = {
-                    "execution_substate": ExecutionSubstate.NONE.value,
-                    "plan_revision": plan_revision,
-                }
-                if current is not EventStatus.EXECUTING_RESPONSE:
-                    status = await _transition_status(
-                        services,
-                        state,
-                        EventStatus.EXECUTING_RESPONSE,
-                        reason="investigation:approval_decided",
-                    )
-                    update.update(status)
-                return _patch_state(_trace(NODE_APPROVAL), update)
         else:
             # ISSUE-218: approval_engine missing — fail closed instead of
             # faking an approval decision.  Persist a degraded flag, transition
@@ -1574,12 +1761,19 @@ def build_investigation_graph(
             )
             execution_ok = False
 
-        status = await _transition_status(
-            services,
-            state,
-            EventStatus.VERIFYING,
-            reason="investigation:execute_plan",
-        )
+        try:
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.VERIFYING,
+                reason="investigation:execute_plan",
+            )
+        except InvalidStateTransitionError as exc:
+            if not (exc.current is EventStatus.VERIFYING and exc.target is EventStatus.VERIFYING):
+                raise
+            status: InvestigationState = {
+                "event_status": EventStatus.VERIFYING.value,
+            }
         return _patch_state(
             _trace(NODE_EXECUTE),
             status,
@@ -1603,6 +1797,18 @@ def build_investigation_graph(
         # placeholder that would silently swallow the missing plan.  A
         # required-policy event must have a concrete response plan before
         # verification can proceed.
+        if policy_required and state.get("response_plan") is None:
+            if disposition_only:
+                loaded = await _project_disposition_only_response_plan(services, state)
+                if loaded is not None:
+                    plan, plan_revision = loaded
+                    state = _patch_state(
+                        state,
+                        {
+                            "response_plan": plan.model_dump(mode="json"),
+                            "plan_revision": plan_revision,
+                        },
+                    )
         if policy_required and state.get("response_plan") is None:
             flags = await _persist_degraded_flag(
                 state,
@@ -1910,10 +2116,31 @@ def build_investigation_graph(
         # ISSUE-205: single builder backfills response_plan + verification_result
         # (state → context_store); the prior hand-written verify-only injection
         # is retired so no parallel construction path remains.
+        if state.get("disposition_only_intent"):
+            evidence_output = EvidenceOutput(
+                evidence_list=[],
+                conflicts=[],
+                gaps=[],
+                success_sources=[],
+                failed_sources=[],
+                overall_confidence=0.0,
+                collection_status=CollectionStatus.COMPLETED,
+            )
+            risk_assessment = RiskAssessment(
+                risk_score=0,
+                severity=Severity(state.get("severity", Severity.LOW.value)),
+                confidence=float(state.get("confidence") or 0.9),
+                risk_factors=[],
+                possible_false_positive=True,
+                scoring_mode=ScoringMode.RULE_ONLY,
+            )
+        else:
+            evidence_output = EvidenceOutput.model_validate(state["evidence_output"])
+            risk_assessment = RiskAssessment.model_validate(state["risk_assessment"])
         report_input = await build_report_agent_input(
             event_id,
-            evidence_output=EvidenceOutput.model_validate(state["evidence_output"]),
-            risk_assessment=RiskAssessment.model_validate(state["risk_assessment"]),
+            evidence_output=evidence_output,
+            risk_assessment=risk_assessment,
             escalated=bool(state.get("escalated", False)),
             replan_count=int(state.get("replan_count", 0)),
             state=state,
@@ -1983,8 +2210,9 @@ def build_investigation_graph(
         graph.add_node(name, cast(Any, _wrap_node(services, node)))
 
     register(NODE_TRIAGE, triage_graph_node)
-    # ISSUE-114: disposition-only is API-triggered via WorkflowRuntimeService.
-    # This node has no graph incoming edges; tests/resume hooks invoke it directly.
+    # ISSUE-114 / ISSUE-288: disposition-only is triggered by
+    # WorkflowRuntimeService, then the normal graph entry hydrates that trusted
+    # intent and enters the dedicated continuation.
     register(NODE_BEGIN_DISPOSITION_ONLY, begin_disposition_only_node)
     register(NODE_MANUAL_HOLD, manual_hold_node)
     register(NODE_CLOSE, close_node)
@@ -2005,7 +2233,14 @@ def build_investigation_graph(
     if rag_agent is not None:
         register(NODE_RAG, rag_graph_node)
 
-    graph.add_edge(START, NODE_TRIAGE)
+    graph.add_conditional_edges(
+        START,
+        route_from_start,
+        {
+            ROUTE_TRIAGE: NODE_TRIAGE,
+            ROUTE_DISPOSITION_ONLY: NODE_BEGIN_DISPOSITION_ONLY,
+        },
+    )
     graph.add_conditional_edges(
         NODE_TRIAGE,
         route_after_triage,

@@ -436,11 +436,27 @@ def _get_adapter_registry() -> Any:
 async def _get_workflow_runtime() -> Any:
     global _workflow_runtime
     if _workflow_runtime is None:
+        from app.db import models as orm
         from app.orchestration.workflow_runtime import WorkflowRuntimeService
+
+        async def resolve_event_status_update_readiness(event_id: str) -> Any:
+            session_factory = _get_session_factory()
+            async with session_factory() as session:
+                row = await session.get(orm.SecurityEvent, event_id)
+                if row is None:
+                    raise KeyError(f"security_event not found: {event_id}")
+                expected_event_version = int(row.row_version or 1)
+            source_service = await get_disposition_source_service()
+            result = await source_service.recheck_disposition_readiness(
+                event_id,
+                expected_event_version=expected_event_version,
+            )
+            return result.writeback_readiness
 
         _workflow_runtime = WorkflowRuntimeService(
             _get_session_factory(),
             event_service=await get_event_service(),
+            readiness_resolver=resolve_event_status_update_readiness,
             decision_record_service=_get_decision_record_service(),
         )
     return _workflow_runtime
