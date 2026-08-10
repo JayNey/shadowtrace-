@@ -7,7 +7,8 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # ISSUE-294: keep workflow_dispatch repro runs from cancelling each other.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   contract-drift:
@@ -625,11 +626,12 @@ jobs:
 
           compose build
 
-          backend_image="$(compose images -q backend)"
-          if [[ -z "${backend_image}" ]]; then
-            echo "backend image id missing after compose build"
-            exit 1
-          fi
+          backend_image="$(
+            python scripts/check_docker_build_context.py \
+              --resolve-compose-image backend \
+              --project-name "${COMPOSE_PROJECT_NAME}" \
+              --compose-file "${GITHUB_WORKSPACE}/infra/docker-compose.yml"
+          )"
           python scripts/check_docker_build_context.py --inspect-image "${backend_image}"
 
           compose up -d --wait --wait-timeout 180

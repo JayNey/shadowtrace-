@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Docker build context / runtime image guards (ISSUE-278).
+"""Docker build context / runtime image guards (ISSUE-278, ISSUE-294).
 
 Measures effective build context size (honouring .dockerignore) and optionally
 validates a built backend image does not ship host-only trees or secrets.
@@ -9,6 +9,8 @@ Usage (CI / local)::
     python scripts/check_docker_build_context.py --context backend-root
     python scripts/check_docker_build_context.py --context frontend --root frontend
     python scripts/check_docker_build_context.py --inspect-image shadowtrace-backend:ci
+    python scripts/check_docker_build_context.py --resolve-compose-image backend \\
+        --project-name shadowtrace-ci-repro
 
 Exit 0 when within limits; non-zero on violation.
 """
@@ -23,6 +25,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -309,6 +312,161 @@ def shutil_which(cmd: str) -> str | None:
     return None
 
 
+def canonical_compose_image_ref(project_name: str, service: str) -> str:
+    """Default local tag Compose assigns after ``docker compose build``."""
+    return f"{project_name}-{service}"
+
+
+def _docker_cmd(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["docker", *args],
+        capture_output=True,
+        text=True,
+        check=check,
+    )
+
+
+def _compose_cmd(
+    project_name: str,
+    compose_file: Path | None,
+    *args: str,
+) -> subprocess.CompletedProcess[str]:
+    cmd = ["docker", "compose", "--project-name", project_name]
+    if compose_file is not None:
+        cmd.extend(["-f", str(compose_file)])
+    cmd.extend(args)
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+
+def _image_id_from_ref(image_ref: str) -> str | None:
+    proc = _docker_cmd("image", "inspect", "--format", "{{.Id}}", image_ref)
+    if proc.returncode != 0:
+        return None
+    image_id = proc.stdout.strip()
+    return image_id or None
+
+
+def _resolve_by_compose_labels(project_name: str, service: str) -> str | None:
+    proc = _docker_cmd(
+        "image",
+        "ls",
+        "-q",
+        "--filter",
+        f"label=com.docker.compose.project={project_name}",
+        "--filter",
+        f"label=com.docker.compose.service={service}",
+    )
+    if proc.returncode != 0:
+        return None
+    candidates = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    # Prefer the newest image when multiple tags/refs match the same service.
+    newest = candidates[0]
+    newest_created = ""
+    for ref in candidates:
+        created_proc = _docker_cmd("image", "inspect", "--format", "{{.Created}}", ref)
+        if created_proc.returncode != 0:
+            continue
+        created = created_proc.stdout.strip()
+        if created >= newest_created:
+            newest_created = created
+            newest = ref
+    return newest
+
+
+def _resolve_by_compose_images(
+    project_name: str,
+    service: str,
+    compose_file: Path | None,
+) -> str | None:
+    proc = _compose_cmd(project_name, compose_file, "images", "-q", service)
+    if proc.returncode != 0:
+        return None
+    image_id = proc.stdout.strip()
+    return image_id or None
+
+
+def print_compose_image_diagnostics(
+    *,
+    project_name: str,
+    service: str,
+    compose_file: Path | None,
+) -> None:
+    compose_path = compose_file if compose_file is not None else REPO_ROOT / "infra" / "docker-compose.yml"
+    print(f"--- compose {service} image diagnostics (ISSUE-294) ---", file=sys.stderr)
+    print(f"project_name={project_name}", file=sys.stderr)
+    print(f"service={service}", file=sys.stderr)
+    print(f"compose_file={compose_path}", file=sys.stderr)
+    print(f"canonical_ref={canonical_compose_image_ref(project_name, service)}", file=sys.stderr)
+
+    for label, cmd in (
+        ("compose images", _compose_cmd(project_name, compose_file, "images")),
+        ("compose ps -a", _compose_cmd(project_name, compose_file, "ps", "-a")),
+        ("docker images (head)", _docker_cmd("images", "--format", "{{.Repository}}:{{.Tag}}\t{{.ID}}")),
+    ):
+        print(f"[{label}]", file=sys.stderr)
+        output = (cmd.stdout or cmd.stderr or "").strip()
+        if not output:
+            print("(empty)", file=sys.stderr)
+            continue
+        lines = output.splitlines()
+        limit = 20 if label.startswith("docker images") else len(lines)
+        for line in lines[:limit]:
+            print(line, file=sys.stderr)
+        if len(lines) > limit:
+            print(f"... ({len(lines) - limit} more lines)", file=sys.stderr)
+
+
+def resolve_compose_service_image(
+    *,
+    project_name: str,
+    service: str,
+    compose_file: Path | None = None,
+) -> str:
+    """Resolve a built Compose service image id (works after ``compose build`` only).
+
+    ``docker compose images`` lists images attached to *created containers*; after
+    ``compose build`` with no ``up`` it is often empty even though the image exists.
+    """
+    if not shutil_which("docker"):
+        print("ERROR: docker not available — cannot resolve compose service image", file=sys.stderr)
+        raise SystemExit(1)
+
+    strategies: tuple[tuple[str, Callable[[], str | None]], ...] = (
+        ("compose-labels", lambda: _resolve_by_compose_labels(project_name, service)),
+        (
+            "canonical-ref",
+            lambda: _image_id_from_ref(canonical_compose_image_ref(project_name, service)),
+        ),
+        (
+            "compose-images",
+            lambda: _resolve_by_compose_images(project_name, service, compose_file),
+        ),
+    )
+    for name, resolver in strategies:
+        image_id = resolver()
+        if image_id:
+            print(
+                f"[compose-image] resolved via {name}: {image_id}",
+                file=sys.stderr,
+            )
+            return image_id
+
+    print_compose_image_diagnostics(
+        project_name=project_name,
+        service=service,
+        compose_file=compose_file,
+    )
+    print(
+        f"ERROR: compose service image not found for project={project_name} service={service}",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+
+
 def inspect_backend_image(image_ref: str, *, max_bytes: int) -> int:
     if not shutil_which("docker"):
         print("WARN: docker not available — skipping image inspection", file=sys.stderr)
@@ -429,6 +587,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Validate a built backend image ref (forbidden paths + size).",
     )
     parser.add_argument(
+        "--resolve-compose-image",
+        metavar="SERVICE",
+        help="Resolve a built Compose service image id (for CI after compose build).",
+    )
+    parser.add_argument(
+        "--project-name",
+        help="Compose project name for --resolve-compose-image.",
+    )
+    parser.add_argument(
+        "--compose-file",
+        type=Path,
+        default=REPO_ROOT / "infra" / "docker-compose.yml",
+        help="Compose file path for --resolve-compose-image diagnostics/fallback.",
+    )
+    parser.add_argument(
         "--max-image-bytes",
         type=int,
         default=DEFAULT_MAX_BACKEND_IMAGE_BYTES,
@@ -442,8 +615,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.inspect_image:
         return inspect_backend_image(args.inspect_image, max_bytes=args.max_image_bytes)
 
+    if args.resolve_compose_image:
+        if not args.project_name:
+            parser.error("--project-name is required with --resolve-compose-image")
+        image_id = resolve_compose_service_image(
+            project_name=args.project_name,
+            service=args.resolve_compose_image,
+            compose_file=args.compose_file,
+        )
+        print(image_id)
+        return 0
+
     if not args.context:
-        parser.error("one of --context, --validate-dockerignore, or --inspect-image is required")
+        parser.error(
+            "one of --context, --validate-dockerignore, --inspect-image, "
+            "or --resolve-compose-image is required"
+        )
 
     profile = CONTEXT_PROFILES[args.context]
     max_bytes = args.max_context_bytes if args.max_context_bytes is not None else profile.max_bytes
