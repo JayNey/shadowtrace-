@@ -91,7 +91,7 @@ class EvaluatePlanResult:
 class ApprovalOutcome:
     """Result of a human or timeout approval decision (ISSUE-193)."""
 
-    resume_status: Literal["ok", "failed", "skipped"] | None = None
+    resume_status: Literal["ok", "failed", "skipped", "deferred"] | None = None
     resume_degraded: bool = False
     persisted_status: ActionStatus | None = None
     decision_id: str | None = None

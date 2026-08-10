@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core.errors import ValidationError
 from app.models.enums import (
     DispositionIntentKind,
     DispositionPolicy,
@@ -149,6 +150,74 @@ async def test_prepare_verify_resume_schedules_fresh_verify_after_recovery() -> 
 
     assert found is True
     assert graph.aupdate_state.await_args.kwargs["as_node"] == NODE_EXECUTE
+
+
+@pytest.mark.asyncio
+async def test_prepare_graph_resume_skips_patch_on_executing_response_mismatch() -> None:
+    class _SequenceSessionFactory:
+        def __init__(self, statuses: list[str]) -> None:
+            self._statuses = statuses
+            self._reads = 0
+
+        def __call__(self) -> Any:
+            return _SequenceSessionCtx(self)
+
+    class _SequenceSessionCtx:
+        def __init__(self, factory: _SequenceSessionFactory) -> None:
+            self._factory = factory
+
+        async def __aenter__(self) -> _SequenceScalarSession:
+            return _SequenceScalarSession(self._factory)
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+    class _SequenceScalarSession:
+        def __init__(self, factory: _SequenceSessionFactory) -> None:
+            self._factory = factory
+
+        async def scalar(self, stmt: Any) -> str:
+            del stmt
+            idx = min(self._factory._reads, len(self._factory._statuses) - 1)
+            self._factory._reads += 1
+            return self._factory._statuses[idx]
+
+        async def execute(self, _stmt: Any) -> _OutboxExecuteResult:
+            return _OutboxExecuteResult([])
+
+    graph = MagicMock()
+    graph.aget_state = AsyncMock(
+        return_value=MagicMock(
+            values={
+                "halted": True,
+                "needs_approval_wait": True,
+                "execution_substate": ExecutionSubstate.WAITING_APPROVAL.value,
+            }
+        )
+    )
+    graph.aupdate_state = AsyncMock()
+    runtime = MagicMock()
+    runtime.set_execution_substate = AsyncMock(
+        side_effect=ValidationError(
+            "caller EventStatus does not match authoritative state",
+            details={
+                "caller_status": EventStatus.EXECUTING_RESPONSE.value,
+                "authoritative_status": EventStatus.FAILED.value,
+            },
+        )
+    )
+
+    found = await prepare_graph_resume_state(
+        _SequenceSessionFactory(
+            [EventStatus.EXECUTING_RESPONSE.value, EventStatus.FAILED.value],
+        ),
+        graph,
+        "evt-exec-mismatch",
+        runtime,
+    )
+
+    assert found is True
+    graph.aupdate_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -2714,3 +2714,53 @@ async def test_mark_graph_failed_swallows_failed_to_failed_transition_error() ->
     await _mark_graph_failed(services, state, RuntimeError("stale resume"))
 
     assert machine.transitions == []
+
+
+@pytest.mark.asyncio
+async def test_mark_graph_failed_is_noop_for_closed_status() -> None:
+    from app.orchestration.workflow_graph import _mark_graph_failed
+
+    event_id = "evt-closed-noop"
+    machine = FakeStateMachine(
+        status=EventStatus.CLOSED,
+        statuses={event_id: EventStatus.CLOSED},
+    )
+    services = {"state_machine": machine}
+    state = _base_state(event_id=event_id, event_status=EventStatus.CLOSED.value)
+
+    await _mark_graph_failed(services, state, RuntimeError("resume loop"))
+
+    assert machine.transitions == []
+
+
+@pytest.mark.asyncio
+async def test_mark_graph_failed_skips_on_state_mismatch_validation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.orchestration.workflow_graph import _mark_graph_failed
+
+    noop_calls: list[str] = []
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph.record_graph_failed_transition_noop",
+        lambda *, reason: noop_calls.append(reason),
+    )
+
+    event_id = "evt-mismatch-noop"
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    services = {"state_machine": machine}
+    state = _base_state(event_id=event_id, event_status=EventStatus.VERIFYING.value)
+    mismatch = ValidationError(
+        "caller EventStatus does not match authoritative state",
+        details={
+            "caller_status": EventStatus.EXECUTING_RESPONSE.value,
+            "authoritative_status": EventStatus.FAILED.value,
+        },
+    )
+
+    await _mark_graph_failed(services, state, mismatch)
+
+    assert machine.transitions == []
+    assert noop_calls == ["state_mismatch"]

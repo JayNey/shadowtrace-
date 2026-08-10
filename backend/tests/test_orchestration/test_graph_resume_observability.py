@@ -265,7 +265,6 @@ async def test_execute_graph_resume_classifies_invalid_transition() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_graph_resume_skips_nested_active_graph() -> None:
-    resume = AsyncMock()
     agent = MagicMock()
     agent._investigation_graph = MagicMock()
 
@@ -325,3 +324,25 @@ async def test_execute_graph_resume_state_mismatch_is_not_retried() -> None:
     assert exc_info.value.error_type == "state_mismatch"
     degraded.set_flag.assert_awaited_once()
     assert runtime.set_execution_substate.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_execute_graph_resume_transient_exhaustion_records_single_failure() -> None:
+    degraded = MagicMock()
+    degraded.has_flag = AsyncMock(return_value=False)
+    degraded.set_flag = AsyncMock(return_value=[])
+    agent = MagicMock()
+    agent._investigation_graph = MagicMock()
+    agent._investigation_graph.aget_state = AsyncMock(side_effect=TimeoutError("redis timeout"))
+
+    with pytest.raises(GraphResumeFailedError):
+        await execute_graph_resume_with_retry(
+            "evt-exhaust",
+            session_factory=_SessionFactory(),
+            get_super_agent=AsyncMock(return_value=agent),
+            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            degraded_flags=degraded,
+        )
+
+    assert agent._investigation_graph.aget_state.await_count == 3
+    degraded.set_flag.assert_awaited_once()

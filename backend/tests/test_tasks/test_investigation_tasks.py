@@ -1206,6 +1206,74 @@ def test_run_investigation_soft_time_limit_releases_with_resolved_owner(
     assert released == [("evt-soft-limit", expected_owner)]
 
 
+def test_run_investigation_soft_timeout_invalidates_checkpoint_and_marks_intent_dead(
+    celery_eager: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-296: soft time limit must fence checkpoint and mark intent dead."""
+    from celery.app.task import Context
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    invalidated: list[str] = []
+    marked_dead: list[tuple[str, str, str]] = []
+
+    class _TrackingLease:
+        async def release(self, event_id: str, owner_id: str) -> bool:
+            return True
+
+    async def _invalidate(event_id: str) -> None:
+        invalidated.append(event_id)
+
+    class _IntentService:
+        async def mark_dead(
+            self,
+            intent_id: str,
+            *,
+            error: str,
+            broker_task_id: str,
+        ) -> None:
+            marked_dead.append((intent_id, error, broker_task_id))
+
+    from app.models.investigation_intent import IntentDeliveryAdmission
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _TrackingLease())
+    monkeypatch.setattr(
+        "app.orchestration.checkpointer.invalidate_event_checkpoint",
+        _invalidate,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks._admit_intent_delivery",
+        AsyncMock(return_value=IntentDeliveryAdmission.ACCEPTED),
+    )
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda _factory: _IntentService(),
+    )
+
+    async def _boom(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(tasks, "_run_investigation_body", _boom)
+
+    ctx = Context(id="task-soft-checkpoint-001", delivery_info={}, retries=0)
+    tasks.run_investigation.request_stack.push(ctx)
+    try:
+        with pytest.raises(SoftTimeLimitExceeded):
+            tasks.run_investigation.run(
+                "evt-soft-checkpoint",
+                include_response_execution=False,
+                lease_acquired=True,
+                intent_id="intent-soft-296",
+            )
+    finally:
+        tasks.run_investigation.request_stack.pop()
+
+    assert invalidated == ["evt-soft-checkpoint"]
+    assert marked_dead == [
+        ("intent-soft-296", "soft_time_limit_exceeded", "task-soft-checkpoint-001"),
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # Analysis-only Celery task tests (ISSUE-225)
 # --------------------------------------------------------------------------- #

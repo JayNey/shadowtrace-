@@ -446,16 +446,25 @@ async def _mark_graph_failed(
             reason=reason,
         )
     except InvalidStateTransitionError as exc:
-        current = getattr(exc, "current", None)
-        target = getattr(exc, "target", None)
-        current_value = getattr(current, "value", current)
-        target_value = getattr(target, "value", target)
-        if current_value == EventStatus.FAILED.value and target_value == EventStatus.FAILED.value:
+        exc_current = getattr(exc, "current", None)
+        exc_target = getattr(exc, "target", None)
+        current_value = getattr(exc_current, "value", exc_current)
+        target_value = getattr(exc_target, "value", exc_target)
+        if current_value in {
+            EventStatus.FAILED.value,
+            EventStatus.CLOSED.value,
+        }:
             logger.info(
-                "skip duplicate graph FAILED transition event=%s",
+                "skip graph FAILED transition event=%s already terminal status=%s",
                 event_id,
+                current_value,
             )
-            record_graph_failed_transition_noop(reason="failed_self_loop")
+            record_graph_failed_transition_noop(
+                reason="failed_self_loop"
+                if current_value == EventStatus.FAILED.value
+                and target_value == EventStatus.FAILED.value
+                else "already_terminal"
+            )
             return
         logger.warning(
             "illegal graph FAILED transition event=%s current=%s target=%s",

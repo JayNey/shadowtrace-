@@ -405,13 +405,15 @@ async def prepare_graph_resume_state(
         )
         return True
 
-    await _sync_execution_substate(
+    authoritative = await _sync_execution_substate(
         runtime,
         session_factory,
         event_id,
         ExecutionSubstate.NONE,
         event_status=EventStatus.EXECUTING_RESPONSE,
     )
+    if authoritative is not EventStatus.EXECUTING_RESPONSE:
+        return True
 
     needs_patch = bool(
         values.get("halted")
