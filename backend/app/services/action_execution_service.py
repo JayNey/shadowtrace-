@@ -1036,10 +1036,11 @@ async def reconcile_stale_executions_for_event(
     *,
     event_id: str | None = None,
     limit: int = 20,
+    force: bool = False,
 ) -> int:
     """Module-level stale execution reconcile (ISSUE-173 / ISSUE-302 CLOSED gate)."""
     settings = get_settings()
-    if not settings.action_execution_reconcile_enabled:
+    if not force and not settings.action_execution_reconcile_enabled:
         return 0
     now = datetime.now(UTC)
     max_attempts = settings.action_execution_max_attempts

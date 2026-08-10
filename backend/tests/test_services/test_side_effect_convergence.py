@@ -30,6 +30,8 @@ from app.models.side_effect_convergence import (
 )
 from app.models.workflow import TransitionContext, validate_closed_gate
 from app.services.side_effect_convergence import (
+    _build_jobs_by_action,
+    _gate_applicable_blocks_convergence,
     build_side_effect_convergence_summary,
     check_gate_applicable_side_effect_convergence,
     reconcile_stale_executions_before_close,
@@ -727,3 +729,246 @@ async def test_reconcile_terminal_job_unblocks_convergence_summary(
         )
     assert summary_after.gate_applicable_outstanding_count == 0
     assert check_gate_applicable_side_effect_convergence(summary_after) is None
+
+
+def test_gate_applicable_unknown_with_running_job_blocks() -> None:
+    """Terminal UNKNOWN must not skip in-flight job checks (ISSUE-302 review)."""
+    now = datetime.now(UTC)
+    action_id = "act-unknown"
+    action = orm.Action(
+        action_id=action_id,
+        event_id="evt-unknown",
+        plan_revision=1,
+        action_fingerprint="fp-unknown",
+        action_category=ActionCategory.RESPONSE.value,
+        action_name="isolate host",
+        tool_name="isolate_host",
+        action_level="l2",
+        execution_owner="direct_tool",
+        writeback_applicable=False,
+        writeback_required=True,
+        status=ActionStatus.UNKNOWN.value,
+    )
+    jobs = [
+        orm.ActionExecutionJob(
+            job_id="job-terminal",
+            event_id="evt-unknown",
+            action_id=action_id,
+            provider_name="mock_tool",
+            idempotency_key="idem-terminal",
+            status=ExecutionJobStatus.SUCCESS.value,
+            attempt=1,
+            created_at=now,
+            updated_at=now,
+        ),
+        orm.ActionExecutionJob(
+            job_id="job-active",
+            event_id="evt-unknown",
+            action_id=action_id,
+            provider_name="mock_tool",
+            idempotency_key="idem-active",
+            status=ExecutionJobStatus.RUNNING.value,
+            attempt=1,
+            created_at=now,
+            updated_at=now,
+        ),
+    ]
+    jobs_by_action = _build_jobs_by_action(jobs)
+    reason = _gate_applicable_blocks_convergence(
+        action,
+        jobs_by_action=jobs_by_action,
+        active_outboxes=[],
+    )
+    assert reason is SideEffectConvergenceReason.IN_FLIGHT_JOB
+
+
+def test_build_jobs_by_action_prefers_active_job() -> None:
+    now = datetime.now(UTC)
+    action_id = "act-multi"
+    terminal = orm.ActionExecutionJob(
+        job_id="job-done",
+        event_id="evt-multi",
+        action_id=action_id,
+        provider_name="mock_tool",
+        idempotency_key="idem-done",
+        status=ExecutionJobStatus.SUCCESS.value,
+        attempt=1,
+        created_at=now,
+        updated_at=now,
+    )
+    active = orm.ActionExecutionJob(
+        job_id="job-run",
+        event_id="evt-multi",
+        action_id=action_id,
+        provider_name="mock_tool",
+        idempotency_key="idem-run",
+        status=ExecutionJobStatus.RUNNING.value,
+        attempt=1,
+        created_at=now,
+        updated_at=now,
+    )
+    jobs_by_action = _build_jobs_by_action([terminal, active])
+    picked = jobs_by_action[action_id]
+    assert picked.job_id == "job-run"
+
+
+async def _seed_unknown_with_running_job(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    action_id = f"act-{sfx}"
+    job_id = f"job-{sfx}"
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="UNKNOWN with running job",
+                    description="ISSUE-302 fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=90,
+                    entities={},
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="isolate host",
+                    tool_name="isolate_host",
+                    action_level="l2",
+                    execution_owner="direct_tool",
+                    writeback_applicable=False,
+                    writeback_required=True,
+                    status=ActionStatus.UNKNOWN.value,
+                )
+            )
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_tool",
+                    idempotency_key=f"idem-{sfx}",
+                    status=ExecutionJobStatus.RUNNING.value,
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return event_id
+
+
+async def _seed_required_with_system_running_job(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    action_id = f"act-{sfx}"
+    job_id = f"job-{sfx}"
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="SYSTEM action must not block gate",
+                    description="ISSUE-302 fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=90,
+                    entities={},
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.SYSTEM.value,
+                    action_name="audit log",
+                    tool_name="audit_log",
+                    action_level="l1",
+                    execution_owner="direct_tool",
+                    writeback_applicable=False,
+                    writeback_required=False,
+                    status=ActionStatus.APPROVED.value,
+                )
+            )
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_tool",
+                    idempotency_key=f"idem-{sfx}",
+                    status=ExecutionJobStatus.RUNNING.value,
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return event_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.usefixtures("clean_state")
+async def test_gate_applicable_unknown_with_running_job_blocks_close(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_unknown_with_running_job(session_factory)
+
+    async with session_factory() as session:
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=1,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+
+    assert summary.gate_applicable_outstanding_count == 1
+    violation = check_gate_applicable_side_effect_convergence(summary)
+    assert violation is not None
+    assert violation.reason is SideEffectConvergenceReason.IN_FLIGHT_JOB
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.usefixtures("clean_state")
+async def test_system_action_running_job_does_not_block_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_required_with_system_running_job(session_factory)
+
+    async with session_factory() as session:
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=1,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+
+    assert summary.gate_applicable_outstanding_count == 0
+    assert check_gate_applicable_side_effect_convergence(summary) is None

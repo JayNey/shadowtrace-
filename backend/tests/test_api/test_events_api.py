@@ -20,10 +20,12 @@ from app.api.v1.deps import reset_deps
 from app.db import models as orm
 from app.main import app
 from app.models.enums import (
+    ActionCategory,
     ActionStatus,
     DispositionPolicy,
     EventStatus,
     EventType,
+    ExecutionJobStatus,
     FinalVerdict,
     Severity,
     WritebackReadiness,
@@ -420,6 +422,132 @@ async def _seed_report_with_event(
                 )
             )
             await session.flush()
+
+
+async def _seed_reporting_required_with_running_side_effect(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    """REPORTING + REQUIRED with gate-applicable RUNNING job (side-effect gate fixture)."""
+    from uuid import uuid4
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    action_id = f"act-{sfx}"
+    job_id = f"job-{sfx}"
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="Side-effect gate API fixture",
+                    description="ISSUE-302 API fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=90,
+                    entities={},
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="isolate host",
+                    tool_name="isolate_host",
+                    action_level="l2",
+                    execution_owner="direct_tool",
+                    writeback_applicable=False,
+                    writeback_required=True,
+                    status=ActionStatus.APPROVED.value,
+                )
+            )
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_tool",
+                    idempotency_key=f"idem-{sfx}",
+                    status=ExecutionJobStatus.RUNNING.value,
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return event_id
+
+
+async def _seed_reporting_not_required_with_running_side_effect(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    """NOT_REQUIRED REPORTING with background RUNNING job."""
+    from uuid import uuid4
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    action_id = f"act-{sfx}"
+    job_id = f"job-{sfx}"
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="account_anomaly",
+                    title="NOT_REQUIRED background side effects",
+                    description="ISSUE-302 API fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.LOW.value,
+                    final_verdict=FinalVerdict.FALSE_POSITIVE.value,
+                    risk_score=10,
+                    entities={},
+                    disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="block domain",
+                    tool_name="block_domain",
+                    action_level="l2",
+                    execution_owner="direct_tool",
+                    writeback_applicable=False,
+                    writeback_required=False,
+                    status=ActionStatus.APPROVED.value,
+                )
+            )
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_tool",
+                    idempotency_key=f"idem-{sfx}",
+                    status=ExecutionJobStatus.RUNNING.value,
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return event_id
 
 
 async def _seed_reporting_not_required_without_report(
@@ -1354,6 +1482,77 @@ async def test_close_reporting_writeback_pending_rejected(
     )
     assert resp.status_code == 409
     assert resp.json()["error_code"] == "writeback_pending"
+
+
+@pytest.mark.asyncio
+async def test_close_reporting_side_effects_pending_rejected(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_required_with_running_side_effect(session_factory)
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "side effect gate test"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 409
+    data = resp.json()
+    assert data["error_code"] == "closed_side_effects_pending"
+    assert data["details"]["action_id"].startswith("act-")
+
+
+@pytest.mark.asyncio
+async def test_get_event_surfaces_side_effect_convergence_counts(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_required_with_running_side_effect(session_factory)
+
+    resp = client.get(f"/api/v1/events/{event_id}", headers=_hdr())
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["gate_applicable_outstanding_count"] == 1
+    assert data["outstanding_side_effect_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_close_not_required_with_background_job_flags_pending(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_not_required_with_running_side_effect(session_factory)
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "not required background side effects"},
+        headers=_hdr(),
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["background_side_effects_pending"] is True
+    assert data["outstanding_side_effect_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_force_close_bypasses_side_effect_gate(
+    client: TestClient,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_reporting_required_with_running_side_effect(session_factory)
+    await _seed_report_with_event(session_factory, event_id)
+
+    resp = client.post(
+        f"/api/v1/events/{event_id}/close",
+        json={"reason": "admin force", "force_local_close": True},
+        headers=_hdr("admin"),
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "closed"
+    assert data["external_unsynced"] is True
 
 
 @pytest.mark.asyncio

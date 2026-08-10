@@ -28,16 +28,6 @@ from app.models.side_effect_convergence import (
 )
 from app.services.writeback_close_gate import load_active_outboxes
 
-_TERMINAL_ACTION_STATUSES = frozenset(
-    {
-        ActionStatus.SUCCESS,
-        ActionStatus.PARTIAL_SUCCESS,
-        ActionStatus.FAILED,
-        ActionStatus.REJECTED,
-        ActionStatus.SUPERSEDED,
-        ActionStatus.UNKNOWN,
-    }
-)
 _ACTIVE_JOB_STATUSES = frozenset(
     {
         ExecutionJobStatus.QUEUED,
@@ -182,6 +172,41 @@ def _summarize_outbox_fields(
     return outbox_delivery, outbox_wb
 
 
+def _build_jobs_by_action(
+    jobs: list[orm.ActionExecutionJob],
+) -> dict[str, orm.ActionExecutionJob]:
+    """Map action_id → job, preferring active (QUEUED/RUNNING) over terminal rows."""
+    result: dict[str, orm.ActionExecutionJob] = {}
+    for job in jobs:
+        existing = result.get(job.action_id)
+        if existing is None:
+            result[job.action_id] = job
+            continue
+        try:
+            new_status = ExecutionJobStatus(job.status)
+            old_status = ExecutionJobStatus(existing.status)
+        except ValueError:
+            continue
+        if new_status in _ACTIVE_JOB_STATUSES and old_status not in _ACTIVE_JOB_STATUSES:
+            result[job.action_id] = job
+    return result
+
+
+def _action_side_effect_blocks_convergence(
+    action_row: orm.Action,
+    *,
+    jobs_by_action: dict[str, orm.ActionExecutionJob],
+    active_outboxes: list[orm.DispositionOutbox],
+) -> SideEffectConvergenceReason | None:
+    """Return a blocking reason when jobs/outboxes for an action have not converged."""
+    status = _parse_action_status(action_row.status)
+    if status is ActionStatus.EXECUTING:
+        return SideEffectConvergenceReason.EXECUTING_ACTION
+    if _action_has_active_job(action_row.action_id, jobs_by_action) is not None:
+        return SideEffectConvergenceReason.IN_FLIGHT_JOB
+    return _scan_outboxes_for_block(active_outboxes)
+
+
 def _gate_applicable_blocks_convergence(
     action_row: orm.Action,
     *,
@@ -189,14 +214,11 @@ def _gate_applicable_blocks_convergence(
     active_outboxes: list[orm.DispositionOutbox],
 ) -> SideEffectConvergenceReason | None:
     """Outstanding reasons that block CLOSED for current-revision gate-applicable actions."""
-    status = _parse_action_status(action_row.status)
-    if status in _TERMINAL_ACTION_STATUSES:
-        return None
-    if status is ActionStatus.EXECUTING:
-        return SideEffectConvergenceReason.EXECUTING_ACTION
-    if _action_has_active_job(action_row.action_id, jobs_by_action) is not None:
-        return SideEffectConvergenceReason.IN_FLIGHT_JOB
-    return _scan_outboxes_for_block(active_outboxes)
+    return _action_side_effect_blocks_convergence(
+        action_row,
+        jobs_by_action=jobs_by_action,
+        active_outboxes=active_outboxes,
+    )
 
 
 def _detached_side_effect_outstanding(
@@ -206,12 +228,11 @@ def _detached_side_effect_outstanding(
     active_outboxes: list[orm.DispositionOutbox],
 ) -> SideEffectConvergenceReason | None:
     """Track background/detached side effects even when the action row is terminal."""
-    status = _parse_action_status(action_row.status)
-    if status is ActionStatus.EXECUTING:
-        return SideEffectConvergenceReason.EXECUTING_ACTION
-    if _action_has_active_job(action_row.action_id, jobs_by_action) is not None:
-        return SideEffectConvergenceReason.IN_FLIGHT_JOB
-    return _scan_outboxes_for_block(active_outboxes)
+    return _action_side_effect_blocks_convergence(
+        action_row,
+        jobs_by_action=jobs_by_action,
+        active_outboxes=active_outboxes,
+    )
 
 
 def _classify_scope(
@@ -263,7 +284,7 @@ async def build_side_effect_convergence_summary(
             )
         ).all()
     )
-    jobs_by_action = {job.action_id: job for job in jobs}
+    jobs_by_action = _build_jobs_by_action(jobs)
 
     outstanding: list[OutstandingSideEffectView] = []
     gate_count = 0
@@ -362,6 +383,7 @@ async def reconcile_stale_executions_before_close(
         session_factory,
         event_id=event_id,
         limit=limit,
+        force=True,
     )
 
 

@@ -380,10 +380,11 @@ async def _side_effect_fields_for_event(event: Any) -> dict[str, int | bool]:
             getattr(event, "event_id", "?"),
             exc_info=True,
         )
+        # Fail closed for display: do not return trustworthy zero counts.
         return {
-            "background_side_effects_pending": False,
-            "outstanding_side_effect_count": 0,
-            "gate_applicable_outstanding_count": 0,
+            "background_side_effects_pending": True,
+            "outstanding_side_effect_count": -1,
+            "gate_applicable_outstanding_count": -1,
         }
 
 
@@ -404,7 +405,14 @@ async def _validate_side_effect_convergence_gate(
     )
 
     session_factory = _get_session_factory()
-    await reconcile_stale_executions_before_close(session_factory, event_id)
+    try:
+        await reconcile_stale_executions_before_close(session_factory, event_id)
+    except Exception:
+        logger.warning(
+            "stale execution reconcile before close API pre-check failed event_id=%s",
+            event_id,
+            exc_info=True,
+        )
     async with session_factory() as session:
         current_revision = await session.scalar(
             select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
@@ -424,6 +432,7 @@ async def _validate_side_effect_convergence_gate(
                 "action_id": violation.action_id,
                 "reason": violation.reason.value,
                 "scope": violation.scope.value,
+                "gate_applicable_outstanding_count": summary.gate_applicable_outstanding_count,
             },
         )
 
