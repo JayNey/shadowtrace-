@@ -1213,6 +1213,42 @@ async def investigate_event(
 # --------------------------------------------------------------------------- #
 
 
+@router.post(
+    "/events/{event_id}/projection-repair",
+    response_model=s.ProjectionRepairResponse,
+)
+async def repair_event_projection(
+    event_id: str,
+    principal: Annotated[Principal, require_roles(ROLE_ADMIN)],
+    event_service: EventService = Depends(get_event_service),
+    state_machine: StateMachineService = Depends(get_state_machine),
+) -> s.ProjectionRepairResponse:
+    """Admin-only ISSUE-285 repair of a committed transition's context projection."""
+    del principal
+    event = await event_service.get_event(event_id)
+    if event is None:
+        raise EventNotFoundError(f"event {event_id} not found", details={"event_id": event_id})
+    outcome = await state_machine.repair_post_commit_projection(
+        event_id,
+        backoff_seconds=0.05,
+    )
+    return s.ProjectionRepairResponse(
+        event_id=event_id,
+        committed=outcome.committed,
+        degraded=outcome.degraded,
+        projection_id=outcome.projection_id,
+        attempts=outcome.attempts,
+        failures=[
+            s.ProjectionRepairFailure(
+                step=failure.step,
+                mode=failure.mode,
+                error_type=failure.error_type,
+            )
+            for failure in outcome.failures
+        ],
+    )
+
+
 @router.post("/events/{event_id}/close", response_model=s.EventCloseResponse)
 async def close_event(
     event_id: str,

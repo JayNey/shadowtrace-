@@ -22,7 +22,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import (
@@ -369,6 +369,14 @@ class StateMachineService:
         self._bus = event_bus
         self._audit_log = audit_log
         self._degraded = degraded_flags
+        self._projection_locks: dict[str, asyncio.Lock] = {}
+
+    def _projection_lock(self, event_id: str) -> asyncio.Lock:
+        lock = self._projection_locks.get(event_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._projection_locks[event_id] = lock
+        return lock
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -483,17 +491,15 @@ class StateMachineService:
         if projection.degraded:
             result = await self._reload_committed_result(event_id, result, projection)
 
-        # 9. Publish state_change via EventBus.
-        if self._bus is not None:
-            await self._bus.publish_event(
-                event_id,
-                "state_change",
-                {
-                    "from_status": current.value,
-                    "to_status": target.value,
-                    "operator": op,
-                },
-            )
+        # 9. Publish state_change via EventBus (best-effort; never imply rollback).
+        await self._publish_state_change(
+            event_id,
+            {
+                "from_status": current.value,
+                "to_status": target.value,
+                "operator": op,
+            },
+        )
 
         return result
 
@@ -589,18 +595,15 @@ class StateMachineService:
         if projection.degraded:
             result = await self._reload_committed_result(event_id, result, projection)
 
-        # Publish state_change.
-        if self._bus is not None:
-            await self._bus.publish_event(
-                event_id,
-                "state_change",
-                {
-                    "from_status": current.value,
-                    "to_status": EventStatus.CLOSED.value,
-                    "operator": principal,
-                    "external_unsynced": True,
-                },
-            )
+        await self._publish_state_change(
+            event_id,
+            {
+                "from_status": current.value,
+                "to_status": EventStatus.CLOSED.value,
+                "operator": principal,
+                "external_unsynced": True,
+            },
+        )
 
         return result
 
@@ -648,12 +651,26 @@ class StateMachineService:
         effects.  The exact audit-derived history is replaced atomically by the
         context store, so repeated repair attempts are bounded and idempotent.
         """
+        async with self._projection_lock(event_id):
+            return await self._repair_post_commit_projection_locked(
+                event_id,
+                max_attempts=max_attempts,
+                backoff_seconds=backoff_seconds,
+            )
+
+    async def _repair_post_commit_projection_locked(
+        self,
+        event_id: str,
+        *,
+        max_attempts: int,
+        backoff_seconds: float,
+    ) -> PostCommitProjectionOutcome:
         attempts = max(1, min(int(max_attempts), _PROJECTION_REPAIR_MAX_ATTEMPTS))
         source = await self._load_projection_repair_source(event_id)
         last: PostCommitProjectionOutcome | None = None
 
         for attempt in range(1, attempts + 1):
-            last = await self._sync_context_after_transition(
+            last = await self._sync_context_after_transition_locked(
                 event_id,
                 source.row,
                 source.current,
@@ -666,17 +683,57 @@ class StateMachineService:
             )
             last = replace(last, attempts=attempt)
             if not last.degraded:
-                clear_failure = await self._clear_projection_degraded(event_id)
+                clear_failure = await self._clear_projection_degraded(
+                    event_id,
+                    expected_projection_id=source.projection_id,
+                )
                 if clear_failure is None:
                     record_state_projection_repair(outcome="success")
                     return last
+                if clear_failure.step == "degraded_flag_stale":
+                    # Newer degradation replaced our marker; projection rebuild itself OK.
+                    record_state_projection_repair(outcome="success")
+                    return replace(last, failures=())
                 last = replace(last, failures=last.failures + (clear_failure,))
+                record_state_projection_repair(outcome="marker_clear_failed")
             if attempt < attempts and backoff_seconds > 0:
                 await asyncio.sleep(backoff_seconds * (2 ** (attempt - 1)))
 
         assert last is not None
         record_state_projection_repair(outcome="exhausted")
         return last
+
+    async def list_projection_degraded_event_ids(self, *, limit: int = 20) -> list[str]:
+        """Return event ids that still carry the ISSUE-285 degraded marker."""
+        pattern = f"%{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=%"
+        async with self._session_factory() as session:
+            rows = await session.scalars(
+                select(orm.SecurityEvent.event_id)
+                .where(cast(orm.SecurityEvent.degraded_flags, String).like(pattern))
+                .order_by(orm.SecurityEvent.updated_at.asc().nulls_last())
+                .limit(max(1, min(int(limit), 100)))
+            )
+            return [str(event_id) for event_id in rows.all()]
+
+    async def repair_degraded_projections(self, *, limit: int = 20) -> dict[str, int]:
+        """Production entry: scan degraded markers and run bounded repairs."""
+        event_ids = await self.list_projection_degraded_event_ids(limit=limit)
+        repaired = 0
+        exhausted = 0
+        for event_id in event_ids:
+            outcome = await self.repair_post_commit_projection(
+                event_id,
+                backoff_seconds=_PROJECTION_REPAIR_BACKOFF_SECONDS,
+            )
+            if outcome.degraded:
+                exhausted += 1
+            else:
+                repaired += 1
+        return {
+            "scanned": len(event_ids),
+            "repaired": repaired,
+            "exhausted": exhausted,
+        }
 
     # ------------------------------------------------------------------ #
     # Side-effect helpers
@@ -736,7 +793,48 @@ class StateMachineService:
             # (post-commit) to avoid cross-connection deadlock — the snapshot's
             # own session would block on the row lock held by the current TX.
 
+    async def _publish_state_change(
+        self,
+        event_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if self._bus is None:
+            return
+        try:
+            await self._bus.publish_event(event_id, "state_change", payload)
+        except Exception:  # noqa: BLE001 - committed transition must still return
+            logger.exception(
+                "state_change publish failed after committed transition event_id=%s",
+                event_id,
+            )
+
     async def _sync_context_after_transition(
+        self,
+        event_id: str,
+        row: orm.SecurityEvent,
+        current: EventStatus,
+        target: EventStatus,
+        operator: str | None,
+        reason: str | None,
+        *,
+        projection_id: str,
+        repair: bool = False,
+        history_override: tuple[dict[str, Any], ...] | None = None,
+    ) -> PostCommitProjectionOutcome:
+        async with self._projection_lock(event_id):
+            return await self._sync_context_after_transition_locked(
+                event_id,
+                row,
+                current,
+                target,
+                operator,
+                reason,
+                projection_id=projection_id,
+                repair=repair,
+                history_override=history_override,
+            )
+
+    async def _sync_context_after_transition_locked(
         self,
         event_id: str,
         row: orm.SecurityEvent,
@@ -832,8 +930,8 @@ class StateMachineService:
                     )
 
         # 3. REPLANNING's journal mirror is also a projection, not a second
-        # transition. Reapplying the same scalar is safe during repair.
-        if target is EventStatus.REPLANNING or repair:
+        # transition. Only rewrite on REPLANNING (or repair of that target).
+        if target is EventStatus.REPLANNING:
             await project_set("replan_count", "replan_count", int(row.replan_count or 0))
 
         # 4. CLOSED snapshot and TTL are isolated independently. Snapshot
@@ -865,7 +963,7 @@ class StateMachineService:
         event_id: str,
         outcome: PostCommitProjectionOutcome,
     ) -> None:
-        value = _projection_degraded_value(outcome.failures)
+        value = _projection_degraded_value(outcome.failures, outcome.projection_id)
         logger.error(
             "transition committed with degraded projection event_id=%s projection_id=%s "
             "failures=%s",
@@ -902,32 +1000,58 @@ class StateMachineService:
                     event_id,
                 )
 
-    async def _clear_projection_degraded(self, event_id: str) -> ProjectionFailure | None:
+    async def _clear_projection_degraded(
+        self,
+        event_id: str,
+        *,
+        expected_projection_id: str,
+    ) -> ProjectionFailure | None:
+        """Clear only this repair generation's marker; never touch foreign Redis flags."""
         if self._degraded is None:
             return None
-        for flag_name, step in (
-            (STATE_TRANSITION_PROJECTION_DEGRADED_FLAG, "degraded_flag"),
-            ("redis_context_unavailable", "redis_degraded_flag"),
-        ):
-            try:
-                await self._degraded.set_flag(
-                    event_id,
-                    flag_name,
-                    False,
-                    writer="StateMachineService",
-                )
-            except Exception as exc:  # noqa: BLE001 - repair result must remain explicit
-                record_state_projection_failure(step=step, mode="raised")
-                logger.exception(
-                    "failed to clear projection degraded flag event_id=%s flag=%s",
-                    event_id,
-                    flag_name,
-                )
-                return ProjectionFailure(
-                    step=step,
-                    mode="raised",
-                    error_type=type(exc).__name__,
-                )
+        try:
+            current = await self._degraded.get_flag_value(
+                event_id,
+                STATE_TRANSITION_PROJECTION_DEGRADED_FLAG,
+            )
+        except Exception as exc:  # noqa: BLE001 - repair result must remain explicit
+            record_state_projection_failure(step="degraded_flag", mode="raised")
+            logger.exception(
+                "failed to read projection degraded flag event_id=%s",
+                event_id,
+            )
+            return ProjectionFailure(
+                step="degraded_flag",
+                mode="raised",
+                error_type=type(exc).__name__,
+            )
+        if current is None:
+            return None
+        token = f"proj={expected_projection_id}"
+        if token not in current:
+            return ProjectionFailure(
+                step="degraded_flag_stale",
+                mode="raised",
+                error_type="StaleProjectionMarker",
+            )
+        try:
+            await self._degraded.set_flag(
+                event_id,
+                STATE_TRANSITION_PROJECTION_DEGRADED_FLAG,
+                False,
+                writer="StateMachineService",
+            )
+        except Exception as exc:  # noqa: BLE001 - repair result must remain explicit
+            record_state_projection_failure(step="degraded_flag", mode="raised")
+            logger.exception(
+                "failed to clear projection degraded flag event_id=%s",
+                event_id,
+            )
+            return ProjectionFailure(
+                step="degraded_flag",
+                mode="raised",
+                error_type=type(exc).__name__,
+            )
         return None
 
     async def _reload_committed_result(
@@ -947,7 +1071,7 @@ class StateMachineService:
 
         marker = (
             f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}="
-            f"{_projection_degraded_value(outcome.failures)}"
+            f"{_projection_degraded_value(outcome.failures, outcome.projection_id)}"
         )
         flags = [
             flag
@@ -1023,7 +1147,14 @@ class StateMachineService:
         )
 
 
-def _projection_degraded_value(failures: tuple[ProjectionFailure, ...]) -> str:
-    """Bounded, low-entropy marker suitable for degraded_flags."""
+def _projection_degraded_value(
+    failures: tuple[ProjectionFailure, ...],
+    projection_id: str,
+) -> str:
+    """Bounded marker including the projection generation token for safe clear."""
     parts = sorted({f"{failure.step}:{failure.mode}" for failure in failures})
-    return "|".join(parts)[:512] or "unknown"
+    base = "|".join(parts) or "unknown"
+    token = f"proj={projection_id}"
+    # Keep room for the generation token used by repair clear fencing.
+    max_base = max(1, 512 - len(token) - 1)
+    return f"{base[:max_base]}|{token}"[:512]

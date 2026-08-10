@@ -176,9 +176,10 @@ async def health(
     from app.orchestration.checkpointer import get_checkpoint_health
 
     checkpoint_health = get_checkpoint_health()
-    from app.core.metrics import get_budget_redis_health
+    from app.core.metrics import get_budget_redis_health, get_state_projection_health
 
     budget_redis_health = get_budget_redis_health()
+    state_projection_health = get_state_projection_health()
 
     hard_deps_ok = postgres == "ok" and redis_status == "ok"
     embedding_ok = embedding_provider.get("status") == "ok"
@@ -212,6 +213,8 @@ async def health(
         overall = "degraded"
     elif budget_redis_health.get("status") == "degraded":
         overall = "degraded"
+    # state_projection counters are process-local observability only (ISSUE-285);
+    # they must not sticky-degrade the live probe.
 
     # 503 only for hard dependency / embedding failures — not missing workers alone (#622).
     # LLM affects HTTP status only when explicitly required (#609).
@@ -230,6 +233,7 @@ async def health(
         "redis": redis_status,
         "checkpoint": checkpoint_health,
         "budget_redis": budget_redis_health,
+        "state_projection": state_projection_health,
         "embedding_provider": embedding_provider,
         "loaded_resources": loaded_resources,
         "playbook_resources": playbook_resources,

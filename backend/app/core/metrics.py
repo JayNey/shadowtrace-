@@ -330,6 +330,17 @@ def get_budget_redis_health() -> dict[str, object]:
     }
 
 
+def get_state_projection_health() -> dict[str, object]:
+    """Process-local post-commit projection failure/repair counters (ISSUE-285)."""
+    snapshot = state_projection_health_snapshot()
+    degraded = snapshot["projection_failures"] > snapshot["projection_repairs"]
+    return {
+        "status": "degraded" if degraded else "ok",
+        "projection_failures": snapshot["projection_failures"],
+        "projection_repairs": snapshot["projection_repairs"],
+    }
+
+
 def reset_metrics_for_tests() -> None:
     """Allow tests to re-register instruments after telemetry reset."""
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
@@ -386,6 +397,7 @@ __all__ = [
     "budget_redis_health_snapshot",
     "checkpoint_health_snapshot",
     "get_budget_redis_health",
+    "get_state_projection_health",
     "observe_writeback_queue_age",
     "record_action_unknown",
     "record_budget_redis_fallback",

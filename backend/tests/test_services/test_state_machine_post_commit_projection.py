@@ -8,11 +8,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
-from app.api.v1.events import close_event
+from app.api.v1.events import close_event, repair_event_projection
 from app.api.v1.schemas import EventCloseRequest
 from app.core.auth import ROLE_ADMIN, Principal
 from app.core.metrics import (
@@ -28,7 +27,6 @@ from app.services.state_machine_service import (
     STATE_TRANSITION_PROJECTION_DEGRADED_FLAG,
     PostCommitProjectionOutcome,
     StateMachineService,
-    _ProjectionRepairSource,
 )
 
 
@@ -51,6 +49,14 @@ class _DurableState:
     row: _Row
     audits: list[dict[str, Any]] = field(default_factory=list)
     committed_transactions: int = 0
+
+
+class _Result:
+    def __init__(self, items: list[Any]) -> None:
+        self._items = items
+
+    def all(self) -> list[Any]:
+        return list(self._items)
 
 
 class _Transaction:
@@ -90,6 +96,35 @@ class _Session:
     async def get(self, _model: Any, event_id: str, **_kwargs: Any) -> _Row | None:
         row = self.working_row if self.working_row is not None else self.state.row
         return row if row.event_id == event_id else None
+
+    async def scalars(self, statement: Any) -> _Result:
+        text = str(statement).lower()
+        if "event_audit_log" in text:
+            return _Result(
+                [
+                    SimpleNamespace(
+                        id=audit["id"],
+                        event_id=audit["event_id"],
+                        from_status=audit["from_status"],
+                        to_status=audit["to_status"],
+                        operator=audit["operator"],
+                        reason=audit["reason"],
+                        created_at=None,
+                    )
+                    for audit in self.state.audits
+                    if audit["event_id"] == self.state.row.event_id
+                ]
+            )
+        if STATE_TRANSITION_PROJECTION_DEGRADED_FLAG.replace("_", "") in text.replace(
+            "_", ""
+        ) or "degraded_flags" in text:
+            if any(
+                str(flag).startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
+                for flag in self.state.row.degraded_flags
+            ):
+                return _Result([self.state.row.event_id])
+            return _Result([])
+        return _Result([])
 
     async def flush(self) -> None:
         return None
@@ -135,6 +170,7 @@ class _ProjectionStore:
         self.values: dict[str, Any] = {"state_history": []}
         self.raise_step: str | None = None
         self.degraded_step: str | None = None
+        self.raise_get_history = False
         self.calls: Counter[str] = Counter()
 
     @staticmethod
@@ -156,6 +192,8 @@ class _ProjectionStore:
 
     async def get(self, _event_id: str, key: str) -> Any:
         self.calls[f"get:{key}"] += 1
+        if key == "state_history" and self.raise_get_history:
+            raise RuntimeError("history get failure")
         return copy.deepcopy(self.values.get(key, []))
 
     async def refresh_closed_snapshot(self, _event_id: str) -> SimpleNamespace:
@@ -188,6 +226,28 @@ class _DegradedFlags:
         self.state.row.degraded_flags = updated
         return updated
 
+    async def get_flag_value(self, _event_id: str, flag_name: str) -> str | None:
+        prefix = f"{flag_name}="
+        for flag in self.state.row.degraded_flags:
+            text = str(flag)
+            if text == flag_name:
+                return "true"
+            if text.startswith(prefix):
+                return text[len(prefix) :]
+        return None
+
+    async def has_flag(self, event_id: str, flag_name: str) -> bool:
+        return (await self.get_flag_value(event_id, flag_name)) is not None
+
+
+class _FailingBus:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def publish_event(self, *_args: Any, **_kwargs: Any) -> None:
+        self.calls += 1
+        raise RuntimeError("bus down")
+
 
 def _event_from_row(row: _Row) -> SimpleNamespace:
     return SimpleNamespace(
@@ -207,6 +267,7 @@ def _build_service(
     monkeypatch: pytest.MonkeyPatch,
     *,
     initial: EventStatus = EventStatus.NEW,
+    bus: Any | None = None,
 ) -> tuple[StateMachineService, _DurableState, _ProjectionStore]:
     state = _DurableState(row=_Row(status=initial.value))
     store = _ProjectionStore()
@@ -229,37 +290,11 @@ def _build_service(
     service = StateMachineService(
         _SessionFactory(state),  # type: ignore[arg-type]
         store,  # type: ignore[arg-type]
+        event_bus=bus,
         audit_log=_AuditLog(),  # type: ignore[arg-type]
         degraded_flags=_DegradedFlags(state),  # type: ignore[arg-type]
     )
     return service, state, store
-
-
-def _repair_source(
-    state: _DurableState,
-    current: EventStatus,
-    target: EventStatus,
-) -> _ProjectionRepairSource:
-    audit = state.audits[-1]
-    history = (
-        {
-            "transition_id": f"audit:{audit['id']}",
-            "from_status": current.value,
-            "to_status": target.value,
-            "operator": audit["operator"],
-            "reason": audit["reason"],
-            "timestamp": "2026-08-09T00:00:00+00:00",
-        },
-    )
-    return _ProjectionRepairSource(
-        row=state.row,  # type: ignore[arg-type]
-        current=current,
-        target=target,
-        operator=audit["operator"],
-        reason=audit["reason"],
-        projection_id=f"audit:{audit['id']}",
-        history=history,
-    )
 
 
 @pytest.fixture(autouse=True)
@@ -302,13 +337,11 @@ async def test_direct_projection_exception_returns_committed_state_and_repairs_s
     assert any(
         flag.startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
         and f"{step}:raised" in flag
+        and "proj=audit:1" in flag
         for flag in state.row.degraded_flags
     )
 
     store.raise_step = None
-    service._load_projection_repair_source = AsyncMock(  # type: ignore[method-assign]
-        return_value=_repair_source(state, initial, target)
-    )
     repaired = await service.repair_post_commit_projection(
         state.row.event_id,
         backoff_seconds=0,
@@ -328,8 +361,11 @@ async def test_direct_projection_exception_returns_committed_state_and_repairs_s
     assert state.row.row_version == 2
     assert state.committed_transactions == 1
     assert len(state.audits) == 1
+    assert store.values["event"]["status"] == target.value
     assert len(store.values["state_history"]) == 1
     assert store.values["state_history"][0]["transition_id"] == "audit:1"
+    if step == "snapshot" or target is EventStatus.CLOSED:
+        assert store.values.get("snapshot") == {"rebuilt": True}
     assert not any(
         flag.startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
         for flag in state.row.degraded_flags
@@ -352,15 +388,68 @@ async def test_returned_degraded_is_distinct_from_direct_exception(
     assert state_projection_health_snapshot()["projection_failures"] == 1
 
     store.degraded_step = None
-    service._load_projection_repair_source = AsyncMock(  # type: ignore[method-assign]
-        return_value=_repair_source(state, EventStatus.NEW, EventStatus.TRIAGING)
-    )
     repaired = await service.repair_post_commit_projection(
         state.row.event_id,
         backoff_seconds=0,
     )
     assert repaired.degraded is False
-    assert "redis_context_unavailable=true" not in state.row.degraded_flags
+    # Shared Redis flag is owned by recovery wiring — repair must not clear it.
+    assert "redis_context_unavailable=true" in state.row.degraded_flags
+    assert not any(
+        flag.startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
+        for flag in state.row.degraded_flags
+    )
+
+
+@pytest.mark.asyncio
+async def test_closed_ttl_raised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, state, store = _build_service(monkeypatch, initial=EventStatus.REPORTING)
+    store.raise_step = "closed_ttl"
+    raised = await service.transition(state.row.event_id, EventStatus.CLOSED)
+    assert raised.status is EventStatus.CLOSED
+    assert any("closed_ttl:raised" in flag for flag in state.row.degraded_flags)
+
+
+@pytest.mark.asyncio
+async def test_closed_ttl_returned_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, state, store = _build_service(monkeypatch, initial=EventStatus.REPORTING)
+    store.degraded_step = "closed_ttl"
+    degraded = await service.force_close(
+        state.row.event_id,
+        principal="admin-1",
+        reason="ttl-degraded",
+    )
+    assert degraded.status is EventStatus.CLOSED
+    assert any("closed_ttl:returned_degraded" in flag for flag in state.row.degraded_flags)
+
+
+@pytest.mark.asyncio
+async def test_history_get_exception_does_not_overwrite(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, state, store = _build_service(monkeypatch)
+    store.values["state_history"] = [{"transition_id": "seed", "to_status": "new"}]
+    store.raise_get_history = True
+    result = await service.transition(state.row.event_id, EventStatus.TRIAGING)
+    assert result.status is EventStatus.TRIAGING
+    assert store.values["state_history"] == [{"transition_id": "seed", "to_status": "new"}]
+    assert any("history:raised" in flag for flag in state.row.degraded_flags)
+
+
+@pytest.mark.asyncio
+async def test_event_bus_publish_failure_does_not_imply_rollback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bus = _FailingBus()
+    service, state, _store = _build_service(monkeypatch, bus=bus)
+    result = await service.transition(state.row.event_id, EventStatus.TRIAGING)
+    assert result.status is EventStatus.TRIAGING
+    assert state.committed_transactions == 1
+    assert bus.calls == 1
 
 
 @pytest.mark.asyncio
@@ -373,9 +462,6 @@ async def test_projection_repair_is_bounded_and_never_replays_transition(
     transition_commits = state.committed_transactions
     transition_audits = len(state.audits)
     transition_version = state.row.row_version
-    service._load_projection_repair_source = AsyncMock(  # type: ignore[method-assign]
-        return_value=_repair_source(state, EventStatus.NEW, EventStatus.TRIAGING)
-    )
 
     outcome = await service.repair_post_commit_projection(
         state.row.event_id,
@@ -391,6 +477,75 @@ async def test_projection_repair_is_bounded_and_never_replays_transition(
     assert state.row.row_version == transition_version
     assert state.row.status == EventStatus.TRIAGING.value
     assert state_projection_health_snapshot()["projection_repairs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_repair_degraded_projections_entrypoint_clears_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, state, store = _build_service(monkeypatch)
+    store.raise_step = "summary"
+    await service.transition(state.row.event_id, EventStatus.TRIAGING)
+    assert any(
+        flag.startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
+        for flag in state.row.degraded_flags
+    )
+    store.raise_step = None
+
+    summary = await service.repair_degraded_projections(limit=10)
+    assert summary == {"scanned": 1, "repaired": 1, "exhausted": 0}
+    assert not any(
+        flag.startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
+        for flag in state.row.degraded_flags
+    )
+    assert store.values["event"]["status"] == EventStatus.TRIAGING.value
+
+
+@pytest.mark.asyncio
+async def test_admin_projection_repair_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, state, store = _build_service(monkeypatch)
+    store.raise_step = "summary"
+    await service.transition(state.row.event_id, EventStatus.TRIAGING)
+    store.raise_step = None
+
+    class _EventService:
+        async def get_event(self, _event_id: str) -> SimpleNamespace:
+            return _event_from_row(state.row)
+
+    response = await repair_event_projection(
+        event_id=state.row.event_id,
+        principal=Principal(subject="admin-1", roles=[ROLE_ADMIN]),
+        event_service=_EventService(),  # type: ignore[arg-type]
+        state_machine=service,
+    )
+    assert response.degraded is False
+    assert response.projection_id == "audit:1"
+    assert not any(
+        flag.startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
+        for flag in state.row.degraded_flags
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_marker_is_not_cleared_by_older_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, state, store = _build_service(monkeypatch)
+    store.raise_step = "summary"
+    await service.transition(state.row.event_id, EventStatus.TRIAGING)
+    store.raise_step = None
+    # Simulate a newer degradation generation written by a concurrent transition.
+    state.row.degraded_flags = [
+        f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=summary:raised|proj=audit:99"
+    ]
+    outcome = await service.repair_post_commit_projection(
+        state.row.event_id,
+        backoff_seconds=0,
+    )
+    assert outcome.degraded is False
+    assert any("proj=audit:99" in flag for flag in state.row.degraded_flags)
 
 
 @pytest.mark.asyncio
@@ -444,3 +599,21 @@ async def test_api_force_close_returns_committed_status_when_snapshot_raises(
     assert state.row.status == EventStatus.CLOSED.value
     assert state.row.row_version == 2
     assert len(state.audits) == 1
+
+
+@pytest.mark.asyncio
+async def test_repair_without_transition_audit_remains_explicitly_unrepairable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, state, store = _build_service(monkeypatch)
+    state.row.status = EventStatus.TRIAGING.value
+    state.row.degraded_flags = [
+        f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=history:raised|proj=row-version:2"
+    ]
+    outcome = await service.repair_post_commit_projection(
+        state.row.event_id,
+        backoff_seconds=0,
+    )
+    assert outcome.degraded is True
+    assert any(failure.step == "history" for failure in outcome.failures)
+    assert "state_history" not in store.values or store.values["state_history"] == []

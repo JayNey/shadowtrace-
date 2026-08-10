@@ -278,6 +278,21 @@ class EventCloseResponse(BaseModel):
     external_unsynced: bool = False
 
 
+class ProjectionRepairFailure(BaseModel):
+    step: str
+    mode: str
+    error_type: str | None = None
+
+
+class ProjectionRepairResponse(BaseModel):
+    event_id: str
+    committed: bool
+    degraded: bool
+    projection_id: str
+    attempts: int
+    failures: list[ProjectionRepairFailure] = []
+
+
 class ReportResponse(BaseModel):
     report: InvestigationReport
 

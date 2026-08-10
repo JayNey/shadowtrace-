@@ -219,11 +219,19 @@ class DegradedFlagService:
 
     async def has_flag(self, event_id: str, flag_name: str) -> bool:
         """Return True when ``flag_name`` (any value) is present on the event."""
+        return (await self.get_flag_value(event_id, flag_name)) is not None
+
+    async def get_flag_value(self, event_id: str, flag_name: str) -> str | None:
+        """Return the value after ``=``, ``true`` for a bare flag, or None if absent."""
         async with self._session_factory() as session:
             se = await session.get(orm.SecurityEvent, event_id)
             if se is None:
-                return False
+                return None
             prefix = f"{flag_name}="
-            return any(
-                f == flag_name or str(f).startswith(prefix) for f in (se.degraded_flags or [])
-            )
+            for flag in se.degraded_flags or []:
+                text = str(flag)
+                if text == flag_name:
+                    return "true"
+                if text.startswith(prefix):
+                    return text[len(prefix) :]
+            return None
