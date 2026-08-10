@@ -446,6 +446,11 @@ async def _get_workflow_runtime() -> Any:
     return _workflow_runtime
 
 
+# Public DI entry for Celery redelivery resume and other non-FastAPI callers
+# (ISSUE-287 / ID-BLK-006). Keeps ConvergenceGuard/session/adapter wiring intact.
+get_workflow_runtime = _get_workflow_runtime
+
+
 async def _resume_investigation(event_id: str) -> None:
     """Resume graph orchestration after approval or writeback (ISSUE-059 / #613)."""
     settings = get_settings()

@@ -1535,6 +1535,32 @@ def test_run_analysis_only_eager_executes_task(
     assert result == {"status": "completed", "event_id": "evt-ao-eager"}
 
 
+@pytest.mark.asyncio
+async def test_execute_redelivery_resume_calls_checkpoint_resume_with_public_di(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Broker redelivery resume must import get_workflow_runtime and delegate to graph resume."""
+    from app.api.v1 import deps
+
+    resume_mock = AsyncMock(return_value=None)
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume.resume_investigation_from_checkpoint",
+        resume_mock,
+    )
+
+    result = await tasks.execute_redelivery_resume(
+        "evt-redelivery-resume",
+        owner_id="owner-redelivery",
+        event_status=EventStatus.WAITING_APPROVAL,
+    )
+
+    assert result == {"status": "completed", "event_id": "evt-redelivery-resume"}
+    resume_mock.assert_awaited_once()
+    _, call_kwargs = resume_mock.await_args
+    assert call_kwargs["get_super_agent"] is deps.get_super_agent
+    assert call_kwargs["get_workflow_runtime"] is deps.get_workflow_runtime
+
+
 def test_run_analysis_only_redelivery_skips_terminal_event(
     celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
