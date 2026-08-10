@@ -549,8 +549,8 @@ def probe_socketio_schema_in_image(image_ref: str) -> int:
 
 def inspect_backend_image(image_ref: str, *, max_bytes: int) -> int:
     if not shutil_which("docker"):
-        print("WARN: docker not available — skipping image inspection", file=sys.stderr)
-        return 0
+        print("ERROR: docker not available — cannot inspect image", file=sys.stderr)
+        return 1
 
     size_proc = subprocess.run(
         ["docker", "image", "inspect", "--format", "{{.Size}}", image_ref],

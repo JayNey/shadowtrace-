@@ -116,6 +116,7 @@ def test_matcher_keeps_runtime_copy_sources() -> None:
         "backend/uv.lock",
         "backend/pyproject.toml",
         "contracts/schemas/foo.json",
+        "contracts/socketio/events.schema.json",
         "data/playbooks/x.yaml",
         "scripts/check_docker_build_context.py",
     ):
@@ -401,3 +402,34 @@ def test_probe_socketio_schema_in_image_fails_when_unreadable() -> None:
         ),
     ):
         assert mod.probe_socketio_schema_in_image("sha256:missing-schema") == 1
+
+
+def test_probe_socketio_schema_in_image_fails_when_smoke_validate_fails() -> None:
+    mod = _load_check_module()
+
+    def run_side_effect(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[-1] == mod._SOCKETIO_SCHEMA_SMOKE_PY:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=1,
+                stdout="",
+                stderr="jsonschema.ValidationError: 'event_type' is a required property",
+            )
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+
+    with (
+        mock.patch.object(mod, "shutil_which", return_value="/usr/bin/docker"),
+        mock.patch("subprocess.run", side_effect=run_side_effect),
+    ):
+        assert mod.probe_socketio_schema_in_image("sha256:bad-smoke") == 1
+
+
+def test_inspect_backend_image_fails_without_docker() -> None:
+    mod = _load_check_module()
+    with mock.patch.object(mod, "shutil_which", return_value=None):
+        assert mod.inspect_backend_image("sha256:test", max_bytes=1024 * 1024) == 1
