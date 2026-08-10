@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from collections.abc import Iterator
 
@@ -20,11 +21,11 @@ def test_deps_exposes_public_get_workflow_runtime() -> None:
     from app.api.v1 import deps
 
     assert hasattr(deps, "get_workflow_runtime")
-    assert deps.get_workflow_runtime is deps._get_workflow_runtime
+    assert inspect.iscoroutinefunction(deps.get_workflow_runtime)
 
 
 def test_execute_redelivery_resume_imports_get_workflow_runtime() -> None:
-    """execute_redelivery_resume must resolve the public DI symbol at import time."""
+    """The lazy redelivery import must resolve the public DI symbol."""
     from app.api.v1.deps import get_workflow_runtime
     from app.tasks.investigation_tasks import execute_redelivery_resume
 
