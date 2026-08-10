@@ -562,6 +562,7 @@ async def test_llm_timeout_records_audit_and_falls_back_to_template(
             )
         )
 
+    assert len(audit.entries) == 1
     timeout_rows = [
         entry
         for entry in audit.entries
@@ -570,9 +571,73 @@ async def test_llm_timeout_records_audit_and_falls_back_to_template(
         and entry.error_class == "timeout"
     ]
     assert len(timeout_rows) == 1
+    assert timeout_rows[0].error_detail is not None
+    assert len(timeout_rows[0].error_detail or "") <= 256
     assert report.generated_by == GENERATED_BY_TEMPLATE
     assert report.report_quality.value == "degraded_template"
     assert report.degraded is True
+    assert report.warnings == ["report_llm_fallback:llm_timeout"]
+
+
+@pytest.mark.asyncio
+async def test_report_agent_timeout_single_audit_with_fallback_models(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+    event_bus: _FakeEventBus,
+) -> None:
+    event_id = f"evt-report-timeout-fallback-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    event_service.final_verdicts[event_id] = FinalVerdict.CONFIRMED_THREAT
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)
+        return httpx.Response(
+            200,
+            json={
+                "model": "fallback-model",
+                "choices": [{"message": {"content": "{}"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            },
+            request=request,
+        )
+
+    audit = InMemoryLLMCallAuditRecorder()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        llm_client = OpenAICompatibleLLMClient(
+            base_url="https://llm.example/v1",
+            api_key="test-key",
+            client=http_client,
+            primary_model="primary-model",
+            fallback_models=("fallback-model",),
+            audit_recorder=audit,
+            timeout_seconds=30.0,
+        )
+        agent = ReportAgent(
+            llm_client=llm_client,
+            llm_timeout_seconds=0.05,
+            working_memory=wm,
+            event_service=event_service,
+            event_bus=event_bus,
+        )
+        report = await agent.execute(
+            ReportAgentInput(
+                event_id=event_id,
+                evidence_output=_main_evidence(event_id),
+                risk_assessment=_high_risk(),
+            )
+        )
+
+    timeout_rows = [
+        entry
+        for entry in audit.entries
+        if entry.prompt_key == "report_generate"
+        and entry.status == "llm_timeout"
+        and entry.error_class == "timeout"
+    ]
+    assert len(audit.entries) == 1
+    assert len(timeout_rows) == 1
+    assert report.generated_by == GENERATED_BY_TEMPLATE
+    assert report.warnings == ["report_llm_fallback:llm_timeout"]
 
 
 @pytest.mark.asyncio

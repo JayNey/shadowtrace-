@@ -73,6 +73,7 @@ class LLMResponse(BaseModel):
 
 class LLMTimeoutError(LLMError):
     default_error_code = "llm_timeout"
+    default_retryable = False
 
 
 class LLMAuthError(LLMError):
@@ -703,8 +704,9 @@ class BaseLLMClient(ABC):
             # Task shutdown can cancel in-flight provider work before the normal audit
             # path runs. Record once; never duplicate a timeout row already persisted.
             if not audit_recorded:
-                status = "llm_provider_error"
-                error = None
+                if status == "error":
+                    status = "llm_provider_error"
+                    error = None
                 await _persist_attempt_audit()
             raise
 
