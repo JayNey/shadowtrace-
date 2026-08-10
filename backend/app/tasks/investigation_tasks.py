@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from typing import Any
+from typing import Any, NoReturn
 
 from celery import uuid as celery_uuid
 from celery.exceptions import SoftTimeLimitExceeded
@@ -18,6 +18,7 @@ from app.core.celery_delivery import (
     DEFER_RETRY_MAX_ATTEMPTS,
     LOOKUP_RETRY_HEADER,
     LOOKUP_RETRY_MAX_ATTEMPTS,
+    REDELIVERY_RESUME_STATUSES,
     RedeliveryDecision,
     RedeliveryDeferRetry,
     RedeliveryHandoffAction,
@@ -321,11 +322,16 @@ def _redelivery_retry_headers(
     return headers
 
 
-def _raise_lookup_retry(event_id: str, *, attempt: int, cause: BaseException | None = None) -> None:
+def _raise_lookup_retry(
+    event_id: str,
+    *,
+    attempt: int,
+    cause: BaseException | None = None,
+) -> NoReturn:
     raise RedeliveryLookupRetry(event_id, attempt=attempt, cause=cause)
 
 
-def _raise_defer_retry(event_id: str, *, reason: str, attempt: int) -> None:
+def _raise_defer_retry(event_id: str, *, reason: str, attempt: int) -> NoReturn:
     raise RedeliveryDeferRetry(event_id, reason=reason, attempt=attempt)
 
 
@@ -334,7 +340,7 @@ def _celery_redelivery_retry(
     exc: RedeliveryLookupRetry | RedeliveryDeferRetry,
     *,
     request_headers: dict[str, object] | None,
-) -> None:
+) -> NoReturn:
     """Retry broker redelivery without ack; propagate typed retry counters via headers."""
     if isinstance(exc, RedeliveryLookupRetry):
         countdown = lookup_retry_countdown(exc.attempt)
@@ -373,19 +379,14 @@ async def execute_redelivery_resume(
 ) -> dict[str, str]:
     """Resume investigation from checkpoint when broker redelivery proves handoff."""
     from app.api.v1.deps import (
+        _get_degraded_flags,
         _get_session_factory,
         get_super_agent,
         get_workflow_runtime,
     )
-    from app.orchestration.graph_resume import resume_investigation_from_checkpoint
+    from app.orchestration.graph_resume_observability import execute_graph_resume_with_retry
 
-    if analysis_only or event_status not in {
-        EventStatus.WAITING_APPROVAL,
-        EventStatus.EXECUTING_RESPONSE,
-        EventStatus.VERIFYING,
-        EventStatus.REPLANNING,
-        EventStatus.REPORTING,
-    }:
+    if analysis_only or event_status not in REDELIVERY_RESUME_STATUSES:
         if analysis_only:
             return await execute_analysis_only_investigation(
                 event_id,
@@ -399,11 +400,12 @@ async def execute_redelivery_resume(
             lease_acquired=lease_acquired,
         )
 
-    await resume_investigation_from_checkpoint(
-        _get_session_factory(),
+    await execute_graph_resume_with_retry(
         event_id,
+        session_factory=_get_session_factory(),
         get_super_agent=get_super_agent,
         get_workflow_runtime=get_workflow_runtime,
+        degraded_flags=_get_degraded_flags(),
     )
     return {"status": "completed", "event_id": event_id}
 

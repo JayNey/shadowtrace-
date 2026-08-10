@@ -446,6 +446,11 @@ async def _get_workflow_runtime() -> Any:
     return _workflow_runtime
 
 
+async def get_workflow_runtime() -> Any:
+    """Public DI entry for Celery redelivery and other non-FastAPI callers."""
+    return await _get_workflow_runtime()
+
+
 async def _resume_investigation(event_id: str) -> None:
     """Resume graph orchestration after approval or writeback (ISSUE-059 / #613)."""
     settings = get_settings()
@@ -791,9 +796,9 @@ async def _build_investigation_agents() -> dict[str, Any]:
     from app.agents.triage_agent import TriageAgent
     from app.core.embedding.factory import get_embedding_client
     from app.core.guardrails import OutputGuard, WorkingMemoryGuardViolationWriter
-    from app.services.agent_publication_service import AgentPublicationService
     from app.core.llm.factory import get_llm_client
     from app.orchestration.convergence_guard import ConvergenceGuard
+    from app.services.agent_publication_service import AgentPublicationService
     from app.services.agent_trace_service import AgentTraceService
     from app.services.budget_service import BudgetService
     from app.services.case_kb_service import CaseKBService

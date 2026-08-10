@@ -1535,6 +1535,67 @@ def test_run_analysis_only_eager_executes_task(
     assert result == {"status": "completed", "event_id": "evt-ao-eager"}
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        EventStatus.WAITING_APPROVAL,
+        EventStatus.EXECUTING_RESPONSE,
+        EventStatus.VERIFYING,
+        EventStatus.REPLANNING,
+        EventStatus.REPORTING,
+        EventStatus.CONTAINED,
+        EventStatus.FAILED,
+    ],
+)
+@pytest.mark.asyncio
+async def test_execute_redelivery_resume_calls_checkpoint_resume_with_public_di(
+    monkeypatch: pytest.MonkeyPatch,
+    status: EventStatus,
+) -> None:
+    """Broker redelivery resume must import get_workflow_runtime and delegate to graph resume."""
+    from app.api.v1 import deps
+
+    resume_mock = AsyncMock(return_value=None)
+    degraded_flags = object()
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.execute_graph_resume_with_retry",
+        resume_mock,
+    )
+    monkeypatch.setattr(deps, "_get_degraded_flags", lambda: degraded_flags)
+
+    result = await tasks.execute_redelivery_resume(
+        f"evt-redelivery-resume-{status.value}",
+        owner_id="owner-redelivery",
+        event_status=status,
+    )
+
+    assert result == {
+        "status": "completed",
+        "event_id": f"evt-redelivery-resume-{status.value}",
+    }
+    resume_mock.assert_awaited_once()
+    call_args, call_kwargs = resume_mock.await_args
+    assert call_args == (f"evt-redelivery-resume-{status.value}",)
+    assert call_kwargs["get_super_agent"] is deps.get_super_agent
+    assert call_kwargs["get_workflow_runtime"] is deps.get_workflow_runtime
+    assert call_kwargs["degraded_flags"] is degraded_flags
+
+
+@pytest.mark.asyncio
+async def test_public_workflow_runtime_delegates_to_private_di(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Private DI overrides remain effective through the public Celery entrypoint."""
+    from app.api.v1 import deps
+
+    runtime = object()
+    private_runtime = AsyncMock(return_value=runtime)
+    monkeypatch.setattr(deps, "_get_workflow_runtime", private_runtime)
+
+    assert await deps.get_workflow_runtime() is runtime
+    private_runtime.assert_awaited_once_with()
+
+
 def test_run_analysis_only_redelivery_skips_terminal_event(
     celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,

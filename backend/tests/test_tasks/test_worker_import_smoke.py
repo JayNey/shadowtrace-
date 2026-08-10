@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import sys
 from collections.abc import Iterator
 
@@ -13,6 +14,23 @@ def test_investigation_intent_tasks_import_without_circular_import() -> None:
     from app.tasks import investigation_intent_tasks
 
     assert investigation_intent_tasks.dispatch_pending_investigation_intents is not None
+
+
+def test_deps_exposes_public_get_workflow_runtime() -> None:
+    """Celery redelivery resume imports get_workflow_runtime from deps (ISSUE-287)."""
+    from app.api.v1 import deps
+
+    assert hasattr(deps, "get_workflow_runtime")
+    assert inspect.iscoroutinefunction(deps.get_workflow_runtime)
+
+
+def test_execute_redelivery_resume_imports_get_workflow_runtime() -> None:
+    """The lazy redelivery import must resolve the public DI symbol."""
+    from app.api.v1.deps import get_workflow_runtime
+    from app.tasks.investigation_tasks import execute_redelivery_resume
+
+    assert callable(get_workflow_runtime)
+    assert execute_redelivery_resume is not None
 
 
 def test_agents_public_exports_remain_available() -> None:
