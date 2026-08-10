@@ -8,7 +8,6 @@ payload; ``content_sha256`` is published on EventBus and stored in
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -415,19 +414,17 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             context_summary=context_summary,
             draft_sections=draft_map,
         )
-        response = await asyncio.wait_for(
-            self.llm_client.chat(
-                messages,
-                event_id=input.event_id,
-                agent_name=self.agent_name,
-                prompt_key="report_generate",
-                scenario_id=resolve_llm_scenario_id(
-                    override=self.scenario_id,
-                    source_snapshot=source_snapshot,
-                ),
-                json_mode=True,
-                max_tokens=8192,
+        response = await self.llm_client.chat(
+            messages,
+            event_id=input.event_id,
+            agent_name=self.agent_name,
+            prompt_key="report_generate",
+            scenario_id=resolve_llm_scenario_id(
+                override=self.scenario_id,
+                source_snapshot=source_snapshot,
             ),
+            json_mode=True,
+            max_tokens=8192,
             timeout=self.llm_timeout_seconds,
         )
         payload = response.parsed

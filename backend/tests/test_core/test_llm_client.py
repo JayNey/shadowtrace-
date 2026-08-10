@@ -780,3 +780,34 @@ async def test_unknown_mock_prompt_fails_explicitly() -> None:
 def test_mock_llm_client_requires_audit_recorder() -> None:
     with pytest.raises(ValueError, match="audit_recorder is required"):
         MockLLMClient()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_inflight_attempt_records_minimal_audit() -> None:
+    audit = InMemoryLLMCallAuditRecorder()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            while True:
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            raise
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = _client(http_client, audit=audit, timeout_seconds=30.0)
+        task = asyncio.create_task(
+            client.chat(
+                MESSAGES,
+                event_id="evt-2026-cancelled",
+                agent_name="ReportAgent",
+                prompt_key="report_generate",
+            )
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert len(audit.entries) == 1
+    assert audit.entries[0].status == "llm_provider_error"
+    assert audit.entries[0].error_class == "provider"
