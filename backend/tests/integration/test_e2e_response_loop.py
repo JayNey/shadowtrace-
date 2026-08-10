@@ -32,10 +32,11 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.agents.response_agent import build_mock_capability_manifest, compute_template_hash
 from app.adapters.mock_xdr import MockXDRDispositionAdapter
 from app.adapters.registry import DispositionAdapterRegistry
+from app.agents.response_agent import build_mock_capability_manifest, compute_template_hash
 from app.api.v1 import deps
+from app.core.auth import Principal
 from app.core.config import get_settings
 from app.core.errors import ValidationError
 from app.core.event_bus import EventBus
@@ -91,6 +92,7 @@ from app.orchestration.workflow_graph import (
     NODE_EXECUTE,
     NODE_RESPONSE,
     NODE_VERIFY,
+    build_initial_investigation_state,
     invoke_investigation_graph,
 )
 from app.orchestration.workflow_runtime import WorkflowRuntimeService
@@ -111,8 +113,8 @@ from app.services.event_disposition_service import (
 from app.services.event_service import EventService
 from app.services.state_machine_service import StateMachineService
 from app.services.terminal_disposition_resolver import TerminalDispositionResolver
-from tests.integration.autonomous_e2e.helpers import patch_production_session_factory
 from tests.helpers.decision_audit import seed_minimum_disposition_audit
+from tests.integration.autonomous_e2e.helpers import patch_production_session_factory
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
 )
@@ -407,7 +409,7 @@ async def _seed_required_fp(
                     "recommendation": "close_as_fp",
                     "max_score": max_score,
                     "matched_window_id": "cw-test",
-                    "supporting_evidence_ids": ["evd-seed-001"],
+                    "supporting_evidence_ids": [],
                 },
             )
 
@@ -2600,27 +2602,31 @@ async def _run_disposition_only_investigation_graph(
     super_agent = await deps.get_super_agent()
     graph = getattr(super_agent, "_investigation_graph", None)
     assert graph is not None
-    config = {"configurable": {"thread_id": event_id}}
-    await graph.aupdate_state(
-        config,
-        {
-            "event_id": event_id,
-            "event_status": EventStatus.TRIAGING.value,
-            "disposition_policy": DispositionPolicy.REQUIRED.value,
-            "event_status_update_readiness": WritebackReadiness.READY.value,
-            "generate_report": True,
-            "halted": False,
-            "degraded_flags": [],
-            "node_trace": [],
-            "need_investigation": True,
-        },
-        as_node=NODE_BEGIN_DISPOSITION_ONLY,
+    runtime = await deps.get_workflow_runtime()
+    await runtime.begin_disposition_only(event_id)
+    async with session_factory() as session:
+        prebuilt_status = await session.scalar(
+            select(orm.Action.status).where(
+                orm.Action.event_id == event_id,
+                orm.Action.execution_phase == ActionExecutionPhase.POST_VERIFY.value,
+                orm.Action.tool_name == "update_source_event_disposition",
+            )
+        )
+    assert prebuilt_status == ActionStatus.APPROVED.value
+    initial = await build_initial_investigation_state(
+        event_id,
+        context_store=deps._get_context_store(),
+        defer_response_execution=False,
+        generate_report=True,
     )
-    final = await invoke_investigation_graph(graph, None, config)
+    config = {"configurable": {"thread_id": event_id}}
+    final = await invoke_investigation_graph(graph, initial, config)
     snapshot = await graph.aget_state(config)
     return {
         "final_state": final,
-        "node_trace": list((snapshot.values or {}).get("node_trace") or final.get("node_trace") or []),
+        "node_trace": list(
+            (snapshot.values or {}).get("node_trace") or final.get("node_trace") or []
+        ),
     }
 
 
@@ -2716,9 +2722,10 @@ async def test_scenario_5_disposition_only_false_positive_closed(
     async with session_factory() as session:
         evidence_journal_entries = await session.scalar(
             select(func.count())
-            .select_from(orm.DispositionOutbox)
+            .select_from(orm.EventContextJournal)
             .where(
-                orm.DispositionOutbox.event_id == event_id,
+                orm.EventContextJournal.event_id == event_id,
+                orm.EventContextJournal.field_name == "evidence_output",
             )
         )
         evidence_journal_entries = evidence_journal_entries or 0
@@ -2756,8 +2763,8 @@ async def test_scenario_5_disposition_only_false_positive_closed(
         assert deferred_row is not None, (
             "begin_disposition_only must create a deferred update_source_event_disposition Action"
         )
-        assert deferred_row.status == ActionStatus.APPROVED.value, (
-            f"deferred action must be APPROVED, got {deferred_row.status}"
+        assert deferred_row.status == ActionStatus.SUCCESS.value, (
+            f"graph-completed deferred action must be SUCCESS, got {deferred_row.status}"
         )
         assert deferred_row.approved_terminal_dispositions == [SourceDisposition.IGNORED.value], (
             f"deferred action must pre-approve IGNORED, got "
@@ -2839,6 +2846,7 @@ async def test_scenario_5_disposition_only_false_positive_closed(
             .select_from(orm.Action)
             .where(
                 orm.Action.event_id == event_id,
+                orm.Action.action_category == ActionCategory.RESPONSE.value,
                 orm.Action.execution_phase == ActionExecutionPhase.IMMEDIATE.value,
             )
         )

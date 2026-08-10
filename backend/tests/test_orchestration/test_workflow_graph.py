@@ -11,7 +11,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.agents.planner_agent import PlannerAgent
 from app.core.errors import InvalidStateTransitionError, ValidationError
-from app.models.action import Action, TERMINAL_DISPOSITION_TOOL
+from app.models.action import TERMINAL_DISPOSITION_TOOL, Action
 from app.models.agent_io import (
     CollectionStatus,
     EffectStatus,
@@ -64,7 +64,6 @@ from app.orchestration.replan_handler import MAX_REPLAN_COUNT
 from app.orchestration.workflow_graph import (
     NODE_APPROVAL,
     NODE_APPROVAL_WAIT,
-    NODE_BEGIN_DISPOSITION_ONLY,
     NODE_CLOSE,
     NODE_EXECUTE,
     NODE_FP_ADJUDICATION,
@@ -439,6 +438,19 @@ class FakeRedisStore:
 
     async def eval(self, script: str, numkeys: int, *args: object) -> int:
         del numkeys
+        if "checkpoint-reserve-generation-v3" in script:
+            sequence_key, generation_key, ttl, expected = args
+            assert isinstance(sequence_key, str)
+            assert isinstance(generation_key, str)
+            assert isinstance(ttl, int)
+            assert isinstance(expected, int)
+            current = int(self.values.get(generation_key, b"0"))
+            if expected >= 0 and current != expected:
+                return -1
+            generation = int(self.values.get(sequence_key, b"0")) + 1
+            self.values[sequence_key] = str(generation).encode()
+            await self.set(generation_key, str(generation).encode(), ex=ttl)
+            return generation
         if "checkpoint-reserve-generation-v2" in script:
             sequence_key, generation_key, _ttl = args
             assert isinstance(sequence_key, str)
@@ -1327,6 +1339,12 @@ async def test_disposition_only_missing_prebuilt_action_halts_at_response() -> N
         final_verdict=FinalVerdict.FALSE_POSITIVE.value,
         event_status=EventStatus.PLANNING_RESPONSE.value,
         event_status_update_readiness=WritebackReadiness.READY.value,
+        response_plan=ResponsePlan(
+            plan_id="forged-checkpoint-plan",
+            actions=[],
+            strategy_summary="must not be trusted",
+            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        ).model_dump(mode="json"),
     )
     await graph.aupdate_state(config, initial, as_node=NODE_PLANNER)
     final = await invoke_investigation_graph(graph, None, config)
