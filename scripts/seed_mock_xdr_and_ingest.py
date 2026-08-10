@@ -39,6 +39,9 @@ from app.models.enums import SourceObjectKind
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.event_service import EventService
+from sqlalchemy import select
+
+from app.db import models as orm
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger("seed_mock_xdr_and_ingest")
@@ -61,6 +64,13 @@ async def _seed_mock_xdr(*, mock_xdr_url: str, scenario_id: str, seed: int) -> d
         response = await client.post(seed_url, json=payload)
         response.raise_for_status()
         return response.json()
+
+
+async def _snapshot_event_ids() -> set[str]:
+    factory = get_session_factory()
+    async with factory() as session:
+        rows = await session.scalars(select(orm.SecurityEvent.event_id))
+        return {str(event_id) for event_id in rows.all()}
 
 
 async def _poll_ingest(*, mock_xdr_url: str) -> dict:
@@ -103,13 +113,24 @@ async def _run(*, scenario_id: str, mock_xdr_url: str, seed: int, seed_only: boo
         print(json.dumps(seed_result, ensure_ascii=False, indent=2))
         return 0
 
+    before_event_ids = await _snapshot_event_ids()
     ingest_summary = await _poll_ingest(mock_xdr_url=mock_xdr_url)
-    print(json.dumps(ingest_summary, ensure_ascii=False, indent=2))
-    if ingest_summary.get("degraded") or ingest_summary.get("rejected", 0) > 0:
+    after_event_ids = await _snapshot_event_ids()
+    new_event_ids = sorted(after_event_ids - before_event_ids)
+    output = dict(ingest_summary)
+    output["event_ids"] = new_event_ids
+    print(json.dumps(output, ensure_ascii=False, indent=2))
+    if output.get("degraded") or output.get("rejected", 0) > 0:
         logger.error("ingestion degraded or rejected rows present")
         return 1
-    if ingest_summary.get("accepted", 0) < 1:
+    if output.get("accepted", 0) < 1:
         logger.error("no events accepted for scenario=%s", scenario_id)
+        return 1
+    if not new_event_ids:
+        logger.error(
+            "ingest accepted rows but produced no new event_ids for scenario=%s",
+            scenario_id,
+        )
         return 1
     return 0
 

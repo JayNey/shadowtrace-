@@ -135,6 +135,83 @@ def test_full_loop_refuses_half_hour_wait(full_loop_mod) -> None:
     assert "30 minutes" in str(excinfo.value) or "APPROVAL_TIMEOUT" in str(excinfo.value)
 
 
+def test_full_loop_refuses_require_closed_without_report(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="requires report generation"):
+        full_loop_mod.main(
+            [
+                "--require-closed",
+                "--no-generate-report",
+                "--event-id",
+                "evt-x",
+            ]
+        )
+
+
+def test_assert_strict_closed_acceptance_requires_closed(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": []}
+            return {
+                "event": {"event_id": "evt-1", "status": "reporting"},
+                "writeback_required": False,
+                "writeback_readiness": "not_required",
+            }
+
+        def request(self, method: str, path: str):
+            raise AssertionError("report must not be fetched for non-closed status")
+
+    with pytest.raises(RuntimeError, match="status=closed"):
+        full_loop_mod.assert_strict_closed_acceptance(_Client(), "evt-1")
+
+
+def test_assert_strict_closed_acceptance_requires_report_body(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": []}
+            return {
+                "event": {"event_id": "evt-2", "status": "closed"},
+                "writeback_required": False,
+                "writeback_readiness": "not_required",
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            assert method == "GET" and path.endswith("/report")
+            return ApiResponse(status=200, data={})
+
+    with pytest.raises(RuntimeError, match="no report body"):
+        full_loop_mod.assert_strict_closed_acceptance(_Client(), "evt-2")
+
+
+def test_assert_strict_closed_acceptance_passes_when_converged(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": []}
+            return {
+                "event": {"event_id": "evt-3", "status": "closed"},
+                "writeback_required": True,
+                "writeback_readiness": "ready",
+                "writeback_overall_status": "confirmed",
+                "pending_writeback_count": 0,
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            return ApiResponse(
+                status=200,
+                data={"report": {"report_quality": "full"}},
+            )
+
+    result = full_loop_mod.assert_strict_closed_acceptance(_Client(), "evt-3")
+    assert result["status"] == "closed"
+    assert result["writeback_overall_status"] == "confirmed"
+
+
 def test_bootstrap_default_generate_report_false_with_opt_in() -> None:
     text = BOOTSTRAP_PATH.read_text(encoding="utf-8")
     assert 'BOOTSTRAP_GENERATE_REPORT="${BOOTSTRAP_GENERATE_REPORT:-false}"' in text
@@ -204,14 +281,14 @@ def test_eval_compose_override_unpublishes_host_ports() -> None:
     assert "eval-frontend" in text
 
 
-def test_matrix_script_serial_stop_and_fresh_project() -> None:
+def test_matrix_script_contains_isolation_keywords() -> None:
     text = MATRIX_PATH.read_text(encoding="utf-8")
-    assert "COMPOSE_PROJECT_NAME" in text or "compose_project_name" in text
+    assert "event_ids_from_seed_summary" in text
     assert "down" in text and "remove-orphans" in text
     assert "docker-compose.eval.yml" in text
     assert "--require-closed" in text
-    assert "event_ids" in text
     assert "127.0.0.1:8000" in text
+    assert "BooleanOptionalAction" in text or "default=True" in text
 
 
 def test_parse_seed_stdout_multiline_json(full_loop_mod) -> None:
@@ -226,12 +303,14 @@ def test_parse_seed_stdout_multiline_json(full_loop_mod) -> None:
   "accepted": 2,
   "duplicate": 0,
   "rejected": 0,
-  "degraded": false
+  "degraded": false,
+  "event_ids": ["evt-1", "evt-2"]
 }
 """
     summary = full_loop_mod.parse_seed_stdout(stdout)
     assert summary["accepted"] == 2
     assert summary["rejected"] == 0
+    assert summary["event_ids"] == ["evt-1", "evt-2"]
 
 
 def test_select_gold_event_ids_prefers_fresh_over_stale(full_loop_mod) -> None:

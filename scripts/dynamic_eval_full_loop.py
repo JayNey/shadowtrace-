@@ -74,16 +74,6 @@ _IN_FLIGHT = frozenset(
     }
 )
 
-# Strict profile (ISSUE-301): only CLOSED is terminal; progress states are not success.
-_STRICT_NON_TERMINAL_STATUSES = frozenset(
-    {
-        "reporting",
-        "contained",
-        "verifying",
-        "executing_response",
-        "replanning",
-    }
-)
 _GATE_APPLICABLE_CATEGORIES = frozenset({"response", "rollback"})
 
 # Past these statuses, evidence summary must be present and non-failed (ISSUE-256).
@@ -368,15 +358,11 @@ def assert_strict_closed_acceptance(
 ) -> dict[str, Any]:
     """ISSUE-301 strict profile: CLOSED + report + writeback gate convergence."""
     detail = get_event_detail(client, event_id)
-    event = unwrap_event_detail(detail)
+    event = unwrap_event_detail_payload(detail, expected_event_id=event_id)
     status = str(event.get("status") or "")
     if status != "closed":
         raise RuntimeError(
             f"strict profile requires status=closed for {event_id}, got {status!r}"
-        )
-    if status in _STRICT_NON_TERMINAL_STATUSES:
-        raise RuntimeError(
-            f"strict profile rejects progress terminal {status!r} for {event_id}"
         )
 
     report_resp = client.request("GET", f"/api/v1/events/{event_id}/report")
@@ -674,6 +660,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.require_closed and not args.generate_report:
+        raise SystemExit(
+            "--require-closed requires report generation; omit --no-generate-report"
+        )
     if args.max_wait_s >= 30 * 60:
         raise SystemExit(
             "Refusing max-wait-s >= 30 minutes — that recreates the "
@@ -706,19 +696,22 @@ def main(argv: list[str] | None = None) -> int:
                 mock_xdr_url=args.mock_xdr_url,
                 seed=args.seed,
             )
-        # Short retry: ingest visibility can lag one list poll.
-        event_ids = []
-        for attempt in range(1, 6):
-            event_ids = select_gold_event_ids(
-                list_events(client),
-                max_events=int(args.max_events),
-                scenario=str(args.scenario),
-                before_ids=before_ids if args.seed_via_compose else None,
-            )
-            if event_ids:
-                break
-            if attempt < 5:
-                time.sleep(min(2.0, float(args.poll_interval_s)))
+            raw_ids = seed_summary.get("event_ids")
+            if isinstance(raw_ids, list):
+                event_ids = [str(item) for item in raw_ids if item][: int(args.max_events)]
+        # Short retry when seed did not emit explicit IDs (legacy path).
+        if not event_ids:
+            for attempt in range(1, 6):
+                event_ids = select_gold_event_ids(
+                    list_events(client),
+                    max_events=int(args.max_events),
+                    scenario=str(args.scenario),
+                    before_ids=before_ids if args.seed_via_compose else None,
+                )
+                if event_ids:
+                    break
+                if attempt < 5:
+                    time.sleep(min(2.0, float(args.poll_interval_s)))
         if not event_ids:
             raise SystemExit(
                 "No status=new events found for gold path. Re-run with "

@@ -30,10 +30,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
 import time
+import zlib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -50,7 +52,6 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from dynamic_eval_full_loop import (  # noqa: E402
     GOLD_SCENARIOS,
     parse_seed_stdout,
-    select_gold_event_ids,
 )
 
 _DEFAULT_SCENARIOS = ",".join(GOLD_SCENARIOS)
@@ -70,6 +71,66 @@ _SENSITIVE_KEYS = frozenset(
 
 class MatrixError(RuntimeError):
     """Matrix orchestration failure."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(_sanitize_error_text(message))
+
+
+def _sanitize_error_text(text: str, *, max_len: int = 4096) -> str:
+    """Redact/truncate subprocess output before it lands in artifacts."""
+    redacted = re.sub(
+        r"(Bearer\s+)[^\s'\"]+",
+        r"\1<redacted>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    redacted = re.sub(
+        r"(Authorization['\"]?\s*[:=]\s*['\"]?)[^'\"\s]+",
+        r"\1<redacted>",
+        redacted,
+        flags=re.IGNORECASE,
+    )
+    if len(redacted) > max_len:
+        return redacted[:max_len] + "…<truncated>"
+    return redacted
+
+
+def scenario_seed_offset(base_seed: int, scenario: str) -> int:
+    """Stable per-scenario seed offset (does not depend on PYTHONHASHSEED)."""
+    return int(base_seed) + (zlib.adler32(scenario.encode("utf-8")) % 10_000)
+
+
+def event_ids_from_seed_summary(
+    seed_summary: dict[str, Any],
+    *,
+    scenario: str,
+    max_events: int,
+) -> list[str]:
+    """Read explicit event IDs emitted by seed_mock_xdr_and_ingest."""
+    raw = seed_summary.get("event_ids")
+    if not isinstance(raw, list):
+        raise MatrixError(
+            f"seed summary missing event_ids for scenario={scenario}: {seed_summary!r}"
+        )
+    event_ids = [str(item) for item in raw if item]
+    if not event_ids:
+        raise MatrixError(
+            f"seed returned empty event_ids for scenario={scenario}: {seed_summary!r}"
+        )
+    return event_ids[: max(1, max_events)]
+
+
+def _service_row_unhealthy(row: dict[str, Any], *, required: set[str]) -> bool:
+    service = str(row.get("Service") or "")
+    if service not in required:
+        return False
+    state = str(row.get("State") or "").lower()
+    if state != "running":
+        return True
+    health = str(row.get("Health") or "").lower()
+    if health and health not in {"healthy"}:
+        return True
+    return False
 
 
 class _CleanupRegistry:
@@ -142,7 +203,13 @@ def _compose_down(
     cmd = _compose_cmd(project, compose_files, "down", "--remove-orphans")
     if volumes:
         cmd.append("-v")
-    _run(cmd, check=False)
+    proc = _run(cmd, capture=True, check=False)
+    if proc.returncode != 0:
+        print(
+            f"[dynamic-eval-matrix] WARN compose down failed "
+            f"project={project} exit={proc.returncode}",
+            file=sys.stderr,
+        )
 
 
 def _scenario_project_name(scenario: str, run_id: str) -> str:
@@ -208,13 +275,7 @@ def _wait_stack_healthy(project: str, compose_files: list[Path], timeout_s: floa
             continue
         required = {"postgres", "redis", "mock-xdr", "backend", "worker"}
         seen = {str(row.get("Service") or "") for row in rows}
-        unhealthy = [
-            row
-            for row in rows
-            if str(row.get("Service") or "") in required
-            and str(row.get("Health") or "").lower() not in {"", "healthy"}
-            and str(row.get("State") or "").lower() != "running"
-        ]
+        unhealthy = [row for row in rows if _service_row_unhealthy(row, required=required)]
         if required.issubset(seen) and not unhealthy:
             return
         time.sleep(3.0)
@@ -251,7 +312,8 @@ def _seed_scenario(
     if proc.returncode != 0:
         raise MatrixError(
             "seed_mock_xdr_and_ingest failed "
-            f"(exit={proc.returncode}):\n{proc.stdout}\n{proc.stderr}"
+            f"(exit={proc.returncode}):\n{_sanitize_error_text(proc.stdout)}\n"
+            f"{_sanitize_error_text(proc.stderr)}"
         )
     summary = parse_seed_stdout(proc.stdout)
     accepted = summary.get("accepted")
@@ -260,72 +322,6 @@ def _seed_scenario(
             f"seed returned no accepted events for scenario={scenario}: {summary!r}"
         )
     return summary
-
-
-def _list_events_via_exec(
-    project: str,
-    compose_files: list[Path],
-    *,
-    token: str,
-) -> list[dict[str, Any]]:
-    inline = (
-        "import json, urllib.request; "
-        "req=urllib.request.Request("
-        "'http://127.0.0.1:8000/api/v1/events?page_size=50', "
-        f"headers={{'Authorization': 'Bearer {token}'}}); "
-        "payload=json.load(urllib.request.urlopen(req, timeout=30)); "
-        "print(json.dumps(payload.get('items') or []))"
-    )
-    cmd = _compose_cmd(
-        project,
-        compose_files,
-        "exec",
-        "-T",
-        "backend",
-        "python3",
-        "-c",
-        inline,
-    )
-    proc = _run(cmd, capture=True, check=False)
-    if proc.returncode != 0:
-        raise MatrixError(
-            f"list events via exec failed (exit={proc.returncode}):\n{proc.stderr}"
-        )
-    try:
-        items = json.loads(proc.stdout.strip() or "[]")
-    except json.JSONDecodeError as exc:
-        raise MatrixError(f"unexpected events list payload: {proc.stdout!r}") from exc
-    if not isinstance(items, list):
-        raise MatrixError(f"unexpected events list payload type: {type(items)!r}")
-    return [item for item in items if isinstance(item, dict)]
-
-
-def _resolve_seed_event_ids(
-    project: str,
-    compose_files: list[Path],
-    *,
-    scenario: str,
-    token: str,
-    max_events: int,
-    retries: int = 5,
-) -> list[str]:
-    """Resolve explicit event IDs on a fresh stack (no cross-scenario reuse)."""
-    event_ids: list[str] = []
-    for attempt in range(1, retries + 1):
-        events = _list_events_via_exec(project, compose_files, token=token)
-        event_ids = select_gold_event_ids(
-            events,
-            max_events=max_events,
-            scenario=scenario,
-            before_ids=None,
-        )
-        if event_ids:
-            return event_ids
-        if attempt < retries:
-            time.sleep(min(2.0, 1.0 * attempt))
-    raise MatrixError(
-        f"no NEW events found after seed for scenario={scenario} on project={project}"
-    )
 
 
 def _run_full_loop_via_exec(
@@ -375,7 +371,8 @@ def _run_full_loop_via_exec(
     if proc.returncode != 0:
         raise MatrixError(
             "dynamic_eval_full_loop failed "
-            f"(exit={proc.returncode}):\n{stdout}\n{proc.stderr}"
+            f"(exit={proc.returncode}):\n{_sanitize_error_text(stdout)}\n"
+            f"{_sanitize_error_text(proc.stderr)}"
         )
     try:
         result = json.loads(stdout)
@@ -449,11 +446,9 @@ def run_scenario(
             seed=seed,
             mock_xdr_url=mock_xdr_url,
         )
-        event_ids = _resolve_seed_event_ids(
-            project,
-            compose_files,
+        event_ids = event_ids_from_seed_summary(
+            seed_summary,
             scenario=scenario,
-            token=token,
             max_events=max_events,
         )
         manifest["seed_summary"] = seed_summary
@@ -480,7 +475,10 @@ def run_scenario(
         return manifest
     except Exception as exc:
         manifest["status"] = "failed"
-        manifest["error"] = {"type": type(exc).__name__, "message": str(exc)}
+        manifest["error"] = {
+            "type": type(exc).__name__,
+            "message": _sanitize_error_text(str(exc)),
+        }
         manifest["elapsed_s"] = round(time.monotonic() - started, 2)
         _write_json(scenario_dir / "manifest.json", manifest)
         raise
@@ -505,8 +503,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--fresh-volumes",
-        action="store_true",
-        help="Always remove volumes on scenario teardown (recommended)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Remove volumes on scenario teardown (default: true)",
     )
     parser.add_argument(
         "--require-closed",
@@ -599,7 +598,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     for scenario in scenarios:
-        per_seed = int(args.seed) + (hash(scenario) % 10_000)
+        per_seed = scenario_seed_offset(int(args.seed), scenario)
         try:
             manifest = run_scenario(
                 scenario=scenario,
@@ -625,7 +624,7 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             summary["results"][scenario] = {
                 "status": "failed",
-                "error": str(exc),
+                "error": _sanitize_error_text(str(exc)),
             }
             summary["status"] = "failed"
             _write_json(artifact_root / "summary.json", summary)

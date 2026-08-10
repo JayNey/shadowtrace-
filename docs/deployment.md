@@ -174,7 +174,7 @@ EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix
 | seed → harness | seed 后解析 **显式 event_ids**，禁止跨场景复用 | 单场景可 `--seed-via-compose` |
 | 终态 | strict：`closed` + `GET /report` + writeback gate | `reporting` / `contained` / `closed` 等 |
 | 失败行为 | 停止后续场景；`down -v --remove-orphans` 清理 | 依使用者手动清理 |
-| Artifact | `artifacts/dynamic-eval-matrix/<run-id>/<scenario>/manifest.json` | 无官方目录 |
+| Artifact | `artifacts/dynamic-eval-matrix/<run-id>/<scenario>/manifest.json` 与根目录 `summary.json` | 无官方目录 |
 
 Matrix 在容器内通过 `docker compose exec backend` 访问 `http://127.0.0.1:8000`，**不**探测或绑定 host port。
 
