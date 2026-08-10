@@ -467,13 +467,45 @@ def test_ensure_json_mode_messages_injects_hint_when_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_primary_timeout_falls_back_and_marks_level_one() -> None:
+async def test_primary_timeout_does_not_retry_fallback() -> None:
     audit = InMemoryLLMCallAuditRecorder()
 
     with respx.mock(base_url="https://llm.example/v1") as router:
         route = router.post("/chat/completions")
         route.side_effect = [
             httpx.ReadTimeout("primary timed out"),
+            httpx.Response(
+                200,
+                json=_response("fallback answer", model="fallback-model", prompt_tokens=7),
+            ),
+        ]
+        async with httpx.AsyncClient(base_url="https://llm.example/v1") as http_client:
+            with pytest.raises(LLMTimeoutError):
+                await _client(
+                    http_client,
+                    audit=audit,
+                    fallback_models=("fallback-model",),
+                ).chat(
+                    MESSAGES,
+                    event_id="evt-2026-fallback",
+                    agent_name="RiskAgent",
+                    prompt_key="risk_score",
+                )
+
+    assert route.call_count == 1
+    assert [(entry.model_name, entry.status, entry.fallback_level) for entry in audit.entries] == [
+        ("primary-model", "llm_timeout", 0),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_primary_provider_error_falls_back_and_marks_level_one() -> None:
+    audit = InMemoryLLMCallAuditRecorder()
+
+    with respx.mock(base_url="https://llm.example/v1") as router:
+        route = router.post("/chat/completions")
+        route.side_effect = [
+            httpx.ConnectError("primary unavailable"),
             httpx.Response(
                 200,
                 json=_response("fallback answer", model="fallback-model", prompt_tokens=7),
@@ -496,7 +528,7 @@ async def test_primary_timeout_falls_back_and_marks_level_one() -> None:
     assert response.fallback_level == 1
     assert response.degraded_reason is not None
     assert [(entry.model_name, entry.status, entry.fallback_level) for entry in audit.entries] == [
-        ("primary-model", "llm_timeout", 0),
+        ("primary-model", "llm_provider_error", 0),
         ("fallback-model", "success", 1),
     ]
 
@@ -504,11 +536,11 @@ async def test_primary_timeout_falls_back_and_marks_level_one() -> None:
 @pytest.mark.asyncio
 async def test_exhausted_real_models_raise_without_mock_fallback() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("unavailable", request=request)
+        raise httpx.ConnectError("unavailable", request=request)
 
     audit = InMemoryLLMCallAuditRecorder()
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
-        with pytest.raises(LLMTimeoutError):
+        with pytest.raises(LLMProviderError):
             await _client(
                 http_client,
                 audit=audit,
@@ -735,7 +767,7 @@ async def test_each_success_and_failure_attempt_is_persisted_as_orm_rows() -> No
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            raise httpx.ReadTimeout("primary timeout", request=request)
+            raise httpx.ConnectError("primary unavailable", request=request)
         return httpx.Response(200, json=_response("ok", model="fallback-model"))
 
     recorder = SQLAlchemyLLMCallAuditRecorder(session_factory)  # type: ignore[arg-type]
@@ -752,7 +784,7 @@ async def test_each_success_and_failure_attempt_is_persisted_as_orm_rows() -> No
         )
 
     assert [(row.prompt_key, row.status, row.fallback_level, row.error_class) for row in rows] == [
-        ("risk_score", "llm_timeout", 0, "timeout"),
+        ("risk_score", "llm_provider_error", 0, "provider"),
         ("risk_score", "success", 1, None),
     ]
     assert rows[0].error_detail is not None
@@ -780,3 +812,81 @@ async def test_unknown_mock_prompt_fails_explicitly() -> None:
 def test_mock_llm_client_requires_audit_recorder() -> None:
     with pytest.raises(ValueError, match="audit_recorder is required"):
         MockLLMClient()
+
+
+def test_llm_timeout_is_not_retryable() -> None:
+    assert LLMTimeoutError().retryable is False
+
+
+@pytest.mark.asyncio
+async def test_cancelled_after_timeout_classified_preserves_status() -> None:
+    class _CancelOnFirstAudit(InMemoryLLMCallAuditRecorder):
+        def __init__(self) -> None:
+            super().__init__()
+            self._cancelled_once = False
+
+        async def record(self, entry: object) -> None:
+            if not self._cancelled_once:
+                self._cancelled_once = True
+                raise asyncio.CancelledError()
+            await super().record(entry)  # type: ignore[arg-type]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)
+        return httpx.Response(
+            200,
+            json=_response("late", model="primary-model"),
+            request=request,
+        )
+
+    audit = _CancelOnFirstAudit()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        with pytest.raises(asyncio.CancelledError):
+            await _client(
+                http_client,
+                audit=audit,
+                fallback_models=("fallback-model",),
+                timeout_seconds=0.05,
+            ).chat(
+                MESSAGES,
+                event_id="evt-2026-cancel-after-timeout",
+                agent_name="ReportAgent",
+                prompt_key="report_generate",
+            )
+
+    assert len(audit.entries) == 1
+    assert audit.entries[0].status == "llm_timeout"
+    assert audit.entries[0].error_class == "timeout"
+    assert audit.entries[0].error_detail is not None
+    assert len(audit.entries[0].error_detail or "") <= 256
+
+
+@pytest.mark.asyncio
+async def test_cancelled_inflight_attempt_records_minimal_audit() -> None:
+    audit = InMemoryLLMCallAuditRecorder()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            while True:
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            raise
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = _client(http_client, audit=audit, timeout_seconds=30.0)
+        task = asyncio.create_task(
+            client.chat(
+                MESSAGES,
+                event_id="evt-2026-cancelled",
+                agent_name="ReportAgent",
+                prompt_key="report_generate",
+            )
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert len(audit.entries) == 1
+    assert audit.entries[0].status == "llm_provider_error"
+    assert audit.entries[0].error_class == "provider"

@@ -73,6 +73,7 @@ class LLMResponse(BaseModel):
 
 class LLMTimeoutError(LLMError):
     default_error_code = "llm_timeout"
+    default_retryable = False
 
 
 class LLMAuthError(LLMError):
@@ -614,81 +615,100 @@ class BaseLLMClient(ABC):
         raw: ProviderResponse | None = None
         status = "error"
         error: BaseException | None = None
-        try:
-            await self._check_budget(event_id=event_id, agent_name=agent_name)
-            try:
-                effective_timeout = timeout if timeout is not None else self.timeout_seconds
-                async with asyncio.timeout(effective_timeout):
-                    raw = await self._request(
-                        messages,
-                        model_name=model_name,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        json_mode=json_mode,
-                    )
-            except TimeoutError as exc:
-                raise LLMTimeoutError(
-                    "LLM request timed out",
-                    details={"model_name": model_name},
-                ) from exc
-        except LLMError as exc:
-            status = exc.error_code
-            error = exc
-        except ShadowTraceError as exc:
-            status = exc.error_code
-            error = exc
-        except Exception as exc:
-            status = "llm_provider_error"
-            error = LLMProviderError("unexpected LLM provider failure")
-            error.__cause__ = exc
+        audit_recorded = False
 
-        parsed: BaseModel | None = None
-        if error is None:
-            assert raw is not None
-            try:
-                parsed = (
-                    self._parse(
-                        raw.content,
-                        response_model,
-                        finish_reason=raw.finish_reason,
-                    )
-                    if json_mode
-                    else None
+        async def _persist_attempt_audit() -> None:
+            nonlocal audit_recorded
+            if audit_recorded:
+                return
+            latency_ms = max(0, round((time.perf_counter() - started) * 1000))
+            error_class, error_detail = classify_llm_call_failure(status=status, error=error)
+            await self._record_audit(
+                LLMCallAudit(
+                    event_id=event_id,
+                    agent_name=agent_name,
+                    prompt_key=prompt_key,
+                    model_name=model_name,
+                    prompt_tokens=raw.prompt_tokens if raw else 0,
+                    completion_tokens=raw.completion_tokens if raw else 0,
+                    total_tokens=(
+                        raw.total_tokens or raw.prompt_tokens + raw.completion_tokens if raw else 0
+                    ),
+                    latency_ms=latency_ms,
+                    fallback_level=fallback_level,
+                    status=status,
+                    error_class=error_class,
+                    error_detail=error_detail,
                 )
-                await self._charge_budget(raw, event_id=event_id, agent_name=agent_name)
-                status = "success"
+            )
+            audit_recorded = True
+
+        try:
+            try:
+                await self._check_budget(event_id=event_id, agent_name=agent_name)
+                try:
+                    effective_timeout = timeout if timeout is not None else self.timeout_seconds
+                    async with asyncio.timeout(effective_timeout):
+                        raw = await self._request(
+                            messages,
+                            model_name=model_name,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            json_mode=json_mode,
+                        )
+                except TimeoutError as exc:
+                    raise LLMTimeoutError(
+                        "LLM request timed out",
+                        details={"model_name": model_name},
+                    ) from exc
+            except LLMError as exc:
+                status = exc.error_code
+                error = exc
             except ShadowTraceError as exc:
                 status = exc.error_code
                 error = exc
             except Exception as exc:
                 status = "llm_provider_error"
-                error = LLMProviderError("LLM post-processing failed")
+                error = LLMProviderError("unexpected LLM provider failure")
                 error.__cause__ = exc
 
-        latency_ms = max(0, round((time.perf_counter() - started) * 1000))
-        error_class, error_detail = classify_llm_call_failure(status=status, error=error)
-        await self._record_audit(
-            LLMCallAudit(
-                event_id=event_id,
-                agent_name=agent_name,
-                prompt_key=prompt_key,
-                model_name=model_name,
-                prompt_tokens=raw.prompt_tokens if raw else 0,
-                completion_tokens=raw.completion_tokens if raw else 0,
-                total_tokens=(
-                    raw.total_tokens or raw.prompt_tokens + raw.completion_tokens if raw else 0
-                ),
-                latency_ms=latency_ms,
-                fallback_level=fallback_level,
-                status=status,
-                error_class=error_class,
-                error_detail=error_detail,
-            )
-        )
-        if error is not None:
-            raise error
-        assert raw is not None
-        return raw, parsed
+            parsed: BaseModel | None = None
+            if error is None:
+                assert raw is not None
+                try:
+                    parsed = (
+                        self._parse(
+                            raw.content,
+                            response_model,
+                            finish_reason=raw.finish_reason,
+                        )
+                        if json_mode
+                        else None
+                    )
+                    await self._charge_budget(raw, event_id=event_id, agent_name=agent_name)
+                    status = "success"
+                except ShadowTraceError as exc:
+                    status = exc.error_code
+                    error = exc
+                except Exception as exc:
+                    status = "llm_provider_error"
+                    error = LLMProviderError("LLM post-processing failed")
+                    error.__cause__ = exc
+
+            await _persist_attempt_audit()
+            if error is not None:
+                raise error
+            assert raw is not None
+            return raw, parsed
+        except asyncio.CancelledError:
+            # Task shutdown can cancel in-flight provider work before the normal audit
+            # path runs. Record once; never duplicate a timeout row already persisted.
+            if not audit_recorded:
+                if status == "error":
+                    status = "llm_provider_error"
+                    error = None
+                await _persist_attempt_audit()
+            raise
 
     async def _repair_json(
         self,
