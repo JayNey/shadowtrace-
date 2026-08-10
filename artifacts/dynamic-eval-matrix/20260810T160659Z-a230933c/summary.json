@@ -1,0 +1,20 @@
+{
+  "run_id": "20260810T160659Z-a230933c",
+  "git_commit": "f5e8760ba733f5655615dd6f68625cdb79ebe57c",
+  "scenarios": [
+    "insider_data_exfiltration",
+    "account_anomaly_fp"
+  ],
+  "artifact_root": "/Users/apple/Desktop/shadowtrace副本/artifacts/dynamic-eval-matrix/20260810T160659Z-a230933c",
+  "fresh_volumes": true,
+  "require_closed": false,
+  "results": {
+    "insider_data_exfiltration": {
+      "status": "failed",
+      "error": "simulated failure",
+      "compose_project_name": "shadowtrace-eval-insider-data-exfiltration-20260810T160659Z-a230933c",
+      "event_ids": null
+    }
+  },
+  "status": "failed"
+}
