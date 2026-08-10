@@ -28,7 +28,7 @@ from sqlalchemy.pool import NullPool
 from app.adapters.mock_xdr import MockXDRDispositionAdapter
 from app.adapters.registry import DispositionAdapterRegistry
 from app.agents.verify_agent import _action_from_row
-from app.core.errors import InvalidStateTransitionError, WritebackConflictError
+from app.core.errors import InvalidStateTransitionError, ValidationError, WritebackConflictError
 from app.core.guardrails import OutboundDispositionGuard
 from app.data_generators.scenarios import build_scenario
 from app.db import models as orm
@@ -2468,6 +2468,19 @@ async def test_paused_not_found_reconcile_does_not_re_enqueue(
         assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
         assert row.latest_writeback_status == WritebackStatus.FAILED.value
         assert row.last_error_code == "not_found"
+        action = await session.get(orm.Action, action_id)
+        assert action is not None
+        assert action.status == ActionStatus.FAILED.value
+        assert action.writeback_status == WritebackStatus.FAILED.value
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert len(receipts) == 1
+        assert receipts[0].status == WritebackStatus.FAILED.value
 
 
 @pytest.mark.asyncio
@@ -2613,6 +2626,130 @@ async def test_writeback_conflict_delivered_without_pause(
         assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
         assert row.latest_writeback_status == WritebackStatus.CONFLICT.value
         assert row.last_error_code == "version_conflict"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_validation_error_stays_paused_for_lookup(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-300: non-allowlist ValidationError must not dead-letter."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    adapter = sync._adapters.get("mock_xdr")
+
+    async def _ambiguous_validation(_command: DispositionCommand) -> None:
+        raise ValidationError("malformed payload", error_code="validation_error")
+
+    monkeypatch.setattr(adapter, "submit", _ambiguous_validation)
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.last_error_code == "delivery_outcome_unknown"
+
+
+@pytest.mark.asyncio
+async def test_transport_exception_stays_paused_for_lookup(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-300: transport/5xx ambiguity still uses PAUSED + lookup recovery."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    adapter = sync._adapters.get("mock_xdr")
+
+    async def _transport_failure(_command: DispositionCommand) -> None:
+        raise RuntimeError("simulated upstream 503")
+
+    monkeypatch.setattr(adapter, "submit", _transport_failure)
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.last_error_code == "delivery_outcome_unknown"
 
 
 @pytest.mark.asyncio

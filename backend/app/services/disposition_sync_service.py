@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.adapters._util import sanitize_disposition_receipt
 from app.adapters.disposition.base import BaseDispositionAdapter
 from app.adapters.disposition.error_classification import (
+    DispositionDeliveryErrorKind,
+    classify_disposition_delivery_error,
     is_deterministic_adapter_rejection_code,
 )
 from app.adapters.registry import DispositionAdapterRegistry
@@ -2064,19 +2066,18 @@ class DispositionSyncService:
                     if is_deterministic_adapter_rejection_code(
                         getattr(outbox, "last_error_code", None),
                     ):
-                        outbox.latest_writeback_status = WritebackStatus.FAILED.value
-                        outbox.last_error_detail = self._truncate_error_detail(
-                            "pre-submit deterministic rejection; lookup retry blocked"
-                        )
-                        validate_outbox_delivery_transition(
-                            OutboxDeliveryStatus.PAUSED,
-                            OutboxDeliveryStatus.DEAD_LETTER,
-                        )
-                        outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
-                        _mirror_writeback_status_to_action(action, WritebackStatus.FAILED.value)
-                        record_writeback_dead_letter(
-                            adapter=claim.adapter.name,
-                            error_code=outbox.last_error_code,
+                        rejection_code = outbox.last_error_code or "adapter_validation_error"
+                        await self._apply_deterministic_rejection_terminal_state(
+                            session,
+                            outbox,
+                            action,
+                            now=now,
+                            from_status=OutboxDeliveryStatus.PAUSED,
+                            error_code=rejection_code,
+                            error_detail=(
+                                "pre-submit deterministic rejection; lookup retry blocked"
+                            ),
+                            adapter_label=claim.adapter.name,
                         )
                         return True, outbox.event_id, WritebackStatus.FAILED
                     if not claim.adapter.allows_safe_retry():
@@ -2249,6 +2250,48 @@ class DispositionSyncService:
         )
         return OutboxDeliveryStatus.DEAD_LETTER
 
+    async def _apply_deterministic_rejection_terminal_state(
+        self,
+        session: AsyncSession,
+        outbox: orm.DispositionOutbox,
+        action: orm.Action | None,
+        *,
+        now: datetime,
+        from_status: OutboxDeliveryStatus,
+        error_code: str,
+        error_detail: str,
+        adapter_label: str,
+    ) -> DispositionReceipt:
+        """Shared DEAD_LETTER terminalization for definitive adapter rejections (ISSUE-300)."""
+        detail = self._truncate_error_detail(error_detail)
+        outbox.last_error_code = error_code
+        outbox.last_error_detail = detail
+        outbox.latest_writeback_status = WritebackStatus.FAILED.value
+        outbox.locked_by = None
+        outbox.locked_at = None
+        outbox.lease_expires_at = None
+        outbox.next_retry_at = None
+        outbox.updated_at = now
+        validate_outbox_delivery_transition(from_status, OutboxDeliveryStatus.DEAD_LETTER)
+        outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+        receipt = await self._append_receipt(
+            session,
+            outbox,
+            status=WritebackStatus.FAILED,
+            provider_message=detail,
+        )
+        _mirror_writeback_status_to_action(action, WritebackStatus.FAILED.value)
+        if action is not None:
+            await self._apply_action_terminal_from_receipt(
+                session,
+                action,
+                receipt,
+                adapter_label=adapter_label,
+            )
+        record_writeback(status=WritebackStatus.FAILED.value, adapter=adapter_label)
+        record_writeback_dead_letter(adapter=adapter_label, error_code=error_code)
+        return receipt
+
     async def _mark_delivery_deterministic_rejection(
         self,
         outbox_id: str,
@@ -2274,39 +2317,23 @@ class DispositionSyncService:
                 current = OutboxDeliveryStatus(outbox.delivery_status)
                 if current is not OutboxDeliveryStatus.LEASED:
                     return
-                outbox.last_error_code = error_code
-                outbox.last_error_detail = detail
-                outbox.latest_writeback_status = WritebackStatus.FAILED.value
-                outbox.locked_by = None
-                outbox.locked_at = None
-                outbox.lease_expires_at = None
-                outbox.next_retry_at = None
-                outbox.updated_at = now
-                validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
-                outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
-                receipt = await self._append_receipt(
+                adapter_label = self._adapter_label(outbox)
+                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
+                await self._apply_deterministic_rejection_terminal_state(
                     session,
                     outbox,
-                    status=WritebackStatus.FAILED,
-                    provider_message=detail,
+                    action,
+                    now=now,
+                    from_status=current,
+                    error_code=error_code,
+                    error_detail=detail,
+                    adapter_label=adapter_label,
                 )
-                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
-                _mirror_writeback_status_to_action(action, WritebackStatus.FAILED.value)
-                if action is not None:
-                    await self._apply_action_terminal_from_receipt(
-                        session,
-                        action,
-                        receipt,
-                        adapter_label=self._adapter_label(outbox),
-                    )
                 event_id = outbox.event_id
                 writeback_id = outbox.writeback_id
-                adapter_label = self._adapter_label(outbox)
 
-        assert event_id is not None
-        assert writeback_id is not None
-        record_writeback(status=WritebackStatus.FAILED.value, adapter=adapter_label)
-        record_writeback_dead_letter(adapter=adapter_label, error_code=error_code)
+        if event_id is None or writeback_id is None:
+            return
         await self._sync_writeback_summary(event_id)
         await self._maybe_resume(event_id)
         if self._bus is not None:
@@ -2374,8 +2401,8 @@ class DispositionSyncService:
                 writeback_id = outbox.writeback_id
                 adapter_label = self._adapter_label(outbox)
 
-        assert event_id is not None
-        assert writeback_id is not None
+        if event_id is None or writeback_id is None:
+            return
         record_writeback(status=WritebackStatus.CONFLICT.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
         await self._maybe_resume(event_id)
@@ -2430,8 +2457,8 @@ class DispositionSyncService:
                 writeback_id = outbox.writeback_id
                 adapter_label = self._adapter_label(outbox)
 
-        assert event_id is not None
-        assert writeback_id is not None
+        if event_id is None or writeback_id is None:
+            return
         record_writeback(status=WritebackStatus.UNKNOWN.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
         await self._maybe_resume(event_id)
@@ -2586,34 +2613,40 @@ class OutboxWorker:
         for outbox_id in claimed:
             try:
                 await self._service._deliver_outbox(outbox_id)
-            except GuardrailViolationError as exc:
-                logger.warning("outbox delivery blocked by guard outbox=%s", outbox_id)
-                await self._service._mark_delivery_dead_letter(
-                    outbox_id,
-                    error_code="guardrail_blocked",
-                    error_detail=str(exc),
-                )
-            except WritebackConflictError as exc:
-                logger.warning(
-                    "outbox delivery conflict outbox=%s error_code=%s",
-                    outbox_id,
-                    exc.error_code,
-                )
-                await self._service._mark_delivery_conflict(
-                    outbox_id,
-                    error_code=exc.error_code,
-                    error_detail=str(exc),
-                )
-            except ValidationError as exc:
-                if is_deterministic_adapter_rejection_code(exc.error_code):
+            except (
+                GuardrailViolationError,
+                WritebackConflictError,
+                ValidationError,
+                WritebackUnsupportedError,
+            ) as exc:
+                kind, code = classify_disposition_delivery_error(exc)
+                if kind is DispositionDeliveryErrorKind.GUARDRAIL:
+                    logger.warning("outbox delivery blocked by guard outbox=%s", outbox_id)
+                    await self._service._mark_delivery_dead_letter(
+                        outbox_id,
+                        error_code="guardrail_blocked",
+                        error_detail=str(exc),
+                    )
+                elif kind is DispositionDeliveryErrorKind.CONFLICT:
+                    logger.warning(
+                        "outbox delivery conflict outbox=%s error_code=%s",
+                        outbox_id,
+                        code,
+                    )
+                    await self._service._mark_delivery_conflict(
+                        outbox_id,
+                        error_code=code or "version_conflict",
+                        error_detail=str(exc),
+                    )
+                elif kind is DispositionDeliveryErrorKind.DETERMINISTIC_REJECTION:
                     logger.warning(
                         "outbox delivery deterministic rejection outbox=%s error_code=%s",
                         outbox_id,
-                        exc.error_code,
+                        code,
                     )
                     await self._service._mark_delivery_deterministic_rejection(
                         outbox_id,
-                        error_code=exc.error_code,
+                        error_code=code or "adapter_validation_error",
                         error_detail=str(exc),
                     )
                 else:
@@ -2627,17 +2660,6 @@ class OutboxWorker:
                         error_code="delivery_outcome_unknown",
                         error_detail=f"{type(exc).__name__}: {exc}",
                     )
-            except WritebackUnsupportedError as exc:
-                logger.warning(
-                    "outbox delivery unsupported outbox=%s error_code=%s",
-                    outbox_id,
-                    exc.error_code,
-                )
-                await self._service._mark_delivery_deterministic_rejection(
-                    outbox_id,
-                    error_code=exc.error_code,
-                    error_detail=str(exc),
-                )
             except Exception as exc:
                 logger.exception(
                     "outbox delivery outcome ambiguous; pausing for lookup outbox=%s",
