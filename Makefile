@@ -65,7 +65,7 @@ CELERY_SIGKILL_ARTIFACT_DIR ?= $(CURDIR)/artifacts/issue-283
 CI_DATABASE_URL ?= postgresql+asyncpg://shadowtrace:shadowtrace@localhost:$(POSTGRES_PORT)/shadowtrace
 CI_REDIS_URL ?= redis://localhost:$(REDIS_PORT)/0
 
-.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
+.PHONY: up down down-v bootstrap smoke-bootstrap up-demo down-demo bootstrap-demo smoke-demo demo-guard-test up-observability down-observability llm-smoke test lint fmt migrate migrate-down load-kb integration-test orchestration-test worker-smoke-test worker-nightly-pytest worker-nightly-smoke worker-nightly-matrix ingestion-scheduler-test auto-investigate-test autonomous-mock-e2e autonomous-mock-e2e-pytest autonomous-mock-e2e-worker-pytest autonomous-mock-e2e-worker-sigkill eval-full-loop eval-full-loop-matrix test-tools test-system test-regression update-baseline test-e2e-frontend frontend-test ci-lint ci-test ci-build update-contracts check-contract-drift check-migration-revisions evaluation-run evaluation-test detection-evaluation-run detection-production-comparison-run
 
 up:
 	$(COMPOSE) $(WORKER_PROFILE) $(SCHEDULER_PROFILE) up -d --build
@@ -127,6 +127,21 @@ eval-full-loop:
 		--token "$(BOOTSTRAP_AUTH_TOKEN)" \
 		--max-events "$(EVAL_MAX_EVENTS)" \
 		--decision "$(EVAL_DECISION)"
+
+# ---------------------------------------------------------------------------
+# ISSUE-301 dynamic-eval matrix (fresh Compose project + volumes per scenario)
+# ---------------------------------------------------------------------------
+EVAL_MATRIX_SCENARIOS ?= insider_data_exfiltration,account_anomaly_fp,suspicious_domain_access
+EVAL_MATRIX_ARTIFACT_DIR ?=
+EVAL_MATRIX_REQUIRE_CLOSED ?=
+eval-full-loop-matrix:
+	@echo "[eval-full-loop-matrix] scenarios=$(EVAL_MATRIX_SCENARIOS)"
+	@echo "[eval-full-loop-matrix] fresh project/volumes per scenario; in-network exec (no host ports)"
+	python3 "$(CURDIR)/scripts/dynamic_eval_matrix.py" \
+		--scenarios "$(EVAL_MATRIX_SCENARIOS)" \
+		--fresh-volumes \
+		$(if $(EVAL_MATRIX_ARTIFACT_DIR),--artifact-dir "$(EVAL_MATRIX_ARTIFACT_DIR)",) \
+		$(if $(EVAL_MATRIX_REQUIRE_CLOSED),--require-closed,)
 
 # ---------------------------------------------------------------------------
 # Mock demo full stack (ISSUE-141 / #647): core + worker + scheduler + OTEL

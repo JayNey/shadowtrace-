@@ -1,0 +1,31 @@
+# ISSUE-301 dynamic eval matrix override.
+#
+# - No host port bindings (avoids fixed-port reuse and probe/release TOCTOU).
+# - Seed + harness talk to backend at http://127.0.0.1:8000 via
+#   ``docker compose exec backend`` on the Compose network.
+# - Shorter approval/LLM timeouts are eval-only; production defaults unchanged.
+services:
+  postgres:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  mock-xdr:
+    ports: !reset []
+
+  backend:
+    ports: !reset []
+    environment:
+      APPROVAL_TIMEOUT_MINUTES: ${EVAL_APPROVAL_TIMEOUT_MINUTES:-5}
+      LLM_TIMEOUT_SECONDS: ${EVAL_LLM_TIMEOUT_SECONDS:-60}
+      TASK_MODE: celery
+
+  frontend:
+    profiles: ["eval-frontend"]
+    ports: !reset []
+
+  worker:
+    environment:
+      APPROVAL_TIMEOUT_MINUTES: ${EVAL_APPROVAL_TIMEOUT_MINUTES:-5}
+      LLM_TIMEOUT_SECONDS: ${EVAL_LLM_TIMEOUT_SECONDS:-60}

@@ -104,6 +104,7 @@ make smoke-demo        # exit 0 并打印 URL/端口表
 | `make smoke-demo` | demo 全栈冒烟：bootstrap + worker + scheduler + OTEL/Prometheus/Grafana |
 | `make down-demo` | 停止 demo 栈（含 worker/scheduler/observability）——**up-demo 后必用** |
 | `make eval-full-loop` | **金标全闭环评测**（ISSUE-256）：mock-xdr seed → full_loop → **脚本审批** |
+| `make eval-full-loop-matrix` | **官方动态评测 matrix**（ISSUE-301）：每场景独立 Compose project + fresh volumes，可选 strict CLOSED |
 | `make up-observability` | 仅启动 OTEL/Prometheus/Grafana（不含 app） |
 | `make down-observability` | 停止 observability 栈 |
 | `make down` | 停止并移除容器（**数据卷保留**） |
@@ -149,6 +150,33 @@ BOOTSTRAP_INCLUDE_RESPONSE=true make bootstrap   # 会停在 waiting_approval，
 - 本剖面 **不**改变 ISSUE-206 / 计划审批 / `evidence_limited` 产品合同。
 
 评测超时建议写在本地 `.env`（参考仓库根目录 `.env.example` 中「Dynamic eval / gold-path profile」注释块），**不要**把仓库里的 `APPROVAL_TIMEOUT_MINUTES=30` 改成 2。
+
+### 动态评测 matrix（ISSUE-301）
+
+全闭环 matrix 是仓库内**唯一**推荐的 serial 动态评测入口：每个场景使用独立 `COMPOSE_PROJECT_NAME` 与 fresh volumes，避免 Mock XDR `control/seed` 在前一场景尚未结束时覆盖 state。
+
+```bash
+# strict CLOSED 验收（三场景串行；任一场景失败即停止）
+python3 scripts/dynamic_eval_matrix.py \
+  --scenarios insider_data_exfiltration,account_anomaly_fp,suspicious_domain_access \
+  --fresh-volumes \
+  --require-closed
+
+# Makefile 等价（默认三场景 + fresh volumes；strict 需显式开启）
+make eval-full-loop-matrix
+EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix
+```
+
+| 项 | matrix / strict | 默认 compat（ISSUE-256） |
+|----|-----------------|--------------------------|
+| Compose project | 每场景唯一 `shadowtrace-eval-<scenario>-<run>` | 固定 `COMPOSE_PROJECT_NAME` |
+| Host ports | **不发布**（`infra/docker-compose.eval.yml`） | 默认映射 8000/5432/… |
+| seed → harness | seed 后解析 **显式 event_ids**，禁止跨场景复用 | 单场景可 `--seed-via-compose` |
+| 终态 | strict：`closed` + `GET /report` + writeback gate | `reporting` / `contained` / `closed` 等 |
+| 失败行为 | 停止后续场景；`down -v --remove-orphans` 清理 | 依使用者手动清理 |
+| Artifact | `artifacts/dynamic-eval-matrix/<run-id>/<scenario>/manifest.json` | 无官方目录 |
+
+Matrix 在容器内通过 `docker compose exec backend` 访问 `http://127.0.0.1:8000`，**不**探测或绑定 host port。
 
 ---
 

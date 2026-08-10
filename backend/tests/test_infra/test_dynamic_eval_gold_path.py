@@ -20,6 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = REPO_ROOT / "scripts"
 APPROVE_PATH = SCRIPTS / "dynamic_eval_approve.py"
 FULL_LOOP_PATH = SCRIPTS / "dynamic_eval_full_loop.py"
+MATRIX_PATH = SCRIPTS / "dynamic_eval_matrix.py"
+EVAL_COMPOSE = REPO_ROOT / "infra" / "docker-compose.eval.yml"
 BOOTSTRAP_PATH = SCRIPTS / "bootstrap.sh"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 DEPLOYMENT_DOC = REPO_ROOT / "docs" / "deployment.md"
@@ -57,6 +59,8 @@ def full_loop_mod():
 def test_gold_path_scripts_exist() -> None:
     assert APPROVE_PATH.is_file()
     assert FULL_LOOP_PATH.is_file()
+    assert MATRIX_PATH.is_file()
+    assert EVAL_COMPOSE.is_file()
     assert SEED_PATH.is_file()
 
 
@@ -113,6 +117,16 @@ def test_event_outcome_ok_rejects_failed(full_loop_mod) -> None:
     assert full_loop_mod.event_outcome_ok("contained") is True
     assert full_loop_mod.event_outcome_ok("waiting_approval") is True
     assert full_loop_mod.event_outcome_ok("failed") is False
+    assert full_loop_mod.event_outcome_ok("reporting", require_closed=True) is False
+    assert full_loop_mod.event_outcome_ok("contained", require_closed=True) is False
+    assert full_loop_mod.event_outcome_ok("closed", require_closed=True) is True
+
+
+def test_unwrap_event_detail_supports_envelope(full_loop_mod) -> None:
+    flat = {"event_id": "evt-flat", "status": "new"}
+    assert full_loop_mod.unwrap_event_detail(flat)["event_id"] == "evt-flat"
+    wrapped = {"event": {"event_id": "evt-wrap", "status": "closed"}, "writeback_required": True}
+    assert full_loop_mod.unwrap_event_detail(wrapped)["event_id"] == "evt-wrap"
 
 
 def test_full_loop_refuses_half_hour_wait(full_loop_mod) -> None:
@@ -151,20 +165,26 @@ def test_env_example_keeps_production_approval_timeout_default() -> None:
 def test_makefile_eval_full_loop_target() -> None:
     text = MAKEFILE_PATH.read_text(encoding="utf-8")
     assert "eval-full-loop:" in text
+    assert "eval-full-loop-matrix:" in text
     assert "dynamic_eval_full_loop.py" in text
+    assert "dynamic_eval_matrix.py" in text
     assert "--seed-via-compose" in text
+    assert "--fresh-volumes" in text
     assert "BOOTSTRAP_GENERATE_REPORT" in text
 
 
 def test_deployment_docs_gold_path_honesty() -> None:
     text = DEPLOYMENT_DOC.read_text(encoding="utf-8")
     assert "ISSUE-256" in text
+    assert "ISSUE-301" in text
     assert "eval-full-loop" in text
+    assert "eval-full-loop-matrix" in text
     assert "seed_mock_xdr_and_ingest" in text
     assert "POST /events" in text
     assert "APPROVAL_TIMEOUT_MINUTES" in text
     assert "EMBEDDING_MODE" in text
     assert "-c 2" in text
+    assert "docker-compose.eval.yml" in text
 
 
 def test_full_loop_documents_seed_fixture_not_post_events() -> None:
@@ -173,6 +193,25 @@ def test_full_loop_documents_seed_fixture_not_post_events() -> None:
     assert "POST /api/v1/events" in text or "POST /events" in text
     assert "include_response_execution" in text
     assert "APPROVAL_TIMEOUT" in text
+    assert "--require-closed" in text
+    assert "unwrap_event_detail" in text
+
+
+def test_eval_compose_override_unpublishes_host_ports() -> None:
+    text = EVAL_COMPOSE.read_text(encoding="utf-8")
+    assert "ISSUE-301" in text
+    assert "ports: !reset []" in text
+    assert "eval-frontend" in text
+
+
+def test_matrix_script_serial_stop_and_fresh_project() -> None:
+    text = MATRIX_PATH.read_text(encoding="utf-8")
+    assert "COMPOSE_PROJECT_NAME" in text or "compose_project_name" in text
+    assert "down" in text and "remove-orphans" in text
+    assert "docker-compose.eval.yml" in text
+    assert "--require-closed" in text
+    assert "event_ids" in text
+    assert "127.0.0.1:8000" in text
 
 
 def test_parse_seed_stdout_multiline_json(full_loop_mod) -> None:

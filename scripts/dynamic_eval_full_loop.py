@@ -74,6 +74,18 @@ _IN_FLIGHT = frozenset(
     }
 )
 
+# Strict profile (ISSUE-301): only CLOSED is terminal; progress states are not success.
+_STRICT_NON_TERMINAL_STATUSES = frozenset(
+    {
+        "reporting",
+        "contained",
+        "verifying",
+        "executing_response",
+        "replanning",
+    }
+)
+_GATE_APPLICABLE_CATEGORIES = frozenset({"response", "rollback"})
+
 # Past these statuses, evidence summary must be present and non-failed (ISSUE-256).
 _EVIDENCE_REQUIRED_STATUSES = frozenset(
     {
@@ -182,9 +194,31 @@ def parse_seed_stdout(stdout: str) -> dict[str, Any]:
     return objects[-1]
 
 
+def unwrap_event_detail(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize GET /events/{id} — flat SecurityEvent or EventDetailResponse envelope."""
+    if "event_id" in payload:
+        return payload
+    nested = payload.get("event")
+    if isinstance(nested, dict) and nested.get("event_id"):
+        return nested
+    raise DynamicEvalApiError(f"unexpected event payload: {payload!r}")
+
+
 def get_event(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
     payload = client.get_json(f"/api/v1/events/{event_id}")
     return unwrap_event_detail_payload(payload, expected_event_id=event_id)
+
+
+def get_event_detail(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
+    """Return raw EventDetailResponse (writeback gate fields at envelope level)."""
+    payload = client.get_json(f"/api/v1/events/{event_id}")
+    if not isinstance(payload, dict):
+        raise DynamicEvalApiError(f"unexpected event detail payload: {payload!r}")
+    if "event" in payload and isinstance(payload.get("event"), dict):
+        return payload
+    if "event_id" in payload:
+        return {"event": payload}
+    raise DynamicEvalApiError(f"unexpected event detail payload: {payload!r}")
 
 
 def list_events(client: DynamicEvalClient, *, page_size: int = 50) -> list[dict[str, Any]]:
@@ -298,11 +332,125 @@ def trigger_full_loop(
     return data
 
 
-def event_outcome_ok(status: str) -> bool:
+def event_outcome_ok(status: str, *, require_closed: bool = False) -> bool:
     """True when status is an acceptable non-FAILED gold-path outcome."""
-    return status != "failed" and (
-        status in SUCCESSISH_EVENT_STATUSES or status == "waiting_approval"
+    if status == "failed":
+        return False
+    if require_closed:
+        return status == "closed"
+    return status in SUCCESSISH_EVENT_STATUSES or status == "waiting_approval"
+
+
+def _terminal_enough(status: str, *, require_closed: bool) -> bool:
+    if require_closed:
+        return status == "closed"
+    return status in SUCCESSISH_EVENT_STATUSES
+
+
+def list_all_event_actions(
+    client: DynamicEvalClient,
+    event_id: str,
+    *,
+    page_size: int = 100,
+) -> list[dict[str, Any]]:
+    payload = client.get_json(
+        f"/api/v1/events/{event_id}/actions?page=1&page_size={page_size}"
     )
+    items = payload.get("items") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise DynamicEvalApiError(f"unexpected actions payload for {event_id}: {payload!r}")
+    return [item for item in items if isinstance(item, dict)]
+
+
+def assert_strict_closed_acceptance(
+    client: DynamicEvalClient,
+    event_id: str,
+) -> dict[str, Any]:
+    """ISSUE-301 strict profile: CLOSED + report + writeback gate convergence."""
+    detail = get_event_detail(client, event_id)
+    event = unwrap_event_detail(detail)
+    status = str(event.get("status") or "")
+    if status != "closed":
+        raise RuntimeError(
+            f"strict profile requires status=closed for {event_id}, got {status!r}"
+        )
+    if status in _STRICT_NON_TERMINAL_STATUSES:
+        raise RuntimeError(
+            f"strict profile rejects progress terminal {status!r} for {event_id}"
+        )
+
+    report_resp = client.request("GET", f"/api/v1/events/{event_id}/report")
+    if report_resp.status != 200:
+        raise RuntimeError(
+            f"strict profile: GET /report for {event_id} failed HTTP "
+            f"{report_resp.status}: {report_resp.data!r}"
+        )
+    report_data = report_resp.data if isinstance(report_resp.data, dict) else {}
+    if not report_data.get("report"):
+        raise RuntimeError(
+            f"strict profile: GET /report for {event_id} returned no report body"
+        )
+
+    if detail.get("writeback_required"):
+        readiness = str(detail.get("writeback_readiness") or "")
+        if readiness != "ready":
+            raise RuntimeError(
+                f"strict profile: event-level writeback_readiness={readiness!r} "
+                f"for {event_id} (expected ready)"
+            )
+        wb_status = detail.get("writeback_overall_status")
+        if wb_status != "confirmed":
+            raise RuntimeError(
+                f"strict profile: writeback_overall_status={wb_status!r} "
+                f"for {event_id} (expected confirmed)"
+            )
+        pending = int(detail.get("pending_writeback_count") or 0)
+        if pending > 0:
+            raise RuntimeError(
+                f"strict profile: pending_writeback_count={pending} for {event_id}"
+            )
+
+    action_violations: list[str] = []
+    for action in list_all_event_actions(client, event_id):
+        if not action.get("writeback_required") or not action.get("writeback_applicable"):
+            continue
+        category = str(action.get("action_category") or "")
+        if category not in _GATE_APPLICABLE_CATEGORIES:
+            continue
+        if action.get("superseded_by_revision") is not None:
+            continue
+        action_status = str(action.get("status") or "")
+        if action_status == "rejected":
+            continue
+        action_id = str(action.get("action_id") or "")
+        readiness = str(action.get("writeback_readiness") or "")
+        if readiness != "ready":
+            action_violations.append(
+                f"{action_id}: writeback_readiness={readiness!r}"
+            )
+        wb = action.get("writeback_status")
+        if wb != "confirmed":
+            action_violations.append(
+                f"{action_id}: writeback_status={wb!r}"
+            )
+    if action_violations:
+        raise RuntimeError(
+            f"strict profile: gate-applicable writeback actions not converged "
+            f"for {event_id}: {action_violations}"
+        )
+
+    return {
+        "event_id": event_id,
+        "status": status,
+        "writeback_required": bool(detail.get("writeback_required")),
+        "writeback_readiness": detail.get("writeback_readiness"),
+        "writeback_overall_status": detail.get("writeback_overall_status"),
+        "report_quality": (
+            (report_data.get("report") or {}).get("report_quality")
+            if isinstance(report_data.get("report"), dict)
+            else None
+        ),
+    }
 
 
 def run_gold_loop(
@@ -313,10 +461,13 @@ def run_gold_loop(
     generate_report: bool,
     poll_interval_s: float,
     max_wait_s: float,
+    require_closed: bool = False,
 ) -> dict[str, Any]:
     """Drive investigate → scripted approve/reject → non-FAILED assertion."""
     started = time.monotonic()
     triggered: list[dict[str, Any]] = []
+    status_trace: dict[str, list[str]] = {eid: [] for eid in event_ids}
+    last_seen: dict[str, str | None] = {eid: None for eid in event_ids}
     for event_id in event_ids:
         inv = trigger_full_loop(client, event_id, generate_report=generate_report)
         triggered.append({"event_id": event_id, "investigate": inv})
@@ -346,6 +497,9 @@ def run_gold_loop(
             event = get_event(client, event_id)
             status = str(event.get("status") or "")
             finals[event_id] = status
+            if status != last_seen[event_id]:
+                status_trace[event_id].append(status)
+                last_seen[event_id] = status
 
             if status == "failed":
                 raise RuntimeError(
@@ -360,6 +514,8 @@ def run_gold_loop(
                 )
 
             if status == "waiting_approval" or status in _IN_FLIGHT:
+                all_done = False
+            elif require_closed and status != "closed":
                 all_done = False
 
             # Always drain waiting actions even if event status lags.
@@ -401,8 +557,7 @@ def run_gold_loop(
                         f"{len(outcomes)} action(s)"
                     )
 
-            if status in SUCCESSISH_EVENT_STATUSES and not pending:
-                # Terminal-enough for gold path (reporting/contained/closed/…).
+            if _terminal_enough(status, require_closed=require_closed) and not pending:
                 continue
 
         if all_done:
@@ -411,7 +566,9 @@ def run_gold_loop(
                 if status in _IN_FLIGHT or status == "new":
                     all_done = False
                     break
-                if status == "failed" or not event_outcome_ok(status):
+                if status == "failed" or not event_outcome_ok(
+                    status, require_closed=require_closed
+                ):
                     raise RuntimeError(
                         f"unacceptable final status for {event_id}: {status}"
                     )
@@ -426,11 +583,21 @@ def run_gold_loop(
 
         time.sleep(poll_interval_s)
 
+    strict_assertions: dict[str, Any] = {}
+    if require_closed:
+        for event_id in event_ids:
+            strict_assertions[event_id] = assert_strict_closed_acceptance(
+                client, event_id
+            )
+
     return {
         "triggered": triggered,
         "decisions": decisions,
         "final_statuses": finals,
         "evidence_statuses": evidence_statuses,
+        "status_trace": status_trace,
+        "strict_assertions": strict_assertions or None,
+        "profile": "strict" if require_closed else "compat",
         "elapsed_s": round(time.monotonic() - started, 2),
         "approval_timeout_used": False,
         "fixture": "seed_mock_xdr_and_ingest",
@@ -492,6 +659,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=float(os.environ.get("DYNAMIC_EVAL_MAX_WAIT_S", "240")),
         help="Hard wall clock (default 240s). Must stay << production approval timeout.",
+    )
+    parser.add_argument(
+        "--require-closed",
+        action="store_true",
+        help=(
+            "ISSUE-301 strict profile: final status must be closed, GET /report "
+            "must succeed, and gate-applicable writeback actions must converge"
+        ),
     )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
@@ -568,15 +743,22 @@ def main(argv: list[str] | None = None) -> int:
         generate_report=bool(args.generate_report),
         poll_interval_s=float(args.poll_interval_s),
         max_wait_s=float(args.max_wait_s),
+        require_closed=bool(args.require_closed),
     )
     result["seed_summary"] = seed_summary
     result["scenario"] = args.scenario
+    result["event_ids"] = event_ids
+    result["require_closed"] = bool(args.require_closed)
     result["notes"] = [
         "Gold fixture is seed_mock_xdr_and_ingest — not POST /events.",
         "Approvals were scripted — APPROVAL_TIMEOUT_MINUTES was not used to finish.",
         "Production APPROVAL_TIMEOUT_MINUTES default remains 30.",
         "EMBEDDING_MODE defaults to mock even when LLM_MODE is real (R2-014).",
     ]
+    if args.require_closed:
+        result["notes"].append(
+            "Strict profile (ISSUE-301): reporting/contained/verifying are not success."
+        )
 
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
