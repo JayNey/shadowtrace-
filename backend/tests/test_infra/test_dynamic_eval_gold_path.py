@@ -1,4 +1,4 @@
-"""ISSUE-256 gold-path dynamic-eval profile guards (no live stack required)."""
+"""ISSUE-256 / ISSUE-301 gold-path and dynamic-eval matrix profile guards."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -234,6 +235,169 @@ def test_assert_strict_closed_acceptance_passes_when_converged(full_loop_mod) ->
     result = full_loop_mod.assert_strict_closed_acceptance(_Client(), "evt-3")
     assert result["status"] == "closed"
     assert result["writeback_overall_status"] == "confirmed"
+
+
+def test_assert_strict_closed_rejects_missing_report_quality(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": [], "total": 0}
+            return {
+                "event": {"event_id": "evt-4", "status": "closed"},
+                "writeback_required": False,
+                "writeback_readiness": "not_required",
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            return ApiResponse(status=200, data={"report": {"report_quality": ""}})
+
+    with pytest.raises(RuntimeError, match="report_quality missing"):
+        full_loop_mod.assert_strict_closed_acceptance(_Client(), "evt-4", max_wait_s=0.0)
+
+
+def test_assert_strict_closed_rejects_action_writeback_violation(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {
+                    "items": [
+                        {
+                            "action_id": "act-bad",
+                            "action_category": "response",
+                            "status": "approved",
+                            "writeback_required": True,
+                            "writeback_applicable": True,
+                            "writeback_readiness": "pending",
+                            "writeback_status": "pending",
+                        }
+                    ],
+                    "total": 1,
+                }
+            return {
+                "event": {"event_id": "evt-5", "status": "closed"},
+                "writeback_required": False,
+                "writeback_readiness": "not_required",
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            return ApiResponse(
+                status=200,
+                data={"report": {"report_quality": "complete"}},
+            )
+
+    with pytest.raises(RuntimeError, match="gate-applicable writeback actions not converged"):
+        full_loop_mod.assert_strict_closed_acceptance(_Client(), "evt-5", max_wait_s=0.0)
+
+
+def test_assert_strict_closed_acceptance_retries_until_converged(full_loop_mod) -> None:
+    class _Client:
+        def __init__(self) -> None:
+            self._attempts = 0
+
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": [], "total": 0}
+            self._attempts += 1
+            readiness = "pending" if self._attempts == 1 else "ready"
+            wb_status = None if self._attempts == 1 else "confirmed"
+            return {
+                "event": {"event_id": "evt-6", "status": "closed"},
+                "writeback_required": True,
+                "writeback_readiness": readiness,
+                "writeback_overall_status": wb_status,
+                "pending_writeback_count": 1 if self._attempts == 1 else 0,
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            return ApiResponse(
+                status=200,
+                data={"report": {"report_quality": "complete"}},
+            )
+
+    result = full_loop_mod.assert_strict_closed_acceptance(
+        _Client(),
+        "evt-6",
+        max_wait_s=2.0,
+        poll_interval_s=0.01,
+    )
+    assert result["writeback_readiness"] == "ready"
+
+
+def test_list_all_event_actions_paginates(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "page=1" in path:
+                return {"items": [{"action_id": f"act-{i}"} for i in range(2)], "total": 3}
+            if "page=2" in path:
+                return {"items": [{"action_id": "act-2"}], "total": 3}
+            raise AssertionError(path)
+
+    actions = full_loop_mod.list_all_event_actions(_Client(), "evt-page")
+    assert len(actions) == 3
+
+
+def test_list_all_event_actions_raises_when_total_truncated(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "page=1" in path:
+                return {"items": [{"action_id": "act-0"}], "total": 3}
+            if "page=2" in path:
+                return {"items": [], "total": 3}
+            raise AssertionError(path)
+
+    with pytest.raises(full_loop_mod.DynamicEvalApiError, match="pagination truncated"):
+        full_loop_mod.list_all_event_actions(_Client(), "evt-trunc")
+
+
+def test_strict_assert_budget_uses_remaining_wall_clock(full_loop_mod) -> None:
+    assert full_loop_mod._strict_assert_budget(max_wait_s=240.0, elapsed_s=200.0) == 40.0
+    assert full_loop_mod._strict_assert_budget(max_wait_s=240.0, elapsed_s=235.0) == 10.0
+    assert full_loop_mod._strict_assert_budget(max_wait_s=30.0, elapsed_s=0.0) == 30.0
+    assert full_loop_mod._strict_assert_budget(max_wait_s=240.0, elapsed_s=10.0) == 60.0
+
+
+def test_require_closed_seed_missing_event_ids_message(full_loop_mod) -> None:
+    with (
+        patch.object(full_loop_mod, "DynamicEvalClient") as client_cls,
+        patch.object(
+            full_loop_mod,
+            "seed_via_compose",
+            return_value={"accepted": 1, "event_ids": []},
+        ),
+    ):
+        client = client_cls.return_value
+
+        def _get_json(path: str) -> dict[str, object]:
+            if "/events" in path:
+                return {"items": []}
+            return {"playbook_resources": {"status": "ready"}}
+
+        client.get_json.side_effect = _get_json
+        with pytest.raises(SystemExit, match="seed summary missing event_ids"):
+            full_loop_mod.main(
+                [
+                    "--require-closed",
+                    "--seed-via-compose",
+                ]
+            )
+
+
+def test_empty_event_id_is_ignored(full_loop_mod) -> None:
+    with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
+        client = client_cls.return_value
+        client.get_json.side_effect = lambda path: (
+            {"items": []}
+            if "/events" in path
+            else {"playbook_resources": {"status": "ready"}}
+        )
+        with pytest.raises(SystemExit, match="heuristic DB selection is forbidden"):
+            full_loop_mod.main(["--require-closed", "--event-id", ""])
 
 
 def test_bootstrap_default_generate_report_false_with_opt_in() -> None:

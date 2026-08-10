@@ -90,6 +90,9 @@ def _sanitize_error_text(text: str, *, max_len: int = 4096) -> str:
         redacted,
         flags=re.IGNORECASE,
     )
+    for key in _SENSITIVE_KEYS:
+        pattern = rf"({re.escape(key)}['\"]?\s*[:=]\s*['\"]?)([^'\"\s,}}]+)"
+        redacted = re.sub(pattern, r"\1<redacted>", redacted, flags=re.IGNORECASE)
     if len(redacted) > max_len:
         return redacted[:max_len] + "…<truncated>"
     return redacted
@@ -250,6 +253,34 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     )
 
 
+def _append_cleanup_error_to_manifest(
+    scenario_dir: Path,
+    *,
+    cleanup_error: MatrixError,
+    manifest_sink: dict[str, Any] | None,
+) -> None:
+    payload = {
+        "type": type(cleanup_error).__name__,
+        "message": _sanitize_error_text(str(cleanup_error)),
+    }
+    manifest_path = scenario_dir / "manifest.json"
+    manifest: dict[str, Any]
+    if manifest_path.is_file():
+        try:
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest = loaded if isinstance(loaded, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+    else:
+        manifest = {}
+    manifest["cleanup_error"] = payload
+    if manifest.get("status") == "passed":
+        manifest["status"] = "passed_with_cleanup_error"
+    _write_json(manifest_path, manifest)
+    if manifest_sink is not None:
+        manifest_sink["cleanup_error"] = payload
+
+
 def _wait_stack_healthy(project: str, compose_files: list[Path], timeout_s: float) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -387,7 +418,9 @@ def _run_full_loop_via_exec(
         result = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise MatrixError(
-            f"full_loop did not emit JSON on stdout: {stdout!r}\nstderr={proc.stderr!r}"
+            "full_loop did not emit JSON on stdout: "
+            f"{_sanitize_error_text(stdout)!r}\n"
+            f"stderr={_sanitize_error_text(proc.stderr)!r}"
         ) from exc
     if not isinstance(result, dict):
         raise MatrixError(f"unexpected full_loop result type: {type(result)!r}")
@@ -448,7 +481,8 @@ def run_scenario(
         if proc.returncode != 0:
             raise MatrixError(
                 f"compose up failed (exit={proc.returncode}):\n"
-                f"{proc.stdout}\n{proc.stderr}"
+                f"{_sanitize_error_text(proc.stdout)}\n"
+                f"{_sanitize_error_text(proc.stderr)}"
             )
         _wait_stack_healthy(project, compose_files, stack_timeout_s)
 
@@ -507,6 +541,11 @@ def run_scenario(
             down_error = exc
         _CLEANUP.set_project(None)
         if down_error is not None:
+            _append_cleanup_error_to_manifest(
+                scenario_dir,
+                cleanup_error=down_error,
+                manifest_sink=manifest_sink,
+            )
             if sys.exc_info()[0] is not None:
                 print(
                     f"[dynamic-eval-matrix] ERROR cleanup failed: {down_error}",
@@ -616,17 +655,28 @@ def main(argv: list[str] | None = None) -> int:
             f"[dynamic-eval-matrix] signal {signum} — running cleanup",
             file=sys.stderr,
         )
-        _CLEANUP.cleanup()
+        cleanup_error: str | None = None
+        try:
+            _CLEANUP.cleanup()
+        except MatrixError as exc:
+            cleanup_error = _sanitize_error_text(str(exc))
+            print(
+                f"[dynamic-eval-matrix] ERROR cleanup failed: {cleanup_error}",
+                file=sys.stderr,
+            )
         scenario = active_run.get("scenario")
         summary_ref = active_run.get("summary")
         if scenario and isinstance(summary_ref, dict):
             manifest = active_run.get("manifest") if isinstance(active_run.get("manifest"), dict) else {}
-            summary_ref["status"] = "interrupted"
-            summary_ref["results"][scenario] = {
+            interrupted = {
                 "status": "interrupted",
                 "compose_project_name": manifest.get("compose_project_name"),
                 "event_ids": manifest.get("event_ids"),
             }
+            if cleanup_error:
+                interrupted["cleanup_error"] = cleanup_error
+            summary_ref["status"] = "interrupted"
+            summary_ref["results"][scenario] = interrupted
             _write_json(artifact_root / "summary.json", summary_ref)
         raise SystemExit(128 + signum)
 
@@ -679,6 +729,8 @@ def main(argv: list[str] | None = None) -> int:
                 "compose_project_name": manifest.get("compose_project_name"),
                 "final_statuses": (manifest.get("result") or {}).get("final_statuses"),
             }
+            if manifest.get("cleanup_error"):
+                summary["results"][scenario]["cleanup_error"] = manifest["cleanup_error"]
             active_run["manifest"] = manifest
         except Exception as exc:
             failed_manifest_path = artifact_root / scenario / "manifest.json"
@@ -702,6 +754,15 @@ def main(argv: list[str] | None = None) -> int:
                 "compose_project_name": compose_project_name,
                 "event_ids": event_ids,
             }
+            failed_manifest = artifact_root / scenario / "manifest.json"
+            if failed_manifest.is_file():
+                try:
+                    manifest_data = json.loads(failed_manifest.read_text(encoding="utf-8"))
+                    cleanup_error = manifest_data.get("cleanup_error")
+                    if cleanup_error:
+                        summary["results"][scenario]["cleanup_error"] = cleanup_error
+                except (OSError, json.JSONDecodeError):
+                    pass
             summary["status"] = "failed"
             _write_json(artifact_root / "summary.json", summary)
             print(f"[dynamic-eval-matrix] FAIL scenario={scenario}: {exc}", file=sys.stderr)
