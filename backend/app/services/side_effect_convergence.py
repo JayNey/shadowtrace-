@@ -49,7 +49,14 @@ _UNDELIVERED_OUTBOX_STATUSES = frozenset(
         OutboxDeliveryStatus.READY,
         OutboxDeliveryStatus.LEASED,
         OutboxDeliveryStatus.WAITING_RETRY,
+        OutboxDeliveryStatus.PAUSED,
     }
+)
+_UNCONFIRMED_WRITEBACK_PRIORITIES: tuple[WritebackStatus, ...] = (
+    WritebackStatus.CONFLICT,
+    WritebackStatus.FAILED,
+    WritebackStatus.SENDING,
+    WritebackStatus.PENDING,
 )
 
 
@@ -107,9 +114,8 @@ def _outbox_blocks_convergence(
         try:
             WritebackStatus(wb_raw)
         except ValueError:
-            pass
-        else:
             return True, SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED
+        return True, SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED
     try:
         delivery = OutboxDeliveryStatus(outbox.delivery_status)
     except ValueError:
@@ -119,12 +125,70 @@ def _outbox_blocks_convergence(
     return False, None
 
 
-def _action_blocks_convergence(
+def _scan_outboxes_for_block(
+    active_outboxes: list[orm.DispositionOutbox],
+) -> SideEffectConvergenceReason | None:
+    for outbox in active_outboxes:
+        blocks, reason = _outbox_blocks_convergence(outbox)
+        if blocks and reason is not None:
+            return reason
+    return None
+
+
+def _summarize_outbox_fields(
+    active_outboxes: list[orm.DispositionOutbox],
+) -> tuple[OutboxDeliveryStatus | None, WritebackStatus | None]:
+    """Pick representative delivery/writeback across all active outboxes (worst-first)."""
+    if not active_outboxes:
+        return None, None
+
+    deliveries: list[OutboxDeliveryStatus] = []
+    writebacks: list[WritebackStatus] = []
+    for outbox in active_outboxes:
+        try:
+            deliveries.append(OutboxDeliveryStatus(outbox.delivery_status))
+        except ValueError:
+            continue
+    for outbox in active_outboxes:
+        raw = outbox.latest_writeback_status
+        if not raw:
+            continue
+        try:
+            writebacks.append(WritebackStatus(raw))
+        except ValueError:
+            writebacks.append(WritebackStatus.PENDING)
+
+    outbox_delivery: OutboxDeliveryStatus | None = None
+    for candidate in (
+        OutboxDeliveryStatus.READY,
+        OutboxDeliveryStatus.LEASED,
+        OutboxDeliveryStatus.WAITING_RETRY,
+        OutboxDeliveryStatus.PAUSED,
+    ):
+        if candidate in deliveries:
+            outbox_delivery = candidate
+            break
+    if outbox_delivery is None and deliveries:
+        outbox_delivery = deliveries[0]
+
+    outbox_wb: WritebackStatus | None = None
+    for candidate in _UNCONFIRMED_WRITEBACK_PRIORITIES:
+        if candidate in writebacks:
+            outbox_wb = candidate
+            break
+    if outbox_wb is None and writebacks:
+        outbox_wb = writebacks[0]
+
+    return outbox_delivery, outbox_wb
+
+
+def _gate_applicable_blocks_convergence(
     action_row: orm.Action,
     *,
     jobs_by_action: dict[str, orm.ActionExecutionJob],
     active_outboxes: list[orm.DispositionOutbox],
 ) -> SideEffectConvergenceReason | None:
+    """Outstanding reasons that block CLOSED for current-revision gate-applicable actions."""
     status = _parse_action_status(action_row.status)
     if status in _TERMINAL_ACTION_STATUSES:
         return None
@@ -132,11 +196,22 @@ def _action_blocks_convergence(
         return SideEffectConvergenceReason.EXECUTING_ACTION
     if _action_has_active_job(action_row.action_id, jobs_by_action) is not None:
         return SideEffectConvergenceReason.IN_FLIGHT_JOB
-    for outbox in active_outboxes:
-        blocks, reason = _outbox_blocks_convergence(outbox)
-        if blocks and reason is not None:
-            return reason
-    return None
+    return _scan_outboxes_for_block(active_outboxes)
+
+
+def _detached_side_effect_outstanding(
+    action_row: orm.Action,
+    *,
+    jobs_by_action: dict[str, orm.ActionExecutionJob],
+    active_outboxes: list[orm.DispositionOutbox],
+) -> SideEffectConvergenceReason | None:
+    """Track background/detached side effects even when the action row is terminal."""
+    status = _parse_action_status(action_row.status)
+    if status is ActionStatus.EXECUTING:
+        return SideEffectConvergenceReason.EXECUTING_ACTION
+    if _action_has_active_job(action_row.action_id, jobs_by_action) is not None:
+        return SideEffectConvergenceReason.IN_FLIGHT_JOB
+    return _scan_outboxes_for_block(active_outboxes)
 
 
 def _classify_scope(
@@ -197,19 +272,28 @@ async def build_side_effect_convergence_summary(
     for action_row in action_rows:
         if action_row.status == ActionStatus.REJECTED.value:
             continue
-        active_outboxes = await load_active_outboxes(session, action_row.action_id)
-        if _action_blocks_convergence(
-            action_row,
-            jobs_by_action=jobs_by_action,
-            active_outboxes=active_outboxes,
-        ) is None:
-            continue
 
         scope = _classify_scope(
             action_row=action_row,
             current_revision=current_revision,
             disposition_policy=disposition_policy,
         )
+        active_outboxes = await load_active_outboxes(session, action_row.action_id)
+        if scope is SideEffectScope.GATE_APPLICABLE:
+            blocking_reason = _gate_applicable_blocks_convergence(
+                action_row,
+                jobs_by_action=jobs_by_action,
+                active_outboxes=active_outboxes,
+            )
+        else:
+            blocking_reason = _detached_side_effect_outstanding(
+                action_row,
+                jobs_by_action=jobs_by_action,
+                active_outboxes=active_outboxes,
+            )
+        if blocking_reason is None:
+            continue
+
         job = jobs_by_action.get(action_row.action_id)
         job_status: ExecutionJobStatus | None = None
         if job is not None:
@@ -218,19 +302,7 @@ async def build_side_effect_convergence_summary(
             except ValueError:
                 job_status = None
 
-        outbox_delivery: OutboxDeliveryStatus | None = None
-        outbox_wb: WritebackStatus | None = None
-        if active_outboxes:
-            head = active_outboxes[0]
-            try:
-                outbox_delivery = OutboxDeliveryStatus(head.delivery_status)
-            except ValueError:
-                outbox_delivery = None
-            if head.latest_writeback_status:
-                try:
-                    outbox_wb = WritebackStatus(head.latest_writeback_status)
-                except ValueError:
-                    outbox_wb = None
+        outbox_delivery, outbox_wb = _summarize_outbox_fields(active_outboxes)
 
         view = OutstandingSideEffectView(
             action_id=action_row.action_id,
@@ -243,6 +315,7 @@ async def build_side_effect_convergence_summary(
             outbox_writeback_status=outbox_wb,
             plan_revision=int(action_row.plan_revision),
             superseded=action_row.superseded_by_revision is not None,
+            blocking_reason=blocking_reason,
         )
         outstanding.append(view)
         if scope is SideEffectScope.GATE_APPLICABLE:
@@ -267,27 +340,11 @@ def check_gate_applicable_side_effect_convergence(
     for view in summary.outstanding_actions:
         if view.scope is not SideEffectScope.GATE_APPLICABLE:
             continue
-        if view.action_status is ActionStatus.EXECUTING:
+        if view.blocking_reason is not None:
             return SideEffectConvergenceViolation(
-                reason=SideEffectConvergenceReason.EXECUTING_ACTION,
+                reason=view.blocking_reason,
                 action_id=view.action_id,
-            )
-        if view.job_status in _ACTIVE_JOB_STATUSES:
-            return SideEffectConvergenceViolation(
-                reason=SideEffectConvergenceReason.IN_FLIGHT_JOB,
-                action_id=view.action_id,
-            )
-        if view.outbox_writeback_status is not None and (
-            view.outbox_writeback_status is not WritebackStatus.CONFIRMED
-        ):
-            return SideEffectConvergenceViolation(
-                reason=SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED,
-                action_id=view.action_id,
-            )
-        if view.outbox_delivery_status in _UNDELIVERED_OUTBOX_STATUSES:
-            return SideEffectConvergenceViolation(
-                reason=SideEffectConvergenceReason.OUTBOX_UNDELIVERED,
-                action_id=view.action_id,
+                scope=view.scope,
             )
     return None
 

@@ -54,6 +54,7 @@ _REQUIRED_DOCUMENTED_CODES: frozenset[str] = frozenset(
         "rate_limited",
         "unknown_delivery",
         "writeback_pending",
+        "closed_side_effects_pending",
         "writeback_failed",
         "writeback_conflict",
         "writeback_unsupported",

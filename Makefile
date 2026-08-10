@@ -110,8 +110,6 @@ smoke-bootstrap:
 # Does NOT change production APPROVAL_TIMEOUT_MINUTES (default 30).
 # ---------------------------------------------------------------------------
 EVAL_SCENARIO ?= insider_data_exfiltration
-EVAL_SCENARIOS ?= insider_data_exfiltration,account_anomaly_fp,suspicious_domain_access
-EVAL_REQUIRE_CLOSED ?=
 EVAL_MAX_EVENTS ?= 1
 EVAL_DECISION ?= approve
 BOOTSTRAP_AUTH_TOKEN ?= bootstrap-token
@@ -129,13 +127,6 @@ eval-full-loop:
 		--token "$(BOOTSTRAP_AUTH_TOKEN)" \
 		--max-events "$(EVAL_MAX_EVENTS)" \
 		--decision "$(EVAL_DECISION)"
-
-eval-full-loop-matrix:
-	@echo "[eval-full-loop-matrix] ISSUE-301 fresh-stack matrix (strict=$(EVAL_REQUIRE_CLOSED))"
-	python3 "$(CURDIR)/scripts/dynamic_eval_matrix.py" \
-		--scenarios "$(EVAL_SCENARIOS)" \
-		--fresh-volumes \
-		$(if $(filter 1 true yes,$(EVAL_REQUIRE_CLOSED)),--require-closed,)
 
 # ---------------------------------------------------------------------------
 # ISSUE-301 dynamic-eval matrix (fresh Compose project + volumes per scenario)

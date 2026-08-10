@@ -39,6 +39,7 @@ _NON_AUTO_RETRY_CODES: frozenset[str] = frozenset(
         "delivery_outcome_unknown",
         "submission_unknown",
         "writeback_pending",
+        "closed_side_effects_pending",
         "writeback_failed",  # only Adapter-gated safe retry may re-enqueue
         "auth_error",
         "validation_error",
@@ -128,6 +129,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     "lookup_unknown": ErrorCategory.TRANSIENT,
     "lookup_unsupported": ErrorCategory.PERMANENT,
     "writeback_pending": ErrorCategory.PERMANENT,  # state conflict, not system fault
+    "closed_side_effects_pending": ErrorCategory.PERMANENT,
     "writeback_failed": ErrorCategory.TOOL,
     "writeback_conflict": ErrorCategory.PERMANENT,
     "writeback_unsupported": ErrorCategory.PERMANENT,
@@ -437,6 +439,15 @@ class ApprovalDecisionConflictError(ShadowTraceError):
 class WritebackPendingError(ShadowTraceError):
     status_code = 409
     default_error_code = "writeback_pending"
+    default_category = ErrorCategory.PERMANENT
+    default_retryable = False
+
+
+class SideEffectsPendingError(ShadowTraceError):
+    """Gate-applicable side effects have not converged before CLOSED (ISSUE-302)."""
+
+    status_code = 409
+    default_error_code = "closed_side_effects_pending"
     default_category = ErrorCategory.PERMANENT
     default_retryable = False
 

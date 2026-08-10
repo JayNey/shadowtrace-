@@ -942,12 +942,17 @@ def validate_closed_gate(ctx: TransitionContext) -> None:
         raise_side_effect_convergence_error,
     )
 
-    if ctx.side_effect_convergence is not None:
-        convergence_violation = check_gate_applicable_side_effect_convergence(
-            ctx.side_effect_convergence
+    if ctx.side_effect_convergence is None:
+        raise InvalidStateTransitionError(
+            "required CLOSED gate: missing side_effect_convergence projection",
+            target=EventStatus.CLOSED,
+            error_code="closed_side_effects_pending",
         )
-        if convergence_violation is not None:
-            raise_side_effect_convergence_error(convergence_violation)
+    convergence_violation = check_gate_applicable_side_effect_convergence(
+        ctx.side_effect_convergence
+    )
+    if convergence_violation is not None:
+        raise_side_effect_convergence_error(convergence_violation)
 
     # disposition_policy=required — shared writeback predicate (ISSUE-171).
     violation = check_required_writeback_close_gate(ctx.applicable_required_actions)

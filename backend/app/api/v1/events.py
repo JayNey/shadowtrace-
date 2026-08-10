@@ -375,6 +375,11 @@ async def _side_effect_fields_for_event(event: Any) -> dict[str, int | bool]:
             disposition_policy=event.disposition_policy,
         )
     except Exception:
+        logger.warning(
+            "side_effect_convergence fields degraded event_id=%s",
+            getattr(event, "event_id", "?"),
+            exc_info=True,
+        )
         return {
             "background_side_effects_pending": False,
             "outstanding_side_effect_count": 0,
@@ -391,14 +396,15 @@ async def _validate_side_effect_convergence_gate(
         return
 
     from app.api.v1.deps import _get_session_factory
-    from app.core.errors import InvalidStateTransitionError, WritebackPendingError
+    from app.core.errors import SideEffectsPendingError
     from app.services.side_effect_convergence import (
         build_side_effect_convergence_summary,
         check_gate_applicable_side_effect_convergence,
-        raise_side_effect_convergence_error,
+        reconcile_stale_executions_before_close,
     )
 
     session_factory = _get_session_factory()
+    await reconcile_stale_executions_before_close(session_factory, event_id)
     async with session_factory() as session:
         current_revision = await session.scalar(
             select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
@@ -411,13 +417,15 @@ async def _validate_side_effect_convergence_gate(
         )
     violation = check_gate_applicable_side_effect_convergence(summary)
     if violation is not None:
-        try:
-            raise_side_effect_convergence_error(violation)
-        except InvalidStateTransitionError as exc:
-            raise WritebackPendingError(
-                str(exc),
-                details=getattr(exc, "details", {}) or {},
-            ) from exc
+        raise SideEffectsPendingError(
+            "required CLOSED gate: gate-applicable side effects have not converged",
+            details={
+                "event_id": event_id,
+                "action_id": violation.action_id,
+                "reason": violation.reason.value,
+                "scope": violation.scope.value,
+            },
+        )
 
 
 async def _validate_writeback_gate(
@@ -1366,11 +1374,16 @@ async def close_event(
             principal=principal.subject,
             reason=body.reason,
         )
+        event = await event_service.get_event(event_id)
+        side_effect_fields: dict[str, int | bool] = {}
+        if event is not None:
+            side_effect_fields = await _side_effect_fields_for_event(event)
         return s.EventCloseResponse(
             event_id=event_id,
             status=EventStatus.CLOSED,
             final_verdict=result.final_verdict,
             external_unsynced=True,
+            **side_effect_fields,
         )
 
     # Validate close rules per ISSUE-038.
@@ -1422,9 +1435,9 @@ async def close_event(
             reason=body.reason,
         )
     elif current_status == EventStatus.REPORTING:
-        # ISSUE-038 step 2: writeback gate pre-check.
-        await _validate_writeback_gate(event_id, event)
+        # ISSUE-038 step 2: side-effect then writeback gate pre-check (align with SM).
         await _validate_side_effect_convergence_gate(event_id, event)
+        await _validate_writeback_gate(event_id, event)
 
         # Handle final_verdict change before closing — regenerate report first.
         if body.final_verdict is not None and body.final_verdict != event.final_verdict:
@@ -1456,10 +1469,10 @@ async def close_event(
         )
     elif current_status == EventStatus.FAILED:
         # FAILED → REPORTING → CLOSED.
-        # ISSUE-038: writeback gate pre-check before any state transitions
+        # ISSUE-038: side-effect then writeback gate pre-check before any state transitions
         # to avoid leaving the event stuck in REPORTING.
-        await _validate_writeback_gate(event_id, event)
         await _validate_side_effect_convergence_gate(event_id, event)
+        await _validate_writeback_gate(event_id, event)
 
         # Generate a quick-close report so validate_closed_gate can pass.
         await _generate_quick_close_report(

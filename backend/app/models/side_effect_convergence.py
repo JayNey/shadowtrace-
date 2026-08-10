@@ -42,6 +42,7 @@ class OutstandingSideEffectView(BaseModel):
     outbox_writeback_status: WritebackStatus | None = None
     plan_revision: int
     superseded: bool = False
+    blocking_reason: SideEffectConvergenceReason | None = None
 
 
 class SideEffectConvergenceSummary(BaseModel):
