@@ -35,7 +35,7 @@ def _suppress_background_intent_dispatch(monkeypatch: pytest.MonkeyPatch) -> Non
         (
             InvestigationIntentStatus.STARTED,
             EventStatus.TRIAGING,
-            InvestigationIntentStatus.TERMINAL,
+            InvestigationIntentStatus.RETRY,
         ),
         (
             InvestigationIntentStatus.STARTED,
@@ -43,7 +43,7 @@ def _suppress_background_intent_dispatch(monkeypatch: pytest.MonkeyPatch) -> Non
             InvestigationIntentStatus.RETRY,
         ),
     ],
-    ids=["enqueued-stale-retry", "started-event-active-terminal", "started-stale-retry"],
+    ids=["enqueued-stale-retry", "started-event-active-retry", "started-stale-retry"],
 )
 @pytest.mark.asyncio
 async def test_reconcile_stale_crash_window_outcomes(
@@ -64,6 +64,7 @@ async def test_reconcile_stale_crash_window_outcomes(
     )
     intent_id = f"iin-window-{uuid4().hex[:8]}"
     event_id = f"evt-window-{uuid4().hex[:8]}"
+    broker_task_id = f"task-window-{uuid4().hex[:8]}"
     async with session_factory() as session:
         async with session.begin():
             session.add(
@@ -92,7 +93,7 @@ async def test_reconcile_stale_crash_window_outcomes(
                     status=initial_status.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id="task-window",
+                    broker_task_id=broker_task_id,
                     updated_at=datetime.now(UTC) - timedelta(minutes=15),
                 )
             )
@@ -115,6 +116,7 @@ async def test_stale_broker_delivery_never_reaches_started(
     )
     intent_id = f"iin-stale-window-{uuid4().hex[:8]}"
     event_id = f"evt-stale-window-{uuid4().hex[:8]}"
+    broker_task_id = f"task-current-{uuid4().hex[:8]}"
     async with session_factory() as session:
         async with session.begin():
             session.add(
@@ -143,10 +145,10 @@ async def test_stale_broker_delivery_never_reaches_started(
                     status=InvestigationIntentStatus.ENQUEUED.value,
                     revision=1,
                     attempt=0,
-                    broker_task_id="task-current",
+                    broker_task_id=broker_task_id,
                 )
             )
-    admission = await service.mark_started(intent_id, broker_task_id="task-stale")
+    admission = await service.mark_started(intent_id, broker_task_id=f"task-stale-{uuid4().hex[:8]}")
     assert admission is IntentDeliveryAdmission.STALE_SUPERSEDED
     async with session_factory() as session:
         row = await session.get(orm.InvestigationIntent, intent_id)

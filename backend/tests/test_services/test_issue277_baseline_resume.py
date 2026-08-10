@@ -57,7 +57,14 @@ async def test_maybe_resume_manual_resolution_enqueues_durable_intent(
             created.append(event_id)
             return object()
 
-        def schedule_dispatch(self) -> None:
+        def schedule_dispatch(
+            self,
+            *,
+            event_id: str | None = None,
+            intent_id: str | None = None,
+            trigger: str = "unspecified",
+        ) -> None:
+            del event_id, intent_id, trigger
             scheduled.append("yes")
 
     class _Session:
