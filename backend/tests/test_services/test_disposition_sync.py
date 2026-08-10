@@ -2330,6 +2330,292 @@ async def test_guardrail_blocked_moves_to_dead_letter(
 
 
 @pytest.mark.asyncio
+async def test_adapter_not_found_dead_letters_without_pause(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-300: explicit adapter not_found must not enter PAUSED/lookup retry."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        _locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    missing_locator = SourceObjectLocator(
+        source_product="mock_xdr",
+        source_tenant_id="tenant-demo",
+        connector_id="conn-disposition",
+        source_kind=SourceObjectKind.INCIDENT,
+        source_object_id="incident-missing-not-found",
+    )
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id,
+                            event_id,
+                            missing_locator,
+                            concurrency_token,
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.latest_writeback_status == WritebackStatus.FAILED.value
+        assert row.last_error_code == "not_found"
+        assert row.next_retry_at is None
+        action = await session.get(orm.Action, action_id)
+        assert action is not None
+        assert action.writeback_status == WritebackStatus.FAILED.value
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert len(receipts) == 1
+        assert receipts[0].status == WritebackStatus.FAILED.value
+
+    assert await worker.run_once(limit=1) == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+
+
+@pytest.mark.asyncio
+async def test_paused_not_found_reconcile_does_not_re_enqueue(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-300: reconcile must not safe-retry pre-submit deterministic rejections."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.PAUSED.value,
+                    latest_writeback_status=WritebackStatus.UNKNOWN.value,
+                    last_error_code="not_found",
+                    last_error_detail="legacy misclassified deterministic rejection",
+                )
+            )
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.latest_writeback_status == WritebackStatus.FAILED.value
+        assert row.last_error_code == "not_found"
+
+
+@pytest.mark.asyncio
+async def test_adapter_unknown_submission_stays_paused_for_lookup(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-300: transport/5xx ambiguity still uses PAUSED + lookup recovery."""
+    from app.models.disposition import DispositionReceipt
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    adapter = sync._adapters.get("mock_xdr")
+    original_submit = adapter.submit
+
+    async def _unknown_submit(command: DispositionCommand) -> DispositionReceipt:
+        return DispositionReceipt(
+            writeback_id=f"wbk-unknown-{command.disposition_id}",
+            sequence=1,
+            disposition_id=command.disposition_id,
+            action_id=command.action_id,
+            source_record_id=command.source_locator.source_object_id,
+            status=WritebackStatus.UNKNOWN,
+            provider_code="unknown_delivery",
+            provider_message="simulated transport loss",
+            submitted_at=datetime.now(UTC),
+            observed_at=datetime.now(UTC),
+            simulated=True,
+        )
+
+    monkeypatch.setattr(adapter, "submit", _unknown_submit)
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
+        assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
+        assert row.last_error_code == "submission_unknown"
+
+    monkeypatch.setattr(adapter, "submit", original_submit)
+
+
+@pytest.mark.asyncio
+async def test_writeback_conflict_delivered_without_pause(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-300: version conflict remains a definitive terminal outcome, not PAUSED."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    outbox_id = f"obx-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=outbox_id,
+                    writeback_id=f"wbk-{_sfx()}",
+                    disposition_id=f"disp-{_sfx()}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=source_record_id,
+                    source_locator_hash="hash",
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="default",
+                    idempotency_key=f"idem-{_sfx()}",
+                    command_payload={
+                        **factory_build_min_command(
+                            action_id, event_id, locator, concurrency_token
+                        ),
+                    },
+                    command_payload_sha256="deadbeef",
+                    delivery_status=OutboxDeliveryStatus.READY.value,
+                    attempt=0,
+                )
+            )
+
+    adapter = sync._adapters.get("mock_xdr")
+
+    async def _conflict_submit(_command: DispositionCommand) -> None:
+        raise WritebackConflictError(
+            "version conflict",
+            error_code="version_conflict",
+            details={"status": 409},
+        )
+
+    monkeypatch.setattr(adapter, "submit", _conflict_submit)
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+        assert row.latest_writeback_status == WritebackStatus.CONFLICT.value
+        assert row.last_error_code == "version_conflict"
+
+
+@pytest.mark.asyncio
 async def test_append_receipt_sanitizes_sensitive_raw_result_before_persist(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,

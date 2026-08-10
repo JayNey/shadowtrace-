@@ -18,6 +18,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters._util import sanitize_disposition_receipt
 from app.adapters.disposition.base import BaseDispositionAdapter
+from app.adapters.disposition.error_classification import (
+    is_deterministic_adapter_rejection_code,
+)
 from app.adapters.registry import DispositionAdapterRegistry
 from app.core.config import get_settings
 from app.core.errors import (
@@ -25,6 +28,7 @@ from app.core.errors import (
     GuardrailViolationError,
     ValidationError,
     WritebackConflictError,
+    WritebackUnsupportedError,
 )
 from app.core.event_bus import EventBus
 from app.core.guardrails import OutboundDispositionGuard
@@ -1548,6 +1552,15 @@ class DispositionSyncService:
                 reason="lookup capability unavailable; cannot prove safe retry",
             )
 
+        if is_deterministic_adapter_rejection_code(getattr(outbox, "last_error_code", None)):
+            return _OperatorRetryDecision(
+                action=_OperatorRetryAction.BLOCKED,
+                reason=(
+                    "deterministic adapter rejection is not safely retryable; "
+                    f"error_code={outbox.last_error_code}"
+                ),
+            )
+
         command = DispositionCommand.model_validate(outbox.command_payload)
         receipt: DispositionReceipt | None = None
         lookup_degraded = False
@@ -1756,7 +1769,10 @@ class DispositionSyncService:
             validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
             outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
             outbox.next_retry_at = None
-            record_writeback_dead_letter(adapter=self._adapter_label(outbox))
+            record_writeback_dead_letter(
+                adapter=self._adapter_label(outbox),
+                error_code=error_code,
+            )
             return OutboxDeliveryStatus.DEAD_LETTER
 
         validate_outbox_delivery_transition(
@@ -2045,6 +2061,24 @@ class DispositionSyncService:
                     return False, outbox.event_id, WritebackStatus.UNKNOWN
 
                 if outcome.kind is _PausedLookupKind.NOT_FOUND:
+                    if is_deterministic_adapter_rejection_code(
+                        getattr(outbox, "last_error_code", None),
+                    ):
+                        outbox.latest_writeback_status = WritebackStatus.FAILED.value
+                        outbox.last_error_detail = self._truncate_error_detail(
+                            "pre-submit deterministic rejection; lookup retry blocked"
+                        )
+                        validate_outbox_delivery_transition(
+                            OutboxDeliveryStatus.PAUSED,
+                            OutboxDeliveryStatus.DEAD_LETTER,
+                        )
+                        outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+                        _mirror_writeback_status_to_action(action, WritebackStatus.FAILED.value)
+                        record_writeback_dead_letter(
+                            adapter=claim.adapter.name,
+                            error_code=outbox.last_error_code,
+                        )
+                        return True, outbox.event_id, WritebackStatus.FAILED
                     if not claim.adapter.allows_safe_retry():
                         outbox.latest_writeback_status = WritebackStatus.UNKNOWN.value
                         outbox.last_error_code = "lookup_not_found"
@@ -2180,7 +2214,10 @@ class DispositionSyncService:
         validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
         outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
         outbox.next_retry_at = None
-        record_writeback_dead_letter(adapter=self._adapter_label(outbox))
+        record_writeback_dead_letter(
+            adapter=self._adapter_label(outbox),
+            error_code=error_code,
+        )
         return OutboxDeliveryStatus.DEAD_LETTER
 
     def _block_outbox_for_writeback_fence(
@@ -2206,8 +2243,148 @@ class DispositionSyncService:
         outbox.next_retry_at = None
         validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
         outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
-        record_writeback_dead_letter(adapter=self._adapter_label(outbox))
+        record_writeback_dead_letter(
+            adapter=self._adapter_label(outbox),
+            error_code=WRITEBACK_FENCE_BLOCKED_ERROR_CODE,
+        )
         return OutboxDeliveryStatus.DEAD_LETTER
+
+    async def _mark_delivery_deterministic_rejection(
+        self,
+        outbox_id: str,
+        *,
+        error_code: str,
+        error_detail: str,
+    ) -> None:
+        """Terminalize a definitive adapter rejection without PAUSED/lookup retry."""
+        now = datetime.now(UTC)
+        event_id: str | None = None
+        writeback_id: str | None = None
+        adapter_label = "unknown"
+        detail = self._truncate_error_detail(error_detail)
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
+                    .with_for_update()
+                )
+                if outbox is None:
+                    return
+                current = OutboxDeliveryStatus(outbox.delivery_status)
+                if current is not OutboxDeliveryStatus.LEASED:
+                    return
+                outbox.last_error_code = error_code
+                outbox.last_error_detail = detail
+                outbox.latest_writeback_status = WritebackStatus.FAILED.value
+                outbox.locked_by = None
+                outbox.locked_at = None
+                outbox.lease_expires_at = None
+                outbox.next_retry_at = None
+                outbox.updated_at = now
+                validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
+                outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
+                receipt = await self._append_receipt(
+                    session,
+                    outbox,
+                    status=WritebackStatus.FAILED,
+                    provider_message=detail,
+                )
+                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
+                _mirror_writeback_status_to_action(action, WritebackStatus.FAILED.value)
+                if action is not None:
+                    await self._apply_action_terminal_from_receipt(
+                        session,
+                        action,
+                        receipt,
+                        adapter_label=self._adapter_label(outbox),
+                    )
+                event_id = outbox.event_id
+                writeback_id = outbox.writeback_id
+                adapter_label = self._adapter_label(outbox)
+
+        assert event_id is not None
+        assert writeback_id is not None
+        record_writeback(status=WritebackStatus.FAILED.value, adapter=adapter_label)
+        record_writeback_dead_letter(adapter=adapter_label, error_code=error_code)
+        await self._sync_writeback_summary(event_id)
+        await self._maybe_resume(event_id)
+        if self._bus is not None:
+            await self._bus.publish_event(
+                event_id,
+                "writeback_updated",
+                {"writeback_id": writeback_id, "status": WritebackStatus.FAILED.value},
+            )
+
+    async def _mark_delivery_conflict(
+        self,
+        outbox_id: str,
+        *,
+        error_code: str,
+        error_detail: str,
+    ) -> None:
+        """Persist a definitive provider conflict without ambiguous PAUSED recovery."""
+        now = datetime.now(UTC)
+        event_id: str | None = None
+        writeback_id: str | None = None
+        adapter_label = "unknown"
+        detail = self._truncate_error_detail(error_detail)
+        async with self._session_factory() as session:
+            async with session.begin():
+                outbox = await session.scalar(
+                    select(orm.DispositionOutbox)
+                    .where(orm.DispositionOutbox.outbox_id == outbox_id)
+                    .with_for_update()
+                )
+                if outbox is None:
+                    return
+                current = OutboxDeliveryStatus(outbox.delivery_status)
+                if current is not OutboxDeliveryStatus.LEASED:
+                    return
+                outbox.last_error_code = error_code
+                outbox.last_error_detail = detail
+                outbox.latest_writeback_status = WritebackStatus.CONFLICT.value
+                outbox.locked_by = None
+                outbox.locked_at = None
+                outbox.lease_expires_at = None
+                outbox.next_retry_at = None
+                outbox.updated_at = now
+                receipt = await self._append_receipt(
+                    session,
+                    outbox,
+                    status=WritebackStatus.CONFLICT,
+                    provider_message=detail,
+                )
+                validate_outbox_delivery_transition(
+                    current,
+                    OutboxDeliveryStatus.DELIVERED,
+                )
+                outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
+                outbox.delivered_at = now
+                action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
+                _mirror_writeback_status_to_action(action, WritebackStatus.CONFLICT.value)
+                if action is not None:
+                    await self._apply_action_terminal_from_receipt(
+                        session,
+                        action,
+                        receipt,
+                        adapter_label=self._adapter_label(outbox),
+                    )
+                event_id = outbox.event_id
+                writeback_id = outbox.writeback_id
+                adapter_label = self._adapter_label(outbox)
+
+        assert event_id is not None
+        assert writeback_id is not None
+        record_writeback(status=WritebackStatus.CONFLICT.value, adapter=adapter_label)
+        await self._sync_writeback_summary(event_id)
+        await self._maybe_resume(event_id)
+        if self._bus is not None:
+            await self._bus.publish_event(
+                event_id,
+                "writeback_updated",
+                {"writeback_id": writeback_id, "status": WritebackStatus.CONFLICT.value},
+            )
 
     async def _mark_delivery_paused_unknown(
         self,
@@ -2289,7 +2466,10 @@ class DispositionSyncService:
         prior_head.updated_at = now
         validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
         prior_head.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
-        record_writeback_dead_letter(adapter=self._adapter_label(prior_head))
+        record_writeback_dead_letter(
+            adapter=self._adapter_label(prior_head),
+            error_code=OUTBOX_SUPERSEDED_ERROR_CODE,
+        )
 
     def _block_superseded_outbox(
         self,
@@ -2316,7 +2496,10 @@ class DispositionSyncService:
         if current is not OutboxDeliveryStatus.DEAD_LETTER:
             validate_outbox_delivery_transition(current, OutboxDeliveryStatus.DEAD_LETTER)
             outbox.delivery_status = OutboxDeliveryStatus.DEAD_LETTER.value
-            record_writeback_dead_letter(adapter=self._adapter_label(outbox))
+            record_writeback_dead_letter(
+                adapter=self._adapter_label(outbox),
+                error_code=OUTBOX_SUPERSEDED_ERROR_CODE,
+            )
         return OutboxDeliveryStatus.DEAD_LETTER
 
     async def _assert_active_head_for_delivery(
@@ -2408,6 +2591,51 @@ class OutboxWorker:
                 await self._service._mark_delivery_dead_letter(
                     outbox_id,
                     error_code="guardrail_blocked",
+                    error_detail=str(exc),
+                )
+            except WritebackConflictError as exc:
+                logger.warning(
+                    "outbox delivery conflict outbox=%s error_code=%s",
+                    outbox_id,
+                    exc.error_code,
+                )
+                await self._service._mark_delivery_conflict(
+                    outbox_id,
+                    error_code=exc.error_code,
+                    error_detail=str(exc),
+                )
+            except ValidationError as exc:
+                if is_deterministic_adapter_rejection_code(exc.error_code):
+                    logger.warning(
+                        "outbox delivery deterministic rejection outbox=%s error_code=%s",
+                        outbox_id,
+                        exc.error_code,
+                    )
+                    await self._service._mark_delivery_deterministic_rejection(
+                        outbox_id,
+                        error_code=exc.error_code,
+                        error_detail=str(exc),
+                    )
+                else:
+                    logger.exception(
+                        "outbox delivery validation outcome ambiguous; pausing for lookup "
+                        "outbox=%s",
+                        outbox_id,
+                    )
+                    await self._service._mark_delivery_paused_unknown(
+                        outbox_id,
+                        error_code="delivery_outcome_unknown",
+                        error_detail=f"{type(exc).__name__}: {exc}",
+                    )
+            except WritebackUnsupportedError as exc:
+                logger.warning(
+                    "outbox delivery unsupported outbox=%s error_code=%s",
+                    outbox_id,
+                    exc.error_code,
+                )
+                await self._service._mark_delivery_deterministic_rejection(
+                    outbox_id,
+                    error_code=exc.error_code,
                     error_detail=str(exc),
                 )
             except Exception as exc:
