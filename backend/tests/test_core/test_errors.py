@@ -19,6 +19,7 @@ from app.core.errors import (
     InvalidVerdictStatusCombinationError,
     LLMError,
     ShadowTraceError,
+    SideEffectsPendingError,
     ToolExecutionError,
     ValidationError,
     classify_exception,
@@ -54,6 +55,7 @@ _REQUIRED_DOCUMENTED_CODES: frozenset[str] = frozenset(
         "rate_limited",
         "unknown_delivery",
         "writeback_pending",
+        "closed_side_effects_pending",
         "writeback_failed",
         "writeback_conflict",
         "writeback_unsupported",
@@ -303,6 +305,29 @@ def test_llm_error_subclass_retry_rules() -> None:
     assert is_retryable(LLMError("x", error_code="llm_auth_error")) is False
     assert is_retryable(LLMError("x", error_code="llm_audit_error")) is False
     assert is_retryable(LLMError("x", error_code="llm_invalid_json")) is False
+
+
+def test_side_effects_pending_error_contract() -> None:
+    err = SideEffectsPendingError(
+        "gate blocked",
+        details={"action_id": "act-1", "reason": "in_flight_job"},
+    )
+    assert err.status_code == 409
+    assert err.default_error_code == "closed_side_effects_pending"
+    assert err.default_category is ErrorCategory.PERMANENT
+    assert err.default_retryable is False
+    assert err.details["action_id"] == "act-1"
+
+
+def test_invalid_state_transition_closed_side_effects_pending_uses_409() -> None:
+    err = InvalidStateTransitionError(
+        "gate blocked",
+        target=EventStatus.CLOSED,
+        error_code="closed_side_effects_pending",
+        details={"action_id": "act-1"},
+    )
+    assert err.status_code == 409
+    assert err.error_code == "closed_side_effects_pending"
 
 
 def test_guardrail_working_memory_code() -> None:

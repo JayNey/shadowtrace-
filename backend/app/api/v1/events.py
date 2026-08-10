@@ -335,6 +335,119 @@ async def _generate_quick_close_report(
         )
 
 
+async def _load_side_effect_convergence_fields(
+    event_id: str,
+    *,
+    event_status: EventStatus,
+    disposition_policy: DispositionPolicy,
+) -> dict[str, int | bool]:
+    """Load side-effect convergence counts for API responses (ISSUE-302)."""
+    from app.api.v1.deps import _get_session_factory
+    from app.services.side_effect_convergence import build_side_effect_convergence_summary
+
+    session_factory = _get_session_factory()
+    async with session_factory() as session:
+        current_revision = await session.scalar(
+            select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
+        )
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=current_revision,
+            disposition_policy=disposition_policy,
+        )
+    total = summary.gate_applicable_outstanding_count + summary.background_outstanding_count
+    pending = summary.background_side_effects_pending
+    if event_status is not EventStatus.CLOSED:
+        pending = total > 0 and disposition_policy is DispositionPolicy.NOT_REQUIRED
+    return {
+        "background_side_effects_pending": pending,
+        "outstanding_side_effect_count": total,
+        "gate_applicable_outstanding_count": summary.gate_applicable_outstanding_count,
+    }
+
+
+async def _side_effect_fields_for_event(event: Any) -> dict[str, int | bool]:
+    """Load side-effect counts for GET/detail (degrade sentinel on failure)."""
+    try:
+        return await _load_side_effect_convergence_fields(
+            event.event_id,
+            event_status=event.status,
+            disposition_policy=event.disposition_policy,
+        )
+    except Exception:
+        logger.warning(
+            "side_effect_convergence fields degraded event_id=%s",
+            getattr(event, "event_id", "?"),
+            exc_info=True,
+        )
+        # Fail closed for display: do not return trustworthy zero counts.
+        return {
+            "background_side_effects_pending": True,
+            "outstanding_side_effect_count": -1,
+            "gate_applicable_outstanding_count": -1,
+        }
+
+
+async def _side_effect_fields_for_close_response(event: Any) -> dict[str, int | bool]:
+    """Load side-effect counts after a successful close (omit fields on load failure)."""
+    try:
+        return await _load_side_effect_convergence_fields(
+            event.event_id,
+            event_status=event.status,
+            disposition_policy=event.disposition_policy,
+        )
+    except Exception:
+        logger.warning(
+            "side_effect_convergence fields omitted after close event_id=%s",
+            getattr(event, "event_id", "?"),
+            exc_info=True,
+        )
+        return {}
+
+
+async def _validate_side_effect_convergence_gate(
+    event_id: str,
+    event: Any,
+) -> None:
+    """Pre-check gate-applicable side-effect convergence before close (ISSUE-302)."""
+    if event.disposition_policy != DispositionPolicy.REQUIRED:
+        return
+
+    from app.api.v1.deps import _get_session_factory
+    from app.core.errors import SideEffectsPendingError
+    from app.services.side_effect_convergence import (
+        build_side_effect_convergence_summary,
+        check_gate_applicable_side_effect_convergence,
+        reconcile_stale_executions_before_close,
+    )
+
+    session_factory = _get_session_factory()
+    await reconcile_stale_executions_before_close(session_factory, event_id)
+    async with session_factory() as session:
+        current_revision = await session.scalar(
+            select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
+        )
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=current_revision,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+    violation = check_gate_applicable_side_effect_convergence(summary)
+    if violation is not None:
+        raise SideEffectsPendingError(
+            "required CLOSED gate: gate-applicable side effects have not converged",
+            details={
+                "event_id": event_id,
+                "action_id": violation.action_id,
+                "reason": violation.reason.value,
+                "scope": violation.scope.value,
+                "gate_applicable_outstanding_count": summary.gate_applicable_outstanding_count,
+            },
+        )
+
+
 async def _validate_writeback_gate(
     event_id: str,
     event: Any,
@@ -749,6 +862,7 @@ async def get_event(
         pending_writeback_count=pending_count,
         detection_context_snapshot=detection_context_summary,
         detection_context_projection_error=detection_context_projection_error,
+        **(await _side_effect_fields_for_event(event)),
         **_guidance_fields(event, get_settings()),
     )
 
@@ -1280,11 +1394,16 @@ async def close_event(
             principal=principal.subject,
             reason=body.reason,
         )
+        event = await event_service.get_event(event_id)
+        side_effect_fields: dict[str, int | bool] = {}
+        if event is not None:
+            side_effect_fields = await _side_effect_fields_for_close_response(event)
         return s.EventCloseResponse(
             event_id=event_id,
             status=EventStatus.CLOSED,
             final_verdict=result.final_verdict,
             external_unsynced=True,
+            **side_effect_fields,
         )
 
     # Validate close rules per ISSUE-038.
@@ -1336,7 +1455,8 @@ async def close_event(
             reason=body.reason,
         )
     elif current_status == EventStatus.REPORTING:
-        # ISSUE-038 step 2: writeback gate pre-check.
+        # ISSUE-038 step 2: side-effect then writeback gate pre-check (align with SM).
+        await _validate_side_effect_convergence_gate(event_id, event)
         await _validate_writeback_gate(event_id, event)
 
         # Handle final_verdict change before closing — regenerate report first.
@@ -1369,8 +1489,9 @@ async def close_event(
         )
     elif current_status == EventStatus.FAILED:
         # FAILED → REPORTING → CLOSED.
-        # ISSUE-038: writeback gate pre-check before any state transitions
+        # ISSUE-038: side-effect then writeback gate pre-check before any state transitions
         # to avoid leaving the event stuck in REPORTING.
+        await _validate_side_effect_convergence_gate(event_id, event)
         await _validate_writeback_gate(event_id, event)
 
         # Generate a quick-close report so validate_closed_gate can pass.
@@ -1431,11 +1552,13 @@ async def close_event(
             f"event {event_id} disappeared after close",
             details={"event_id": event_id},
         )
+    side_effect_fields = await _side_effect_fields_for_close_response(event)
     return s.EventCloseResponse(
         event_id=event_id,
         status=event.status,
         final_verdict=event.final_verdict,
         external_unsynced=event.external_unsynced,
+        **side_effect_fields,
     )
 
 

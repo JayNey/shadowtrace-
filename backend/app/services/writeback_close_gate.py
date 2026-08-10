@@ -126,9 +126,14 @@ async def load_active_outboxes(
     return list(
         (
             await session.scalars(
-                select(orm.DispositionOutbox).where(
+                select(orm.DispositionOutbox)
+                .where(
                     orm.DispositionOutbox.action_id == action_id,
                     orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                )
+                .order_by(
+                    orm.DispositionOutbox.created_at.asc(),
+                    orm.DispositionOutbox.outbox_id.asc(),
                 )
             )
         ).all()
