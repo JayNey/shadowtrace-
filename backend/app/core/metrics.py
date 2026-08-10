@@ -27,6 +27,7 @@ _budget_redis_recovery_total: Any | None = None
 _budget_redis_degraded_gauge: Any | None = None
 _state_projection_failure_total: Any | None = None
 _state_projection_repair_total: Any | None = None
+_investigation_intent_enqueue_total: Any | None = None
 _initialized = False
 _process_checkpoint_fallback_active = False
 _process_checkpoint_fallback_triggers = 0
@@ -35,6 +36,8 @@ _process_budget_redis_degraded = False
 _process_reservation_redis_degraded = False
 _process_state_projection_failures = 0
 _process_state_projection_repairs = 0
+_process_investigation_intent_enqueue_success = 0
+_process_investigation_intent_enqueue_failure = 0
 
 
 def _ensure_metrics() -> None:
@@ -44,6 +47,7 @@ def _ensure_metrics() -> None:
     global _budget_redis_fallback_total
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _state_projection_failure_total, _state_projection_repair_total
+    global _investigation_intent_enqueue_total
 
     if not telemetry.is_telemetry_enabled():
         return
@@ -115,6 +119,11 @@ def _ensure_metrics() -> None:
         _state_projection_repair_total = _meter.create_counter(
             name="shadowtrace_state_projection_repair_total",
             description="Bounded post-commit state projection repair outcomes",
+            unit="1",
+        )
+        _investigation_intent_enqueue_total = _meter.create_counter(
+            name="shadowtrace_investigation_intent_enqueue_total",
+            description="Best-effort Celery dispatch trigger outcomes for pending intents",
             unit="1",
         )
     except Exception:
@@ -341,6 +350,44 @@ def get_state_projection_health() -> dict[str, object]:
     }
 
 
+def record_investigation_intent_enqueue(*, result: str) -> None:
+    """Increment ``shadowtrace_investigation_intent_enqueue_total{result=...}``."""
+    global _process_investigation_intent_enqueue_success, _process_investigation_intent_enqueue_failure
+    normalized = result.strip().lower()
+    if normalized == "success":
+        _process_investigation_intent_enqueue_success += 1
+    elif normalized == "failure":
+        _process_investigation_intent_enqueue_failure += 1
+    else:
+        return
+    _ensure_metrics()
+    if _investigation_intent_enqueue_total is None:
+        return
+    try:
+        _investigation_intent_enqueue_total.add(1, {"result": normalized})
+    except Exception:
+        logger.debug("investigation intent enqueue metric export failed", exc_info=True)
+
+
+def investigation_intent_enqueue_health_snapshot() -> dict[str, int]:
+    """Process-local enqueue counters for health probes and deterministic tests."""
+    return {
+        "enqueue_success": _process_investigation_intent_enqueue_success,
+        "enqueue_failure": _process_investigation_intent_enqueue_failure,
+    }
+
+
+def get_investigation_intent_enqueue_health() -> dict[str, object]:
+    """Process-local investigation intent dispatch trigger observability (ISSUE-291)."""
+    snapshot = investigation_intent_enqueue_health_snapshot()
+    degraded = snapshot["enqueue_failure"] > 0 and snapshot["enqueue_success"] == 0
+    return {
+        "status": "degraded" if degraded else "ok",
+        "enqueue_success": snapshot["enqueue_success"],
+        "enqueue_failure": snapshot["enqueue_failure"],
+    }
+
+
 def reset_metrics_for_tests() -> None:
     """Allow tests to re-register instruments after telemetry reset."""
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
@@ -349,10 +396,12 @@ def reset_metrics_for_tests() -> None:
     global _budget_redis_fallback_total
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _state_projection_failure_total, _state_projection_repair_total
+    global _investigation_intent_enqueue_total
     global _process_checkpoint_fallback_active, _process_checkpoint_fallback_triggers
     global _process_checkpoint_loop_rebinds
     global _process_budget_redis_degraded, _process_reservation_redis_degraded
     global _process_state_projection_failures, _process_state_projection_repairs
+    global _process_investigation_intent_enqueue_success, _process_investigation_intent_enqueue_failure
     _meter = None
     _writeback_total = None
     _writeback_queue_age = None
@@ -367,6 +416,7 @@ def reset_metrics_for_tests() -> None:
     _budget_redis_degraded_gauge = None
     _state_projection_failure_total = None
     _state_projection_repair_total = None
+    _investigation_intent_enqueue_total = None
     _initialized = False
     _process_checkpoint_fallback_active = False
     _process_checkpoint_fallback_triggers = 0
@@ -375,6 +425,15 @@ def reset_metrics_for_tests() -> None:
     _process_reservation_redis_degraded = False
     _process_state_projection_failures = 0
     _process_state_projection_repairs = 0
+    _process_investigation_intent_enqueue_success = 0
+    _process_investigation_intent_enqueue_failure = 0
+
+
+def reset_investigation_intent_enqueue_metrics_for_tests() -> None:
+    """Reset only investigation intent enqueue process counters."""
+    global _process_investigation_intent_enqueue_success, _process_investigation_intent_enqueue_failure
+    _process_investigation_intent_enqueue_success = 0
+    _process_investigation_intent_enqueue_failure = 0
 
 
 def reset_checkpoint_metrics_for_tests() -> None:
@@ -397,13 +456,16 @@ __all__ = [
     "budget_redis_health_snapshot",
     "checkpoint_health_snapshot",
     "get_budget_redis_health",
+    "get_investigation_intent_enqueue_health",
     "get_state_projection_health",
+    "investigation_intent_enqueue_health_snapshot",
     "observe_writeback_queue_age",
     "record_action_unknown",
     "record_budget_redis_fallback",
     "record_budget_redis_recovery",
     "record_checkpoint_fallback",
     "record_checkpoint_loop_rebind",
+    "record_investigation_intent_enqueue",
     "record_state_projection_failure",
     "record_state_projection_repair",
     "record_writeback",
@@ -411,6 +473,7 @@ __all__ = [
     "record_writeback_dead_letter",
     "reset_budget_redis_metrics_for_tests",
     "reset_checkpoint_metrics_for_tests",
+    "reset_investigation_intent_enqueue_metrics_for_tests",
     "reset_metrics_for_tests",
     "set_budget_redis_degraded",
     "set_checkpoint_memory_fallback",

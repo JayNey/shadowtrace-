@@ -79,12 +79,14 @@ async def build_celery_health(
     """Aggregate broker + worker health for ``GET /health``."""
     mode = (task_mode or "background").strip().lower()
     broker_status = await check_celery_broker(broker_url)
+    beat_schedule = check_investigation_intent_beat_schedule(task_mode=mode)
 
     if mode != "celery":
         return {
             "task_mode": mode,
             "broker": broker_status,
             "worker": {"status": "not_applicable", "workers": 0, "worker_ids": []},
+            "investigation_intent_beat": beat_schedule,
         }
 
     worker = await check_celery_workers(timeout=inspect_timeout)
@@ -92,4 +94,31 @@ async def build_celery_health(
         "task_mode": mode,
         "broker": broker_status,
         "worker": worker,
+        "investigation_intent_beat": beat_schedule,
+    }
+
+
+def check_investigation_intent_beat_schedule(*, task_mode: str) -> dict[str, Any]:
+    """Verify durable intent recovery tasks are registered in the beat schedule."""
+    mode = (task_mode or "background").strip().lower()
+    if mode != "celery":
+        return {
+            "status": "not_applicable",
+            "dispatch_scheduled": False,
+            "reconcile_scheduled": False,
+        }
+
+    from app.core.celery_app import _build_beat_schedule
+    from app.core.config import TaskMode
+
+    schedule = _build_beat_schedule(task_mode=TaskMode.CELERY)
+    dispatch_key = "shadowtrace-dispatch-investigation-intents"
+    reconcile_key = "shadowtrace-reconcile-investigation-intents"
+    dispatch_scheduled = dispatch_key in schedule
+    reconcile_scheduled = reconcile_key in schedule
+    status = "ok" if dispatch_scheduled and reconcile_scheduled else "degraded"
+    return {
+        "status": status,
+        "dispatch_scheduled": dispatch_scheduled,
+        "reconcile_scheduled": reconcile_scheduled,
     }

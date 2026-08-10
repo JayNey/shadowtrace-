@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -481,15 +483,34 @@ async def test_http_intent_survives_api_restart_and_dispatches(
     monkeypatch.setattr("app.tasks.investigation_tasks.publish_investigation_for_intent", _publish)
 
     restarted_worker = InvestigationIntentService(session_factory, settings=settings)
-    assert await restarted_worker.claim_and_publish_batch(limit=100) >= 1
-    assert {
-        "event_id": event_id,
-        "task_id": committed.task_id,
-        "intent_id": committed.intent_id,
-        "include_response_execution": False,
-        "generate_report": True,
-        "resume_from_checkpoint": False,
-    } in published
+
+    async def _claim_committed_intent(*, limit: int = 10) -> list[str]:
+        del limit
+        async with session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    orm.InvestigationIntent,
+                    committed.intent_id,
+                    with_for_update=True,
+                )
+                assert row is not None
+                row.status = InvestigationIntentStatus.CLAIMED.value
+                row.claim_owner = "intent-dispatcher-1"
+                row.claim_expires_at = datetime.now(UTC) + timedelta(seconds=30)
+        return [committed.intent_id]
+
+    monkeypatch.setattr(restarted_worker, "_claim_batch", _claim_committed_intent)
+    assert await restarted_worker.claim_and_publish_batch(limit=1) == 1
+    assert published == [
+        {
+            "event_id": event_id,
+            "task_id": committed.task_id,
+            "intent_id": committed.intent_id,
+            "include_response_execution": False,
+            "generate_report": True,
+            "resume_from_checkpoint": False,
+        }
+    ]
     async with session_factory() as session:
         row = await session.get(orm.InvestigationIntent, committed.intent_id)
         assert row is not None
@@ -963,8 +984,13 @@ async def test_reconcile_stale_started_event_triaging_retries_for_resume(
         "app.tasks.investigation_tasks.publish_investigation_for_intent",
         lambda **kwargs: published.append(kwargs),
     )
-    claimed = await service._claim_batch(limit=100)
-    assert intent_id in claimed
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.InvestigationIntent, intent_id, with_for_update=True)
+            assert row is not None
+            row.status = InvestigationIntentStatus.CLAIMED.value
+            row.claim_owner = "intent-dispatcher-1"
+            row.claim_expires_at = datetime.now(UTC) + timedelta(seconds=30)
     assert await service._publish_claimed_intent(intent_id) is True
     assert any(
         call["intent_id"] == intent_id and call["resume_from_checkpoint"] is True
@@ -1623,7 +1649,7 @@ async def test_reconcile_stale_schedules_dispatch(
                     revision=1,
                     attempt=0,
                     broker_task_id=broker_task_id,
-                    updated_at=datetime.now(UTC) - timedelta(minutes=10),
+                    updated_at=datetime(1970, 1, 1, tzinfo=UTC),
                 )
             )
     calls: list[str] = []
@@ -1646,6 +1672,10 @@ async def test_reconcile_stale_schedules_dispatch(
     assert await service.reconcile_stale(limit=5) >= 1
     assert calls == ["dispatch"]
     assert broker_task_id in deleted_metadata
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status != InvestigationIntentStatus.ENQUEUED.value
 
 
 @pytest.mark.asyncio
@@ -2335,3 +2365,210 @@ async def test_auto_response_unexpected_publish_failure_sets_degraded_flag(
     assert any(
         flag.startswith("auto_response_dispatch_unavailable=") for flag in event.degraded_flags
     )
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_enqueue_failure_is_observable_and_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.core.metrics import (
+        investigation_intent_enqueue_health_snapshot,
+        reset_investigation_intent_enqueue_metrics_for_tests,
+    )
+
+    reset_investigation_intent_enqueue_metrics_for_tests()
+    service = InvestigationIntentService(
+        MagicMock(),
+        settings=Settings(TASK_MODE="celery"),
+    )
+
+    def _broker_down() -> None:
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
+        _broker_down,
+    )
+
+    intent_logger = logging.getLogger("app.services.investigation_intent_service")
+    intent_logger.disabled = False
+    intent_logger.propagate = True
+    with caplog.at_level(
+        logging.ERROR,
+        logger="app.services.investigation_intent_service",
+    ):
+        service.schedule_dispatch(
+            event_id="evt-enqueue-fail",
+            intent_id="iin-enqueue-fail",
+            trigger="test",
+        )
+
+    snapshot = investigation_intent_enqueue_health_snapshot()
+    assert snapshot["enqueue_failure"] == 1
+    assert snapshot["enqueue_success"] == 0
+    assert any(
+        "failed to enqueue investigation intent dispatch" in record.message
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_enqueue_failure_pending_recoverable_via_sync_batch(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        TASK_MODE="celery",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=30,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-recover-{uuid4().hex[:8]}"
+    event_id = f"evt-recover-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Recover after enqueue failure",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.PENDING.value,
+                    revision=1,
+                    attempt=0,
+                    include_response_execution=False,
+                    generate_report=False,
+                )
+            )
+
+    def _broker_down() -> None:
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
+        _broker_down,
+    )
+    service.schedule_dispatch(event_id=event_id, intent_id=intent_id, trigger="test")
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.PENDING.value
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.InvestigationIntent, intent_id, with_for_update=True)
+            assert row is not None
+            row.status = InvestigationIntentStatus.CLAIMED.value
+            row.claim_owner = "intent-dispatcher-1"
+            row.claim_expires_at = datetime.now(UTC) + timedelta(seconds=30)
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _noop_publish(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _noop_publish,
+    )
+
+    async def _claim_only_test_intent(*, limit: int = 10) -> list[str]:
+        del limit
+        return [intent_id]
+
+    monkeypatch.setattr(service, "_claim_batch", _claim_only_test_intent)
+    result = await service.dispatch_sync_batch(limit=5)
+    assert result["published"] == 1
+    assert result["claimed"] == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.ENQUEUED.value
+
+
+@pytest.mark.asyncio
+async def test_pending_dispatch_stats_reports_oldest_age(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = InvestigationIntentService(
+        session_factory,
+        settings=Settings(TASK_MODE="celery"),
+    )
+    before = await service.pending_dispatch_stats()
+    intent_id = f"iin-pending-age-{uuid4().hex[:8]}"
+    event_id = f"evt-pending-age-{uuid4().hex[:8]}"
+    created_at = datetime.now(UTC) - timedelta(minutes=5)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="Pending age probe",
+                    description="",
+                    status=EventStatus.NEW.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.PENDING.value,
+                    revision=1,
+                    attempt=0,
+                    include_response_execution=False,
+                    generate_report=False,
+                    created_at=created_at,
+                )
+            )
+
+    stats = await service.pending_dispatch_stats()
+    assert stats["pending_count"] == before["pending_count"] + 1
+    assert stats["oldest_pending_age_s"] is not None
+    if before["oldest_pending_age_s"] is None:
+        assert float(stats["oldest_pending_age_s"]) >= 290.0
+    else:
+        assert float(stats["oldest_pending_age_s"]) >= min(
+            float(before["oldest_pending_age_s"]),
+            290.0,
+        )

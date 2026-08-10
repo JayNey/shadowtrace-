@@ -813,7 +813,11 @@ async def _schedule_investigation(
         )
 
     if task_mode == TaskMode.CELERY.value:
-        intent_service.schedule_dispatch()
+        intent_service.schedule_dispatch(
+            event_id=event_id,
+            intent_id=intent_id,
+            trigger="http_investigate",
+        )
         return task_id
 
     workflow_path = workflow_path_from_request(

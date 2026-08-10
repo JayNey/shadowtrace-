@@ -1676,7 +1676,14 @@ async def test_schedule_investigation_analysis_only_celery_routes_to_dispatch(
     captured: dict[str, object] = {}
 
     class _IntentService:
-        def schedule_dispatch(self) -> None:
+        def schedule_dispatch(
+            self,
+            *,
+            event_id: str | None = None,
+            intent_id: str | None = None,
+            trigger: str = "unspecified",
+        ) -> None:
+            del event_id, intent_id, trigger
             captured["scheduled"] = True
 
     task_id = await _schedule_investigation(

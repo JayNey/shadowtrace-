@@ -80,8 +80,15 @@ def _durable_intent_double(
                 created=True,
             )
 
-        def schedule_dispatch(self) -> None:
+        def schedule_dispatch(
+            self,
+            *,
+            event_id: str | None = None,
+            intent_id: str | None = None,
+            trigger: str = "unspecified",
+        ) -> None:
             """Mirror production: trigger dispatch best-effort and never raise."""
+            del event_id, intent_id, trigger
             self.schedule_calls += 1
             if on_schedule_dispatch is None:
                 return

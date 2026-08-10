@@ -9,6 +9,7 @@ import pytest
 from app.core.celery_health import (
     build_celery_health,
     check_celery_broker,
+    check_investigation_intent_beat_schedule,
     probe_celery_workers,
 )
 
@@ -117,3 +118,23 @@ async def test_build_celery_health_probes_workers_in_celery_mode() -> None:
         )
     worker_mock.assert_awaited_once()
     assert result["worker"]["status"] == "degraded"
+    assert result["investigation_intent_beat"]["status"] == "ok"
+
+
+def test_investigation_intent_beat_schedule_not_applicable_in_background_mode() -> None:
+    result = check_investigation_intent_beat_schedule(task_mode="background")
+    assert result["status"] == "not_applicable"
+
+
+def test_investigation_intent_beat_schedule_ok_in_celery_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+    result = check_investigation_intent_beat_schedule(task_mode="celery")
+    assert result["status"] == "ok"
+    assert result["dispatch_scheduled"] is True
+    assert result["reconcile_scheduled"] is True
+    get_settings.cache_clear()
