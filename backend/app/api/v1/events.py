@@ -1213,7 +1213,7 @@ async def investigate_event(
 
 
 # --------------------------------------------------------------------------- #
-# POST /events/{event_id}/close — close event
+# POST /events/{event_id}/projection-repair — admin projection repair (ISSUE-285)
 # --------------------------------------------------------------------------- #
 
 
@@ -1251,6 +1251,11 @@ async def repair_event_projection(
             for failure in outcome.failures
         ],
     )
+
+
+# --------------------------------------------------------------------------- #
+# POST /events/{event_id}/close — close event
+# --------------------------------------------------------------------------- #
 
 
 @router.post("/events/{event_id}/close", response_model=s.EventCloseResponse)
