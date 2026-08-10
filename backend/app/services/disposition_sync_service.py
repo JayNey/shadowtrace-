@@ -148,6 +148,26 @@ def _mirror_writeback_status_to_action(action: orm.Action | None, status: str) -
         action.writeback_status = status
 
 
+# ISSUE-235 / ISSUE-290: intents that must re-check action approval at deliver time.
+_DELIVERY_APPROVAL_RECHECK_INTENTS: frozenset[DispositionIntentKind] = frozenset(
+    {
+        DispositionIntentKind.ENTITY_ACTION_SUBMIT,
+        DispositionIntentKind.EXECUTION_RESULT_RECORD,
+        DispositionIntentKind.EVENT_STATUS_UPDATE,
+    }
+)
+
+
+def _action_still_approved_for_delivery(action: orm.Action) -> bool:
+    """True when the action row is still in the effective approved set (ISSUE-235)."""
+    return action.status in {
+        ActionStatus.APPROVED.value,
+        ActionStatus.EXECUTING.value,
+        ActionStatus.SUCCESS.value,
+        ActionStatus.PARTIAL_SUCCESS.value,
+    } and action.superseded_by_revision is None
+
+
 class DispositionSyncService:
     """Owns disposition_commands/receipts/writeback_summary WorkingMemory fields."""
 
@@ -1196,27 +1216,16 @@ class DispositionSyncService:
                         self._worker_id,
                     )
                     return
-                # ISSUE-235 (SUS-301): TOCTOU 纵深防御 — deliver relies on the
-                # enqueue-time approved_action_ids snapshot and does not
-                # re-derive it; an approval revoked between enqueue and
-                # delivery would still go out.  Re-check entity-class commands
-                # right before delivery: the action must still be in the
-                # effective approved set (APPROVED/EXECUTING/SUCCESS, not
-                # superseded).  Fail-closed → DEAD_LETTER, never delivered.
-                if command.intent_kind in {
-                    DispositionIntentKind.ENTITY_ACTION_SUBMIT,
-                    DispositionIntentKind.EXECUTION_RESULT_RECORD,
-                }:
-                    if (
-                        action_row.status
-                        not in {
-                            ActionStatus.APPROVED.value,
-                            ActionStatus.EXECUTING.value,
-                            ActionStatus.SUCCESS.value,
-                            ActionStatus.PARTIAL_SUCCESS.value,
-                        }
-                        or action_row.superseded_by_revision is not None
-                    ):
+                # ISSUE-235 / ISSUE-290 (SUS-301): TOCTOU 纵深防御 — deliver
+                # relies on the enqueue-time approved_action_ids snapshot and
+                # does not re-derive it; an approval revoked between enqueue
+                # and delivery would still go out.  Re-check side-effect intents
+                # (entity-class + terminal EVENT_STATUS_UPDATE) right before
+                # delivery: the action must still be in the effective approved
+                # set (APPROVED/EXECUTING/SUCCESS, not superseded).
+                # Fail-closed → DEAD_LETTER, never delivered.
+                if command.intent_kind in _DELIVERY_APPROVAL_RECHECK_INTENTS:
+                    if not _action_still_approved_for_delivery(action_row):
                         logger.warning(
                             "outbox delivery blocked: approval revoked before delivery "
                             "outbox=%s action_id=%s status=%s superseded_by=%s",
@@ -1237,8 +1246,8 @@ class DispositionSyncService:
                 # ISSUE-224: enqueue validated against resolve_approved_action_ids;
                 # delivery-time guard re-validates source_locator, message_code,
                 # and analysis content but does not re-derive the approved list.
-                # ISSUE-235 adds a separate action-row status/supersede re-check
-                # for entity-class commands above (not EVENT_STATUS_UPDATE).
+                # ISSUE-235/290 adds a separate action-row status/supersede
+                # re-check for side-effect intents above.
                 await self._guard.validate(
                     command,
                     {

@@ -3273,6 +3273,193 @@ async def test_deliver_execution_result_rejected_after_supersede(
         assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
 
+@pytest.mark.asyncio
+async def test_deliver_event_status_update_rejected_after_approval_revoked(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-290: terminal EVENT_STATUS_UPDATE must fail-closed after revoke."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    action_id = outbox_row.action_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.REJECTED.value
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    await sync.deliver_outbox(outbox_row.outbox_id)
+
+    assert submit_calls == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+        assert row.last_error_detail is not None
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert receipts == []
+
+
+@pytest.mark.asyncio
+async def test_deliver_event_status_update_rejected_after_supersede(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-290: EVENT_STATUS_UPDATE whose action was superseded after enqueue must not deliver."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    action_id = outbox_row.action_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.SUCCESS.value
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    await sync.deliver_outbox(outbox_row.outbox_id)
+
+    assert submit_calls == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_worker_deliver_event_status_update_rejected_after_approval_revoked(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-290: worker lease path must fail-closed for revoked terminal writeback."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    action_id = outbox_row.action_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.REJECTED.value
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+    assert submit_calls == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_deliver_event_status_update_confirms_when_still_approved(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-290: approved terminal EVENT_STATUS_UPDATE still delivers to CONFIRMED."""
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+
+    await sync.deliver_outbox(outbox_row.outbox_id)
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+        assert row.latest_writeback_status == WritebackStatus.CONFIRMED.value
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert receipts
+        assert any(r.status == WritebackStatus.CONFIRMED.value for r in receipts)
+
+
 async def _enqueue_terminal_event_status_update(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
