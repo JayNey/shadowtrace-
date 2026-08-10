@@ -119,6 +119,16 @@ export default function TimelineEntryItem({
                     关联实体：{evidence.related_entities.join(", ")}
                   </Typography.Text>
                 ) : null}
+                {evidence.raw_data && Object.keys(evidence.raw_data).length > 0 ? (
+                  <Typography.Text
+                    type="secondary"
+                    style={{ fontSize: 12, display: "block", marginTop: 4 }}
+                  >
+                    {Object.entries(evidence.raw_data)
+                      .map(([key, value]) => `${key}: ${String(value)}`)
+                      .join(" · ")}
+                  </Typography.Text>
+                ) : null}
               </>
             ) : (
               <Typography.Text type="secondary">
