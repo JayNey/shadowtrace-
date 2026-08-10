@@ -790,7 +790,10 @@ def get_execution_job_query_service() -> ExecutionJobQueryService:
     return _execution_job_query
 
 
-ExecutionJobQueryDep = Annotated["ExecutionJobQueryService", Depends(get_execution_job_query_service)]
+ExecutionJobQueryDep = Annotated[
+    "ExecutionJobQueryService",
+    Depends(get_execution_job_query_service),
+]
 
 
 async def _get_wm() -> Any:
