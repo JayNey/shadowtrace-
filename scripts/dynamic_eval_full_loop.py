@@ -74,6 +74,9 @@ _IN_FLIGHT = frozenset(
     }
 )
 
+_MAX_ACTION_PAGES = 50
+_STRICT_ASSERT_MAX_WAIT_S = 10.0
+_STRICT_ASSERT_POLL_S = 0.5
 _GATE_APPLICABLE_CATEGORIES = frozenset({"response", "rollback"})
 
 # Past these statuses, evidence summary must be present and non-failed (ISSUE-256).
@@ -186,12 +189,7 @@ def parse_seed_stdout(stdout: str) -> dict[str, Any]:
 
 def unwrap_event_detail(payload: dict[str, Any]) -> dict[str, Any]:
     """Normalize GET /events/{id} — flat SecurityEvent or EventDetailResponse envelope."""
-    if "event_id" in payload:
-        return payload
-    nested = payload.get("event")
-    if isinstance(nested, dict) and nested.get("event_id"):
-        return nested
-    raise DynamicEvalApiError(f"unexpected event payload: {payload!r}")
+    return unwrap_event_detail_payload(payload)
 
 
 def get_event(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
@@ -346,7 +344,7 @@ def list_all_event_actions(
     page = 1
     collected: list[dict[str, Any]] = []
     total: int | None = None
-    while True:
+    while page <= _MAX_ACTION_PAGES:
         payload = client.get_json(
             f"/api/v1/events/{event_id}/actions?page={page}&page_size={page_size}"
         )
@@ -358,16 +356,27 @@ def list_all_event_actions(
         page_items = [item for item in items if isinstance(item, dict)]
         collected.extend(page_items)
         if total is None and isinstance(payload, dict) and payload.get("total") is not None:
-            total = int(payload["total"])
+            try:
+                total = int(payload["total"])
+            except (TypeError, ValueError) as exc:
+                raise DynamicEvalApiError(
+                    f"invalid actions total for {event_id}: {payload.get('total')!r}"
+                ) from exc
         if total is not None and len(collected) >= total:
             break
-        if len(page_items) < page_size:
+        if total is None and len(page_items) < page_size:
+            break
+        if not page_items:
             break
         page += 1
+    else:
+        raise DynamicEvalApiError(
+            f"actions pagination exceeded {_MAX_ACTION_PAGES} pages for {event_id}"
+        )
     return collected
 
 
-def assert_strict_closed_acceptance(
+def _assert_strict_closed_acceptance_once(
     client: DynamicEvalClient,
     event_id: str,
 ) -> dict[str, Any]:
@@ -394,6 +403,10 @@ def assert_strict_closed_acceptance(
         )
     if isinstance(report_obj, dict):
         report_quality = str(report_obj.get("report_quality") or "")
+        if not report_quality:
+            raise RuntimeError(
+                f"strict profile: report_quality missing for {event_id}"
+            )
         if report_quality == "incomplete_placeholder":
             raise RuntimeError(
                 f"strict profile: report_quality={report_quality!r} for {event_id}"
@@ -459,6 +472,27 @@ def assert_strict_closed_acceptance(
             else None
         ),
     }
+
+
+def assert_strict_closed_acceptance(
+    client: DynamicEvalClient,
+    event_id: str,
+    *,
+    max_wait_s: float = _STRICT_ASSERT_MAX_WAIT_S,
+    poll_interval_s: float = _STRICT_ASSERT_POLL_S,
+) -> dict[str, Any]:
+    """Strict CLOSED acceptance with bounded retry for post-close convergence lag."""
+    deadline = time.monotonic() + max_wait_s
+    last_error: RuntimeError | None = None
+    while True:
+        try:
+            return _assert_strict_closed_acceptance_once(client, event_id)
+        except RuntimeError as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(min(poll_interval_s, max(0.0, deadline - time.monotonic())))
+    raise last_error  # pragma: no cover
 
 
 def run_gold_loop(
@@ -709,7 +743,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
 
-    event_ids = list(args.event_id or [])
+    event_ids = [str(item).strip() for item in (args.event_id or []) if str(item).strip()]
     seed_summary: dict[str, Any] | None = None
     if not event_ids:
         before_ids = {
@@ -727,6 +761,11 @@ def main(argv: list[str] | None = None) -> int:
             if isinstance(raw_ids, list):
                 event_ids = [str(item) for item in raw_ids if item][: int(args.max_events)]
         if not event_ids and args.require_closed:
+            if args.seed_via_compose:
+                raise SystemExit(
+                    "strict profile (--require-closed): seed summary missing event_ids "
+                    "(ISSUE-301)"
+                )
             raise SystemExit(
                 "strict profile (--require-closed) requires explicit event_ids from "
                 "seed output or --event-id; heuristic DB selection is forbidden "
