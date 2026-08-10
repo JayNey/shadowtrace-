@@ -11,7 +11,10 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass, field
-from typing import Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar
+
+if TYPE_CHECKING:
+    from app.services.event_service import EventService
 
 from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
@@ -121,8 +124,7 @@ def _revalidate_model(model: type[ModelT], value: Any) -> ModelT:
             error_code="guardrail_violation",
         )
     try:
-        validated = cast(type[BaseModel], model).model_validate(payload)
-        return cast(ModelT, validated)
+        return model.model_validate(payload)
     except PydanticValidationError as exc:
         raise GuardrailViolationError(
             "sanitized proposal failed schema re-validation",
@@ -136,7 +138,7 @@ class AgentPublicationService:
 
     def __init__(
         self,
-        event_service: Any,
+        event_service: EventService,
         *,
         degraded_flags: Any | None = None,
         event_bus: Any | None = None,
@@ -241,14 +243,11 @@ class AgentPublicationService:
         if not persist_report:
             return canonical
 
-        persisted = cast(
-            InvestigationReport,
-            await self._event_service.publish_investigation_report(
-                canonical,
-                plan_revision=plan_revision,
-                operator="ReportAgent",
-                publication=publication,
-            ),
+        persisted = await self._event_service.publish_investigation_report(
+            canonical,
+            plan_revision=plan_revision,
+            operator="ReportAgent",
+            publication=publication,
         )
 
         if working_memory is not None:
