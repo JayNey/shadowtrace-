@@ -56,6 +56,7 @@ _RECOVERY_DELAY_S = 30.0
 _SESSION_VALIDATION_INTERVAL_S = 30.0
 _SEQUENCE_TTL_S = 60 * 60 * 24 * 30  # 30 days
 _MAX_CONSECUTIVE_FAILURES = 5
+SocketIOHealthStatus = Literal["ok", "degraded", "stopped"]
 
 
 def _sequence_key(event_id: str) -> str:
@@ -272,9 +273,7 @@ class SocketIOManager:
                         _RECOVERY_DELAY_S,
                         exc_info=True,
                     )
-                    self._consecutive_failures = 0
                     await asyncio.sleep(_RECOVERY_DELAY_S)
-                    self._bridge_degraded = False
                     continue
                 record_socketio_subscriber_failure(reason="subscriber_error")
                 logger.warning(
