@@ -248,10 +248,91 @@ def test_resolve_compose_service_image_prints_diagnostics_on_miss() -> None:
     diagnostics.assert_called_once()
 
 
-def test_ci_docker_build_uses_compose_image_resolver() -> None:
+def test_resolve_compose_service_image_falls_back_to_compose_images() -> None:
+    mod = _load_check_module()
+    with (
+        mock.patch.object(mod, "shutil_which", return_value="/usr/bin/docker"),
+        mock.patch.object(mod, "_resolve_by_compose_labels", return_value=None),
+        mock.patch.object(mod, "_image_id_from_ref", return_value=None),
+        mock.patch.object(
+            mod,
+            "_resolve_by_compose_images",
+            return_value="sha256:from-compose-images",
+        ) as compose_images,
+    ):
+        image_id = mod.resolve_compose_service_image(
+            project_name="shadowtrace-ci-99-1",
+            service="backend",
+        )
+    assert image_id == "sha256:from-compose-images"
+    compose_images.assert_called_once_with("shadowtrace-ci-99-1", "backend", None)
+
+
+def test_resolve_compose_service_image_exits_when_docker_missing() -> None:
+    mod = _load_check_module()
+    with mock.patch.object(mod, "shutil_which", return_value=None):
+        with pytest.raises(SystemExit) as exc:
+            mod.resolve_compose_service_image(
+                project_name="shadowtrace-ci-99-1",
+                service="backend",
+            )
+    assert exc.value.code == 1
+
+
+def test_resolve_by_compose_labels_prefers_newest_when_multiple() -> None:
+    mod = _load_check_module()
+
+    def docker_cmd_side_effect(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+        if args[:3] == ("image", "ls", "-q"):
+            return subprocess.CompletedProcess(
+                args=["docker", *args],
+                returncode=0,
+                stdout="sha256:older\nsha256:newer\n",
+                stderr="",
+            )
+        if args[:3] == ("image", "inspect", "--format") and args[3] == "{{.Created}}":
+            ref = args[4]
+            created = (
+                "2024-01-01T00:00:00Z"
+                if ref == "sha256:older"
+                else "2024-06-01T00:00:00Z"
+            )
+            return subprocess.CompletedProcess(
+                args=["docker", *args],
+                returncode=0,
+                stdout=f"{created}\n",
+                stderr="",
+            )
+        raise AssertionError(f"unexpected _docker_cmd call: {args}")
+
+    with mock.patch.object(mod, "_docker_cmd", side_effect=docker_cmd_side_effect):
+        image_id = mod._resolve_by_compose_labels("shadowtrace-ci-99-1", "backend")
+    assert image_id == "sha256:newer"
+
+
+def test_ci_docker_build_resolves_then_inspects_backend_image() -> None:
     ci_text = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    assert "--resolve-compose-image backend" in ci_text
-    assert "compose images -q backend" not in ci_text
+    makefile_text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+
+    step_marker = "      - name: Build and validate stack"
+    step_start = ci_text.index(step_marker)
+    step_run = ci_text.index("        run: |", step_start)
+    next_step = ci_text.find("\n      - ", step_run + 1)
+    step_body = ci_text[step_run:next_step if next_step != -1 else len(ci_text)]
+
+    assert "compose build" in step_body
+    assert "--resolve-compose-image backend" in step_body
+    assert '--inspect-image "${backend_image}"' in step_body
+    assert '--project-name "${COMPOSE_PROJECT_NAME}"' in step_body
+    build_pos = step_body.index("compose build")
+    resolve_pos = step_body.index("--resolve-compose-image backend")
+    inspect_pos = step_body.index('--inspect-image "${backend_image}"')
+    assert build_pos < resolve_pos < inspect_pos
+
+    ci_build_start = makefile_text.index("ci-build:")
+    ci_build_body = makefile_text[ci_build_start:]
+    assert "--resolve-compose-image backend" in ci_build_body
+    assert "compose images -q backend" not in ci_build_body
 
 
 def test_seed_dirty_fails_when_ignore_empty(tmp_path: Path) -> None:

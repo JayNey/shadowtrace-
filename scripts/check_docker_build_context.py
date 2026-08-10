@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Docker build context / runtime image guards (ISSUE-278).
+"""Docker build context / runtime image guards (ISSUE-278, ISSUE-294).
 
 Measures effective build context size (honouring .dockerignore) and optionally
 validates a built backend image does not ship host-only trees or secrets.
@@ -396,7 +396,7 @@ def print_compose_image_diagnostics(
     compose_file: Path | None,
 ) -> None:
     compose_path = compose_file if compose_file is not None else REPO_ROOT / "infra" / "docker-compose.yml"
-    print("--- compose backend image diagnostics (ISSUE-294) ---", file=sys.stderr)
+    print(f"--- compose {service} image diagnostics (ISSUE-294) ---", file=sys.stderr)
     print(f"project_name={project_name}", file=sys.stderr)
     print(f"service={service}", file=sys.stderr)
     print(f"compose_file={compose_path}", file=sys.stderr)
