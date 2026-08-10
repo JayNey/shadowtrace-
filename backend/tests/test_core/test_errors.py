@@ -319,6 +319,17 @@ def test_side_effects_pending_error_contract() -> None:
     assert err.details["action_id"] == "act-1"
 
 
+def test_invalid_state_transition_closed_side_effects_pending_uses_409() -> None:
+    err = InvalidStateTransitionError(
+        "gate blocked",
+        target=EventStatus.CLOSED,
+        error_code="closed_side_effects_pending",
+        details={"action_id": "act-1"},
+    )
+    assert err.status_code == 409
+    assert err.error_code == "closed_side_effects_pending"
+
+
 def test_guardrail_working_memory_code() -> None:
     exc = GuardrailViolationError(
         "non-owner write",

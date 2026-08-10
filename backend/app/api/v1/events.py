@@ -368,6 +368,7 @@ async def _load_side_effect_convergence_fields(
 
 
 async def _side_effect_fields_for_event(event: Any) -> dict[str, int | bool]:
+    """Load side-effect counts for GET/detail (degrade sentinel on failure)."""
     try:
         return await _load_side_effect_convergence_fields(
             event.event_id,
@@ -388,6 +389,23 @@ async def _side_effect_fields_for_event(event: Any) -> dict[str, int | bool]:
         }
 
 
+async def _side_effect_fields_for_close_response(event: Any) -> dict[str, int | bool]:
+    """Load side-effect counts after a successful close (omit fields on load failure)."""
+    try:
+        return await _load_side_effect_convergence_fields(
+            event.event_id,
+            event_status=event.status,
+            disposition_policy=event.disposition_policy,
+        )
+    except Exception:
+        logger.warning(
+            "side_effect_convergence fields omitted after close event_id=%s",
+            getattr(event, "event_id", "?"),
+            exc_info=True,
+        )
+        return {}
+
+
 async def _validate_side_effect_convergence_gate(
     event_id: str,
     event: Any,
@@ -405,14 +423,7 @@ async def _validate_side_effect_convergence_gate(
     )
 
     session_factory = _get_session_factory()
-    try:
-        await reconcile_stale_executions_before_close(session_factory, event_id)
-    except Exception:
-        logger.warning(
-            "stale execution reconcile before close API pre-check failed event_id=%s",
-            event_id,
-            exc_info=True,
-        )
+    await reconcile_stale_executions_before_close(session_factory, event_id)
     async with session_factory() as session:
         current_revision = await session.scalar(
             select(func.max(orm.Action.plan_revision)).where(orm.Action.event_id == event_id)
@@ -1386,7 +1397,7 @@ async def close_event(
         event = await event_service.get_event(event_id)
         side_effect_fields: dict[str, int | bool] = {}
         if event is not None:
-            side_effect_fields = await _side_effect_fields_for_event(event)
+            side_effect_fields = await _side_effect_fields_for_close_response(event)
         return s.EventCloseResponse(
             event_id=event_id,
             status=EventStatus.CLOSED,
@@ -1541,7 +1552,7 @@ async def close_event(
             f"event {event_id} disappeared after close",
             details={"event_id": event_id},
         )
-    side_effect_fields = await _side_effect_fields_for_event(event)
+    side_effect_fields = await _side_effect_fields_for_close_response(event)
     return s.EventCloseResponse(
         event_id=event_id,
         status=event.status,

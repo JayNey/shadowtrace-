@@ -30,8 +30,8 @@ from app.models.side_effect_convergence import (
 )
 from app.models.workflow import TransitionContext, validate_closed_gate
 from app.services.side_effect_convergence import (
+    _action_side_effect_blocks_convergence,
     _build_jobs_by_action,
-    _gate_applicable_blocks_convergence,
     build_side_effect_convergence_summary,
     check_gate_applicable_side_effect_convergence,
     reconcile_stale_executions_before_close,
@@ -730,6 +730,229 @@ async def test_reconcile_terminal_job_unblocks_convergence_summary(
     assert summary_after.gate_applicable_outstanding_count == 0
     assert check_gate_applicable_side_effect_convergence(summary_after) is None
 
+    async with session_factory() as session:
+        action_row = await session.get(orm.Action, summary_before.outstanding_actions[0].action_id)
+    assert action_row is not None
+    assert action_row.status == ActionStatus.SUCCESS.value
+
+
+async def _seed_required_with_dead_letter_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    action_id = f"act-{sfx}"
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="REQUIRED dead-letter outbox gate",
+                    description="ISSUE-302 fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=90,
+                    entities={},
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="block ip",
+                    tool_name="block_ip",
+                    action_level="l2",
+                    execution_owner="direct_tool",
+                    writeback_applicable=False,
+                    writeback_required=True,
+                    status=ActionStatus.SUCCESS.value,
+                )
+            )
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-{sfx}",
+                    writeback_id=f"wbk-{sfx}",
+                    disposition_id=f"disp-{sfx}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=0,
+                    source_record_id=f"src-{sfx}",
+                    source_locator_hash="h" * 64,
+                    source_sequence=1,
+                    intent_kind="entity_action_submit",
+                    logical_slot="slot-0",
+                    idempotency_key=f"idem-{sfx}",
+                    command_payload={},
+                    command_payload_sha256="a" * 64,
+                    delivery_status=OutboxDeliveryStatus.DEAD_LETTER.value,
+                    latest_writeback_status=None,
+                )
+            )
+    return event_id
+
+
+async def _seed_required_rollback_with_running_job(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> str:
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    action_id = f"act-{sfx}"
+    job_id = f"job-{sfx}"
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="REQUIRED rollback running job gate",
+                    description="ISSUE-302 fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=90,
+                    entities={},
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.ROLLBACK.value,
+                    action_name="rollback isolate",
+                    tool_name="rollback_isolate",
+                    action_level="l2",
+                    execution_owner="direct_tool",
+                    writeback_applicable=False,
+                    writeback_required=True,
+                    status=ActionStatus.APPROVED.value,
+                )
+            )
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_tool",
+                    idempotency_key=f"idem-{sfx}",
+                    status=ExecutionJobStatus.RUNNING.value,
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return event_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.usefixtures("clean_state")
+async def test_required_dead_letter_outbox_blocks_closed_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_required_with_dead_letter_outbox(session_factory)
+
+    async with session_factory() as session:
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=1,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+
+    violation = check_gate_applicable_side_effect_convergence(summary)
+    assert violation is not None
+    assert violation.reason is SideEffectConvergenceReason.OUTBOX_UNDELIVERED
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.usefixtures("clean_state")
+async def test_rollback_in_flight_job_blocks_required_close(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    event_id = await _seed_required_rollback_with_running_job(session_factory)
+
+    async with session_factory() as session:
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=1,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+
+    assert summary.gate_applicable_outstanding_count == 1
+    violation = check_gate_applicable_side_effect_convergence(summary)
+    assert violation is not None
+    assert violation.reason is SideEffectConvergenceReason.IN_FLIGHT_JOB
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.usefixtures("clean_state")
+async def test_reconcile_before_close_bypasses_disabled_global_reconcile(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+
+    event_id = await _seed_executing_with_terminal_job(session_factory)
+    get_settings.cache_clear()
+    monkeypatch.setenv("ACTION_EXECUTION_RECONCILE_ENABLED", "false")
+    get_settings.cache_clear()
+
+    settings = get_settings()
+    assert settings.action_execution_reconcile_enabled is False
+
+    await reconcile_stale_executions_before_close(session_factory, event_id)
+
+    async with session_factory() as session:
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=1,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+    assert summary.gate_applicable_outstanding_count == 0
+
+    get_settings.cache_clear()
+    monkeypatch.delenv("ACTION_EXECUTION_RECONCILE_ENABLED", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_before_close_failure_blocks_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import action_execution_service as aes_module
+
+    async def _boom(*_args: object, **_kwargs: object) -> int:
+        raise RuntimeError("reconcile unavailable")
+
+    monkeypatch.setattr(aes_module, "reconcile_stale_executions_for_event", _boom)
+
+    with pytest.raises(InvalidStateTransitionError, match="reconcile failed") as exc:
+        await reconcile_stale_executions_before_close(object(), "evt-missing")
+    assert exc.value.error_code == "closed_side_effects_pending"
+    assert exc.value.status_code == 409
+
 
 def test_gate_applicable_unknown_with_running_job_blocks() -> None:
     """Terminal UNKNOWN must not skip in-flight job checks (ISSUE-302 review)."""
@@ -774,7 +997,7 @@ def test_gate_applicable_unknown_with_running_job_blocks() -> None:
         ),
     ]
     jobs_by_action = _build_jobs_by_action(jobs)
-    reason = _gate_applicable_blocks_convergence(
+    reason = _action_side_effect_blocks_convergence(
         action,
         jobs_by_action=jobs_by_action,
         active_outboxes=[],

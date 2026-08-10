@@ -241,9 +241,28 @@ class EventDetailResponse(BaseModel):
     next_recommended_action: NextRecommendedAction = NextRecommendedAction.NONE
     full_loop_available: bool = True
     phase_message: str | None = None
-    background_side_effects_pending: bool = False
-    outstanding_side_effect_count: int = 0
-    gate_applicable_outstanding_count: int = 0
+    background_side_effects_pending: bool = Field(
+        default=False,
+        description=(
+            "True when detached/background response or rollback side effects are still "
+            "outstanding. For REQUIRED events before CLOSED, prefer "
+            "gate_applicable_outstanding_count. -1 counts mean degraded/unavailable."
+        ),
+    )
+    outstanding_side_effect_count: int = Field(
+        default=0,
+        description=(
+            "Total gate-applicable plus background detached outstanding side effects. "
+            "-1 means the count could not be loaded (degraded)."
+        ),
+    )
+    gate_applicable_outstanding_count: int = Field(
+        default=0,
+        description=(
+            "Outstanding side effects on the current plan revision that block REQUIRED "
+            "CLOSED when non-zero. -1 means degraded/unavailable."
+        ),
+    )
 
 
 class InvestigateResponse(BaseModel):
@@ -279,9 +298,28 @@ class EventCloseResponse(BaseModel):
     status: EventStatus
     final_verdict: FinalVerdict
     external_unsynced: bool = False
-    background_side_effects_pending: bool = False
-    outstanding_side_effect_count: int = 0
-    gate_applicable_outstanding_count: int = 0
+    background_side_effects_pending: bool = Field(
+        default=False,
+        description=(
+            "True when detached/background response or rollback side effects are still "
+            "outstanding. For REQUIRED events before CLOSED, prefer "
+            "gate_applicable_outstanding_count. -1 counts mean degraded/unavailable."
+        ),
+    )
+    outstanding_side_effect_count: int = Field(
+        default=0,
+        description=(
+            "Total gate-applicable plus background detached outstanding side effects. "
+            "-1 means the count could not be loaded (degraded)."
+        ),
+    )
+    gate_applicable_outstanding_count: int = Field(
+        default=0,
+        description=(
+            "Outstanding side effects on the current plan revision that block REQUIRED "
+            "CLOSED when non-zero. -1 means degraded/unavailable."
+        ),
+    )
 
 
 class ProjectionRepairFailure(BaseModel):

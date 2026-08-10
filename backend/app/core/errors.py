@@ -305,6 +305,8 @@ class InvalidStateTransitionError(ShadowTraceError):
             retryable=retryable,
             details=merged,
         )
+        if self.error_code == "closed_side_effects_pending":
+            self.status_code = 409
 
 
 class InvalidVerdictStatusCombinationError(ShadowTraceError):

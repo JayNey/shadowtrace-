@@ -436,17 +436,10 @@ class StateMachineService:
         projection_id = ""
 
         if target is EventStatus.CLOSED:
-            try:
-                await reconcile_stale_executions_before_close(
-                    self._session_factory,
-                    event_id,
-                )
-            except Exception:  # noqa: BLE001 - reconcile must not block close attempt
-                logger.warning(
-                    "stale execution reconcile before CLOSED failed event_id=%s",
-                    event_id,
-                    exc_info=True,
-                )
+            await reconcile_stale_executions_before_close(
+                self._session_factory,
+                event_id,
+            )
 
         async with self._session_factory() as session:
             async with session.begin():

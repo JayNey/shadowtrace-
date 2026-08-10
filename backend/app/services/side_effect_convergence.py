@@ -40,6 +40,7 @@ _UNDELIVERED_OUTBOX_STATUSES = frozenset(
         OutboxDeliveryStatus.LEASED,
         OutboxDeliveryStatus.WAITING_RETRY,
         OutboxDeliveryStatus.PAUSED,
+        OutboxDeliveryStatus.DEAD_LETTER,
     }
 )
 _UNCONFIRMED_WRITEBACK_PRIORITIES: tuple[WritebackStatus, ...] = (
@@ -150,6 +151,7 @@ def _summarize_outbox_fields(
 
     outbox_delivery: OutboxDeliveryStatus | None = None
     for candidate in (
+        OutboxDeliveryStatus.DEAD_LETTER,
         OutboxDeliveryStatus.READY,
         OutboxDeliveryStatus.LEASED,
         OutboxDeliveryStatus.WAITING_RETRY,
@@ -205,34 +207,6 @@ def _action_side_effect_blocks_convergence(
     if _action_has_active_job(action_row.action_id, jobs_by_action) is not None:
         return SideEffectConvergenceReason.IN_FLIGHT_JOB
     return _scan_outboxes_for_block(active_outboxes)
-
-
-def _gate_applicable_blocks_convergence(
-    action_row: orm.Action,
-    *,
-    jobs_by_action: dict[str, orm.ActionExecutionJob],
-    active_outboxes: list[orm.DispositionOutbox],
-) -> SideEffectConvergenceReason | None:
-    """Outstanding reasons that block CLOSED for current-revision gate-applicable actions."""
-    return _action_side_effect_blocks_convergence(
-        action_row,
-        jobs_by_action=jobs_by_action,
-        active_outboxes=active_outboxes,
-    )
-
-
-def _detached_side_effect_outstanding(
-    action_row: orm.Action,
-    *,
-    jobs_by_action: dict[str, orm.ActionExecutionJob],
-    active_outboxes: list[orm.DispositionOutbox],
-) -> SideEffectConvergenceReason | None:
-    """Track background/detached side effects even when the action row is terminal."""
-    return _action_side_effect_blocks_convergence(
-        action_row,
-        jobs_by_action=jobs_by_action,
-        active_outboxes=active_outboxes,
-    )
 
 
 def _classify_scope(
@@ -300,18 +274,11 @@ async def build_side_effect_convergence_summary(
             disposition_policy=disposition_policy,
         )
         active_outboxes = await load_active_outboxes(session, action_row.action_id)
-        if scope is SideEffectScope.GATE_APPLICABLE:
-            blocking_reason = _gate_applicable_blocks_convergence(
-                action_row,
-                jobs_by_action=jobs_by_action,
-                active_outboxes=active_outboxes,
-            )
-        else:
-            blocking_reason = _detached_side_effect_outstanding(
-                action_row,
-                jobs_by_action=jobs_by_action,
-                active_outboxes=active_outboxes,
-            )
+        blocking_reason = _action_side_effect_blocks_convergence(
+            action_row,
+            jobs_by_action=jobs_by_action,
+            active_outboxes=active_outboxes,
+        )
         if blocking_reason is None:
             continue
 
@@ -379,12 +346,20 @@ async def reconcile_stale_executions_before_close(
     """Reclaim lease-expired jobs before evaluating the CLOSED gate (ISSUE-302)."""
     from app.services.action_execution_service import reconcile_stale_executions_for_event
 
-    return await reconcile_stale_executions_for_event(
-        session_factory,
-        event_id=event_id,
-        limit=limit,
-        force=True,
-    )
+    try:
+        return await reconcile_stale_executions_for_event(
+            session_factory,
+            event_id=event_id,
+            limit=limit,
+            force=True,
+        )
+    except Exception as exc:
+        raise InvalidStateTransitionError(
+            "stale execution reconcile failed before CLOSED gate",
+            target=EventStatus.CLOSED,
+            error_code="closed_side_effects_pending",
+            details={"event_id": event_id, "reason": "stale_reconcile_failed"},
+        ) from exc
 
 
 __all__ = [
