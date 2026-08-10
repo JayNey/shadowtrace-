@@ -38,8 +38,13 @@ from app.models.agent_io import (
     VerificationResult,
     VerifyAgentInput,
 )
+from app.agents.response_agent import generate_response_plan_id
+from app.models.action import TERMINAL_DISPOSITION_TOOL
 from app.models.context import EventContext
 from app.models.enums import (
+    ActionCategory,
+    ActionExecutionPhase,
+    ActionStatus,
     DispositionPolicy,
     EventStatus,
     EventType,
@@ -63,6 +68,7 @@ from app.orchestration.writeback_recovery_handler import (
     resolve_writeback_statuses,
     writeback_recovery_graph_node,
 )
+from app.services.action_mapper import action_from_orm
 from app.services.agent_task_coordinator import (
     run_response_plan_with_ledger,
     run_risk_score_with_ledger,
@@ -726,6 +732,59 @@ def _plan_revision_from_state(state: InvestigationState) -> int:
     return 1
 
 
+async def _load_prebuilt_disposition_response_plan(
+    session_factory: Any,
+    event_id: str,
+) -> tuple[ResponsePlan, int] | None:
+    """Project the APPROVED deferred terminal Action from ``begin_disposition_only``.
+
+    Returns ``None`` when the trusted prebuilt action is missing or ambiguous.
+    """
+    from sqlalchemy import select
+
+    from app.db import models as orm
+
+    async with session_factory() as session:
+        rows = (
+            await session.scalars(
+                select(orm.Action).where(
+                    orm.Action.event_id == event_id,
+                    orm.Action.action_category == ActionCategory.RESPONSE.value,
+                    orm.Action.execution_phase == ActionExecutionPhase.POST_VERIFY.value,
+                    orm.Action.tool_name == TERMINAL_DISPOSITION_TOOL,
+                    orm.Action.status == ActionStatus.APPROVED.value,
+                    orm.Action.superseded_by_revision.is_(None),
+                )
+            )
+        ).all()
+    if len(rows) != 1:
+        return None
+    action = action_from_orm(rows[0])
+    plan_revision = int(action.plan_revision)
+    plan = ResponsePlan(
+        plan_id=generate_response_plan_id(event_id, plan_revision),
+        actions=[action],
+        strategy_summary="disposition-only: prebuilt deferred terminal writeback",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    return plan, plan_revision
+
+
+async def _project_disposition_only_response_plan(
+    services: dict[str, Any],
+    state: InvestigationState,
+) -> tuple[ResponsePlan, int] | None:
+    """Load prebuilt plan from DB or reuse an already-hydrated checkpoint snapshot."""
+    existing = state.get("response_plan")
+    if existing is not None:
+        plan = ResponsePlan.model_validate(existing)
+        return plan, _plan_revision_from_state(state)
+    session_factory = services.get("session_factory")
+    if session_factory is None:
+        return None
+    return await _load_prebuilt_disposition_response_plan(session_factory, state["event_id"])
+
+
 def build_investigation_graph(
     agents: dict[str, Any],
     services: dict[str, Any],
@@ -1303,9 +1362,55 @@ def build_investigation_graph(
 
     async def response_node(state: InvestigationState) -> InvestigationState:
         if state.get("disposition_only_intent"):
+            loaded = await _project_disposition_only_response_plan(services, state)
+            if loaded is None:
+                flags = await _persist_degraded_flag(
+                    state,
+                    "disposition_only_missing_prebuilt_action",
+                    event_id=state["event_id"],
+                    degraded_flags=degraded_flags,
+                )
+                status = await _transition_status(
+                    services,
+                    state,
+                    EventStatus.FAILED,
+                    context=TransitionContext(
+                        disposition_only_intent=True,
+                        final_verdict=FinalVerdict(
+                            state.get("final_verdict") or FinalVerdict.FALSE_POSITIVE.value
+                        ),
+                        disposition_policy=DispositionPolicy.REQUIRED,
+                    ),
+                    reason="investigation:disposition_only_missing_prebuilt_action",
+                )
+                return _patch_state(
+                    _trace(NODE_RESPONSE),
+                    status,
+                    {"halted": True, "degraded_flags": flags},
+                )
+            plan, plan_revision = loaded
+            transition_context = TransitionContext(
+                disposition_only_intent=True,
+                final_verdict=FinalVerdict(
+                    state.get("final_verdict") or FinalVerdict.FALSE_POSITIVE.value
+                ),
+                disposition_policy=DispositionPolicy.REQUIRED,
+                response_actions_are_disposition_only=True,
+            )
+            status = await _transition_status(
+                services,
+                state,
+                EventStatus.WAITING_APPROVAL,
+                context=transition_context,
+                reason="investigation:disposition_only_prebuilt_plan",
+            )
             return _patch_state(
                 _trace(NODE_RESPONSE),
-                {"halted": True},
+                status,
+                {
+                    "response_plan": plan.model_dump(mode="json"),
+                    "plan_revision": plan_revision,
+                },
             )
         plan_revision = _plan_revision_from_state(state)
         response_update: dict[str, Any] = {"plan_revision": plan_revision}
@@ -1603,6 +1708,18 @@ def build_investigation_graph(
         # placeholder that would silently swallow the missing plan.  A
         # required-policy event must have a concrete response plan before
         # verification can proceed.
+        if policy_required and state.get("response_plan") is None:
+            if disposition_only:
+                loaded = await _project_disposition_only_response_plan(services, state)
+                if loaded is not None:
+                    plan, plan_revision = loaded
+                    state = _patch_state(
+                        state,
+                        {
+                            "response_plan": plan.model_dump(mode="json"),
+                            "plan_revision": plan_revision,
+                        },
+                    )
         if policy_required and state.get("response_plan") is None:
             flags = await _persist_degraded_flag(
                 state,
