@@ -1060,6 +1060,12 @@ class TestWriteback:
         # Writeback failed → recovery needed, NOT action replan.
         assert result.need_action_replan is False
         assert result.need_writeback_recovery is True
+        phase2_results = [
+            r for r in result.results if r.detail == "writeback_failed_recovery"
+        ]
+        assert len(phase2_results) == 1
+        assert phase2_results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert phase2_results[0].verification_phase == VerificationPhase.DISPOSITION
 
     async def test_analysis_content_never_egresses(self):
         """Verification tool params never carry analysis content (reason, raw_result)."""
@@ -3476,10 +3482,16 @@ class TestIssue060ReviewFixes:
         assert result.need_manual_resolution is False
         # Action replan NOT triggered.
         assert result.need_action_replan is False
+        phase2_results = [
+            r for r in result.results if r.detail == "writeback_unknown_requires_lookup"
+        ]
+        assert len(phase2_results) == 1
+        assert phase2_results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert phase2_results[0].verification_phase == VerificationPhase.DISPOSITION
 
-    async def test_unknown_writeback_effect_verified_preserved(self):
-        """B1: UNKNOWN writeback status preserves phase 1 VERIFIED effect.
-        The entity effect is confirmed; only the writeback receipt is uncertain."""
+    async def test_unknown_writeback_phase2_unverifiable_preserves_phase1_verified(self):
+        """B1 / ISSUE-293: phase-1 entity effect stays VERIFIED; phase-2 writeback
+        receipt is uncertain → UNVERIFIABLE + recovery (not misleading VERIFIED)."""
         action = _action(
             tool_name="block_ip",
             status=ActionStatus.SUCCESS,
@@ -3517,7 +3529,8 @@ class TestIssue060ReviewFixes:
             r for r in result.results if r.detail == "writeback_unknown_requires_lookup"
         ]
         assert len(phase2_results) == 1
-        assert phase2_results[0].effect_status == EffectStatus.VERIFIED
+        assert phase2_results[0].effect_status == EffectStatus.UNVERIFIABLE
+        assert phase2_results[0].verification_phase == VerificationPhase.DISPOSITION
 
     # ── B2: plan_revision=0 not skipped ───────────────────────────────────
 
@@ -4604,6 +4617,7 @@ class TestShouldFixRegression:
         ]
         assert len(wb_results) == 1
         assert wb_results[0].detail == "writeback_not_yet_dispatched"
+        assert wb_results[0].effect_status == EffectStatus.UNVERIFIABLE
         assert result.need_writeback_recovery is True
         assert action.action_id in result.pending_writeback_action_ids
         assert not result.recoverable_writeback_ids

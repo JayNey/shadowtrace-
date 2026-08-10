@@ -476,10 +476,9 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
         await self._write_verification_result(event_id, result)
 
         # Phase-1 effect statuses were already denormalized above. Do NOT
-        # re-persist all_results: phase-2 disposition rows reuse
-        # effect_status=VERIFIED for writeback receipt confirmation and
-        # would overwrite the orthogonal effect_verification_status column
-        # (ISSUE-085 Blocker).
+        # re-persist all_results: phase-2 disposition rows carry their own
+        # effect_status (UNVERIFIABLE on recovery) and must never overwrite
+        # the orthogonal effect_verification_status column (ISSUE-085 / ISSUE-293).
 
         # 6. Publish action_verified events.
         await self._publish_action_verified_events(event_id, result)
@@ -1309,6 +1308,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 )
             else:
                 # Recovery path: PENDING / SENDING / ACCEPTED / PARTIAL / FAILED
+                # ISSUE-293: per-action effect_status must not read as success
+                # while writeback receipt is still waiting / recoverable.
                 need_recovery = True
                 self._track_writeback_recovery_targets(
                     recoverable_wb=recoverable_wb,
@@ -1319,7 +1320,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 results.append(
                     VerificationActionResult(
                         action_id=action.action_id,
-                        effect_status=EffectStatus.VERIFIED,
+                        effect_status=EffectStatus.UNVERIFIABLE,
                         writeback_required=True,
                         writeback_readiness=wb_readiness,
                         writeback_status=wb_status,
@@ -1982,7 +1983,7 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
 
         Only terminal ``VerificationPhase.EFFECT`` outcomes are persisted
         (``verified`` / ``failed`` / ``unverifiable``). Phase-2 disposition
-        results reuse ``effect_status=VERIFIED`` for writeback receipt confirmation
+        results use their own ``effect_status`` (``UNVERIFIABLE`` on recovery)
         and must never overwrite the entity-effect column used by SOC stats.
 
         In-flight ``SKIPPED`` rows (pending execution, waiting approval, deferred
