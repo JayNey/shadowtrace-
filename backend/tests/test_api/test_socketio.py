@@ -56,13 +56,20 @@ from app.core.socketio_events import (
     disconnect_invalid_sessions,
     register_handlers,
 )
-from app.core.socketio_manager import SocketIOManager
+from app.core.socketio_manager import SocketIOManager, reset_socketio_health_state_for_tests
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+
+
+@pytest.fixture(autouse=True)
+def _reset_socketio_health_state() -> None:
+    reset_socketio_health_state_for_tests()
+    yield
+    reset_socketio_health_state_for_tests()
 SCHEMA_PATH = Path(__file__).resolve().parents[3] / "contracts" / "socketio" / "events.schema.json"
 
 EXPECTED_EVENT_TYPES = sorted(SOCKET_MESSAGE_TYPES)
@@ -585,6 +592,145 @@ async def test_manager_stop_clears_registry_without_detaching_handlers() -> None
 
     assert manager._sessions is registry
     assert registry.get(sid) is None
+
+
+@pytest.mark.asyncio
+async def test_health_snapshot_stopped_before_start() -> None:
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+    snapshot = manager.health_snapshot()
+    assert snapshot["status"] == "stopped"
+    assert snapshot["listener_running"] is False
+    assert snapshot["consecutive_failures"] == 0
+    assert snapshot["last_success_at"] is None
+    assert snapshot["last_error_class"] is None
+
+
+@pytest.mark.asyncio
+async def test_health_snapshot_ok_while_listener_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+
+    async def _healthy_subscriber() -> None:
+        from datetime import UTC, datetime
+
+        manager._last_success_at = datetime.now(UTC).isoformat()
+        while not manager._stopping:
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(manager, "_run_subscriber", _healthy_subscriber)
+
+    await manager.start()
+    await asyncio.sleep(0.05)
+
+    snapshot = manager.health_snapshot()
+    assert snapshot["status"] == "ok"
+    assert snapshot["listener_running"] is True
+    assert snapshot["last_success_at"] is not None
+
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_health_snapshot_degraded_after_subscriber_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+
+    async def _fail_subscriber() -> None:
+        raise FileNotFoundError("missing schema")
+
+    monkeypatch.setattr(manager, "_run_subscriber", _fail_subscriber)
+
+    async def _stop_after_retry(_delay: float) -> None:
+        manager._stopping = True
+
+    monkeypatch.setattr("app.core.socketio_manager.asyncio.sleep", _stop_after_retry)
+
+    await manager._listen()
+
+    snapshot = manager.health_snapshot()
+    assert snapshot["status"] == "degraded"
+    assert snapshot["last_error_class"] == "FileNotFoundError"
+    assert snapshot["consecutive_failures"] == 1
+    assert snapshot["subscriber_failures"] == 1
+    assert "missing schema" not in str(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_health_snapshot_recovers_after_subscriber_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+    attempts = {"count": 0}
+    recovered = asyncio.Event()
+
+    async def _flaky_subscriber() -> None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise ConnectionError("redis unavailable")
+        if attempts["count"] == 2:
+            from datetime import UTC, datetime
+
+            manager._last_success_at = datetime.now(UTC).isoformat()
+            recovered.set()
+            return
+        while not manager._stopping:
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(manager, "_run_subscriber", _flaky_subscriber)
+
+    real_sleep = asyncio.sleep
+
+    async def _noop_sleep(_delay: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("app.core.socketio_manager.asyncio.sleep", _noop_sleep)
+
+    await manager.start()
+    await asyncio.wait_for(recovered.wait(), timeout=1.0)
+    await real_sleep(0)
+
+    snapshot = manager.health_snapshot()
+    assert snapshot["status"] == "ok"
+    assert snapshot["listener_running"] is True
+    assert snapshot["last_error_class"] is None
+    assert snapshot["consecutive_failures"] == 0
+    assert snapshot["subscriber_failures"] == 1
+    assert snapshot["subscriber_recoveries"] == 1
+
+    await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_health_snapshot_marks_degraded_during_recovery_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = SocketIOManager(AsyncMock())  # type: ignore[arg-type]
+
+    async def _always_fail() -> None:
+        raise RuntimeError("subscriber down")
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if delay >= 30.0:
+            snapshot = manager.health_snapshot()
+            assert snapshot["status"] == "degraded"
+            assert manager._bridge_degraded is True
+            manager._stopping = True
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(manager, "_run_subscriber", _always_fail)
+    monkeypatch.setattr("app.core.socketio_manager.asyncio.sleep", _record_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager._listen()
+
+    assert sleeps.count(2.0) == 4
+    assert 30.0 in sleeps
+    assert manager.health_snapshot()["subscriber_failures"] == 5
 
 
 # ---------------------------------------------------------------------------

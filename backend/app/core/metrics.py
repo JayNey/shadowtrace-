@@ -29,6 +29,8 @@ _state_projection_failure_total: Any | None = None
 _state_projection_repair_total: Any | None = None
 _investigation_intent_enqueue_total: Any | None = None
 _graph_failed_transition_noop_total: Any | None = None
+_socketio_subscriber_failure_total: Any | None = None
+_socketio_subscriber_recovery_total: Any | None = None
 _initialized = False
 _process_checkpoint_fallback_active = False
 _process_checkpoint_fallback_triggers = 0
@@ -39,6 +41,8 @@ _process_state_projection_failures = 0
 _process_state_projection_repairs = 0
 _process_investigation_intent_enqueue_success = 0
 _process_investigation_intent_enqueue_failure = 0
+_process_socketio_subscriber_failures = 0
+_process_socketio_subscriber_recoveries = 0
 
 
 def _ensure_metrics() -> None:
@@ -49,6 +53,7 @@ def _ensure_metrics() -> None:
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _state_projection_failure_total, _state_projection_repair_total
     global _investigation_intent_enqueue_total, _graph_failed_transition_noop_total
+    global _socketio_subscriber_failure_total, _socketio_subscriber_recovery_total
 
     if not telemetry.is_telemetry_enabled():
         return
@@ -132,6 +137,16 @@ def _ensure_metrics() -> None:
             description=(
                 "Bounded no-op outcomes when graph failure marking would duplicate terminal state"
             ),
+            unit="1",
+        )
+        _socketio_subscriber_failure_total = _meter.create_counter(
+            name="shadowtrace_socketio_subscriber_failure_total",
+            description="Socket.IO Redis subscriber failures by retry phase",
+            unit="1",
+        )
+        _socketio_subscriber_recovery_total = _meter.create_counter(
+            name="shadowtrace_socketio_subscriber_recovery_total",
+            description="Socket.IO Redis subscriber recovery outcomes",
             unit="1",
         )
     except Exception:
@@ -409,6 +424,47 @@ def get_investigation_intent_enqueue_health() -> dict[str, object]:
     }
 
 
+def record_socketio_subscriber_failure(*, reason: str) -> None:
+    """Record a Socket.IO Redis subscriber failure (``subscriber_error`` or ``recovery_backoff``)."""
+    global _process_socketio_subscriber_failures
+    _process_socketio_subscriber_failures += 1
+    _ensure_metrics()
+    if _socketio_subscriber_failure_total is None:
+        return
+    try:
+        _socketio_subscriber_failure_total.add(1, {"reason": reason})
+    except Exception:
+        logger.debug("socketio subscriber failure metric export failed", exc_info=True)
+
+
+def record_socketio_subscriber_recovery(*, outcome: str) -> None:
+    """Record a Socket.IO subscriber recovery (``reconnected``)."""
+    global _process_socketio_subscriber_recoveries
+    _process_socketio_subscriber_recoveries += 1
+    _ensure_metrics()
+    if _socketio_subscriber_recovery_total is None:
+        return
+    try:
+        _socketio_subscriber_recovery_total.add(1, {"outcome": outcome})
+    except Exception:
+        logger.debug("socketio subscriber recovery metric export failed", exc_info=True)
+
+
+def socketio_subscriber_health_snapshot() -> dict[str, int]:
+    """Process-local Socket.IO subscriber counters for health probes and tests (ISSUE-298)."""
+    return {
+        "subscriber_failures": _process_socketio_subscriber_failures,
+        "subscriber_recoveries": _process_socketio_subscriber_recoveries,
+    }
+
+
+def reset_socketio_subscriber_metrics_for_tests() -> None:
+    """Reset Socket.IO subscriber process counters."""
+    global _process_socketio_subscriber_failures, _process_socketio_subscriber_recoveries
+    _process_socketio_subscriber_failures = 0
+    _process_socketio_subscriber_recoveries = 0
+
+
 def reset_metrics_for_tests() -> None:
     """Allow tests to re-register instruments after telemetry reset."""
     global _meter, _writeback_total, _writeback_queue_age, _writeback_retry_total
@@ -418,6 +474,7 @@ def reset_metrics_for_tests() -> None:
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _state_projection_failure_total, _state_projection_repair_total
     global _investigation_intent_enqueue_total, _graph_failed_transition_noop_total
+    global _socketio_subscriber_failure_total, _socketio_subscriber_recovery_total
     global _process_checkpoint_fallback_active, _process_checkpoint_fallback_triggers
     global _process_checkpoint_loop_rebinds
     global _process_budget_redis_degraded, _process_reservation_redis_degraded
@@ -425,6 +482,7 @@ def reset_metrics_for_tests() -> None:
     global \
         _process_investigation_intent_enqueue_success, \
         _process_investigation_intent_enqueue_failure
+    global _process_socketio_subscriber_failures, _process_socketio_subscriber_recoveries
     _meter = None
     _writeback_total = None
     _writeback_queue_age = None
@@ -441,6 +499,8 @@ def reset_metrics_for_tests() -> None:
     _state_projection_repair_total = None
     _investigation_intent_enqueue_total = None
     _graph_failed_transition_noop_total = None
+    _socketio_subscriber_failure_total = None
+    _socketio_subscriber_recovery_total = None
     _initialized = False
     _process_checkpoint_fallback_active = False
     _process_checkpoint_fallback_triggers = 0
@@ -451,6 +511,8 @@ def reset_metrics_for_tests() -> None:
     _process_state_projection_repairs = 0
     _process_investigation_intent_enqueue_success = 0
     _process_investigation_intent_enqueue_failure = 0
+    _process_socketio_subscriber_failures = 0
+    _process_socketio_subscriber_recoveries = 0
 
 
 def reset_investigation_intent_enqueue_metrics_for_tests() -> None:

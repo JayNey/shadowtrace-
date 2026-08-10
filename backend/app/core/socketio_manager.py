@@ -21,7 +21,7 @@ import logging
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import jsonschema
 import socketio
@@ -56,6 +56,7 @@ _RECOVERY_DELAY_S = 30.0
 _SESSION_VALIDATION_INTERVAL_S = 30.0
 _SEQUENCE_TTL_S = 60 * 60 * 24 * 30  # 30 days
 _MAX_CONSECUTIVE_FAILURES = 5
+SocketIOHealthStatus = Literal["ok", "degraded", "stopped"]
 
 
 def _sequence_key(event_id: str) -> str:
@@ -98,6 +99,11 @@ class SocketIOManager:
         self._stopping = False
         self._consecutive_failures = 0
         self._bridge_degraded = False
+        self._last_success_at: str | None = None
+        self._last_error_class: str | None = None
+
+        global _active_manager
+        _active_manager = self
 
         register_handlers(self._sio, sessions=self._sessions)
 
@@ -119,6 +125,28 @@ class SocketIOManager:
     def bridge_degraded(self) -> bool:
         """True when the listener is in a prolonged recovery backoff."""
         return self._bridge_degraded
+
+    def health_snapshot(self) -> dict[str, object]:
+        """Sanitized process-local subscriber readiness (ISSUE-298)."""
+        from app.core.metrics import socketio_subscriber_health_snapshot
+
+        metrics = socketio_subscriber_health_snapshot()
+        listener_running = self.bridge_active
+        if self._bridge_degraded or self._consecutive_failures > 0:
+            status: SocketIOHealthStatus = "degraded"
+        elif self._listener_task is None or (self._listener_task.done() and not listener_running):
+            status = "stopped"
+        else:
+            status = "ok"
+        return {
+            "status": status,
+            "listener_running": listener_running,
+            "consecutive_failures": self._consecutive_failures,
+            "last_success_at": self._last_success_at,
+            "last_error_class": self._last_error_class,
+            "subscriber_failures": metrics["subscriber_failures"],
+            "subscriber_recoveries": metrics["subscriber_recoveries"],
+        }
 
     # ------------------------------------------------------------------ #
     # FastAPI integration
@@ -151,6 +179,7 @@ class SocketIOManager:
         self._stopping = False
         self._consecutive_failures = 0
         self._bridge_degraded = False
+        self._last_error_class = None
         if not listener_running:
             self._listener_task = asyncio.create_task(self._listen())
         if not validator_running:
@@ -181,6 +210,8 @@ class SocketIOManager:
         # Handlers close over this registry, so clear it without replacing it.
         self._sessions.clear()
         self._bridge_degraded = False
+        self._consecutive_failures = 0
+        self._last_error_class = None
         logger.info("SocketIOManager stopped")
 
     # ------------------------------------------------------------------ #
@@ -215,15 +246,25 @@ class SocketIOManager:
         enters a longer recovery delay, then retries (frontend may poll REST).
         """
         while not self._stopping:
+            recovering = self._consecutive_failures > 0 or self._bridge_degraded
             try:
                 await self._run_subscriber()
+                if recovering:
+                    from app.core.metrics import record_socketio_subscriber_recovery
+
+                    record_socketio_subscriber_recovery(outcome="reconnected")
                 self._consecutive_failures = 0
                 self._bridge_degraded = False
+                self._last_error_class = None
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as exc:
+                from app.core.metrics import record_socketio_subscriber_failure
+
+                self._last_error_class = type(exc).__name__
                 self._consecutive_failures += 1
                 if self._consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    record_socketio_subscriber_failure(reason="recovery_backoff")
                     self._bridge_degraded = True
                     logger.critical(
                         "SocketIOManager subscriber failed %d consecutive times — "
@@ -232,10 +273,9 @@ class SocketIOManager:
                         _RECOVERY_DELAY_S,
                         exc_info=True,
                     )
-                    self._consecutive_failures = 0
                     await asyncio.sleep(_RECOVERY_DELAY_S)
-                    self._bridge_degraded = False
                     continue
+                record_socketio_subscriber_failure(reason="subscriber_error")
                 logger.warning(
                     "SocketIOManager subscriber error — retrying in %.1fs (attempt %d/%d)",
                     _RECONNECT_DELAY_S,
@@ -252,6 +292,7 @@ class SocketIOManager:
             client = self._redis.get_client()
             pubsub = client.pubsub()
             await pubsub.psubscribe(_EVENTS_CHANNEL_PATTERN)
+            self._last_success_at = datetime.now(UTC).isoformat()
 
             async for message in pubsub.listen():
                 if self._stopping:
@@ -426,4 +467,43 @@ class SocketIOManager:
                 )
 
 
-__all__ = ["SocketIOManager", "_events_schema", "_sequence_key"]
+_active_manager: SocketIOManager | None = None
+
+
+def get_socketio_health() -> dict[str, object]:
+    """Process-wide Socket.IO subscriber readiness for health probes (ISSUE-298)."""
+    if _active_manager is None:
+        from app.core.metrics import socketio_subscriber_health_snapshot
+
+        metrics = socketio_subscriber_health_snapshot()
+        return {
+            "status": "stopped",
+            "listener_running": False,
+            "consecutive_failures": 0,
+            "last_success_at": None,
+            "last_error_class": None,
+            "subscriber_failures": metrics["subscriber_failures"],
+            "subscriber_recoveries": metrics["subscriber_recoveries"],
+        }
+    return _active_manager.health_snapshot()
+
+
+def reset_socketio_health_state_for_tests() -> None:
+    """Reset process-local Socket.IO health counters for deterministic tests."""
+    from app.core.metrics import reset_socketio_subscriber_metrics_for_tests
+
+    reset_socketio_subscriber_metrics_for_tests()
+    if _active_manager is not None:
+        _active_manager._consecutive_failures = 0
+        _active_manager._bridge_degraded = False
+        _active_manager._last_success_at = None
+        _active_manager._last_error_class = None
+
+
+__all__ = [
+    "SocketIOManager",
+    "_events_schema",
+    "_sequence_key",
+    "get_socketio_health",
+    "reset_socketio_health_state_for_tests",
+]

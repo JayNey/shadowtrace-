@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Iterator
+from contextlib import ExitStack
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -12,6 +13,7 @@ from httpx import ASGITransport, AsyncClient
 from app.api.v1 import health as health_module
 from app.core.config import Settings, get_settings
 from app.core.metrics import reset_budget_redis_metrics_for_tests
+from app.core.socketio_manager import reset_socketio_health_state_for_tests
 from app.main import app
 from app.orchestration.checkpointer import (
     RedisCheckpointer,
@@ -23,9 +25,11 @@ from app.orchestration.checkpointer import (
 def _reset_checkpoint_health_state() -> Iterator[None]:
     reset_checkpoint_health_state_for_tests()
     reset_budget_redis_metrics_for_tests()
+    reset_socketio_health_state_for_tests()
     yield
     reset_checkpoint_health_state_for_tests()
     reset_budget_redis_metrics_for_tests()
+    reset_socketio_health_state_for_tests()
 
 
 @pytest.fixture(autouse=True)
@@ -162,6 +166,21 @@ async def test_health_ok_fields_complete(client: AsyncClient) -> None:
     assert body["investigation"]["approval_policy_version"] == "issue109_v1"
     assert body["investigation"]["detection_governance_policy_version"] == "issue125_v1"
     assert body["investigation"]["knowledge_query_plan_schema_version"] == "1.0"
+    assert set(body["socketio"].keys()) >= {
+        "status",
+        "listener_running",
+        "consecutive_failures",
+        "last_success_at",
+        "last_error_class",
+        "subscriber_failures",
+        "subscriber_recoveries",
+    }
+    assert body["socketio"]["status"] in {"ok", "degraded", "stopped"}
+    socketio_str = str(body["socketio"]).lower()
+    assert "traceback" not in socketio_str
+    assert "payload" not in socketio_str
+    for forbidden in ("token", "channel", "event_id", "message"):
+        assert forbidden not in socketio_str
 
     for key in ("source_adapter", "disposition_adapter", "tool_provider"):
         component = body[key]
@@ -468,3 +487,203 @@ async def test_health_reflects_budget_redis_degraded(client: AsyncClient) -> Non
     assert response.status_code == 200
     assert body["status"] == "degraded"
     assert body["budget_redis"] == budget_payload
+
+
+@pytest.mark.asyncio
+async def test_health_reflects_socketio_degraded_without_503(client: AsyncClient) -> None:
+    settings = Settings(SIMULATION_ENABLED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+    socketio_payload = {
+        "status": "degraded",
+        "listener_running": True,
+        "consecutive_failures": 3,
+        "last_success_at": "2026-08-10T12:00:00+00:00",
+        "last_error_class": "FileNotFoundError",
+        "subscriber_failures": 3,
+        "subscriber_recoveries": 0,
+    }
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock", "dimension": 1024},
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
+        patch(
+            "app.api.v1.health._check_loaded_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "pipeline_attached": True, "reasons": []},
+        ),
+        patch(
+            "app.api.v1.health._check_playbook_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "mode": "production", "reasons": []},
+        ),
+        patch(
+            "app.orchestration.checkpointer.get_checkpoint_health",
+            return_value={"status": "ok", "memory_fallback": False},
+        ),
+        patch(
+            "app.core.socketio_manager.get_socketio_health",
+            return_value=socketio_payload,
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "degraded"
+    assert body["socketio"] == socketio_payload
+    assert body["postgres"] == "ok"
+    assert body["redis"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_health_reflects_socketio_ok_when_subscriber_healthy(
+    client: AsyncClient,
+) -> None:
+    settings = Settings(SIMULATION_ENABLED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+    socketio_payload = {
+        "status": "ok",
+        "listener_running": True,
+        "consecutive_failures": 0,
+        "last_success_at": "2026-08-10T12:00:00+00:00",
+        "last_error_class": None,
+        "subscriber_failures": 0,
+        "subscriber_recoveries": 0,
+    }
+
+    with (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock", "dimension": 1024},
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
+        patch(
+            "app.api.v1.health._check_loaded_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "pipeline_attached": True, "reasons": []},
+        ),
+        patch(
+            "app.api.v1.health._check_playbook_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "mode": "production", "reasons": []},
+        ),
+        patch(
+            "app.orchestration.checkpointer.get_checkpoint_health",
+            return_value={"status": "ok", "memory_fallback": False},
+        ),
+        patch(
+            "app.core.socketio_manager.get_socketio_health",
+            return_value=socketio_payload,
+        ),
+    ):
+        response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    body = response.json()
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    assert body["socketio"] == socketio_payload
+
+
+@pytest.mark.asyncio
+async def test_health_socketio_recovery_restores_overall_ok(client: AsyncClient) -> None:
+    settings = Settings(SIMULATION_ENABLED=True)
+    app.dependency_overrides[get_settings] = lambda: settings
+    degraded_payload = {
+        "status": "degraded",
+        "listener_running": True,
+        "consecutive_failures": 3,
+        "last_success_at": "2026-08-10T12:00:00+00:00",
+        "last_error_class": "ConnectionError",
+        "subscriber_failures": 3,
+        "subscriber_recoveries": 0,
+    }
+    ok_payload = {
+        "status": "ok",
+        "listener_running": True,
+        "consecutive_failures": 0,
+        "last_success_at": "2026-08-10T12:05:00+00:00",
+        "last_error_class": None,
+        "subscriber_failures": 3,
+        "subscriber_recoveries": 1,
+    }
+
+    common_patches = (
+        patch("app.api.v1.health.check_postgres", new_callable=AsyncMock, return_value="ok"),
+        patch("app.api.v1.health.check_redis", new_callable=AsyncMock, return_value="ok"),
+        patch(
+            "app.api.v1.health.check_embedding_provider",
+            new_callable=AsyncMock,
+            return_value={"status": "ok", "mode": "mock", "dimension": 1024},
+        ),
+        patch(
+            "app.api.v1.health.check_llm_provider",
+            new_callable=AsyncMock,
+            return_value=_llm_health_payload(status="ok"),
+        ),
+        patch(
+            "app.api.v1.health._check_loaded_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "pipeline_attached": True, "reasons": []},
+        ),
+        patch(
+            "app.api.v1.health._check_playbook_resources",
+            new_callable=AsyncMock,
+            return_value={"status": "ready", "mode": "production", "reasons": []},
+        ),
+        patch(
+            "app.orchestration.checkpointer.get_checkpoint_health",
+            return_value={"status": "ok", "memory_fallback": False},
+        ),
+    )
+
+    with ExitStack() as stack:
+        for item in common_patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch(
+                "app.core.socketio_manager.get_socketio_health",
+                return_value=degraded_payload,
+            )
+        )
+        degraded_response = await client.get("/api/v1/health")
+
+    degraded_body = degraded_response.json()
+    assert degraded_response.status_code == 200
+    assert degraded_body["status"] == "degraded"
+    assert degraded_body["socketio"] == degraded_payload
+
+    with ExitStack() as stack:
+        for item in common_patches:
+            stack.enter_context(item)
+        stack.enter_context(
+            patch(
+                "app.core.socketio_manager.get_socketio_health",
+                return_value=ok_payload,
+            )
+        )
+        recovered_response = await client.get("/api/v1/health")
+
+    app.dependency_overrides.clear()
+    recovered_body = recovered_response.json()
+    assert recovered_response.status_code == 200
+    assert recovered_body["status"] == "ok"
+    assert recovered_body["socketio"] == ok_payload

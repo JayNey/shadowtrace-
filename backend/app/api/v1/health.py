@@ -187,6 +187,9 @@ async def health(
 
     budget_redis_health = get_budget_redis_health()
     state_projection_health = get_state_projection_health()
+    from app.core.socketio_manager import get_socketio_health
+
+    socketio_health = get_socketio_health()
     investigation_intent_enqueue_health = get_investigation_intent_enqueue_health()
     pending_dispatch_stats: dict[str, int | float | None] = {
         "pending_count": 0,
@@ -238,6 +241,8 @@ async def health(
         overall = "degraded"
     elif budget_redis_health.get("status") == "degraded":
         overall = "degraded"
+    elif socketio_health.get("status") == "degraded":
+        overall = "degraded"
     # state_projection counters are process-local observability only (ISSUE-285);
     # they must not sticky-degrade the live probe.
 
@@ -259,6 +264,7 @@ async def health(
         "checkpoint": checkpoint_health,
         "budget_redis": budget_redis_health,
         "state_projection": state_projection_health,
+        "socketio": socketio_health,
         "embedding_provider": embedding_provider,
         "loaded_resources": loaded_resources,
         "playbook_resources": playbook_resources,
