@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -9,11 +10,12 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import NamedTuple, cast
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, TaskMode, get_settings
+from app.core.metrics import record_investigation_intent_enqueue
 from app.core.errors import (
     DependencyUnavailableError,
     IdempotencyKeyReuseError,
@@ -547,7 +549,13 @@ class InvestigationIntentService:
             return None
         return intent_id
 
-    def schedule_dispatch(self) -> None:
+    def schedule_dispatch(
+        self,
+        *,
+        event_id: str | None = None,
+        intent_id: str | None = None,
+        trigger: str = "unspecified",
+    ) -> None:
         """Best-effort trigger for any committed pending intent; never raises."""
         if self._settings.task_mode is not TaskMode.CELERY:
             return
@@ -556,10 +564,81 @@ class InvestigationIntentService:
 
             dispatch_pending_investigation_intents.delay()
         except Exception:
-            logger.warning(
-                "failed to enqueue investigation intent dispatch",
+            record_investigation_intent_enqueue(result="failure")
+            logger.error(
+                "failed to enqueue investigation intent dispatch "
+                "trigger=%s intent_id=%s event_id=%s",
+                trigger,
+                intent_id or "-",
+                event_id or "-",
                 exc_info=True,
             )
+            if event_id is not None:
+                self._schedule_dispatch_degraded_flag(event_id)
+            return
+        record_investigation_intent_enqueue(result="success")
+        logger.debug(
+            "enqueued investigation intent dispatch trigger=%s intent_id=%s event_id=%s",
+            trigger,
+            intent_id or "-",
+            event_id or "-",
+        )
+
+    def _schedule_dispatch_degraded_flag(self, event_id: str) -> None:
+        """Best-effort event degraded flag when the dispatch trigger cannot enqueue."""
+        if self._degraded is None:
+            return
+
+        async def _set_flag() -> None:
+            try:
+                await self._degraded.set_flag(
+                    event_id,
+                    "auto_investigate_dispatch_unavailable",
+                    True,
+                    writer="InvestigationIntentService",
+                )
+            except Exception:
+                logger.warning(
+                    "failed to set auto_investigate_dispatch_unavailable event=%s",
+                    event_id,
+                    exc_info=True,
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(_set_flag())
+
+    async def pending_dispatch_stats(self) -> dict[str, int | float | None]:
+        """Return pending/retry backlog count and oldest age for health probes."""
+        now = datetime.now(UTC)
+        pending_statuses = (
+            InvestigationIntentStatus.PENDING.value,
+            InvestigationIntentStatus.RETRY.value,
+        )
+        async with self._session_factory() as session:
+            pending_count = int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(orm.InvestigationIntent)
+                    .where(orm.InvestigationIntent.status.in_(pending_statuses))
+                )
+                or 0
+            )
+            oldest_created = await session.scalar(
+                select(orm.InvestigationIntent.created_at)
+                .where(orm.InvestigationIntent.status.in_(pending_statuses))
+                .order_by(orm.InvestigationIntent.created_at.asc())
+                .limit(1)
+            )
+        oldest_pending_age_s: float | None = None
+        if oldest_created is not None:
+            oldest_pending_age_s = max(0.0, (now - oldest_created).total_seconds())
+        return {
+            "pending_count": pending_count,
+            "oldest_pending_age_s": oldest_pending_age_s,
+        }
 
     async def dispatch_sync_batch(self, *, limit: int = 10) -> dict[str, int]:
         """Synchronously claim and publish pending intents (#612 management API).
@@ -798,7 +877,7 @@ class InvestigationIntentService:
                         exc_info=True,
                     )
         if reconciled:
-            self.schedule_dispatch()
+            self.schedule_dispatch(trigger="reconcile_stale")
         provisional_created = await self._materialize_provisional_intents(
             limit=int(self._settings.auto_investigate_materialize_batch_size)
         )
@@ -1344,7 +1423,7 @@ class InvestigationIntentService:
                     if intent_id is not None:
                         created += 1
         if created:
-            self.schedule_dispatch()
+            self.schedule_dispatch(trigger="materialize_provisional")
         return created
 
 

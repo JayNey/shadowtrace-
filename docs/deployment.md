@@ -198,6 +198,30 @@ DISPOSITION_BASE_URL=http://mock-xdr:8100
 
 Auto-investigate / scheduler 触发的调查仍走 Celery → SuperAgent（LangGraph），不受 `ORCHESTRATION_MODE=analysis_only` 影响；仅 HTTP `POST …/investigate` 受上表约束。
 
+### Durable intent 调度与 Beat 依赖（ISSUE-291）
+
+`TASK_MODE=celery` 时，HTTP/ingest 受理会先 **commit** `investigation_intent` 再 best-effort 触发 `dispatch_pending_investigation_intents.delay()`。该立即触发失败 **不会** 撤销已落库的 PENDING intent，也 **不会** 让 API 返回 503（ISSUE-276 durable 202 语义保持不变）。
+
+**运维必须同时满足：**
+
+| 组件 | 作用 |
+|------|------|
+| Celery investigation **worker** | 消费 `shadowtrace.run_investigation` 等任务 |
+| Celery **beat**（`scheduler-beat` 或 demo 栈） | 周期执行 `shadowtrace.dispatch_investigation_intents` 与 `shadowtrace.reconcile_investigation_intents`，捞起 PENDING/RETRY 与 stale intent |
+
+仅 `make up WORKER=1` 而 **未** 启 beat 时，enqueue 失败或进程重启后 intent 可能长期 PENDING。应使用 `make up-demo` / `make up SCHEDULER=1`（含 beat），或手工调用管理 API `POST /api/v1/investigation-intents/dispatch` 补偿。
+
+**可观测性：**
+
+```bash
+# beat 调度键 + pending 龄期 + enqueue 计数（进程内）
+curl -s localhost:8000/api/v1/health | jq '.celery.investigation_intent_beat, .investigation.intent_dispatch'
+```
+
+- 指标：`shadowtrace_investigation_intent_enqueue_total{result=success|failure}`
+- enqueue 失败日志含 `trigger` / `intent_id` / `event_id`；已知 `event_id` 时设置 degraded flag `auto_investigate_dispatch_unavailable`
+- **禁止** 静默 fallback 到 BackgroundTasks
+
 验证：
 
 ```bash

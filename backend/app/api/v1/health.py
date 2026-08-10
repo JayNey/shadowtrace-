@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Response
@@ -15,6 +16,8 @@ from app.services.action_approval_policy import APPROVAL_POLICY_VERSION
 from app.services.detection_governance_policy import DETECTION_GOVERNANCE_POLICY_VERSION
 
 router = APIRouter(tags=["health"])
+
+logger = logging.getLogger(__name__)
 
 # Process-wide Redis cache so health probes reuse one client per URL.
 _REDIS_CLIENTS: dict[str, Redis] = {}
@@ -176,10 +179,27 @@ async def health(
     from app.orchestration.checkpointer import get_checkpoint_health
 
     checkpoint_health = get_checkpoint_health()
-    from app.core.metrics import get_budget_redis_health, get_state_projection_health
+    from app.core.metrics import (
+        get_budget_redis_health,
+        get_investigation_intent_enqueue_health,
+        get_state_projection_health,
+    )
 
     budget_redis_health = get_budget_redis_health()
     state_projection_health = get_state_projection_health()
+    investigation_intent_enqueue_health = get_investigation_intent_enqueue_health()
+    pending_dispatch_stats: dict[str, int | float | None] = {
+        "pending_count": 0,
+        "oldest_pending_age_s": None,
+    }
+    if settings.task_mode.strip().lower() == "celery":
+        try:
+            from app.api.v1.deps import get_investigation_intent_service
+
+            intent_service = await get_investigation_intent_service()
+            pending_dispatch_stats = await intent_service.pending_dispatch_stats()
+        except Exception:  # noqa: BLE001 — health must never raise
+            logger.debug("investigation intent pending stats probe failed", exc_info=True)
 
     hard_deps_ok = postgres == "ok" and redis_status == "ok"
     embedding_ok = embedding_provider.get("status") == "ok"
@@ -195,6 +215,9 @@ async def health(
     celery_task_mode = str(celery_health.get("task_mode", "background"))
     celery_broker_status = str(celery_health.get("broker", "error"))
     celery_worker_status = str(celery_health.get("worker", {}).get("status", "not_applicable"))
+    intent_beat_status = str(
+        celery_health.get("investigation_intent_beat", {}).get("status", "not_applicable")
+    )
 
     overall = "ok"
     if not hard_deps_ok or not embedding_ok:
@@ -208,6 +231,8 @@ async def health(
     elif celery_worker_status in {"degraded", "error"}:
         overall = "degraded"
     elif celery_task_mode == "celery" and celery_broker_status == "error":
+        overall = "degraded"
+    elif celery_task_mode == "celery" and intent_beat_status == "degraded":
         overall = "degraded"
     elif checkpoint_health.get("status") == "degraded":
         overall = "degraded"
@@ -253,5 +278,9 @@ async def health(
             "approval_policy_version": APPROVAL_POLICY_VERSION,
             "detection_governance_policy_version": DETECTION_GOVERNANCE_POLICY_VERSION,
             "knowledge_query_plan_schema_version": KNOWLEDGE_QUERY_PLAN_SCHEMA_VERSION,
+            "intent_dispatch": {
+                **investigation_intent_enqueue_health,
+                **pending_dispatch_stats,
+            },
         },
     }

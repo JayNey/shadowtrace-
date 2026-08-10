@@ -26,6 +26,7 @@ def _resolve_broker_url() -> str:
 def init_worker_telemetry(**kwargs: object) -> None:
     """Bootstrap SessionProvider + OpenTelemetry in each Celery child (ISSUE-118/092)."""
     del kwargs
+    from app.core.celery_health import check_investigation_intent_beat_schedule
     from app.core.logging_setup import configure_logging
     from app.core.telemetry import setup_telemetry
     from app.db.session_provider import init_worker_session_provider
@@ -33,6 +34,13 @@ def init_worker_telemetry(**kwargs: object) -> None:
     configure_logging()
     provider = init_worker_session_provider()
     setup_telemetry(engine=provider.engine())
+    settings = get_settings()
+    beat = check_investigation_intent_beat_schedule(task_mode=settings.task_mode)
+    if settings.task_mode is TaskMode.CELERY and beat.get("status") == "degraded":
+        logger.warning(
+            "investigation intent beat schedule incomplete in worker process: %s",
+            beat,
+        )
     logger.debug("Celery worker session provider + telemetry initialized")
 
 
@@ -62,8 +70,9 @@ worker_process_shutdown.connect(shutdown_worker_resources, weak=False)
 celery_app = Celery("shadowtrace")
 
 
-def _build_beat_schedule() -> dict[str, dict[str, object]]:
+def _build_beat_schedule(*, task_mode: TaskMode | None = None) -> dict[str, dict[str, object]]:
     settings = get_settings()
+    effective_task_mode = task_mode if task_mode is not None else settings.task_mode
     schedule: dict[str, dict[str, object]] = {}
     if settings.ingestion_scheduler_enabled:
         schedule["shadowtrace-poll-sources"] = {
@@ -71,7 +80,7 @@ def _build_beat_schedule() -> dict[str, dict[str, object]]:
             "schedule": float(settings.ingestion_poll_interval_s),
             "options": {"queue": "ingestion"},
         }
-    if settings.task_mode is TaskMode.CELERY:
+    if effective_task_mode is TaskMode.CELERY:
         schedule["shadowtrace-dispatch-investigation-intents"] = {
             "task": "shadowtrace.dispatch_investigation_intents",
             "schedule": float(settings.auto_investigate_dispatch_interval_s),
