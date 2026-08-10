@@ -110,6 +110,12 @@ def _build_beat_schedule() -> dict[str, dict[str, object]]:
             "schedule": float(settings.action_execution_reconcile_interval_s),
             "options": {"queue": "investigation"},
         }
+        # ISSUE-285: bounded repair of committed-but-degraded context projections.
+        schedule["shadowtrace-repair-state-transition-projections"] = {
+            "task": "shadowtrace.repair_state_transition_projections",
+            "schedule": float(settings.action_execution_reconcile_interval_s),
+            "options": {"queue": "investigation"},
+        }
     return schedule
 
 
@@ -128,6 +134,7 @@ celery_app.conf.update(
         "shadowtrace.behavior_observation.retry_pending": {"queue": "ingestion"},
         "shadowtrace.detection_governance.expire_active_approvals": {"queue": "investigation"},
         "shadowtrace.reconcile_stale_executions": {"queue": "investigation"},
+        "shadowtrace.repair_state_transition_projections": {"queue": "investigation"},
     },
     task_acks_late=True,
     task_reject_on_worker_lost=True,
@@ -146,6 +153,7 @@ celery_app.conf.update(
         "app.tasks.behavior_observation_tasks",
         "app.tasks.detection_governance_tasks",
         "app.tasks.action_execution_tasks",
+        "app.tasks.state_projection_tasks",
     ),
 )
 

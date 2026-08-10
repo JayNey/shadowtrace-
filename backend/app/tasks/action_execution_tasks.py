@@ -15,6 +15,7 @@ from app.services.action_execution_service import ActionExecutionService
 from app.services.context_service import EventContextStore
 from app.services.degraded_flag_service import create_degraded_flag_service
 from app.services.disposition_sync_service import DispositionSyncService
+from app.services.event_audit_log_service import EventAuditLogService
 from app.services.state_machine_service import StateMachineService
 from app.tools.executor import ToolExecutor
 from app.tools.registry import ToolRegistry
@@ -30,6 +31,7 @@ async def _build_execution_service() -> ActionExecutionService:
     redis = RedisClient()
     store = EventContextStore(redis, factory)
     degraded = create_degraded_flag_service(store, factory)
+    audit = EventAuditLogService(factory)
     registry = DispositionAdapterRegistry()
     return ActionExecutionService(
         factory,
@@ -40,7 +42,12 @@ async def _build_execution_service() -> ActionExecutionService:
             outbound_guard=OutboundDispositionGuard(),
         ),
         tool_executor=ToolExecutor(registry=await _mock_registry()),
-        state_machine=StateMachineService(factory, store, degraded_flags=degraded),
+        state_machine=StateMachineService(
+            factory,
+            store,
+            audit_log=audit,
+            degraded_flags=degraded,
+        ),
         context_store=store,
     )
 
