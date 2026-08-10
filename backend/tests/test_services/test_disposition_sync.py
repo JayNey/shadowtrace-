@@ -43,7 +43,6 @@ from app.models.enums import (
     ActionStatus,
     ConfirmationEvidence,
     DispositionPolicy,
-    DispositionIntentKind,
     EventStatus,
     EventType,
     ExecutionJobStatus,
@@ -52,8 +51,8 @@ from app.models.enums import (
     FinalVerdict,
     OutboxDeliveryStatus,
     Severity,
-    SourceObjectKind,
     SourceDisposition,
+    SourceObjectKind,
     TargetExecutionStatus,
     TargetWritebackStatus,
     WritebackReadiness,
@@ -858,7 +857,9 @@ async def test_operator_retry_operation_replay_idempotent(
             await session.scalars(
                 select(orm.EventAuditLog).where(
                     orm.EventAuditLog.event_id == event_id,
-                    orm.EventAuditLog.reason.like(f"operator_retry:replay:{writeback_id}:{op_id}:%"),
+                    orm.EventAuditLog.reason.like(
+                        f"operator_retry:replay:{writeback_id}:{op_id}:%"
+                    ),
                 )
             )
         ).all()
@@ -3273,6 +3274,252 @@ async def test_deliver_execution_result_rejected_after_supersede(
         assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
 
+@pytest.mark.asyncio
+async def test_deliver_event_status_update_rejected_after_approval_revoked(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-290: terminal EVENT_STATUS_UPDATE must fail-closed after revoke."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    action_id = outbox_row.action_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.REJECTED.value
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    await sync.deliver_outbox(outbox_row.outbox_id)
+
+    assert submit_calls == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+        assert row.last_error_detail is not None
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert receipts == []
+
+
+@pytest.mark.asyncio
+async def test_deliver_event_status_update_rejected_after_supersede(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-290: EVENT_STATUS_UPDATE whose action was superseded after enqueue must not deliver."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    action_id = outbox_row.action_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.SUCCESS.value
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    await sync.deliver_outbox(outbox_row.outbox_id)
+
+    assert submit_calls == 0
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+        assert row.last_error_detail is not None
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert receipts == []
+
+
+@pytest.mark.asyncio
+async def test_worker_deliver_event_status_update_rejected_after_approval_revoked(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-290: worker lease path must fail-closed for revoked terminal writeback."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    action_id = outbox_row.action_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.REJECTED.value
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+    assert submit_calls == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_worker_deliver_event_status_update_rejected_after_supersede(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-290: worker lease path must fail-closed for superseded terminal writeback."""
+    from app.models.enums import OutboxDeliveryStatus
+    from app.services.disposition_sync_service import OutboxWorker
+    from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+    action_id = outbox_row.action_id
+
+    async with session_factory() as session:
+        async with session.begin():
+            row = await session.get(orm.Action, action_id, with_for_update=True)
+            assert row is not None
+            row.status = ActionStatus.SUCCESS.value
+            row.superseded_by_revision = 2
+
+    submit_calls = 0
+    adapter = sync._adapters.get("mock_xdr")
+    assert adapter is not None
+    original_submit = adapter.submit
+
+    async def _tracked_submit(cmd):  # type: ignore[no-untyped-def]
+        nonlocal submit_calls
+        submit_calls += 1
+        return await original_submit(cmd)
+
+    monkeypatch.setattr(adapter, "submit", _tracked_submit)
+
+    worker = OutboxWorker(sync)
+    assert await worker.run_once(limit=1) == 1
+    assert submit_calls == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
+        assert row.last_error_code == WRITEBACK_FENCE_BLOCKED_ERROR_CODE
+
+
+@pytest.mark.asyncio
+async def test_deliver_event_status_update_confirms_when_still_approved(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-290: approved terminal EVENT_STATUS_UPDATE still delivers to CONFIRMED."""
+    sync, _event_id, _source_record_id, outbox_row = await _enqueue_terminal_event_status_update(
+        session_factory,
+        store,
+        mock_xdr_client,
+    )
+
+    await sync.deliver_outbox(outbox_row.outbox_id)
+
+    async with session_factory() as session:
+        row = await session.get(orm.DispositionOutbox, outbox_row.outbox_id)
+        assert row is not None
+        assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+        assert row.latest_writeback_status == WritebackStatus.CONFIRMED.value
+        receipts = (
+            await session.scalars(
+                select(orm.DispositionReceipt).where(
+                    orm.DispositionReceipt.writeback_id == row.writeback_id
+                )
+            )
+        ).all()
+        assert receipts
+        assert any(r.status == WritebackStatus.CONFIRMED.value for r in receipts)
+
+
 async def _enqueue_terminal_event_status_update(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,
@@ -3353,7 +3600,7 @@ async def test_superseded_outbox_not_claimed_by_worker(
     factory = DispositionCommandFactory()
     action = Action.model_validate(
         {
-            "action_id": f"act-supersede-{_sfx()}",
+            "action_id": first_row.action_id,
             "event_id": event_id,
             "plan_revision": 1,
             "action_fingerprint": "fp-terminal-2",
@@ -3380,11 +3627,11 @@ async def test_superseded_outbox_not_claimed_by_worker(
         operator_id="test-operator",
         disposition_id=new_disposition_id(),
         closure_cycle=1,
-        target_disposition=SourceDisposition.RESOLVED,
+        target_disposition=SourceDisposition.COMPLETED,
     )
     async with session_factory() as session:
         async with session.begin():
-            await sync.enqueue_command(
+            second = await sync.enqueue_command(
                 session,
                 command=command,
                 event_id=event_id,
@@ -3400,6 +3647,10 @@ async def test_superseded_outbox_not_claimed_by_worker(
             assert old.delivery_status == OutboxDeliveryStatus.DEAD_LETTER.value
             old.delivery_status = OutboxDeliveryStatus.WAITING_RETRY.value
             old.next_retry_at = datetime.now(UTC) - timedelta(seconds=1)
+            # Isolate the superseded row: leave no other claimable active head.
+            new_head = await session.get(orm.DispositionOutbox, second.outbox_id)
+            assert new_head is not None
+            new_head.delivery_status = OutboxDeliveryStatus.DELIVERED.value
 
     submit_calls = 0
     adapter = sync._adapters.get("mock_xdr")
@@ -3503,7 +3754,7 @@ async def test_idempotent_enqueue_returns_existing_head_without_superseding(
         source_locator=locator,
         source_concurrency_token=first_row.command_payload.get("source_concurrency_token"),
         operator_id="test-operator",
-        disposition_id=new_disposition_id(),
+        disposition_id=first_row.disposition_id,
         closure_cycle=1,
         target_disposition=SourceDisposition.CONTAINED,
     )
