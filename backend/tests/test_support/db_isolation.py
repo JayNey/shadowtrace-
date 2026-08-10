@@ -13,11 +13,10 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.core.redis_client import RedisClient
-from app.db.base import Base
-
 # Register all ORM tables on Base.metadata before reading table names.
 import app.db.models  # noqa: F401
+from app.core.redis_client import RedisClient
+from app.db.base import Base
 
 
 def business_tables() -> tuple[str, ...]:

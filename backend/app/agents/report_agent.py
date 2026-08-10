@@ -14,7 +14,7 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -50,6 +50,9 @@ from app.models.enums import (
 )
 from app.models.ids import new_action_id, report_id_for_event
 from app.models.report import InvestigationReport, ReportSection
+
+if TYPE_CHECKING:
+    from app.services.agent_publication_service import AgentPublicationService
 
 logger = logging.getLogger(__name__)
 
@@ -128,9 +131,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
         # Durable publish without a guard is forbidden (ISSUE-270). When callers
         # wire event_service / publication_service but omit output_guard, install
         # a default ENFORCE guard so ``_apply_guardrails`` cannot no-op.
-        if output_guard is None and (
-            publication_service is not None or event_service is not None
-        ):
+        if output_guard is None and (publication_service is not None or event_service is not None):
             from app.core.guardrails import OutputGuard
 
             output_guard = OutputGuard()
@@ -341,9 +342,7 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             return output
         publisher = self._resolve_publication_service()
         if publisher is None:
-            raise RuntimeError(
-                "ReportAgent.persist_report=True requires AgentPublicationService"
-            )
+            raise RuntimeError("ReportAgent.persist_report=True requires AgentPublicationService")
         if self.output_guard is None:
             raise RuntimeError(
                 "ReportAgent publication requires OutputGuard (ISSUE-270 fail-closed)"
@@ -367,12 +366,13 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
             persist_report=True,
         )
 
-    def _resolve_publication_service(self) -> Any | None:
+    def _resolve_publication_service(self) -> AgentPublicationService | None:
+        from app.services.agent_publication_service import AgentPublicationService
+
         if self.publication_service is not None:
-            return self.publication_service
+            return cast(AgentPublicationService, self.publication_service)
         if self.event_service is None:
             return None
-        from app.services.agent_publication_service import AgentPublicationService
 
         return AgentPublicationService(
             self.event_service,

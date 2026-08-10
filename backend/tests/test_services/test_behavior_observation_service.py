@@ -36,13 +36,13 @@ from app.services.detection_scope_service import DetectionScopeService
 from tests.test_services.behavior_observation_fixtures import (
     build_ambiguous_active_scope_rows,
     patch_session_scalars_with_ambiguous_scopes,
+    truncate_behavior_observation_tables,
+)
+from tests.test_services.behavior_observation_fixtures import (
     seed_behavior_observation_connector as seed_connector,
 )
 from tests.test_services.behavior_observation_fixtures import (
     seed_behavior_observation_source_log as seed_source_log,
-)
-from tests.test_services.behavior_observation_fixtures import (
-    truncate_behavior_observation_tables,
 )
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]

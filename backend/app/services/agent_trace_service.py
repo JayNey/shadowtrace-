@@ -762,9 +762,7 @@ class TraceProjection:
                     )[:512]
                 elif "verdict_reason_codes=" not in structured_conclusion:
                     # Keep synthesized severity/score brief and append demotion codes.
-                    structured_conclusion = (
-                        f"{structured_conclusion} {demotion_brief}"
-                    )[:512]
+                    structured_conclusion = (f"{structured_conclusion} {demotion_brief}")[:512]
 
         entity_audit: dict[str, Any] = {}
         for key in _DECISION_ENTITY_FIELDS:

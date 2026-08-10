@@ -40,10 +40,6 @@ from tests.integration.resume_isolation_support import (
     default_artifact_path,
     summarize_consecutive_runs,
 )
-from tests.test_support.db_isolation import (
-    clear_shadowtrace_redis_keys,
-    truncate_business_tables,
-)
 from tests.test_orchestration.orchestration_fixtures import (
     GOLDEN_ORCHESTRATION_MAX_SECONDS,
     GOLDEN_ORCHESTRATION_STATUSES,
@@ -55,6 +51,10 @@ from tests.test_orchestration.orchestration_fixtures import (
     exercise_version_conflict_retry,
     ingest_main_scenario_event,
     seed_graph_event,
+)
+from tests.test_support.db_isolation import (
+    clear_shadowtrace_redis_keys,
+    truncate_business_tables,
 )
 
 pytestmark = pytest.mark.orchestration

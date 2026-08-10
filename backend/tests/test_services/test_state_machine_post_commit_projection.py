@@ -115,9 +115,10 @@ class _Session:
                     if audit["event_id"] == self.state.row.event_id
                 ]
             )
-        if STATE_TRANSITION_PROJECTION_DEGRADED_FLAG.replace("_", "") in text.replace(
-            "_", ""
-        ) or "degraded_flags" in text:
+        if (
+            STATE_TRANSITION_PROJECTION_DEGRADED_FLAG.replace("_", "") in text.replace("_", "")
+            or "degraded_flags" in text
+        ):
             if any(
                 str(flag).startswith(f"{STATE_TRANSITION_PROJECTION_DEGRADED_FLAG}=")
                 for flag in self.state.row.degraded_flags

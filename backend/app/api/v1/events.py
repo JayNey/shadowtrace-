@@ -853,6 +853,7 @@ async def _schedule_investigation(
         )
 
     if mode == "analysis_only":
+
         async def _run_pipeline() -> None:
             try:
                 from app.services.evidence_projection import (
@@ -1157,9 +1158,7 @@ async def investigate_event(
         )
 
     request_key = (
-        idempotency_key.strip()
-        if idempotency_key is not None
-        else f"http-investigate:{event_id}"
+        idempotency_key.strip() if idempotency_key is not None else f"http-investigate:{event_id}"
     )
     payload_sha256 = http_investigation_payload_sha256(
         event_id=event_id,

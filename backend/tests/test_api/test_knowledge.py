@@ -184,8 +184,7 @@ def test_knowledge_list_passes_tenant_when_present() -> None:
 
 def test_knowledge_openapi_declares_catalog_query_params() -> None:
     params = {
-        p["name"]
-        for p in app.openapi()["paths"]["/api/v1/knowledge"]["get"].get("parameters", [])
+        p["name"] for p in app.openapi()["paths"]["/api/v1/knowledge"]["get"].get("parameters", [])
     }
     assert {"page", "page_size", "kb_name", "q"} <= params
 

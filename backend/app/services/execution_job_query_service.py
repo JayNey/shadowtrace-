@@ -126,7 +126,10 @@ def _assert_action_event_binding(
     if pointer is None:
         # Brief write race: job row exists before action.execution_job_id is set.
         logger.info(
-            "execution job action pointer unset; allowing action/event binding job_id=%s action_id=%s",
+            (
+                "execution job action pointer unset; allowing action/event binding "
+                "job_id=%s action_id=%s"
+            ),
             job_row.job_id,
             job_row.action_id,
         )
@@ -184,7 +187,10 @@ class ExecutionJobQueryService:
                     tenant_id = _event_tenant_id(event_row)
                     if tenant_id is None:
                         logger.warning(
-                            "execution job event tenant could not be resolved job_id=%s event_id=%s",
+                            (
+                                "execution job event tenant could not be resolved "
+                                "job_id=%s event_id=%s"
+                            ),
                             job_id,
                             job_row.event_id,
                         )

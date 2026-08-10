@@ -531,9 +531,9 @@ async def resolve_task_state(task_id: str) -> tuple[str, str | None]:
         from app.db.session import get_session_factory
         from app.services.investigation_intent_service import InvestigationIntentService
 
-        intent = await InvestigationIntentService(
-            get_session_factory()
-        ).lookup_by_broker_task_id(task_id)
+        intent = await InvestigationIntentService(get_session_factory()).lookup_by_broker_task_id(
+            task_id
+        )
         if intent is not None:
             event_id = intent.event_id
     return normalize_public_task_state(result.state), event_id

@@ -1060,9 +1060,7 @@ class TestWriteback:
         # Writeback failed → recovery needed, NOT action replan.
         assert result.need_action_replan is False
         assert result.need_writeback_recovery is True
-        phase2_results = [
-            r for r in result.results if r.detail == "writeback_failed_recovery"
-        ]
+        phase2_results = [r for r in result.results if r.detail == "writeback_failed_recovery"]
         assert len(phase2_results) == 1
         assert phase2_results[0].effect_status == EffectStatus.UNVERIFIABLE
         assert phase2_results[0].verification_phase == VerificationPhase.DISPOSITION

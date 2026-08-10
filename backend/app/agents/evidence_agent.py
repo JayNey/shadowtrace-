@@ -45,10 +45,6 @@ from app.models.entities import (
 )
 from app.models.enums import EvidenceSource, ToolCategory
 from app.models.evidence import Evidence, EvidenceConflict, EvidenceGap
-from app.services.evidence_safe_projection import (
-    EvidenceSanitizerError,
-    sanitize_evidence_for_persist,
-)
 from app.models.tool_meta import ToolResult, ToolResultStatus
 from app.models.workflow import GLOBAL_EVIDENCE_TIMEOUT_S, SINGLE_SOURCE_TIMEOUT_S
 from app.services.evidence_projection import (
@@ -61,6 +57,10 @@ from app.services.evidence_query_plan_service import (
     build_query_dedupe_key,
     resolve_evidence_query_plan,
     snapshot_cutoff_from_source,
+)
+from app.services.evidence_safe_projection import (
+    EvidenceSanitizerError,
+    sanitize_evidence_for_persist,
 )
 
 logger = logging.getLogger(__name__)

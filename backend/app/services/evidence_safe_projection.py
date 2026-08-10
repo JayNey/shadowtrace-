@@ -268,7 +268,9 @@ def project_evidence_for_api(item: Evidence) -> EvidenceSafeProjection:
         schema_version=EVIDENCE_SAFE_PROJECTION_VERSION,
         evidence_id=item.evidence_id,
         event_id=item.event_id,
-        source=item.source if isinstance(item.source, EvidenceSource) else EvidenceSource(item.source),
+        source=item.source
+        if isinstance(item.source, EvidenceSource)
+        else EvidenceSource(item.source),
         evidence_type=item.evidence_type,
         description=_redact_pii_text(item.description),
         confidence=item.confidence,

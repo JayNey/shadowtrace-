@@ -470,7 +470,7 @@ async def test_expired_task_requeue_claim_complete_cycle(
     task = await task_service.enqueue(
         _enqueue_request(event_id=event_id, idempotency_key=f"idem-{_sfx()}")
     )
-    claim = await task_service.claim(
+    await task_service.claim(
         AgentTaskClaimRequest(
             task_id=task.task_id,
             worker_principal="worker-a",

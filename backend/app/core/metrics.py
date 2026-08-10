@@ -352,7 +352,9 @@ def get_state_projection_health() -> dict[str, object]:
 
 def record_investigation_intent_enqueue(*, result: str) -> None:
     """Increment ``shadowtrace_investigation_intent_enqueue_total{result=...}``."""
-    global _process_investigation_intent_enqueue_success, _process_investigation_intent_enqueue_failure
+    global \
+        _process_investigation_intent_enqueue_success, \
+        _process_investigation_intent_enqueue_failure
     normalized = result.strip().lower()
     if normalized == "success":
         _process_investigation_intent_enqueue_success += 1
@@ -401,7 +403,9 @@ def reset_metrics_for_tests() -> None:
     global _process_checkpoint_loop_rebinds
     global _process_budget_redis_degraded, _process_reservation_redis_degraded
     global _process_state_projection_failures, _process_state_projection_repairs
-    global _process_investigation_intent_enqueue_success, _process_investigation_intent_enqueue_failure
+    global \
+        _process_investigation_intent_enqueue_success, \
+        _process_investigation_intent_enqueue_failure
     _meter = None
     _writeback_total = None
     _writeback_queue_age = None
@@ -431,7 +435,9 @@ def reset_metrics_for_tests() -> None:
 
 def reset_investigation_intent_enqueue_metrics_for_tests() -> None:
     """Reset only investigation intent enqueue process counters."""
-    global _process_investigation_intent_enqueue_success, _process_investigation_intent_enqueue_failure
+    global \
+        _process_investigation_intent_enqueue_success, \
+        _process_investigation_intent_enqueue_failure
     _process_investigation_intent_enqueue_success = 0
     _process_investigation_intent_enqueue_failure = 0
 

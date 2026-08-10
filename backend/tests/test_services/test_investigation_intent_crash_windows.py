@@ -148,7 +148,9 @@ async def test_stale_broker_delivery_never_reaches_started(
                     broker_task_id=broker_task_id,
                 )
             )
-    admission = await service.mark_started(intent_id, broker_task_id=f"task-stale-{uuid4().hex[:8]}")
+    admission = await service.mark_started(
+        intent_id, broker_task_id=f"task-stale-{uuid4().hex[:8]}"
+    )
     assert admission is IntentDeliveryAdmission.STALE_SUPERSEDED
     async with session_factory() as session:
         row = await session.get(orm.InvestigationIntent, intent_id)

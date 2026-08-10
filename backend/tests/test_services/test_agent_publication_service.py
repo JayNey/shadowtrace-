@@ -8,8 +8,8 @@ from uuid import uuid4
 
 import pytest
 
-from app.agents.risk_agent import RiskAgent
 from app.agents.report_agent import ReportAgent
+from app.agents.risk_agent import RiskAgent
 from app.core.errors import GuardrailViolationError
 from app.core.guardrails import GuardrailMode, OutputGuard
 from app.models.agent_io import (

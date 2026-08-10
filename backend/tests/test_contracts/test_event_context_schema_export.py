@@ -36,4 +36,3 @@ def test_investigation_report_committed_schema_includes_degraded() -> None:
     assert committed == current
     assert "degraded" in committed["properties"]
     assert "degraded" in committed["required"]
-

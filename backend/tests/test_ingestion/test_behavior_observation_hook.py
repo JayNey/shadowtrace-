@@ -20,7 +20,6 @@ from app.models.behavior_observation import (
 )
 from app.models.detection_scope import (
     DetectionScopeIdentity,
-    DetectionScopeLifecycleState,
     UpstreamConnectorMember,
 )
 from app.models.enums import SourceDisposition, SourceObjectKind

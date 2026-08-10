@@ -18,7 +18,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
-from app.api.v1 import schemas as api_schemas
 from app.core.auth import Principal
 from app.core.config import Settings
 from app.core.errors import DependencyUnavailableError, ResourceNotFoundError
@@ -110,8 +109,9 @@ async def session_factory(
 
 @pytest_asyncio.fixture
 async def clean_state(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[None]:
-    from app.db.base import Base
     from sqlalchemy import text
+
+    from app.db.base import Base
 
     quoted = ", ".join(f'"{table}"' for table in sorted(Base.metadata.tables))
     async with session_factory() as session:

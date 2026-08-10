@@ -160,12 +160,16 @@ _DELIVERY_APPROVAL_RECHECK_INTENTS: frozenset[DispositionIntentKind] = frozenset
 
 def _action_still_approved_for_delivery(action: orm.Action) -> bool:
     """True when the action row is still in the effective approved set (ISSUE-235)."""
-    return action.status in {
-        ActionStatus.APPROVED.value,
-        ActionStatus.EXECUTING.value,
-        ActionStatus.SUCCESS.value,
-        ActionStatus.PARTIAL_SUCCESS.value,
-    } and action.superseded_by_revision is None
+    return (
+        action.status
+        in {
+            ActionStatus.APPROVED.value,
+            ActionStatus.EXECUTING.value,
+            ActionStatus.SUCCESS.value,
+            ActionStatus.PARTIAL_SUCCESS.value,
+        }
+        and action.superseded_by_revision is None
+    )
 
 
 class DispositionSyncService:
@@ -406,9 +410,7 @@ class DispositionSyncService:
                         "superseded outbox head cannot be retried",
                         details={
                             "writeback_id": writeback_id,
-                            "superseded_by_disposition_id": (
-                                outbox.superseded_by_disposition_id
-                            ),
+                            "superseded_by_disposition_id": (outbox.superseded_by_disposition_id),
                         },
                     )
 
@@ -539,9 +541,7 @@ class DispositionSyncService:
                             operator=operator,
                             operation_id=None,
                             reason=reason,
-                            audit_reason=(
-                                f"operator_retry:blocked:{decision.reason or 'lookup'}"
-                            ),
+                            audit_reason=(f"operator_retry:blocked:{decision.reason or 'lookup'}"),
                             from_delivery=OutboxDeliveryStatus.PAUSED.value,
                             to_delivery=OutboxDeliveryStatus.PAUSED.value,
                             result_status=latest or WritebackStatus.FAILED,
@@ -889,9 +889,7 @@ class DispositionSyncService:
                     )
                     outbox.latest_writeback_status = target.value
                     outbox.delivery_status = OutboxDeliveryStatus.DELIVERED.value
-                    action = await session.get(
-                        orm.Action, outbox.action_id, with_for_update=True
-                    )
+                    action = await session.get(orm.Action, outbox.action_id, with_for_update=True)
                     _mirror_writeback_status_to_action(action, target.value)
                     if self._manual_resolution is not None:
                         from app.core.errors import IdempotencyKeyReuseError

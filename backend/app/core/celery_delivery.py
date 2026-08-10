@@ -140,10 +140,16 @@ def _retry_header_count(headers: dict[str, object] | None, key: str) -> int:
     if not headers:
         return 0
     raw = headers.get(key, 0)
-    try:
-        return int(raw)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+    return 0
 
 
 def lookup_retry_count(headers: dict[str, object] | None) -> int:
@@ -157,13 +163,13 @@ def defer_retry_count(headers: dict[str, object] | None) -> int:
 def lookup_retry_countdown(attempt: int) -> float:
     """Bounded exponential backoff with jitter for lookup retries."""
     base = min(60.0, LOOKUP_RETRY_BASE_SECONDS * (2 ** max(attempt - 1, 0)))
-    return base + random.uniform(0.0, base * 0.3)
+    return float(base + random.uniform(0.0, base * 0.3))
 
 
 def defer_retry_countdown(attempt: int) -> float:
     """Bounded exponential backoff with jitter for lease/contention deferrals."""
     base = min(120.0, DEFER_RETRY_BASE_SECONDS * (2 ** max(attempt - 1, 0)))
-    return base + random.uniform(0.0, base * 0.3)
+    return float(base + random.uniform(0.0, base * 0.3))
 
 
 def _resume_claim_key(event_id: str) -> str:
@@ -338,15 +344,11 @@ async def record_redelivery_recovery_needed(
             )
 
     session_factory = _get_session_factory()
-    audit_reason = (
-        f"celery_redelivery_recovery_needed:reason={reason[:200]}:task_id={task_id}"
-    )
+    audit_reason = f"celery_redelivery_recovery_needed:reason={reason[:200]}:task_id={task_id}"
     async with session_factory() as session:
         async with session.begin():
             event_status = await session.scalar(
-                select(orm.SecurityEvent.status).where(
-                    orm.SecurityEvent.event_id == event_id
-                )
+                select(orm.SecurityEvent.status).where(orm.SecurityEvent.event_id == event_id)
             )
             session.add(
                 orm.EventAuditLog(

@@ -426,7 +426,6 @@ async def test_claim_batch_skips_superseded_rows_even_if_returned() -> None:
 @pytest.mark.asyncio
 async def test_deliver_after_supersede_never_calls_adapter_submit() -> None:
     """ISSUE-273: claim→supersede→deliver race must yield zero provider submits."""
-    from datetime import UTC, datetime
 
     outbox = _prior_head("disp-old")
     outbox.outbox_id = "ob-raced"

@@ -18,7 +18,9 @@ BACKEND_DOCKERFILE = REPO_ROOT / "backend" / "Dockerfile"
 COMPOSE_PATH = REPO_ROOT / "infra" / "docker-compose.yml"
 CHECK_SCRIPT = REPO_ROOT / "scripts" / "check_docker_build_context.py"
 
-_BACKEND_SERVICES = frozenset({"mock-xdr", "backend", "worker", "scheduler-beat", "scheduler-worker"})
+_BACKEND_SERVICES = frozenset(
+    {"mock-xdr", "backend", "worker", "scheduler-beat", "scheduler-worker"}
+)
 
 
 def _load_check_module():
@@ -32,7 +34,9 @@ def _load_check_module():
 
 
 def test_root_and_frontend_dockerignore_exist() -> None:
-    assert ROOT_DOCKERIGNORE.is_file(), "repo root must ship .dockerignore for backend build context"
+    assert ROOT_DOCKERIGNORE.is_file(), (
+        "repo root must ship .dockerignore for backend build context"
+    )
     assert FRONTEND_DOCKERIGNORE.is_file(), "frontend must ship .dockerignore for SPA build context"
 
 
@@ -50,7 +54,9 @@ def test_compose_backend_services_share_root_context() -> None:
     services = data.get("services") or {}
     for name in sorted(_BACKEND_SERVICES):
         build = (services.get(name) or {}).get("build") or {}
-        assert build.get("dockerfile") == "backend/Dockerfile", f"{name} must use backend/Dockerfile"
+        assert build.get("dockerfile") == "backend/Dockerfile", (
+            f"{name} must use backend/Dockerfile"
+        )
         assert build.get("context") == "..", (
             f"{name} must use repo-root context (shared, .dockerignore-filtered)"
         )
@@ -292,11 +298,7 @@ def test_resolve_by_compose_labels_prefers_newest_when_multiple() -> None:
             )
         if args[:3] == ("image", "inspect", "--format") and args[3] == "{{.Created}}":
             ref = args[4]
-            created = (
-                "2024-01-01T00:00:00Z"
-                if ref == "sha256:older"
-                else "2024-06-01T00:00:00Z"
-            )
+            created = "2024-01-01T00:00:00Z" if ref == "sha256:older" else "2024-06-01T00:00:00Z"
             return subprocess.CompletedProcess(
                 args=["docker", *args],
                 returncode=0,
@@ -318,7 +320,7 @@ def test_ci_docker_build_resolves_then_inspects_backend_image() -> None:
     step_start = ci_text.index(step_marker)
     step_run = ci_text.index("        run: |", step_start)
     next_step = ci_text.find("\n      - ", step_run + 1)
-    step_body = ci_text[step_run:next_step if next_step != -1 else len(ci_text)]
+    step_body = ci_text[step_run : next_step if next_step != -1 else len(ci_text)]
 
     assert "compose build" in step_body
     assert "--resolve-compose-image backend" in step_body

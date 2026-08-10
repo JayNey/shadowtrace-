@@ -396,7 +396,7 @@ async def test_concurrent_same_key_http_intake_has_one_commit_and_one_replay(
         return await service.create_or_replay_http_intent(
             event_id,
             requested_by="analyst-concurrent",
-                request_idempotency_key=f"req-http-concurrent:{event_id}",
+            request_idempotency_key=f"req-http-concurrent:{event_id}",
             request_payload_sha256=payload_hash,
             orchestration_mode="graph",
             include_response_execution=False,

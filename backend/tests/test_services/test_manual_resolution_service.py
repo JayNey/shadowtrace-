@@ -407,6 +407,7 @@ async def test_resolve_unknown_creates_intent_in_same_transaction(
 ) -> None:
     event_id = await _seed_event(session_factory)
     action_id = await _seed_unknown_action(session_factory, event_id)
+
     async def _noop_runner(_eid: str) -> None:
         return None
 
@@ -702,8 +703,7 @@ async def test_resolve_writeback_on_manual_hold_creates_intent_not_direct_resume
         intent = await session.scalar(
             select(orm.GraphResumeIntent).where(
                 orm.GraphResumeIntent.event_id == event_id,
-                orm.GraphResumeIntent.resolution_source
-                == RESOLUTION_SOURCE_WRITEBACK_MANUAL,
+                orm.GraphResumeIntent.resolution_source == RESOLUTION_SOURCE_WRITEBACK_MANUAL,
             )
         )
         assert intent is not None

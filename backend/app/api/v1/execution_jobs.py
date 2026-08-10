@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from fastapi import APIRouter
 
 from app.api.v1 import schemas as s
@@ -19,7 +21,8 @@ async def get_execution_job(
     principal: ReadPrincipal,
     query: ExecutionJobQueryDep,
 ) -> s.ExecutionJobResponse:
-    return await query.get_execution_job(job_id, principal=principal)
+    response = await query.get_execution_job(job_id, principal=principal)
+    return cast(s.ExecutionJobResponse, response)
 
 
 @router.get("/tasks/{task_id}", response_model=s.TaskResponse)

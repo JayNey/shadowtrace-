@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from app.agents.base import BaseAgent
 from app.agents.confidence_calibration import DEFAULT_TEMPERATURE, calibrate_confidence
@@ -31,12 +31,14 @@ from app.models.agent_io import (
     RiskAssessment,
     RiskFactor,
     ScoringMode,
-    TriageResult,
 )
 from app.models.enums import FinalVerdict
 from app.services.risk_verdict_projection import (
     EVIDENCE_LIMITED_DEMOTED_FROM_CONFIRMED_THREAT,
 )
+
+if TYPE_CHECKING:
+    from app.services.agent_publication_service import AgentPublicationService
 
 logger = logging.getLogger(__name__)
 
@@ -71,9 +73,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         # Durable publish without a guard is forbidden (ISSUE-270). When callers
         # wire event_service / publication_service but omit output_guard, install
         # a default ENFORCE guard so ``_apply_guardrails`` cannot no-op.
-        if output_guard is None and (
-            publication_service is not None or event_service is not None
-        ):
+        if output_guard is None and (publication_service is not None or event_service is not None):
             from app.core.guardrails import OutputGuard
 
             output_guard = OutputGuard()
@@ -250,9 +250,7 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
         if publisher is None:
             return output
         if self.output_guard is None:
-            raise RuntimeError(
-                "RiskAgent publication requires OutputGuard (ISSUE-270 fail-closed)"
-            )
+            raise RuntimeError("RiskAgent publication requires OutputGuard (ISSUE-270 fail-closed)")
         verdict = await self._resolve_publication_verdict(input, output)
         from app.services.agent_publication_service import GuardApprovedPublication
 
@@ -270,12 +268,13 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
             publication=token,
         )
 
-    def _resolve_publication_service(self) -> Any | None:
+    def _resolve_publication_service(self) -> AgentPublicationService | None:
+        from app.services.agent_publication_service import AgentPublicationService
+
         if self.publication_service is not None:
-            return self.publication_service
+            return cast(AgentPublicationService, self.publication_service)
         if self.event_service is None:
             return None
-        from app.services.agent_publication_service import AgentPublicationService
 
         return AgentPublicationService(
             self.event_service,

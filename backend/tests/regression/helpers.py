@@ -26,10 +26,6 @@ from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService
 from app.services.event_service import EventService
 from app.services.state_machine_service import StateMachineService
-from tests.test_support.db_isolation import (
-    clear_shadowtrace_redis_keys,
-    truncate_business_tables,
-)
 from tests.system.helpers import (
     ingest_scenario_event,
     run_l3_approval_response_chain,
@@ -37,6 +33,10 @@ from tests.system.helpers import (
 from tests.system.scenario_expectations import (
     FULL_RESPONSE_SCENARIOS,
     L3_APPROVAL_RESPONSE_SCENARIOS,
+)
+from tests.test_support.db_isolation import (
+    clear_shadowtrace_redis_keys,
+    truncate_business_tables,
 )
 
 

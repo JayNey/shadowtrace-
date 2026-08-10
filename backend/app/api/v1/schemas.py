@@ -40,7 +40,7 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
-from app.models.evidence import Evidence, EvidenceSafeProjection
+from app.models.evidence import EvidenceSafeProjection
 from app.models.report import InvestigationReport, ReportSection
 
 # EventListItem / EventSummary live in app.models.security_event (ISSUE-094 §2)

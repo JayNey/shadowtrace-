@@ -1771,9 +1771,14 @@ def build_investigation_graph(
         except InvalidStateTransitionError as exc:
             if not (exc.current is EventStatus.VERIFYING and exc.target is EventStatus.VERIFYING):
                 raise
-            status: InvestigationState = {
+            fallback_status: InvestigationState = {
                 "event_status": EventStatus.VERIFYING.value,
             }
+            return _patch_state(
+                _trace(NODE_EXECUTE),
+                fallback_status,
+                {"execution_ok": execution_ok},
+            )
         return _patch_state(
             _trace(NODE_EXECUTE),
             status,

@@ -43,9 +43,10 @@ def test_event_context_schema_includes_detection_context_snapshot_field() -> Non
     committed = json.loads(path.read_text(encoding="utf-8"))
     current = EventContext.model_json_schema(mode="serialization")
     assert "detection_context_snapshot" in committed["properties"]
-    assert committed["properties"]["detection_context_snapshot"] == current["properties"][
-        "detection_context_snapshot"
-    ]
+    assert (
+        committed["properties"]["detection_context_snapshot"]
+        == current["properties"]["detection_context_snapshot"]
+    )
 
 
 @pytest.mark.parametrize(

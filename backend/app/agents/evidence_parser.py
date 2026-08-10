@@ -120,13 +120,10 @@ class EvidenceParser:
         # never land in description / related_entities (ISSUE-269 / ID-SEC-003).
         timestamp = parse_timestamp(safe_raw.get("logged_at") or safe_raw.get("timestamp"))
         evidence_type = self._evidence_type(tool_name, safe_raw)
-        description = redact_sensitive_text(
-            self._description(tool_name, safe_raw, timestamp)
-        )
+        description = redact_sensitive_text(self._description(tool_name, safe_raw, timestamp))
         confidence = self._confidence(safe_raw, default_confidence)
         related = [
-            redact_sensitive_text(item)
-            for item in self._related_entities(tool_name, safe_raw)
+            redact_sensitive_text(item) for item in self._related_entities(tool_name, safe_raw)
         ]
         source_ref = self._match_source_ref(safe_raw, references)
 

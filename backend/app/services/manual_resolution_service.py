@@ -304,10 +304,7 @@ class ManualResolutionService:
                 )
             )
             if existing is not None:
-                if (
-                    existing.event_id != event_id
-                    or existing.payload_sha256 != payload_hash
-                ):
+                if existing.event_id != event_id or existing.payload_sha256 != payload_hash:
                     raise IdempotencyKeyReuseError(
                         "operation_id was already used with a different resolution",
                         details={
@@ -381,10 +378,7 @@ class ManualResolutionService:
                     )
                 )
                 if by_op is not None:
-                    if (
-                        by_op.event_id != event_id
-                        or by_op.payload_sha256 != payload_hash
-                    ):
+                    if by_op.event_id != event_id or by_op.payload_sha256 != payload_hash:
                         raise IdempotencyKeyReuseError(
                             "operation_id was already used with a different resolution",
                             details={
@@ -544,9 +538,7 @@ class ManualResolutionService:
                     # reconcile wrappers). This loop only fences expired claims.
                     if status is GraphResumeIntentStatus.PENDING:
                         continue
-                    expired_claim = (
-                        row.claim_expires_at is not None and row.claim_expires_at <= now
-                    )
+                    expired_claim = row.claim_expires_at is not None and row.claim_expires_at <= now
                     stale_started = (
                         status is GraphResumeIntentStatus.STARTED
                         and row.updated_at.replace(tzinfo=UTC) <= stale_cutoff
@@ -554,15 +546,11 @@ class ManualResolutionService:
                     if not (expired_claim or stale_started):
                         continue
                     if int(row.attempt or 0) + 1 >= self._max_attempts:
-                        validate_graph_resume_transition(
-                            status, GraphResumeIntentStatus.DEAD
-                        )
+                        validate_graph_resume_transition(status, GraphResumeIntentStatus.DEAD)
                         row.status = GraphResumeIntentStatus.DEAD.value
                         row.last_error = "reconcile_exhausted"
                     else:
-                        validate_graph_resume_transition(
-                            status, GraphResumeIntentStatus.RETRY
-                        )
+                        validate_graph_resume_transition(status, GraphResumeIntentStatus.RETRY)
                         row.status = GraphResumeIntentStatus.RETRY.value
                         row.attempt = int(row.attempt or 0) + 1
                         row.revision = int(row.revision or 1) + 1
@@ -599,9 +587,7 @@ class ManualResolutionService:
                 ).all()
                 for row in rows:
                     current = GraphResumeIntentStatus(row.status)
-                    validate_graph_resume_transition(
-                        current, GraphResumeIntentStatus.CLAIMED
-                    )
+                    validate_graph_resume_transition(current, GraphResumeIntentStatus.CLAIMED)
                     row.status = GraphResumeIntentStatus.CLAIMED.value
                     row.claim_owner = _DISPATCH_WORKER_ID
                     row.claim_expires_at = lease_until
@@ -659,9 +645,7 @@ class ManualResolutionService:
             # remains reclaimable (clearing first would fence as hold_already_cleared).
             await self._resume_runner(event_id)
         except Exception as exc:
-            logger.exception(
-                "graph resume intent failed intent=%s event=%s", intent_id, event_id
-            )
+            logger.exception("graph resume intent failed intent=%s event=%s", intent_id, event_id)
             await self._mark_failure(intent_id, error=str(exc))
             return False
 
@@ -718,9 +702,7 @@ class ManualResolutionService:
     async def _mark_terminal(self, intent_id: str) -> None:
         async with self._session_factory() as session:
             async with session.begin():
-                row = await session.get(
-                    orm.GraphResumeIntent, intent_id, with_for_update=True
-                )
+                row = await session.get(orm.GraphResumeIntent, intent_id, with_for_update=True)
                 if row is None:
                     return
                 current = GraphResumeIntentStatus(row.status)
@@ -735,9 +717,7 @@ class ManualResolutionService:
     async def _mark_failure(self, intent_id: str, *, error: str) -> None:
         async with self._session_factory() as session:
             async with session.begin():
-                row = await session.get(
-                    orm.GraphResumeIntent, intent_id, with_for_update=True
-                )
+                row = await session.get(orm.GraphResumeIntent, intent_id, with_for_update=True)
                 if row is None:
                     return
                 current = GraphResumeIntentStatus(row.status)

@@ -150,8 +150,8 @@ def client() -> TestClient:
     app.dependency_overrides[_real_get_execution_job_query] = _mock_execution_job_query
     app.dependency_overrides[_real_get_disposition_source_service] = _mock_disposition_source
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
-    app.dependency_overrides[_real_get_knowledge_query_service] = (
-        lambda: _MockKnowledgeQueryService()
+    app.dependency_overrides[_real_get_knowledge_query_service] = lambda: (
+        _MockKnowledgeQueryService()
     )
     client = TestClient(app)
     client.mock_disposition_sync = mock_disposition_sync  # type: ignore[attr-defined]

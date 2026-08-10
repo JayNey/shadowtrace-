@@ -11,9 +11,9 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any
+from typing import Any, TypeVar, cast
 
+from pydantic import BaseModel
 from pydantic import ValidationError as PydanticValidationError
 
 from app.agents.triage_risk_consistency import (
@@ -106,7 +106,10 @@ def assert_guard_approved_publication(
         )
 
 
-def _revalidate_model(model: type[Any], value: Any) -> Any:
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def _revalidate_model(model: type[ModelT], value: Any) -> ModelT:
     """Re-validate sanitized proposal before durable publication."""
     if hasattr(value, "model_dump"):
         payload = value.model_dump(mode="json")
@@ -118,7 +121,8 @@ def _revalidate_model(model: type[Any], value: Any) -> Any:
             error_code="guardrail_violation",
         )
     try:
-        return model.model_validate(payload)
+        validated = cast(type[BaseModel], model).model_validate(payload)
+        return cast(ModelT, validated)
     except PydanticValidationError as exc:
         raise GuardrailViolationError(
             "sanitized proposal failed schema re-validation",
@@ -261,7 +265,7 @@ class AgentPublicationService:
 
         await self._publish_report_generated(persisted)
         await self._persist_report_generated_flag(event_id, True)
-        return persisted
+        return cast(InvestigationReport, persisted)
 
     async def _publish_report_generated(self, report: InvestigationReport) -> None:
         if self._event_bus is None:

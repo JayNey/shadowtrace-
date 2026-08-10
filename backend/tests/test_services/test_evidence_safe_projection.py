@@ -105,7 +105,9 @@ def test_sanitize_fail_closed_on_payload_budget() -> None:
 
 
 def test_sanitize_strips_unknown_nested_keys_under_allowed_parent() -> None:
-    record = _login_record(result={"account": "ops-user", "sid": "deadbeef-session", "token": "nope"})
+    record = _login_record(
+        result={"account": "ops-user", "sid": "deadbeef-session", "token": "nope"}
+    )
     cleaned = sanitize_evidence_raw_data("query_account_login", record)
     assert cleaned["result"]["account"] == "ops-user"
     assert "sid" not in cleaned["result"]

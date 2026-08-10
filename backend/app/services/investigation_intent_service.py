@@ -15,14 +15,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.config import Settings, TaskMode, get_settings
-from app.core.metrics import record_investigation_intent_enqueue
 from app.core.errors import (
     DependencyUnavailableError,
     IdempotencyKeyReuseError,
-    InvestigationInProgressError,
     InvalidStateTransitionError,
+    InvestigationInProgressError,
     ValidationError,
 )
+from app.core.metrics import record_investigation_intent_enqueue
 from app.db import models as orm
 from app.models.enums import EventStatus, InvestigationIntentStatus
 from app.models.investigation_intent import (
@@ -253,10 +253,8 @@ class InvestigationIntentService:
                         select(orm.InvestigationIntent)
                         .where(
                             orm.InvestigationIntent.event_id == event_id,
-                            orm.InvestigationIntent.intent_kind
-                            == INTENT_KIND_HTTP_INVESTIGATE,
-                            orm.InvestigationIntent.intent_version
-                            == INTENT_VERSION_ISSUE276_V1,
+                            orm.InvestigationIntent.intent_kind == INTENT_KIND_HTTP_INVESTIGATE,
+                            orm.InvestigationIntent.intent_version == INTENT_VERSION_ISSUE276_V1,
                         )
                         .with_for_update()
                     )
@@ -357,7 +355,7 @@ class InvestigationIntentService:
                         raise InvestigationInProgressError(
                             "investigation already accepted for this event",
                             details={"event_id": event_id, "intent_id": active.intent_id},
-                        )
+                        ) from None
             raise
 
     async def mark_inline_started(self, intent_id: str) -> str:
@@ -586,12 +584,13 @@ class InvestigationIntentService:
 
     def _schedule_dispatch_degraded_flag(self, event_id: str) -> None:
         """Best-effort event degraded flag when the dispatch trigger cannot enqueue."""
-        if self._degraded is None:
+        degraded = self._degraded
+        if degraded is None:
             return
 
         async def _set_flag() -> None:
             try:
-                await self._degraded.set_flag(
+                await degraded.set_flag(
                     event_id,
                     "auto_investigate_dispatch_unavailable",
                     True,
@@ -1084,8 +1083,7 @@ class InvestigationIntentService:
                     )
                     return None
                 resume_from_checkpoint = (
-                    int(row.revision or 1) > 1
-                    and event.status in _EVENT_INVESTIGATION_RESUMABLE
+                    int(row.revision or 1) > 1 and event.status in _EVENT_INVESTIGATION_RESUMABLE
                 )
                 if event.status != EventStatus.NEW.value and not resume_from_checkpoint:
                     await self._set_status_in_session(
