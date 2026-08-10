@@ -11,6 +11,12 @@ from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.adapters.disposition.error_classification import (  # noqa: F401
+    DispositionDeliveryErrorKind,
+    bounded_dead_letter_error_code,
+    classify_disposition_delivery_error,
+    is_deterministic_adapter_rejection_code,
+)
 from app.core.errors import WritebackUnsupportedError
 from app.models.disposition import DispositionCommand, DispositionReceipt, SourceObjectLocator
 from app.models.enums import (

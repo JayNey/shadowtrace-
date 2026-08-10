@@ -65,6 +65,7 @@ def _outbox(*, idempotency_key: str = "idem-1") -> Any:
         command_payload=_command_payload(idempotency_key=idempotency_key),
         delivery_status=OutboxDeliveryStatus.PAUSED.value,
         latest_writeback_status=WritebackStatus.FAILED.value,
+        last_error_code=None,
     )
 
 
@@ -168,3 +169,27 @@ async def test_evaluate_terminal_receipt_reconciles() -> None:
     )
     assert decision.action is _OperatorRetryAction.RECONCILE_TERMINAL
     assert decision.target_status is WritebackStatus.CONFIRMED
+
+
+@pytest.mark.asyncio
+async def test_operator_retry_blocks_deterministic_rejection_code() -> None:
+    class _LookupAdapter:
+        name = "lookup"
+
+        def capabilities(self) -> DispositionAdapterCapabilities:
+            return DispositionAdapterCapabilities(
+                supports_idempotency=True,
+                supports_lookup_by_idempotency=True,
+            )
+
+        def allows_safe_retry(self) -> bool:
+            return True
+
+    outbox = _outbox()
+    outbox.last_error_code = "not_found"
+    decision = await _service(_LookupAdapter())._evaluate_operator_retry_lookup(
+        AsyncMock(),
+        outbox,
+    )
+    assert decision.action is _OperatorRetryAction.BLOCKED
+    assert "deterministic adapter rejection" in decision.reason

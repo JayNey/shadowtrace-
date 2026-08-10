@@ -1,7 +1,8 @@
 """Business metrics for disposition / writeback observability (ISSUE-092).
 
-Label dimensions are intentionally low-cardinality: ``status`` and ``adapter``
-only. Never attach ``source_object_id``, IP addresses, or raw payloads.
+Label dimensions are intentionally low-cardinality: ``status``, ``adapter``, and
+bounded ``error_code`` buckets for dead-letter metrics only. Never attach
+``source_object_id``, IP addresses, or raw payloads.
 """
 
 from __future__ import annotations
@@ -187,13 +188,18 @@ def record_writeback_retry(*, adapter: str) -> None:
         logger.debug("writeback retry metric export failed", exc_info=True)
 
 
-def record_writeback_dead_letter(*, adapter: str) -> None:
-    """Increment ``shadowtrace_writeback_dead_letter_total{adapter}``."""
+def record_writeback_dead_letter(*, adapter: str, error_code: str | None = None) -> None:
+    """Increment ``shadowtrace_writeback_dead_letter_total{adapter,error_code?}``."""
+    from app.adapters.disposition.error_classification import bounded_dead_letter_error_code
+
     _ensure_metrics()
     if _writeback_dead_letter_total is None:
         return
+    labels: dict[str, str] = {"adapter": adapter}
+    if error_code is not None:
+        labels["error_code"] = bounded_dead_letter_error_code(error_code)
     try:
-        _writeback_dead_letter_total.add(1, {"adapter": adapter})
+        _writeback_dead_letter_total.add(1, labels)
     except Exception:
         logger.debug("writeback dead letter metric export failed", exc_info=True)
 
