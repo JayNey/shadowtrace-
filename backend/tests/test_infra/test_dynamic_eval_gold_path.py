@@ -342,6 +342,26 @@ def test_list_all_event_actions_paginates(full_loop_mod) -> None:
     assert len(actions) == 3
 
 
+def test_list_all_event_actions_raises_when_total_truncated(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "page=1" in path:
+                return {"items": [{"action_id": "act-0"}], "total": 3}
+            if "page=2" in path:
+                return {"items": [], "total": 3}
+            raise AssertionError(path)
+
+    with pytest.raises(full_loop_mod.DynamicEvalApiError, match="pagination truncated"):
+        full_loop_mod.list_all_event_actions(_Client(), "evt-trunc")
+
+
+def test_strict_assert_budget_uses_remaining_wall_clock(full_loop_mod) -> None:
+    assert full_loop_mod._strict_assert_budget(max_wait_s=240.0, elapsed_s=200.0) == 40.0
+    assert full_loop_mod._strict_assert_budget(max_wait_s=240.0, elapsed_s=235.0) == 10.0
+    assert full_loop_mod._strict_assert_budget(max_wait_s=30.0, elapsed_s=0.0) == 30.0
+    assert full_loop_mod._strict_assert_budget(max_wait_s=240.0, elapsed_s=10.0) == 60.0
+
+
 def test_require_closed_seed_missing_event_ids_message(full_loop_mod) -> None:
     with (
         patch.object(full_loop_mod, "DynamicEvalClient") as client_cls,

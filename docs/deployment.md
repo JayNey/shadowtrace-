@@ -167,14 +167,17 @@ make eval-full-loop-matrix
 EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix
 ```
 
-| 项 | matrix / strict | 默认 compat（ISSUE-256） |
-|----|-----------------|--------------------------|
-| Compose project | 每场景唯一 `shadowtrace-eval-<scenario>-<run>` | 固定 `COMPOSE_PROJECT_NAME` |
-| Host ports | **不发布**（`infra/docker-compose.eval.yml`） | 默认映射 8000/5432/… |
-| seed → harness | seed 后解析 **显式 event_ids**，禁止跨场景复用 | 单场景可 `--seed-via-compose` |
-| 终态 | strict：`closed` + `GET /report` + writeback gate | `reporting` / `contained` / `closed` 等 |
-| 失败行为 | 停止后续场景；`down -v --remove-orphans` 清理 | 依使用者手动清理 |
-| Artifact | `artifacts/dynamic-eval-matrix/<run-id>/<scenario>/manifest.json` 与根目录 `summary.json` | 无官方目录 |
+| 项 | matrix compat（默认） | matrix strict（`--require-closed`） | 单场景 ISSUE-256 |
+|----|----------------------|-------------------------------------|------------------|
+| Compose project | 每场景唯一 `shadowtrace-eval-<scenario>-<run>` | 同左 | 固定 `COMPOSE_PROJECT_NAME` |
+| Host ports | **不发布**（`infra/docker-compose.eval.yml`） | 同左 | 默认映射 8000/5432/… |
+| seed → harness | seed JSON **显式 event_ids** → `--event-id` | 同左 | 单场景可 `--seed-via-compose` |
+| 终态 | `reporting` / `contained` / `closed` 等 | 必须 `closed` + `GET /report` + writeback gate | 同 compat |
+| Eval 超时 | `infra/docker-compose.eval.yml` 覆盖 `APPROVAL_TIMEOUT_MINUTES` / `LLM_TIMEOUT_SECONDS`（默认 5min / 60s） | 同左 | 本地 `.env` 评测 profile |
+| 失败行为 | 停止后续场景；`down -v --remove-orphans` 清理 | 同左 | 依使用者手动清理 |
+| Artifact | `artifacts/dynamic-eval-matrix/<run-id>/<scenario>/manifest.json` 与根目录 `summary.json` | 同左 | 无官方目录 |
+
+Makefile 可选：`EVAL_MATRIX_FRESH_VOLUMES=0`（保留 volume）、`EVAL_MATRIX_SCENARIOS=...` 覆盖场景列表。
 
 Matrix 在容器内通过 `docker compose exec backend` 访问 `http://127.0.0.1:8000`，**不**探测或绑定 host port。
 

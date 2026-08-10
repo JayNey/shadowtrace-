@@ -75,7 +75,8 @@ _IN_FLIGHT = frozenset(
 )
 
 _MAX_ACTION_PAGES = 50
-_STRICT_ASSERT_MAX_WAIT_S = 10.0
+_STRICT_ASSERT_MIN_WAIT_S = 10.0
+_STRICT_ASSERT_MAX_CAP_S = 60.0
 _STRICT_ASSERT_POLL_S = 0.5
 _GATE_APPLICABLE_CATEGORIES = frozenset({"response", "rollback"})
 
@@ -367,6 +368,11 @@ def list_all_event_actions(
         if total is None and len(page_items) < page_size:
             break
         if not page_items:
+            if total is not None and len(collected) < total:
+                raise DynamicEvalApiError(
+                    f"actions pagination truncated for {event_id}: "
+                    f"collected={len(collected)} total={total} empty page={page}"
+                )
             break
         page += 1
     else:
@@ -474,11 +480,17 @@ def _assert_strict_closed_acceptance_once(
     }
 
 
+def _strict_assert_budget(*, max_wait_s: float, elapsed_s: float) -> float:
+    """Remaining wall clock for post-close strict convergence checks."""
+    remaining = max_wait_s - elapsed_s
+    return max(_STRICT_ASSERT_MIN_WAIT_S, min(remaining, _STRICT_ASSERT_MAX_CAP_S))
+
+
 def assert_strict_closed_acceptance(
     client: DynamicEvalClient,
     event_id: str,
     *,
-    max_wait_s: float = _STRICT_ASSERT_MAX_WAIT_S,
+    max_wait_s: float = _STRICT_ASSERT_MIN_WAIT_S,
     poll_interval_s: float = _STRICT_ASSERT_POLL_S,
 ) -> dict[str, Any]:
     """Strict CLOSED acceptance with bounded retry for post-close convergence lag."""
@@ -490,9 +502,8 @@ def assert_strict_closed_acceptance(
         except RuntimeError as exc:
             last_error = exc
             if time.monotonic() >= deadline:
-                raise
+                raise last_error from None
             time.sleep(min(poll_interval_s, max(0.0, deadline - time.monotonic())))
-    raise last_error  # pragma: no cover
 
 
 def run_gold_loop(
@@ -627,9 +638,16 @@ def run_gold_loop(
 
     strict_assertions: dict[str, Any] = {}
     if require_closed:
+        strict_budget = _strict_assert_budget(
+            max_wait_s=max_wait_s,
+            elapsed_s=time.monotonic() - started,
+        )
         for event_id in event_ids:
             strict_assertions[event_id] = assert_strict_closed_acceptance(
-                client, event_id
+                client,
+                event_id,
+                max_wait_s=strict_budget,
+                poll_interval_s=min(poll_interval_s, _STRICT_ASSERT_POLL_S),
             )
 
     return {

@@ -100,6 +100,19 @@ def test_sanitize_error_text_redacts_bearer(matrix_mod) -> None:
     assert "<redacted>" in sanitized
 
 
+def test_sanitize_error_text_redacts_password_key(matrix_mod) -> None:
+    raw = 'seed failed password="hunter2" during ingest'
+    sanitized = matrix_mod._sanitize_error_text(raw)
+    assert "hunter2" not in sanitized
+    assert "<redacted>" in sanitized
+
+
+def test_parse_args_defaults_compat_profile(matrix_mod) -> None:
+    args = matrix_mod.parse_args(["--scenarios", "insider_data_exfiltration"])
+    assert args.require_closed is False
+    assert args.fresh_volumes is True
+
+
 def test_matrix_main_stops_after_first_scenario_failure(matrix_mod) -> None:
     calls: list[str] = []
 
@@ -202,6 +215,48 @@ def test_run_scenario_finally_compose_down_with_volumes(matrix_mod, tmp_path: Pa
         )
     assert manifest["status"] == "passed"
     assert down_calls == [True]
+
+
+def test_run_scenario_cleanup_failure_after_pass_raises(matrix_mod, tmp_path: Path) -> None:
+    def _fake_down(_project: str, _files: list[Path], *, volumes: bool) -> None:
+        raise matrix_mod.MatrixError("compose down failed project=proj-test exit=1")
+
+    with (
+        patch.object(matrix_mod, "_compose_down", side_effect=_fake_down),
+        patch.object(matrix_mod, "_wait_stack_healthy"),
+        patch.object(
+            matrix_mod,
+            "_seed_scenario",
+            return_value={"accepted": 1, "event_ids": ["evt-a"]},
+        ),
+        patch.object(
+            matrix_mod,
+            "_run_full_loop_via_exec",
+            return_value={"final_statuses": {"evt-a": "closed"}},
+        ),
+        patch.object(matrix_mod, "_run", return_value=type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
+    ):
+        with pytest.raises(matrix_mod.MatrixError, match="compose down failed"):
+            matrix_mod.run_scenario(
+                scenario="insider_data_exfiltration",
+                run_id="run-test",
+                artifact_root=tmp_path,
+                token="bootstrap-token",
+                seed=42,
+                mock_xdr_url="http://mock-xdr:8100",
+                require_closed=False,
+                fresh_volumes=True,
+                stack_timeout_s=10.0,
+                max_wait_s=10.0,
+                poll_interval_s=1.0,
+                max_events=1,
+                build=False,
+            )
+    manifest = json.loads(
+        (tmp_path / "insider_data_exfiltration" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "passed_with_cleanup_error"
+    assert "cleanup_error" in manifest
 
 
 def test_run_full_loop_via_exec_passes_explicit_event_ids(matrix_mod) -> None:

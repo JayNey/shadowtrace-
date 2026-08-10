@@ -90,6 +90,9 @@ def _sanitize_error_text(text: str, *, max_len: int = 4096) -> str:
         redacted,
         flags=re.IGNORECASE,
     )
+    for key in _SENSITIVE_KEYS:
+        pattern = rf"({re.escape(key)}['\"]?\s*[:=]\s*['\"]?)([^'\"\s,}}]+)"
+        redacted = re.sub(pattern, r"\1<redacted>", redacted, flags=re.IGNORECASE)
     if len(redacted) > max_len:
         return redacted[:max_len] + "…<truncated>"
     return redacted
@@ -271,6 +274,8 @@ def _append_cleanup_error_to_manifest(
     else:
         manifest = {}
     manifest["cleanup_error"] = payload
+    if manifest.get("status") == "passed":
+        manifest["status"] = "passed_with_cleanup_error"
     _write_json(manifest_path, manifest)
     if manifest_sink is not None:
         manifest_sink["cleanup_error"] = payload
@@ -413,7 +418,9 @@ def _run_full_loop_via_exec(
         result = json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise MatrixError(
-            f"full_loop did not emit JSON on stdout: {stdout!r}\nstderr={proc.stderr!r}"
+            "full_loop did not emit JSON on stdout: "
+            f"{_sanitize_error_text(stdout)!r}\n"
+            f"stderr={_sanitize_error_text(proc.stderr)!r}"
         ) from exc
     if not isinstance(result, dict):
         raise MatrixError(f"unexpected full_loop result type: {type(result)!r}")
@@ -474,7 +481,8 @@ def run_scenario(
         if proc.returncode != 0:
             raise MatrixError(
                 f"compose up failed (exit={proc.returncode}):\n"
-                f"{proc.stdout}\n{proc.stderr}"
+                f"{_sanitize_error_text(proc.stdout)}\n"
+                f"{_sanitize_error_text(proc.stderr)}"
             )
         _wait_stack_healthy(project, compose_files, stack_timeout_s)
 
@@ -721,6 +729,8 @@ def main(argv: list[str] | None = None) -> int:
                 "compose_project_name": manifest.get("compose_project_name"),
                 "final_statuses": (manifest.get("result") or {}).get("final_statuses"),
             }
+            if manifest.get("cleanup_error"):
+                summary["results"][scenario]["cleanup_error"] = manifest["cleanup_error"]
             active_run["manifest"] = manifest
         except Exception as exc:
             failed_manifest_path = artifact_root / scenario / "manifest.json"
