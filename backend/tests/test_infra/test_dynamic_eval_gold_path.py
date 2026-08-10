@@ -6,10 +6,14 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 
 from app.api.v1 import schemas as s
+from app.api.v1.deps import get_event_service, reset_deps
+from app.main import app
 from app.models.enums import EventStatus, WritebackReadiness
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -21,6 +25,10 @@ ENV_EXAMPLE = REPO_ROOT / ".env.example"
 DEPLOYMENT_DOC = REPO_ROOT / "docs" / "deployment.md"
 MAKEFILE_PATH = REPO_ROOT / "Makefile"
 SEED_PATH = SCRIPTS / "seed_mock_xdr_and_ingest.py"
+
+_DEV_TOKENS = json.dumps(
+    {"analyst-token": {"subject": "analyst-1", "roles": ["analyst"]}},
+)
 
 
 def _load_module(path: Path, name: str):
@@ -270,6 +278,58 @@ def test_unwrap_event_detail_payload_rejects_event_id_mismatch(approve_mod) -> N
         approve_mod.unwrap_event_detail_payload(payload, expected_event_id="evt-expected")
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        "not-a-dict",
+        None,
+    ],
+)
+def test_unwrap_event_detail_payload_rejects_non_dict_payload(
+    approve_mod,
+    payload: Any,
+) -> None:
+    with pytest.raises(approve_mod.DynamicEvalApiError, match="unexpected event payload"):
+        approve_mod.unwrap_event_detail_payload(payload)
+
+
+def test_unwrap_event_detail_payload_rejects_missing_event_and_event_id(
+    approve_mod,
+) -> None:
+    with pytest.raises(approve_mod.DynamicEvalApiError, match="unexpected event payload"):
+        approve_mod.unwrap_event_detail_payload({"writeback_required": False})
+
+
+def test_unwrap_event_detail_payload_rejects_empty_event_id(approve_mod) -> None:
+    with pytest.raises(approve_mod.DynamicEvalApiError, match="unexpected event payload"):
+        approve_mod.unwrap_event_detail_payload({"event_id": ""})
+
+
+def test_unwrap_event_detail_payload_rejects_non_string_event_id(approve_mod) -> None:
+    with pytest.raises(approve_mod.DynamicEvalApiError, match="unexpected event payload"):
+        approve_mod.unwrap_event_detail_payload({"event_id": 123})
+
+
+def test_unwrap_event_detail_payload_falls_back_when_event_null_and_flat_event_id_present(
+    approve_mod,
+) -> None:
+    flat = s.example_security_event("evt-null-event").model_dump(mode="json")
+    payload = {"event": None, **flat}
+    event = approve_mod.unwrap_event_detail_payload(
+        payload,
+        expected_event_id="evt-null-event",
+    )
+    assert event["event_id"] == "evt-null-event"
+
+
+def test_unwrap_event_detail_payload_rejects_event_null_without_flat_event_id(
+    approve_mod,
+) -> None:
+    with pytest.raises(approve_mod.DynamicEvalApiError, match="unexpected event payload"):
+        approve_mod.unwrap_event_detail_payload({"event": None, "writeback_required": False})
+
+
 def test_collection_status_from_event_after_unwrap(full_loop_mod, approve_mod) -> None:
     payload = _example_event_detail_payload(
         event_id="evt-evidence",
@@ -289,7 +349,11 @@ def test_openapi_get_event_detail_returns_event_detail_response() -> None:
     )
     assert schema_ref.endswith("/EventDetailResponse")
     required = set(spec["components"]["schemas"]["EventDetailResponse"]["required"])
-    assert {"event", "writeback_required", "writeback_readiness"}.issubset(required)
+    assert required == {"event", "writeback_required", "writeback_readiness"}
+    event_ref = spec["components"]["schemas"]["EventDetailResponse"]["properties"]["event"][
+        "$ref"
+    ]
+    assert event_ref.endswith("/SecurityEvent")
 
 
 def test_get_event_unwraps_event_detail_response(full_loop_mod, approve_mod) -> None:
@@ -304,6 +368,81 @@ def test_get_event_unwraps_event_detail_response(full_loop_mod, approve_mod) -> 
     event = full_loop_mod.get_event(_Client(), "evt-detail")
     assert event["event_id"] == "evt-detail"
     assert event["status"] == "closed"
+
+
+def test_get_event_unwraps_legacy_flat_event(full_loop_mod) -> None:
+    flat = s.example_security_event("evt-flat-get").model_dump(mode="json")
+
+    class _Client:
+        def get_json(self, path: str):
+            assert path == "/api/v1/events/evt-flat-get"
+            return flat
+
+    event = full_loop_mod.get_event(_Client(), "evt-flat-get")
+    assert event["event_id"] == "evt-flat-get"
+
+
+def test_get_event_raises_on_unexpected_payload(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            return {"writeback_required": False}
+
+    with pytest.raises(full_loop_mod.DynamicEvalApiError, match="unexpected event payload"):
+        full_loop_mod.get_event(_Client(), "evt-bad")
+
+
+def test_get_event_detail_testclient_response_unwraps_for_gold_path(
+    approve_mod,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live GET detail JSON must parse through gold-path unwrap helper."""
+    from app.core.config import get_settings
+
+    bridge_event = s.example_security_event("evt-bridge").model_copy(
+        update={"title": "ISSUE-295 unwrap bridge"},
+    )
+
+    class _StubEventService:
+        async def get_event(self, event_id: str):
+            if event_id != bridge_event.event_id:
+                return None
+            return bridge_event
+
+    monkeypatch.setenv("DEV_AUTH_TOKENS", _DEV_TOKENS)
+    monkeypatch.setenv("ALLOW_LIVE_SIDE_EFFECTS", "false")
+    monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
+    monkeypatch.setenv("LLM_MODE", "mock")
+    monkeypatch.setenv("TOOL_MODE", "mock")
+    monkeypatch.setenv("SOURCE_MODE", "mock_xdr")
+    monkeypatch.setenv("DISPOSITION_MODE", "mock_xdr")
+    monkeypatch.setenv("SIMULATION_ENABLED", "true")
+    monkeypatch.setenv("TASK_MODE", "background")
+    get_settings.cache_clear()
+
+    reset_deps()
+    app.dependency_overrides.clear()
+
+    async def _override_event_service() -> _StubEventService:
+        return _StubEventService()
+
+    app.dependency_overrides[get_event_service] = _override_event_service
+    client = TestClient(app)
+    resp = client.get(
+        f"/api/v1/events/{bridge_event.event_id}",
+        headers={"Authorization": "Bearer analyst-token"},
+    )
+    assert resp.status_code == 200
+    payload = resp.json()
+    event = approve_mod.unwrap_event_detail_payload(
+        payload,
+        expected_event_id=bridge_event.event_id,
+    )
+    assert event["event_id"] == bridge_event.event_id
+    assert event["title"] == "ISSUE-295 unwrap bridge"
+    assert "writeback_required" in payload
+    assert "writeback_readiness" in payload
+    app.dependency_overrides.clear()
+    reset_deps()
 
 
 def test_run_gold_loop_fails_fast_when_waiting_without_actions(full_loop_mod) -> None:
