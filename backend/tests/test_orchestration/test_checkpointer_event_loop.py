@@ -15,6 +15,7 @@ from app.core.redis_client import RedisClient, is_event_loop_error
 from app.orchestration.checkpointer import (
     CheckpointPersistenceError,
     RedisCheckpointer,
+    checkpoint_generation_key_for_event,
     checkpoint_key_for_event,
     get_checkpoint_health,
     reset_checkpoint_health_state_for_tests,
@@ -106,6 +107,13 @@ def test_checkpointer_persist_load_across_celery_style_runs(
     root.addHandler(handler)
     try:
 
+        async def _cleanup_keys() -> None:
+            redis = deps._get_redis()
+            client = redis.get_client()
+            for event_id in (event_a, event_b):
+                await client.delete(checkpoint_key_for_event(event_id))
+                await client.delete(checkpoint_generation_key_for_event(event_id))
+
         async def _investigate_persist(event_id: str) -> None:
             redis = deps._get_redis()
             saver = await RedisCheckpointer.create(redis)
@@ -133,6 +141,7 @@ def test_checkpointer_persist_load_across_celery_style_runs(
             assert event_id in saver._memory.storage
 
         # investigate → release → investigate → release → resume ×2
+        asyncio.run(_cleanup_keys())
         asyncio.run(_investigate_persist(event_a))
         _release_celery_task_loop_resources()
         asyncio.run(_investigate_persist(event_b))
@@ -181,10 +190,14 @@ async def test_persist_recovers_from_event_loop_error_without_sticky_fallback() 
 
         async def eval(self, script: str, numkeys: int, *args: object) -> int:
             del numkeys
-            if "checkpoint-reserve-generation-v2" in script:
-                sequence_key, generation_key, _ttl = args
+            if "checkpoint-reserve-generation-v3" in script:
+                sequence_key, generation_key, _ttl, expected = args
                 assert isinstance(sequence_key, str)
                 assert isinstance(generation_key, str)
+                expected_i = int(expected)  # type: ignore[arg-type]
+                current = int(self.values.get(generation_key, b"0"))
+                if expected_i >= 0 and current != expected_i:
+                    return -1
                 generation = int(self.values.get(sequence_key, b"0")) + 1
                 self.values[sequence_key] = str(generation).encode()
                 self.values[generation_key] = str(generation).encode()
@@ -385,10 +398,14 @@ async def test_hydrate_recovers_from_event_loop_error_without_sticky_fallback() 
 
         async def eval(self, script: str, numkeys: int, *args: object) -> int:
             del numkeys
-            if "checkpoint-reserve-generation-v2" in script:
-                sequence_key, generation_key, _ttl = args
+            if "checkpoint-reserve-generation-v3" in script:
+                sequence_key, generation_key, _ttl, expected = args
                 assert isinstance(sequence_key, str)
                 assert isinstance(generation_key, str)
+                expected_i = int(expected)  # type: ignore[arg-type]
+                current = int(self.values.get(generation_key, b"0"))
+                if expected_i >= 0 and current != expected_i:
+                    return -1
                 generation = int(self.values.get(sequence_key, b"0")) + 1
                 self.values[sequence_key] = str(generation).encode()
                 self.values[generation_key] = str(generation).encode()
@@ -458,6 +475,13 @@ def test_checkpointer_survives_consecutive_asyncio_run_without_strategy_b_releas
     """Defense-in-depth: same RedisClient + saver across loops without Strategy B."""
     redis = RedisClient(url=REDIS_URL, max_connections=2)
     event_id = "evt-issue252-no-release"
+    checkpoint_key = checkpoint_key_for_event(event_id)
+    generation_key = checkpoint_generation_key_for_event(event_id)
+
+    async def _cleanup() -> None:
+        client = redis.get_client()
+        await client.delete(checkpoint_key)
+        await client.delete(generation_key)
 
     async def _persist_round() -> None:
         saver = await RedisCheckpointer.create(redis)
@@ -480,9 +504,52 @@ def test_checkpointer_survives_consecutive_asyncio_run_without_strategy_b_releas
         assert event_id in saver._memory.storage
 
     try:
+        asyncio.run(_cleanup())
         asyncio.run(_persist_round())
         asyncio.run(_hydrate_round())
         health = get_checkpoint_health()
         assert health["memory_fallback"] is False
+    finally:
+        asyncio.run(redis.aclose())
+
+
+@pytest.mark.skipif(not _redis_reachable(), reason="Redis not reachable")
+def test_real_redis_lua_rejects_stale_writer_basis() -> None:
+    """ISSUE-284: exercise reserve/publish Lua on real Redis (not the SQLite double)."""
+    redis = RedisClient(url=REDIS_URL, max_connections=2)
+    thread_id = "evt-issue284-real-redis-fence"
+    checkpoint_key = checkpoint_key_for_event(thread_id)
+    generation_key = checkpoint_generation_key_for_event(thread_id)
+
+    async def _run() -> None:
+        client = redis.get_client()
+        await client.delete(checkpoint_key)
+        await client.delete(generation_key)
+        seed = await RedisCheckpointer.create(redis)
+        seed._memory.storage[thread_id] = {"state": "N"}
+        await seed._persist(thread_id)
+        basis = int(await client.get(generation_key) or b"0")
+        assert basis > 0
+
+        process_b = await RedisCheckpointer.create(redis)
+        await process_b._hydrate(thread_id)
+        assert process_b._thread_basis_generation[thread_id] == basis
+
+        process_a = await RedisCheckpointer.create(redis)
+        await process_a._hydrate(thread_id)
+        process_a._memory.storage[thread_id] = {"state": "N+1"}
+        # Advance fence without publishing by reserving then deleting payload.
+        await process_a._advance_generation_fence(thread_id, op="generation fence", expected=basis)
+        await client.delete(checkpoint_key)
+        advanced = int(await client.get(generation_key) or b"0")
+        assert advanced > basis
+
+        process_b._memory.storage[thread_id] = {"state": "stale-from-N"}
+        with pytest.raises(CheckpointPersistenceError, match="stale basis"):
+            await process_b._persist(thread_id)
+        assert await client.get(checkpoint_key) is None
+
+    try:
+        asyncio.run(_run())
     finally:
         asyncio.run(redis.aclose())

@@ -36,8 +36,16 @@ CHECKPOINT_GENERATION_KEY_PREFIX = "shadowtrace:checkpoint-generation:"
 CHECKPOINT_GENERATION_SEQUENCE_KEY = "shadowtrace:checkpoint-generation-sequence"
 CHECKPOINT_TTL_SECONDS = 7 * 24 * 60 * 60
 
+# ARGV[1]=ttl, ARGV[2]=expected fence (-1 = force advance for cleanup/tombstone).
+# When expected >= 0, refuse must still equal the caller's loaded/persisted basis
+# before a new generation is allocated — blocking stale writers from minting N+2.
 _CHECKPOINT_RESERVE_SCRIPT = """
--- checkpoint-reserve-generation-v2
+-- checkpoint-reserve-generation-v3
+local expected = tonumber(ARGV[2])
+local current = tonumber(redis.call('GET', KEYS[2]) or '0')
+if expected >= 0 and current ~= expected then
+  return -1
+end
 local generation = redis.call('INCR', KEYS[1])
 redis.call('SET', KEYS[2], generation, 'EX', ARGV[1])
 return generation
@@ -52,6 +60,10 @@ end
 redis.call('SET', KEYS[1], ARGV[2], 'EX', ARGV[3])
 return 1
 """
+
+_PERSIST_TRANSIENT_RETRIES = 2
+_PERSIST_TRANSIENT_BACKOFF_S = 0.05
+_FORCE_GENERATION_EXPECTED = -1
 
 _PROCESS_LAST_FALLBACK_REMINDER_AT = 0.0
 _CHECKPOINTERS: weakref.WeakSet[Any] = weakref.WeakSet()
@@ -148,6 +160,9 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         self._last_recovery_probe_at = 0.0
         self._memory_pinned_threads: set[str] = set()
         self._persistence_failed_threads: set[str] = set()
+        # Last Redis generation this saver loaded or successfully published.
+        # Persist refuses to mint a newer generation unless the fence still matches.
+        self._thread_basis_generation: dict[str, int] = {}
         self._thread_locks: dict[
             str,
             tuple[asyncio.AbstractEventLoop, asyncio.Lock],
@@ -269,6 +284,25 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         if callable(rebind):
             await rebind()
 
+    @staticmethod
+    def _is_transient_redis_error(exc: BaseException) -> bool:
+        if isinstance(exc, (ConnectionError, TimeoutError, asyncio.TimeoutError, OSError)):
+            return True
+        name = type(exc).__name__.lower()
+        if "timeout" in name or "connection" in name:
+            return True
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "timeout",
+                "connection",
+                "temporarily unavailable",
+                "try again",
+                "broken pipe",
+            )
+        )
+
     async def _redis_call_with_loop_retry(
         self,
         op: str,
@@ -289,6 +323,29 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
             result = await awaitable_factory()
             record_checkpoint_loop_rebind(op=op)
             return result
+
+    async def _redis_call_with_transient_retry(
+        self,
+        op: str,
+        awaitable_factory: Any,
+    ) -> Any:
+        """Retry transient Redis I/O; event-loop rebind still happens per attempt."""
+        attempt = 0
+        while True:
+            try:
+                return await self._redis_call_with_loop_retry(op, awaitable_factory)
+            except Exception as exc:
+                if attempt >= _PERSIST_TRANSIENT_RETRIES or not self._is_transient_redis_error(exc):
+                    raise
+                attempt += 1
+                logger.warning(
+                    "checkpoint Redis %s transient failure (attempt %s/%s); retrying",
+                    op,
+                    attempt,
+                    _PERSIST_TRANSIENT_RETRIES,
+                    exc_info=True,
+                )
+                await asyncio.sleep(_PERSIST_TRANSIENT_BACKOFF_S * attempt)
 
     def _enable_memory_fallback(self, message: str, *, exc_info: bool = False) -> None:
         global _PROCESS_LAST_FALLBACK_REMINDER_AT
@@ -359,8 +416,15 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         self._mark_sync_nonrecoverable()
         self._memory.delete_thread(thread_id)
 
+    def _ensure_thread_readable(self, thread_id: str) -> None:
+        if thread_id in self._persistence_failed_threads:
+            raise CheckpointPersistenceError(
+                f"checkpoint read blocked after prior persistence failure for thread_id={thread_id}"
+            )
+
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         thread_id = str(config["configurable"]["thread_id"])
+        self._ensure_thread_readable(thread_id)
         await self._maybe_attempt_redis_recovery()
         await self._hydrate(thread_id)
         return self._memory.get_tuple(config)
@@ -375,6 +439,7 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
     ) -> AsyncIterator[CheckpointTuple]:
         if config is not None:
             thread_id = str(config["configurable"]["thread_id"])
+            self._ensure_thread_readable(thread_id)
             await self._maybe_attempt_redis_recovery()
             await self._hydrate(thread_id)
         for item in self._memory.list(config, filter=filter, before=before, limit=limit):
@@ -406,14 +471,28 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         await self._persist(thread_id)
 
     def _thread_lock(self, thread_id: str) -> asyncio.Lock:
-        """Return a per-thread lock scoped to the active event loop."""
+        """Return a per-thread lock scoped to the active event loop.
+
+        Idle locks may be rebound after a Celery loop recycle.  A lock still held
+        on another loop means concurrent cross-loop use of the same saver, which
+        is rejected instead of silently replacing the in-flight mutex.
+        """
         loop = asyncio.get_running_loop()
         existing = self._thread_locks.get(thread_id)
-        if existing is None or existing[0] is not loop:
+        if existing is None:
             lock = asyncio.Lock()
             self._thread_locks[thread_id] = (loop, lock)
             return lock
-        return existing[1]
+        existing_loop, lock = existing
+        if existing_loop is loop:
+            return lock
+        if lock.locked():
+            raise CheckpointPersistenceError(
+                f"checkpoint thread lock is held on another event loop for thread_id={thread_id}"
+            )
+        rebound = asyncio.Lock()
+        self._thread_locks[thread_id] = (loop, rebound)
+        return rebound
 
     async def adelete_thread(self, thread_id: str) -> None:
         async with self._thread_lock(thread_id):
@@ -423,19 +502,26 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         had_persistence_failure = thread_id in self._persistence_failed_threads
         self._memory.delete_thread(thread_id)
         self._memory_pinned_threads.discard(thread_id)
+        self._thread_basis_generation.pop(thread_id, None)
         if self._redis is None:
+            self._thread_locks.pop(thread_id, None)
             return
         redis = self._redis
         try:
-            # Advance the tombstone before deleting the payload.  A pinned thread
-            # may still have an older Redis value, and a late publisher must not
-            # be able to make that value loadable again after cleanup.
-            await self._advance_generation_fence(thread_id, op="cleanup fence")
+            # Force-advance the fence before deleting the payload.  A pinned
+            # thread may still have an older Redis value, and a late publisher
+            # must not be able to make that value loadable again after cleanup.
+            await self._advance_generation_fence(
+                thread_id,
+                op="cleanup fence",
+                expected=_FORCE_GENERATION_EXPECTED,
+            )
             await self._redis_call_with_loop_retry(
                 "delete",
                 lambda: redis.get_client().delete(checkpoint_key_for_event(thread_id)),
             )
             self._persistence_failed_threads.discard(thread_id)
+            self._thread_locks.pop(thread_id, None)
         except Exception as exc:
             if had_persistence_failure:
                 self._persistence_failed_threads.add(thread_id)
@@ -526,6 +612,9 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
                     )
                     return
                 self._import(thread_id, value)
+                self._thread_basis_generation[thread_id] = (
+                    fence_generation if fence_generation > 0 else payload_generation
+                )
         except Exception as exc:
             self._pin_thread_to_memory(thread_id)
             if is_event_loop_error(exc):
@@ -562,13 +651,19 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         self._persistence_failed_threads.add(thread_id)
         self._enable_memory_fallback(message, exc_info=exc_info)
 
-    async def _advance_generation_fence(self, thread_id: str, *, op: str) -> int:
+    async def _advance_generation_fence(
+        self,
+        thread_id: str,
+        *,
+        op: str,
+        expected: int,
+    ) -> int:
         redis = self._redis
         if redis is None:
             raise CheckpointPersistenceError(
                 f"checkpoint generation fence unavailable for thread_id={thread_id}"
             )
-        generation = await self._redis_call_with_loop_retry(
+        generation = await self._redis_call_with_transient_retry(
             op,
             lambda: redis.get_client().eval(
                 _CHECKPOINT_RESERVE_SCRIPT,
@@ -576,13 +671,19 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
                 CHECKPOINT_GENERATION_SEQUENCE_KEY,
                 checkpoint_generation_key_for_event(thread_id),
                 self._ttl_seconds,
+                expected,
             ),
         )
         return int(generation)
 
     async def _reserve_generation(self, thread_id: str) -> int:
+        expected = self._thread_basis_generation.get(thread_id, 0)
         try:
-            return await self._advance_generation_fence(thread_id, op="generation fence")
+            generation = await self._advance_generation_fence(
+                thread_id,
+                op="generation fence",
+                expected=expected,
+            )
         except Exception as exc:
             # If the fence itself cannot advance, remove the old payload when
             # possible.  Either outcome is explicit: execution halts here.
@@ -595,6 +696,16 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
             raise CheckpointPersistenceError(
                 f"checkpoint generation fence failed for thread_id={thread_id}"
             ) from exc
+        if generation < 0:
+            self._mark_persistence_failure(
+                thread_id,
+                "Redis checkpoint generation fence rejected stale writer basis",
+            )
+            raise CheckpointPersistenceError(
+                f"checkpoint generation fence rejected stale basis "
+                f"for thread_id={thread_id} expected={expected}"
+            )
+        return generation
 
     async def _publish(self, thread_id: str, generation: int, raw: bytes) -> None:
         redis = self._redis
@@ -603,7 +714,7 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
                 f"checkpoint publish unavailable for thread_id={thread_id}"
             )
         try:
-            published = await self._redis_call_with_loop_retry(
+            published = await self._redis_call_with_transient_retry(
                 "persist",
                 lambda: redis.get_client().eval(
                     _CHECKPOINT_PUBLISH_SCRIPT,
@@ -655,6 +766,7 @@ class RedisCheckpointer(BaseCheckpointSaver[str]):
         raw = self._export(thread_id, generation=generation)
         if raw is not None:
             await self._publish(thread_id, generation, raw)
+            self._thread_basis_generation[thread_id] = generation
 
 
 async def build_checkpointer(

@@ -24,10 +24,18 @@ from app.orchestration.checkpointer import (
 
 
 class FakeRedisStore:
-    def __init__(self, *, fail_set: bool = False, fail_incr: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_set: bool = False,
+        fail_incr: bool = False,
+        fail_set_times: int = 0,
+    ) -> None:
         self.values: dict[str, bytes] = {}
         self.fail_set = fail_set
         self.fail_incr = fail_incr
+        self.fail_set_times = fail_set_times
+        self.set_attempts = 0
 
     async def get(self, key: str) -> bytes | None:
         return self.values.get(key)
@@ -50,12 +58,16 @@ class FakeRedisStore:
 
     async def eval(self, script: str, numkeys: int, *args: object) -> int:
         del numkeys
-        if "checkpoint-reserve-generation-v2" in script:
-            sequence_key, generation_key, _ttl = args
+        if "checkpoint-reserve-generation-v3" in script:
+            sequence_key, generation_key, _ttl, expected = args
             assert isinstance(sequence_key, str)
             assert isinstance(generation_key, str)
+            expected_i = int(expected)  # type: ignore[arg-type]
             if self.fail_incr:
                 raise ConnectionError("redis generation reserve failed")
+            current = int(self.values.get(generation_key, b"0"))
+            if expected_i >= 0 and current != expected_i:
+                return -1
             generation = int(self.values.get(sequence_key, b"0")) + 1
             self.values[sequence_key] = str(generation).encode()
             self.values[generation_key] = str(generation).encode()
@@ -68,7 +80,8 @@ class FakeRedisStore:
         assert isinstance(generation_key, str)
         assert isinstance(generation, int)
         assert isinstance(value, bytes)
-        if self.fail_set:
+        self.set_attempts += 1
+        if self.fail_set or self.set_attempts <= self.fail_set_times:
             raise ConnectionError("redis set failed")
         current = int(self.values.get(generation_key, b"0"))
         if current != generation:
@@ -99,7 +112,7 @@ class FakeRedisClient:
 
 
 class _SharedRedisStore:
-    """SQLite-backed Redis double used by the real process-boundary artifact."""
+    """SQLite Redis-protocol double for OS-process fencing (not real Redis Lua)."""
 
     def __init__(self, database_path: str, *, fail_set: bool) -> None:
         self.database_path = database_path
@@ -142,10 +155,17 @@ class _SharedRedisStore:
         del numkeys
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            if "checkpoint-reserve-generation-v2" in script:
-                sequence_key, generation_key, _ttl = args
+            if "checkpoint-reserve-generation-v3" in script:
+                sequence_key, generation_key, _ttl, expected = args
                 assert isinstance(sequence_key, str)
                 assert isinstance(generation_key, str)
+                expected_i = int(expected)  # type: ignore[arg-type]
+                fence_row = connection.execute(
+                    "SELECT value FROM checkpoint_kv WHERE key = ?", (generation_key,)
+                ).fetchone()
+                current = int(fence_row[0]) if fence_row is not None else 0
+                if expected_i >= 0 and current != expected_i:
+                    return -1
                 row = connection.execute(
                     "SELECT value FROM checkpoint_kv WHERE key = ?", (sequence_key,)
                 ).fetchone()
@@ -203,6 +223,8 @@ def _process_persist(
     async def _run() -> None:
         redis = _SharedRedisClient(database_path, fail_set=fail_set)
         saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+        # Hydrate first so the writer basis matches any existing fence (production path).
+        await saver._hydrate(thread_id)
         saver._memory.storage[thread_id] = {"state": state}
         try:
             await saver._persist(thread_id)
@@ -390,6 +412,7 @@ async def test_failed_persist_fences_stale_checkpoint_from_new_saver() -> None:
     assert redis.store.values[generation_key] == b"1"
 
     process_a = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    await process_a._hydrate(thread_id)
     process_a._memory.storage[thread_id] = {"state": "N+1"}
     redis.store.fail_set = True
     with pytest.raises(CheckpointPersistenceError, match="publish"):
@@ -402,6 +425,70 @@ async def test_failed_persist_fences_stale_checkpoint_from_new_saver() -> None:
     process_b = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
     await process_b._hydrate(thread_id)
     assert thread_id not in process_b._memory.storage
+
+
+@pytest.mark.asyncio
+async def test_stale_hydrated_writer_cannot_persist_after_generation_fence_advance() -> None:
+    """ISSUE-284 blocker: hydrated B must not mint N+2 from stale memory after A fails N+1."""
+    redis = FakeRedisClient()
+    thread_id = "evt-stale-hydrated-writer"
+    checkpoint_key = checkpoint_key_for_event(thread_id)
+    generation_key = checkpoint_generation_key_for_event(thread_id)
+
+    seed = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    seed._memory.storage[thread_id] = {"state": "N"}
+    await seed._persist(thread_id)
+    persisted_n = redis.store.values[checkpoint_key]
+
+    process_b = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    await process_b._hydrate(thread_id)
+    assert process_b._thread_basis_generation[thread_id] == 1
+
+    process_a = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    await process_a._hydrate(thread_id)
+    process_a._memory.storage[thread_id] = {"state": "N+1"}
+    redis.store.fail_set = True
+    with pytest.raises(CheckpointPersistenceError, match="publish"):
+        await process_a._persist(thread_id)
+    assert redis.store.values[generation_key] == b"2"
+    redis.store.fail_set = False
+
+    process_b._memory.storage[thread_id] = {"state": "stale-from-N"}
+    with pytest.raises(CheckpointPersistenceError, match="stale basis"):
+        await process_b._persist(thread_id)
+
+    assert redis.store.values[checkpoint_key] == persisted_n
+    assert redis.store.values[generation_key] == b"2"
+    reader = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    await reader._hydrate(thread_id)
+    assert thread_id not in reader._memory.storage
+
+
+@pytest.mark.asyncio
+async def test_aget_tuple_fail_closed_after_persist_failure() -> None:
+    redis = FakeRedisClient()
+    thread_id = "evt-read-after-fail"
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    saver._memory.storage[thread_id] = {"state": "N"}
+    redis.store.fail_set = True
+    with pytest.raises(CheckpointPersistenceError, match="publish"):
+        await saver._persist(thread_id)
+
+    with pytest.raises(CheckpointPersistenceError, match="read blocked"):
+        await saver.aget_tuple(_config(thread_id))
+
+
+@pytest.mark.asyncio
+async def test_transient_persist_publish_failure_retries_then_succeeds() -> None:
+    redis = FakeRedisClient()
+    redis.store.fail_set_times = 1
+    thread_id = "evt-transient-retry"
+    saver = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    saver._memory.storage[thread_id] = {"state": "durable"}
+    await saver._persist(thread_id)
+    assert redis.store.set_attempts == 2
+    assert checkpoint_key_for_event(thread_id) in redis.store.values
+    assert thread_id not in saver._persistence_failed_threads
 
 
 @pytest.mark.asyncio
@@ -434,7 +521,10 @@ async def test_legacy_checkpoint_loads_only_when_no_generation_fence_exists() ->
 def test_failed_persist_cannot_resurrect_stale_checkpoint_across_os_processes(
     tmp_path: Path,
 ) -> None:
-    """Repeatable ISSUE-284 artifact: seed N, fail A/N+1, then start B."""
+    """OS-process artifact via SQLite Redis double (not real Redis EVAL).
+
+    Seed N → process A fails N+1 → process B hydrate must not revive N.
+    """
     context = multiprocessing.get_context("spawn")
     database_path = str(tmp_path / "cross-process-checkpoint.sqlite3")
     results = context.Queue()
@@ -479,6 +569,7 @@ async def test_failed_generation_fence_deletes_stale_checkpoint_and_halts() -> N
     assert checkpoint_key_for_event(thread_id) in redis.store.values
 
     process_a = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    await process_a._hydrate(thread_id)
     process_a._memory.storage[thread_id] = {"state": "N+1"}
     redis.store.fail_incr = True
     with pytest.raises(CheckpointPersistenceError, match="fence"):
@@ -490,28 +581,35 @@ async def test_failed_generation_fence_deletes_stale_checkpoint_and_halts() -> N
 
 
 @pytest.mark.asyncio
-async def test_late_lower_generation_cannot_overwrite_latest_checkpoint() -> None:
+async def test_concurrent_generation_writers_from_same_basis_only_one_advances() -> None:
+    """Two hydrated writers racing from basis N: exactly one publish wins."""
     redis = FakeRedisClient()
     thread_id = "evt-concurrent-generation"
+    seed = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    seed._memory.storage[thread_id] = {"state": "N"}
+    await seed._persist(thread_id)
+
     slower = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
     faster = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    await slower._hydrate(thread_id)
+    await faster._hydrate(thread_id)
+    slower._memory.storage[thread_id] = {"state": "from-slower"}
+    faster._memory.storage[thread_id] = {"state": "from-faster"}
 
-    slower._memory.storage[thread_id] = {"state": "N+1"}
-    slow_generation = await slower._reserve_generation(thread_id)
-    slow_payload = slower._export(thread_id, generation=slow_generation)
-    faster._memory.storage[thread_id] = {"state": "N+2"}
-    fast_generation = await faster._reserve_generation(thread_id)
-    fast_payload = faster._export(thread_id, generation=fast_generation)
+    outcomes = await asyncio.gather(
+        slower._persist(thread_id),
+        faster._persist(thread_id),
+        return_exceptions=True,
+    )
+    errors = [item for item in outcomes if isinstance(item, BaseException)]
+    successes = [item for item in outcomes if not isinstance(item, BaseException)]
+    assert len(successes) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], CheckpointPersistenceError)
 
-    assert slow_payload is not None
-    assert fast_payload is not None
-    await faster._publish(thread_id, fast_generation, fast_payload)
-    with pytest.raises(CheckpointPersistenceError, match="superseded"):
-        await slower._publish(thread_id, slow_generation, slow_payload)
-
-    process_b = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
-    await process_b._hydrate(thread_id)
-    assert process_b._memory.storage[thread_id] == {"state": "N+2"}
+    reader = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    await reader._hydrate(thread_id)
+    assert reader._memory.storage[thread_id]["state"] in {"from-slower", "from-faster"}
 
 
 @pytest.mark.asyncio
@@ -532,7 +630,11 @@ async def test_same_saver_serializes_concurrent_persists_for_one_thread() -> Non
 
 @pytest.mark.asyncio
 async def test_generation_is_not_reused_after_thread_fence_expires() -> None:
-    """Global sequence prevents an old generation-1 publisher from winning an ABA race."""
+    """Global sequence prevents an old generation-1 publisher from winning an ABA race.
+
+    Fence expiry is simulated by deleting the per-thread fence key; the global
+    sequence key is retained (as Redis would keep a non-TTL sequence key).
+    """
     redis = FakeRedisClient()
     thread_id = "evt-generation-aba"
     old_process = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
@@ -566,10 +668,20 @@ async def test_pinned_cleanup_removes_loadable_checkpoint_and_keeps_fence() -> N
 
     assert checkpoint_key_for_event(thread_id) not in redis.store.values
     assert int(redis.store.values[checkpoint_generation_key_for_event(thread_id)]) >= 2
+    assert thread_id not in saver._thread_locks
+    assert thread_id not in saver._thread_basis_generation
 
     process_b = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
     await process_b._hydrate(thread_id)
     assert thread_id not in process_b._memory.storage
+
+    # Stale hydrated writer after cleanup must not recreate a loadable payload.
+    stale = await RedisCheckpointer.create(redis)  # type: ignore[arg-type]
+    stale._thread_basis_generation[thread_id] = 1
+    stale._memory.storage[thread_id] = {"state": "post-cleanup-stale"}
+    with pytest.raises(CheckpointPersistenceError, match="stale basis"):
+        await stale._persist(thread_id)
+    assert checkpoint_key_for_event(thread_id) not in redis.store.values
 
 
 @pytest.mark.asyncio
