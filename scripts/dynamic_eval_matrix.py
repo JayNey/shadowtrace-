@@ -138,17 +138,25 @@ class _CleanupRegistry:
 
     def __init__(self) -> None:
         self._project: str | None = None
+        self._fresh_volumes: bool = True
         self._compose_files: list[Path] = [_BASE_COMPOSE, _EVAL_COMPOSE]
 
-    def set_project(self, project: str | None) -> None:
+    def set_project(
+        self,
+        project: str | None,
+        *,
+        fresh_volumes: bool = True,
+    ) -> None:
         self._project = project
+        if project is not None:
+            self._fresh_volumes = fresh_volumes
 
     def cleanup(self) -> None:
         project = self._project
         if not project:
             return
         print(f"[dynamic-eval-matrix] cleanup project={project}", file=sys.stderr)
-        _compose_down(project, self._compose_files, volumes=True)
+        _compose_down(project, self._compose_files, volumes=self._fresh_volumes)
 
 
 _CLEANUP = _CleanupRegistry()
@@ -205,10 +213,10 @@ def _compose_down(
         cmd.append("-v")
     proc = _run(cmd, capture=True, check=False)
     if proc.returncode != 0:
-        print(
-            f"[dynamic-eval-matrix] WARN compose down failed "
-            f"project={project} exit={proc.returncode}",
-            file=sys.stderr,
+        detail = _sanitize_error_text((proc.stderr or proc.stdout or "").strip())
+        raise MatrixError(
+            f"compose down failed project={project} exit={proc.returncode}"
+            + (f": {detail}" if detail else "")
         )
 
 
@@ -361,6 +369,7 @@ def _run_full_loop_via_exec(
         cmd.extend(["--event-id", event_id])
     if require_closed:
         cmd.append("--require-closed")
+        cmd.append("--generate-report")
 
     print(
         f"[dynamic-eval-matrix] full_loop scenario={scenario} "
@@ -400,6 +409,7 @@ def run_scenario(
     poll_interval_s: float,
     max_events: int,
     build: bool,
+    manifest_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     project = _scenario_project_name(scenario, run_id)
     compose_files = [_BASE_COMPOSE, _EVAL_COMPOSE]
@@ -413,8 +423,11 @@ def run_scenario(
         "require_closed": require_closed,
         "profile": "strict" if require_closed else "compat",
     }
+    if manifest_sink is not None:
+        manifest_sink.clear()
+        manifest_sink.update(manifest)
 
-    _CLEANUP.set_project(project)
+    _CLEANUP.set_project(project, fresh_volumes=fresh_volumes)
     started = time.monotonic()
     try:
         up_cmd = _compose_cmd(
@@ -453,6 +466,8 @@ def run_scenario(
         )
         manifest["seed_summary"] = seed_summary
         manifest["event_ids"] = event_ids
+        if manifest_sink is not None:
+            manifest_sink.update(manifest)
 
         loop_result = _run_full_loop_via_exec(
             project,
@@ -481,10 +496,24 @@ def run_scenario(
         }
         manifest["elapsed_s"] = round(time.monotonic() - started, 2)
         _write_json(scenario_dir / "manifest.json", manifest)
+        if manifest_sink is not None:
+            manifest_sink.update(manifest)
         raise
     finally:
-        _compose_down(project, compose_files, volumes=fresh_volumes)
+        down_error: MatrixError | None = None
+        try:
+            _compose_down(project, compose_files, volumes=fresh_volumes)
+        except MatrixError as exc:
+            down_error = exc
         _CLEANUP.set_project(None)
+        if down_error is not None:
+            if sys.exc_info()[0] is not None:
+                print(
+                    f"[dynamic-eval-matrix] ERROR cleanup failed: {down_error}",
+                    file=sys.stderr,
+                )
+            else:
+                raise down_error
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -549,6 +578,11 @@ def _parse_scenarios(raw: str) -> list[str]:
     scenarios = [part.strip() for part in raw.split(",") if part.strip()]
     if not scenarios:
         raise MatrixError("at least one scenario is required")
+    seen: set[str] = set()
+    for scenario in scenarios:
+        if scenario in seen:
+            raise MatrixError(f"duplicate scenario in --scenarios: {scenario!r}")
+        seen.add(scenario)
     unknown = [s for s in scenarios if s not in GOLD_SCENARIOS]
     if unknown:
         raise MatrixError(
@@ -570,12 +604,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     scenarios = _parse_scenarios(str(args.scenarios))
 
+    active_run: dict[str, Any] = {
+        "artifact_root": artifact_root,
+        "summary": None,
+        "scenario": None,
+        "manifest": None,
+    }
+
     def _signal_handler(signum: int, _frame: Any) -> None:
         print(
             f"[dynamic-eval-matrix] signal {signum} — running cleanup",
             file=sys.stderr,
         )
         _CLEANUP.cleanup()
+        scenario = active_run.get("scenario")
+        summary_ref = active_run.get("summary")
+        if scenario and isinstance(summary_ref, dict):
+            manifest = active_run.get("manifest") if isinstance(active_run.get("manifest"), dict) else {}
+            summary_ref["status"] = "interrupted"
+            summary_ref["results"][scenario] = {
+                "status": "interrupted",
+                "compose_project_name": manifest.get("compose_project_name"),
+                "event_ids": manifest.get("event_ids"),
+            }
+            _write_json(artifact_root / "summary.json", summary_ref)
         raise SystemExit(128 + signum)
 
     signal.signal(signal.SIGINT, _signal_handler)
@@ -590,6 +642,7 @@ def main(argv: list[str] | None = None) -> int:
         "require_closed": bool(args.require_closed),
         "results": {},
     }
+    active_run["summary"] = summary
 
     print(
         f"[dynamic-eval-matrix] run_id={run_id} scenarios={scenarios} "
@@ -599,6 +652,10 @@ def main(argv: list[str] | None = None) -> int:
 
     for scenario in scenarios:
         per_seed = scenario_seed_offset(int(args.seed), scenario)
+        active_run["scenario"] = scenario
+        active_run["manifest"] = {
+            "compose_project_name": _scenario_project_name(scenario, run_id),
+        }
         try:
             manifest = run_scenario(
                 scenario=scenario,
@@ -614,6 +671,7 @@ def main(argv: list[str] | None = None) -> int:
                 poll_interval_s=float(args.poll_interval_s),
                 max_events=int(args.max_events),
                 build=not bool(args.no_build),
+                manifest_sink=active_run["manifest"],
             )
             summary["results"][scenario] = {
                 "status": manifest.get("status"),
@@ -621,15 +679,36 @@ def main(argv: list[str] | None = None) -> int:
                 "compose_project_name": manifest.get("compose_project_name"),
                 "final_statuses": (manifest.get("result") or {}).get("final_statuses"),
             }
+            active_run["manifest"] = manifest
         except Exception as exc:
+            failed_manifest_path = artifact_root / scenario / "manifest.json"
+            compose_project_name = active_run["manifest"].get("compose_project_name")
+            event_ids = None
+            if failed_manifest_path.is_file():
+                try:
+                    failed_manifest = json.loads(
+                        failed_manifest_path.read_text(encoding="utf-8")
+                    )
+                    if isinstance(failed_manifest, dict):
+                        compose_project_name = failed_manifest.get(
+                            "compose_project_name", compose_project_name
+                        )
+                        event_ids = failed_manifest.get("event_ids")
+                except (OSError, json.JSONDecodeError):
+                    pass
             summary["results"][scenario] = {
                 "status": "failed",
                 "error": _sanitize_error_text(str(exc)),
+                "compose_project_name": compose_project_name,
+                "event_ids": event_ids,
             }
             summary["status"] = "failed"
             _write_json(artifact_root / "summary.json", summary)
             print(f"[dynamic-eval-matrix] FAIL scenario={scenario}: {exc}", file=sys.stderr)
             return 1
+        finally:
+            active_run["scenario"] = None
+            active_run["manifest"] = None
 
     summary["status"] = "passed"
     _write_json(artifact_root / "summary.json", summary)

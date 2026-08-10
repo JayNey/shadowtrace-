@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import signal
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MATRIX_PATH = REPO_ROOT / "scripts" / "dynamic_eval_matrix.py"
+FULL_LOOP_PATH = REPO_ROOT / "scripts" / "dynamic_eval_full_loop.py"
 
 
 def _load_matrix_module():
@@ -27,6 +29,26 @@ def _load_matrix_module():
     sys.modules["dynamic_eval_matrix_under_test"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_full_loop_module():
+    scripts_dir = str(REPO_ROOT / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    spec = importlib.util.spec_from_file_location(
+        "dynamic_eval_full_loop_under_test",
+        FULL_LOOP_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["dynamic_eval_full_loop_under_test"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def full_loop_mod():
+    return _load_full_loop_module()
 
 
 @pytest.fixture(scope="module")
@@ -97,3 +119,190 @@ def test_matrix_main_stops_after_first_scenario_failure(matrix_mod) -> None:
         )
     assert rc == 1
     assert calls == ["insider_data_exfiltration"]
+
+
+def test_scenario_project_name_unique_for_all_gold_scenarios(matrix_mod) -> None:
+    run_id = "20260810T120000Z-deadbeef"
+    names = [
+        matrix_mod._scenario_project_name(scenario, run_id)
+        for scenario in matrix_mod.GOLD_SCENARIOS
+    ]
+    assert len(names) == len(set(names))
+
+
+def test_parse_scenarios_rejects_duplicates(matrix_mod) -> None:
+    with pytest.raises(matrix_mod.MatrixError, match="duplicate scenario"):
+        matrix_mod._parse_scenarios("insider_data_exfiltration,insider_data_exfiltration")
+
+
+def test_sanitize_redacts_sensitive_dict_keys(matrix_mod) -> None:
+    payload = {
+        "token": "secret-token",
+        "nested": {"password": "secret-password", "ok": "visible"},
+    }
+    sanitized = matrix_mod._sanitize(payload)
+    assert sanitized["token"] == "<redacted>"
+    assert sanitized["nested"]["password"] == "<redacted>"
+    assert sanitized["nested"]["ok"] == "visible"
+
+
+def test_compose_down_raises_on_failure(matrix_mod) -> None:
+    with patch.object(
+        matrix_mod,
+        "_run",
+        return_value=type(
+            "Proc",
+            (),
+            {"returncode": 1, "stdout": "boom", "stderr": ""},
+        )(),
+    ):
+        with pytest.raises(matrix_mod.MatrixError, match="compose down failed"):
+            matrix_mod._compose_down(
+                "proj",
+                [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+                volumes=True,
+            )
+
+
+def test_run_scenario_finally_compose_down_with_volumes(matrix_mod, tmp_path: Path) -> None:
+    down_calls: list[bool] = []
+
+    def _fake_down(_project: str, _files: list[Path], *, volumes: bool) -> None:
+        down_calls.append(volumes)
+
+    with (
+        patch.object(matrix_mod, "_compose_down", side_effect=_fake_down),
+        patch.object(matrix_mod, "_wait_stack_healthy"),
+        patch.object(
+            matrix_mod,
+            "_seed_scenario",
+            return_value={"accepted": 1, "event_ids": ["evt-a"]},
+        ),
+        patch.object(
+            matrix_mod,
+            "_run_full_loop_via_exec",
+            return_value={"final_statuses": {"evt-a": "closed"}},
+        ),
+        patch.object(matrix_mod, "_run", return_value=type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
+    ):
+        manifest = matrix_mod.run_scenario(
+            scenario="insider_data_exfiltration",
+            run_id="run-test",
+            artifact_root=tmp_path,
+            token="bootstrap-token",
+            seed=42,
+            mock_xdr_url="http://mock-xdr:8100",
+            require_closed=False,
+            fresh_volumes=True,
+            stack_timeout_s=10.0,
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+            max_events=1,
+            build=False,
+        )
+    assert manifest["status"] == "passed"
+    assert down_calls == [True]
+
+
+def test_run_full_loop_via_exec_passes_explicit_event_ids(matrix_mod) -> None:
+    captured: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs):
+        captured.append(cmd)
+        return type("Proc", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
+
+    with patch.object(matrix_mod, "_run", side_effect=_fake_run):
+        matrix_mod._run_full_loop_via_exec(
+            "proj",
+            [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+            event_ids=["evt-a", "evt-b"],
+            scenario="insider_data_exfiltration",
+            token="bootstrap-token",
+            require_closed=True,
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+        )
+    cmd = captured[0]
+    assert cmd.count("--event-id") == 2
+    assert "evt-a" in cmd and "evt-b" in cmd
+    assert "--require-closed" in cmd
+    assert "--generate-report" in cmd
+
+
+def test_signal_handler_respects_fresh_volumes_flag(matrix_mod) -> None:
+    down_volumes: list[bool] = []
+
+    def _fake_down(_project: str, _files: list[Path], *, volumes: bool) -> None:
+        down_volumes.append(volumes)
+
+    matrix_mod._CLEANUP.set_project("proj-test", fresh_volumes=False)
+    with patch.object(matrix_mod, "_compose_down", side_effect=_fake_down):
+        matrix_mod._CLEANUP.cleanup()
+    assert down_volumes == [False]
+
+
+def test_matrix_failure_summary_includes_manifest_fields(
+    matrix_mod,
+    tmp_path: Path,
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    scenario = "insider_data_exfiltration"
+    manifest_path = artifact_root / scenario / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "compose_project_name": "shadowtrace-eval-insider-run",
+                "event_ids": ["evt-seed-1"],
+                "status": "failed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_run_scenario(*, scenario: str, **kwargs):
+        raise matrix_mod.MatrixError("simulated failure")
+
+    with patch.object(matrix_mod, "run_scenario", side_effect=_fake_run_scenario):
+        rc = matrix_mod.main(
+            [
+                "--scenarios",
+                scenario,
+                "--artifact-dir",
+                str(artifact_root),
+                "--no-build",
+            ]
+        )
+    assert rc == 1
+    summary = json.loads((artifact_root / "summary.json").read_text(encoding="utf-8"))
+    row = summary["results"][scenario]
+    assert row["compose_project_name"] == "shadowtrace-eval-insider-run"
+    assert row["event_ids"] == ["evt-seed-1"]
+
+
+def test_require_closed_rejects_heuristic_event_selection(full_loop_mod) -> None:
+    with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
+        client = client_cls.return_value
+        client.get_json.side_effect = lambda path: (
+            {"items": []}
+            if "/events" in path
+            else {"playbook_resources": {"status": "ready"}}
+        )
+        with pytest.raises(SystemExit, match="heuristic DB selection is forbidden"):
+            full_loop_mod.main(["--require-closed"])
+
+
+def test_full_loop_rejects_event_id_with_seed_via_compose(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="cannot be combined with --seed-via-compose"):
+        full_loop_mod.main(
+            [
+                "--require-closed",
+                "--event-id",
+                "evt-x",
+                "--seed-via-compose",
+            ]
+        )
+
+
+def test_event_outcome_ok_rejects_verifying_when_require_closed(full_loop_mod) -> None:
+    assert full_loop_mod.event_outcome_ok("verifying", require_closed=True) is False

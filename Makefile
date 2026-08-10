@@ -134,12 +134,13 @@ eval-full-loop:
 EVAL_MATRIX_SCENARIOS ?= insider_data_exfiltration,account_anomaly_fp,suspicious_domain_access
 EVAL_MATRIX_ARTIFACT_DIR ?=
 EVAL_MATRIX_REQUIRE_CLOSED ?=
+EVAL_MATRIX_FRESH_VOLUMES ?= 1
 eval-full-loop-matrix:
 	@echo "[eval-full-loop-matrix] scenarios=$(EVAL_MATRIX_SCENARIOS)"
 	@echo "[eval-full-loop-matrix] fresh project/volumes per scenario; in-network exec (no host ports)"
 	python3 "$(CURDIR)/scripts/dynamic_eval_matrix.py" \
 		--scenarios "$(EVAL_MATRIX_SCENARIOS)" \
-		--fresh-volumes \
+		$(if $(filter 0,$(EVAL_MATRIX_FRESH_VOLUMES)),--no-fresh-volumes,--fresh-volumes) \
 		$(if $(EVAL_MATRIX_ARTIFACT_DIR),--artifact-dir "$(EVAL_MATRIX_ARTIFACT_DIR)",) \
 		$(if $(EVAL_MATRIX_REQUIRE_CLOSED),--require-closed,)
 

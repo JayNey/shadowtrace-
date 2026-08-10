@@ -119,6 +119,7 @@ def test_event_outcome_ok_rejects_failed(full_loop_mod) -> None:
     assert full_loop_mod.event_outcome_ok("failed") is False
     assert full_loop_mod.event_outcome_ok("reporting", require_closed=True) is False
     assert full_loop_mod.event_outcome_ok("contained", require_closed=True) is False
+    assert full_loop_mod.event_outcome_ok("verifying", require_closed=True) is False
     assert full_loop_mod.event_outcome_ok("closed", require_closed=True) is True
 
 
@@ -184,6 +185,29 @@ def test_assert_strict_closed_acceptance_requires_report_body(full_loop_mod) -> 
 
     with pytest.raises(RuntimeError, match="no report body"):
         full_loop_mod.assert_strict_closed_acceptance(_Client(), "evt-2")
+
+
+def test_assert_strict_closed_rejects_incomplete_placeholder_report(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if "/actions" in path:
+                return {"items": [], "total": 0}
+            return {
+                "event": {"event_id": "evt-2b", "status": "closed"},
+                "writeback_required": False,
+                "writeback_readiness": "not_required",
+            }
+
+        def request(self, method: str, path: str):
+            from dynamic_eval_approve import ApiResponse
+
+            return ApiResponse(
+                status=200,
+                data={"report": {"report_quality": "incomplete_placeholder"}},
+            )
+
+    with pytest.raises(RuntimeError, match="incomplete_placeholder"):
+        full_loop_mod.assert_strict_closed_acceptance(_Client(), "evt-2b")
 
 
 def test_assert_strict_closed_acceptance_passes_when_converged(full_loop_mod) -> None:

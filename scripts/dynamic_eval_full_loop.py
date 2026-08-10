@@ -343,13 +343,28 @@ def list_all_event_actions(
     *,
     page_size: int = 100,
 ) -> list[dict[str, Any]]:
-    payload = client.get_json(
-        f"/api/v1/events/{event_id}/actions?page=1&page_size={page_size}"
-    )
-    items = payload.get("items") if isinstance(payload, dict) else None
-    if not isinstance(items, list):
-        raise DynamicEvalApiError(f"unexpected actions payload for {event_id}: {payload!r}")
-    return [item for item in items if isinstance(item, dict)]
+    page = 1
+    collected: list[dict[str, Any]] = []
+    total: int | None = None
+    while True:
+        payload = client.get_json(
+            f"/api/v1/events/{event_id}/actions?page={page}&page_size={page_size}"
+        )
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise DynamicEvalApiError(
+                f"unexpected actions payload for {event_id}: {payload!r}"
+            )
+        page_items = [item for item in items if isinstance(item, dict)]
+        collected.extend(page_items)
+        if total is None and isinstance(payload, dict) and payload.get("total") is not None:
+            total = int(payload["total"])
+        if total is not None and len(collected) >= total:
+            break
+        if len(page_items) < page_size:
+            break
+        page += 1
+    return collected
 
 
 def assert_strict_closed_acceptance(
@@ -372,10 +387,17 @@ def assert_strict_closed_acceptance(
             f"{report_resp.status}: {report_resp.data!r}"
         )
     report_data = report_resp.data if isinstance(report_resp.data, dict) else {}
-    if not report_data.get("report"):
+    report_obj = report_data.get("report")
+    if not report_obj:
         raise RuntimeError(
             f"strict profile: GET /report for {event_id} returned no report body"
         )
+    if isinstance(report_obj, dict):
+        report_quality = str(report_obj.get("report_quality") or "")
+        if report_quality == "incomplete_placeholder":
+            raise RuntimeError(
+                f"strict profile: report_quality={report_quality!r} for {event_id}"
+            )
 
     if detail.get("writeback_required"):
         readiness = str(detail.get("writeback_readiness") or "")
@@ -664,6 +686,11 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--require-closed requires report generation; omit --no-generate-report"
         )
+    if args.event_id and args.seed_via_compose:
+        raise SystemExit(
+            "--event-id cannot be combined with --seed-via-compose; "
+            "seed emits fresh event_ids (ISSUE-301)"
+        )
     if args.max_wait_s >= 30 * 60:
         raise SystemExit(
             "Refusing max-wait-s >= 30 minutes — that recreates the "
@@ -699,7 +726,13 @@ def main(argv: list[str] | None = None) -> int:
             raw_ids = seed_summary.get("event_ids")
             if isinstance(raw_ids, list):
                 event_ids = [str(item) for item in raw_ids if item][: int(args.max_events)]
-        # Short retry when seed did not emit explicit IDs (legacy path).
+        if not event_ids and args.require_closed:
+            raise SystemExit(
+                "strict profile (--require-closed) requires explicit event_ids from "
+                "seed output or --event-id; heuristic DB selection is forbidden "
+                "(ISSUE-301)"
+            )
+        # Short retry when seed did not emit explicit IDs (legacy compat path).
         if not event_ids:
             for attempt in range(1, 6):
                 event_ids = select_gold_event_ids(
