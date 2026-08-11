@@ -1082,6 +1082,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             )
             if rag_out is not None:
                 ec.rag_output = rag_out.model_dump(mode="json")
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: must bubble to task/intent owner; never swallow.
+            raise
         except Exception:
             logger.warning(
                 "SuperAgent: RAG failed for event=%s — continuing without RAG",
@@ -1171,6 +1174,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     if hasattr(graph_output, "model_dump")
                     else graph_output
                 )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.warning(
                 "SuperAgent: GraphAgent failed for event=%s — continuing",
@@ -1254,6 +1259,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     if hasattr(storyline, "model_dump")
                     else storyline
                 )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.warning(
                 "SuperAgent: StorylineService failed for event=%s — continuing",
@@ -1314,6 +1321,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         )
         try:
             result = await engine.run(goal, context, react_exec)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.exception("SuperAgent: ReAct run failed for event=%s", event_id)
             return

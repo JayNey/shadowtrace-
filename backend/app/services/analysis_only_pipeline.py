@@ -21,6 +21,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.evidence_agent import EvidenceAgent
 from app.agents.report_agent import ReportAgent
 from app.agents.risk_agent import RiskAgent
@@ -175,6 +177,9 @@ async def run_rag_stage(
             )
             return None, True
         return output, bool(output.degraded)
+    except SoftTimeLimitExceeded:
+        # ISSUE-314: soft-limit ownership is task/intent; do not swallow.
+        raise
     except Exception:
         logger.warning(
             "RAGAgent failed for event=%s; continuing without RAG enhancement",
@@ -639,6 +644,8 @@ class AnalysisOnlyPipeline:
             output = await self._graph.execute(
                 GraphAgentInput(event_id=event_id, evidence_output=evidence_output)
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.warning(
                 "GraphAgent failed for event=%s; continuing without graph output",
