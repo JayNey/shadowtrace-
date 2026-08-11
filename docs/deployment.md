@@ -48,10 +48,12 @@ make demo-full-loop
 # compat 剖面（非 strict CLOSED）：make eval-full-loop
 ```
 
-三场景 matrix + strict CLOSED：
+三场景 matrix + 全局 strict CLOSED（与 `--profile-by-scenario` 互斥；Makefile 在开启 REQUIRE_CLOSED 时自动关闭 profile）：
 
 ```bash
 EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix
+# 等价显式写法：
+EVAL_MATRIX_REQUIRE_CLOSED=1 EVAL_MATRIX_PROFILE_BY_SCENARIO=0 make eval-full-loop-matrix
 ```
 
 可选 full-loop bootstrap 剖面（会停在 `waiting_approval`，需脚本审批）：
@@ -209,8 +211,9 @@ python3 scripts/dynamic_eval_matrix.py \
   --fresh-volumes \
   --require-closed
 
-# Makefile 等价（默认三场景 + fresh volumes；strict 需显式开启）
+# Makefile 等价（默认三场景 + fresh volumes + profile-by-scenario）
 make eval-full-loop-matrix
+# 全局 strict CLOSED（自动关闭 profile-by-scenario）
 EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix
 ```
 

@@ -60,19 +60,20 @@ def build_suspicious_domain_access(
         SourceObjectKind.ASSET,
         asset_id,
         connector_id=conn_disp.connector_id,
+        parent=alert_id,
         status_raw="managed",
         updated_at=base,
     )
     asset_no_agent = make_ref(
         SourceObjectKind.ASSET,
-        "8010",
+        f"8010{id_suffix}",
         connector_id=conn_disp.connector_id,
         status_raw="unmanaged",
         updated_at=base,
     )
     asset_offline = make_ref(
         SourceObjectKind.ASSET,
-        "8011",
+        f"8011{id_suffix}",
         connector_id=conn_disp.connector_id,
         status_raw="offline",
         updated_at=base,

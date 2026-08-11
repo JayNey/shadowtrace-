@@ -624,6 +624,158 @@ def test_run_scenario_profile_by_scenario_domain_pressure_failure_blocks(
 
 
 
+def test_matrix_main_summary_status_reflects_non_blocking_pressure_error(
+    matrix_mod, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+
+    def _fake_run_scenario(*, scenario: str, **kwargs):
+        return {
+            "status": "passed_with_pressure_error",
+            "event_ids": ["evt-s", "evt-p"],
+            "compose_project_name": "proj-fp",
+            "result": {"final_statuses": {"evt-s": "closed"}},
+            "pressure_error": {"type": "MatrixError", "message": "[pressure gate] boom"},
+            "profile": "analysis_only_fp",
+        }
+
+    with patch.object(matrix_mod, "run_scenario", side_effect=_fake_run_scenario):
+        rc = matrix_mod.main(
+            [
+                "--scenarios",
+                "account_anomaly_fp",
+                "--artifact-dir",
+                str(artifact_root),
+                "--profile-by-scenario",
+                "--no-build",
+            ]
+        )
+    assert rc == 0
+    summary = json.loads((artifact_root / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "passed_with_pressure_error"
+    assert summary["results"]["account_anomaly_fp"]["pressure_error"]["message"]
+
+
+def test_matrix_failure_summary_copies_pressure_error_from_manifest(
+    matrix_mod, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    scenario = "suspicious_domain_access"
+    manifest_path = artifact_root / scenario / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "compose_project_name": "shadowtrace-eval-domain-run",
+                "event_ids": ["evt-s", "evt-p"],
+                "semantic_event_ids": ["evt-s"],
+                "pressure_event_ids": ["evt-p"],
+                "status": "failed",
+                "pressure_error": {
+                    "type": "MatrixError",
+                    "message": "[pressure gate] boom",
+                },
+                "semantic_result": {"final_statuses": {"evt-s": "closed"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_run_scenario(*, scenario: str, **kwargs):
+        raise matrix_mod.MatrixError("[pressure gate] boom")
+
+    with patch.object(matrix_mod, "run_scenario", side_effect=_fake_run_scenario):
+        rc = matrix_mod.main(
+            [
+                "--scenarios",
+                scenario,
+                "--artifact-dir",
+                str(artifact_root),
+                "--profile-by-scenario",
+                "--no-build",
+            ]
+        )
+    assert rc == 1
+    summary = json.loads((artifact_root / "summary.json").read_text(encoding="utf-8"))
+    row = summary["results"][scenario]
+    assert row["pressure_error"]["message"] == "[pressure gate] boom"
+    assert row["pressure_event_ids"] == ["evt-p"]
+    assert row["semantic_event_ids"] == ["evt-s"]
+
+
+def test_run_analysis_only_loop_keeps_polling_on_reporting_until_closed(
+    full_loop_mod,
+) -> None:
+    statuses = ["triaging", "reporting", "closed"]
+    from dynamic_eval_approve import ApiResponse
+
+    class _Client:
+        def __init__(self) -> None:
+            self._idx = 0
+
+        def get_json(self, path: str):
+            if path.endswith("/audit-logs?page=1&page_size=5"):
+                return {"items": []}
+            if path.endswith("/decision-trace"):
+                return {}
+            if self._idx < len(statuses):
+                status = statuses[self._idx]
+                self._idx += 1
+            else:
+                status = "closed"
+            return {
+                "event": {
+                    "event_id": "evt-ao",
+                    "status": status,
+                    "final_verdict": "false_positive",
+                    "disposition_policy": "not_required",
+                    "event_context_snapshot": {"collection_status": "completed"},
+                }
+            }
+
+        def post_json(self, path: str, body: dict):
+            return ApiResponse(
+                status=202,
+                data={
+                    "event_id": "evt-ao",
+                    "task_id": "t1",
+                    "intent_id": "iin-1",
+                    "status": "new",
+                    "include_response_execution": False,
+                    "generate_report": True,
+                    "full_loop_available": True,
+                },
+            )
+
+    with patch.object(full_loop_mod.time, "sleep", return_value=None):
+        result = full_loop_mod.run_analysis_only_loop(
+            _Client(),  # type: ignore[arg-type]
+            event_ids=["evt-ao"],
+            generate_report=True,
+            poll_interval_s=0.01,
+            max_wait_s=5.0,
+            semantic_profile="analysis_only_fp",
+        )
+    assert result["final_statuses"]["evt-ao"] == "closed"
+    assert "reporting" in result["status_trace"]["evt-ao"]
+    assert result["semantic_assertions"]["evt-ao"]["final_verdict"] == "false_positive"
+
+
+def test_main_rejects_analysis_only_without_generate_report(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="analysis-only requires report generation"):
+        full_loop_mod.main(
+            [
+                "--analysis-only",
+                "--semantic-profile",
+                "analysis_only_fp",
+                "--event-id",
+                "evt-x",
+                "--no-generate-report",
+                "--skip-baseline-preflight",
+            ]
+        )
+
+
 def test_assert_fp_semantic_gate_raises_with_diagnostics(full_loop_mod) -> None:
     class _Client:
         def get_json(self, path: str):

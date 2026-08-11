@@ -78,9 +78,18 @@ async def _check_playbook_resources(settings: Settings | None = None) -> dict[st
 
 async def _check_change_window_baseline(settings: Settings | None = None) -> dict[str, object]:
     """Return sanitized org change-window baseline readiness (ISSUE-313)."""
-    from app.services.change_window_baseline_loader import probe_change_window_baseline
+    try:
+        from app.services.change_window_baseline_loader import probe_change_window_baseline
 
-    return probe_change_window_baseline(settings)
+        return probe_change_window_baseline(settings)
+    except Exception as exc:  # noqa: BLE001 — health must never raise
+        return {
+            "status": "unavailable",
+            "resolved_path": "",
+            "tenant_ids": [],
+            "required_tenant_ids": [],
+            "reasons": [f"probe_error:{type(exc).__name__}"],
+        }
 
 
 async def _check_loaded_resources(settings: Settings | None = None) -> dict[str, object]:

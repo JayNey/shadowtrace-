@@ -674,7 +674,8 @@ def run_scenario(
                 manifest["status"] = "passed_with_pressure_error"
             elif pressure_error is None:
                 manifest["status"] = "passed"
-            else:
+            elif pressure_error is not None:
+                # Blocking pressure failures raise above; keep for clarity.
                 manifest["status"] = "failed"
         else:
             loop_result = _run_full_loop_via_exec(
@@ -969,9 +970,26 @@ def main(argv: list[str] | None = None) -> int:
             if failed_manifest.is_file():
                 try:
                     manifest_data = json.loads(failed_manifest.read_text(encoding="utf-8"))
-                    cleanup_error = manifest_data.get("cleanup_error")
-                    if cleanup_error:
-                        summary["results"][scenario]["cleanup_error"] = cleanup_error
+                    if isinstance(manifest_data, dict):
+                        cleanup_error = manifest_data.get("cleanup_error")
+                        if cleanup_error:
+                            summary["results"][scenario]["cleanup_error"] = cleanup_error
+                        if manifest_data.get("pressure_error"):
+                            summary["results"][scenario]["pressure_error"] = (
+                                manifest_data["pressure_error"]
+                            )
+                        if manifest_data.get("semantic_result") is not None:
+                            summary["results"][scenario]["semantic_result"] = (
+                                manifest_data["semantic_result"]
+                            )
+                        if manifest_data.get("pressure_event_ids") is not None:
+                            summary["results"][scenario]["pressure_event_ids"] = (
+                                manifest_data["pressure_event_ids"]
+                            )
+                        if manifest_data.get("semantic_event_ids") is not None:
+                            summary["results"][scenario]["semantic_event_ids"] = (
+                                manifest_data["semantic_event_ids"]
+                            )
                 except (OSError, json.JSONDecodeError):
                     pass
             summary["status"] = "failed"
@@ -981,6 +999,18 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             active_run["scenario"] = None
             active_run["manifest"] = None
+
+    if any(
+        isinstance(row, dict) and row.get("status") == "passed_with_pressure_error"
+        for row in summary["results"].values()
+    ):
+        summary["status"] = "passed_with_pressure_error"
+        _write_json(artifact_root / "summary.json", summary)
+        print(
+            f"[dynamic-eval-matrix] PASSED WITH PRESSURE ERRORS run_id={run_id} "
+            "(semantic gates passed; see per-scenario pressure_error)"
+        )
+        return 0
 
     summary["status"] = "passed"
     _write_json(artifact_root / "summary.json", summary)

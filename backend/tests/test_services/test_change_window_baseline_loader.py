@@ -143,6 +143,107 @@ def test_assert_demo_eval_baseline_available_passes_when_ready(tmp_path: Path) -
     assert_demo_eval_baseline_available(settings)
 
 
+def test_assert_demo_raises_on_empty_tenant_demo_windows(tmp_path: Path) -> None:
+    clear_change_window_baseline_cache()
+    target = tmp_path / "empty.json"
+    target.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tenants": [{"tenant_id": "tenant-demo", "change_windows": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(CHANGE_WINDOW_BASELINE_PATH=str(target))
+    with pytest.raises(RuntimeError, match="resolved_path="):
+        assert_demo_eval_baseline_available(settings)
+
+
+def test_assert_demo_uses_settings_path_when_settings_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """settings=None must still honor CHANGE_WINDOW_BASELINE_PATH (ISSUE-313)."""
+    clear_change_window_baseline_cache()
+    good = tmp_path / "good.json"
+    empty = tmp_path / "empty.json"
+    _write_baseline(good)
+    empty.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tenants": [{"tenant_id": "tenant-demo", "change_windows": []}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    import app.services.change_window_baseline_loader as loader
+
+    # Walk-up / container would find "good"; env points at empty → assert must fail.
+    monkeypatch.setattr(loader, "_CONTAINER_BASELINE_PATH", good)
+    monkeypatch.setattr(loader, "_walk_up_for_baseline", lambda _start: good)
+    monkeypatch.setenv("CHANGE_WINDOW_BASELINE_PATH", str(empty))
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    with pytest.raises(RuntimeError, match=str(empty)):
+        assert_demo_eval_baseline_available(None)
+
+
+def test_probe_reports_unreadable_file_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "locked.json"
+    target.write_text("{}", encoding="utf-8")
+    settings = Settings(CHANGE_WINDOW_BASELINE_PATH=str(target))
+
+    def _boom(*_args, **_kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(Path, "read_text", _boom)
+    probe = probe_change_window_baseline(settings)
+    assert probe["status"] == "unavailable"
+    assert "file_unreadable" in probe["reasons"]
+
+
+def test_probe_ready_when_only_non_required_tenant_empty(tmp_path: Path) -> None:
+    target = tmp_path / "mixed.json"
+    target.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tenants": [
+                    {
+                        "tenant_id": "tenant-demo",
+                        "change_windows": [
+                            {
+                                "window_id": "cw-test",
+                                "authorized_accounts": ["ops-change-bot"],
+                                "authorized_actions": ["login"],
+                                "authorized_asset_groups": ["ops"],
+                                "valid_from": "2024-06-15T08:00:00+00:00",
+                                "valid_until": "2024-06-15T12:00:00+00:00",
+                            }
+                        ],
+                    },
+                    {"tenant_id": "tenant-other", "change_windows": []},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        CHANGE_WINDOW_BASELINE_PATH=str(target),
+        CHANGE_WINDOW_BASELINE_REQUIRED="true",
+        CHANGE_WINDOW_BASELINE_REQUIRED_TENANTS="tenant-demo",
+    )
+    probe = probe_change_window_baseline(settings)
+    assert probe["status"] == "ready"
+    assert any("empty_change_windows" in str(r) for r in probe["reasons"])
+
+
 def test_load_change_window_baseline_reflects_settings_path_change(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -63,16 +63,22 @@ def build_account_anomaly_fp(
         status_raw="managed",
         updated_at=base,
     )
+    # Keep numeric_asset_id aligned with reference.source_object_id. Instance
+    # suffixes are opaque; prefer the base ASSET_ID for numeric fields that
+    # tooling expects to be digits, while refs stay instance-scoped.
+    numeric_asset_id = ASSET_ID
+    asset_no_agent_id = f"7002{id_suffix}"
+    asset_offline_id = f"7003{id_suffix}"
     asset_no_agent = make_ref(
         SourceObjectKind.ASSET,
-        "7002",
+        asset_no_agent_id,
         connector_id=conn_disp.connector_id,
         status_raw="unmanaged",
         updated_at=base,
     )
     asset_offline = make_ref(
         SourceObjectKind.ASSET,
-        "7003",
+        asset_offline_id,
         connector_id=conn_disp.connector_id,
         status_raw="offline",
         updated_at=base,
@@ -81,7 +87,7 @@ def build_account_anomaly_fp(
     assets = [
         SourceAsset(
             reference=asset_ref,
-            numeric_asset_id=asset_id if asset_id.isdigit() else ASSET_ID,
+            numeric_asset_id=numeric_asset_id,
             hostname=OPS_HOST,
             ip="10.50.1.10",
             owner=OPS_ACCOUNT,

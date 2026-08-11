@@ -107,7 +107,9 @@ _EVIDENCE_OK_STATUSES = frozenset({"completed", "partial_done", "degraded"})
 # waiting_approval with zero selectable actions for this many polls → fail fast.
 _WAITING_STALL_POLLS = 5
 
-_ANALYSIS_ONLY_TERMINAL = frozenset({"closed", "contained", "reporting"})
+# Semantic gates assert status==closed; do not treat reporting/contained as done
+# (poll can observe REPORTING before close_node finishes — ISSUE-313).
+_ANALYSIS_ONLY_TERMINAL = frozenset({"closed"})
 
 
 class EvalFailure(RuntimeError):
@@ -886,6 +888,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.require_closed and not args.generate_report:
         raise SystemExit(
             "--require-closed requires report generation; omit --no-generate-report"
+        )
+    if args.analysis_only and not args.generate_report:
+        raise SystemExit(
+            "--analysis-only requires report generation to reach CLOSED; "
+            "omit --no-generate-report"
         )
     if args.event_id and args.seed_via_compose:
         raise SystemExit(

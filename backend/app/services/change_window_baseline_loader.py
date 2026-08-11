@@ -32,6 +32,18 @@ def _walk_up_for_baseline(start: Path) -> Path | None:
     return None
 
 
+def _coerce_settings(settings: Any | None) -> Any | None:
+    """Prefer explicit settings; otherwise mirror ``load()`` and pull ``get_settings()``."""
+    if settings is not None:
+        return settings
+    try:
+        from app.core.config import get_settings
+
+        return get_settings()
+    except Exception:
+        return None
+
+
 def resolve_change_window_baseline_path(
     path: str | None = None,
     *,
@@ -82,6 +94,10 @@ def _parse_baseline_file(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return None, ["json_invalid"]
+    except OSError:
+        return None, ["file_unreadable"]
+    except UnicodeDecodeError:
+        return None, ["file_unreadable"]
     if not isinstance(raw, dict):
         return None, ["schema_root_not_object"]
     tenants_raw = raw.get("tenants")
@@ -90,8 +106,9 @@ def _parse_baseline_file(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
     return raw, reasons
 
 
-def _index_baseline(raw: dict[str, Any]) -> dict[str, OrgChangeWindowBaseline]:
+def _index_baseline(raw: dict[str, Any]) -> tuple[dict[str, OrgChangeWindowBaseline], int]:
     indexed: dict[str, OrgChangeWindowBaseline] = {}
+    invalid_window_entries = 0
     for entry in raw.get("tenants") or []:
         if not isinstance(entry, dict):
             continue
@@ -101,21 +118,24 @@ def _index_baseline(raw: dict[str, Any]) -> dict[str, OrgChangeWindowBaseline]:
         windows: list[ChangeWindowBaseline] = []
         for window in entry.get("change_windows") or []:
             if not isinstance(window, dict):
+                invalid_window_entries += 1
                 continue
             try:
                 windows.append(ChangeWindowBaseline.model_validate(window))
             except Exception:
+                invalid_window_entries += 1
                 logger.debug("skip invalid change window entry", exc_info=True)
         indexed[tenant_id] = OrgChangeWindowBaseline(
             schema_version=int(raw.get("schema_version") or 1),
             tenant_id=tenant_id,
             change_windows=windows,
         )
-    return indexed
+    return indexed, invalid_window_entries
 
 
 def probe_change_window_baseline(settings: Any | None = None) -> dict[str, Any]:
     """Structured readiness probe for health checks and eval preflight."""
+    settings = _coerce_settings(settings)
     path = resolve_change_window_baseline_path(settings=settings)
     raw, reasons = _parse_baseline_file(path)
     if raw is None:
@@ -128,7 +148,7 @@ def probe_change_window_baseline(settings: Any | None = None) -> dict[str, Any]:
             "reasons": reasons,
         }
 
-    indexed = _index_baseline(raw)
+    indexed, invalid_window_entries = _index_baseline(raw)
     tenant_ids = sorted(indexed.keys())
     required = _required_tenant_ids(settings)
     empty_window_tenants = [
@@ -139,18 +159,34 @@ def probe_change_window_baseline(settings: Any | None = None) -> dict[str, Any]:
         for tenant_id in required
         if tenant_id not in indexed or not indexed[tenant_id].change_windows
     ]
+    # Empty windows on non-required tenants must not fail-closed health when a
+    # required-tenant list is configured (ISSUE-313 review).
+    status_empty_tenants = (
+        [tenant_id for tenant_id in empty_window_tenants if tenant_id in required]
+        if required
+        else list(empty_window_tenants)
+    )
     if empty_window_tenants:
         reasons.append(f"empty_change_windows:{','.join(empty_window_tenants)}")
     if missing_required:
         reasons.append(f"missing_required_tenants:{','.join(missing_required)}")
     if not tenant_ids:
         reasons.append("no_tenant_entries")
+    if invalid_window_entries:
+        reasons.append(f"invalid_window_entries:{invalid_window_entries}")
 
-    if missing_required and bool(getattr(settings, "change_window_baseline_required", False)):
+    status_blocking = (
+        bool(missing_required) or bool(status_empty_tenants) or not tenant_ids
+    )
+    required_flag = bool(getattr(settings, "change_window_baseline_required", False))
+    if missing_required and required_flag:
         status = "unavailable"
-    elif reasons:
+    elif status_blocking:
+        status = "degraded"
+    elif invalid_window_entries:
         status = "degraded"
     else:
+        # Non-required empty windows remain in reasons but do not block ready.
         status = "ready"
 
     return {
@@ -164,6 +200,7 @@ def probe_change_window_baseline(settings: Any | None = None) -> dict[str, Any]:
 
 def assert_demo_eval_baseline_available(settings: Any | None = None) -> None:
     """Fail-closed preflight for demo eval scenarios that depend on tenant-demo."""
+    settings = _coerce_settings(settings)
     probe = probe_change_window_baseline(settings)
     path = str(probe["resolved_path"])
     indexed = load_change_window_baseline(path)
@@ -184,19 +221,15 @@ def _load_change_window_baseline_at(resolved_path: str) -> dict[str, OrgChangeWi
     if raw is None:
         logger.warning("change-window baseline missing or invalid at %s", path)
         return {}
-    return _index_baseline(raw)
+    indexed, _invalid = _index_baseline(raw)
+    return indexed
 
 
 def load_change_window_baseline(path: str | None = None) -> dict[str, OrgChangeWindowBaseline]:
     """Load tenant-indexed change-window baselines from *path* or settings default."""
     settings = None
     if path is None:
-        try:
-            from app.core.config import get_settings
-
-            settings = get_settings()
-        except Exception:
-            settings = None
+        settings = _coerce_settings(None)
     resolved = resolve_change_window_baseline_path(path, settings=settings)
     return _load_change_window_baseline_at(str(resolved))
 
