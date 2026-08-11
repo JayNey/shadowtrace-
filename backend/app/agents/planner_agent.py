@@ -218,16 +218,6 @@ def _revalidate_cached_plan(plan: ExecutionPlan) -> ExecutionPlan | None:
     sanitized = _validate_execution_plan(plan)
     if [s.assigned_agent for s in sanitized.steps] == original_agents:
         return sanitized
-    if not sanitized.degraded:
-        sanitized = ExecutionPlan(
-            plan_id=sanitized.plan_id,
-            event_id=sanitized.event_id,
-            steps=sanitized.steps,
-            budget=sanitized.budget,
-            revision=sanitized.revision,
-            revise_reason=sanitized.revise_reason,
-            degraded=True,
-        )
     try:
         return _ensure_min_steps(sanitized)
     except ValueError:
@@ -483,14 +473,17 @@ class PlannerAgent(BaseAgent[PlannerAgentInput, ExecutionPlan]):
         if _wire_step_has_non_assignable_agent(wire.steps):
             raise ValueError("LLM plan contains non-executable agents")
 
+        converted_steps = _steps_from_wire(wire.steps)
+        wire_steps_dropped = len(converted_steps) < len(wire.steps)
+
         plan = ExecutionPlan(
             plan_id=_generate_plan_id(event_id, 0),
             event_id=event_id,
-            steps=_steps_from_wire(wire.steps),
+            steps=converted_steps,
             budget=wire.budget if isinstance(wire.budget, PlanBudget) else PlanBudget(),
             revision=0,
             revise_reason=None,
-            degraded=bool(response.degraded_reason),
+            degraded=bool(response.degraded_reason) or wire_steps_dropped,
         )
 
         plan = _ensure_min_steps(_validate_execution_plan(plan))
@@ -527,15 +520,18 @@ class PlannerAgent(BaseAgent[PlannerAgentInput, ExecutionPlan]):
         if _wire_step_has_non_assignable_agent(wire.steps):
             raise ValueError("LLM plan contains non-executable agents")
 
+        converted_steps = _steps_from_wire(wire.steps)
+        wire_steps_dropped = len(converted_steps) < len(wire.steps)
+
         new_revision = previous_plan.revision + 1
         plan = ExecutionPlan(
             plan_id=previous_plan.plan_id,
             event_id=event_id,
-            steps=_steps_from_wire(wire.steps),
+            steps=converted_steps,
             budget=wire.budget if isinstance(wire.budget, PlanBudget) else previous_plan.budget,
             revision=new_revision,
             revise_reason=failure_reason,
-            degraded=bool(response.degraded_reason),
+            degraded=bool(response.degraded_reason) or wire_steps_dropped,
         )
 
         plan = _ensure_min_steps(_validate_execution_plan(plan))

@@ -737,6 +737,7 @@ def test_validate_execution_plan_drops_invalid_agent_steps() -> None:
     assert clean.steps[0].assigned_agent == "evidence_agent"
     assert clean.steps[1].step_order == 2
     assert clean.steps[1].assigned_agent == "risk_agent"
+    assert clean.degraded is True
 
 
 def test_planner_required_tools_registered_in_tool_specs() -> None:
@@ -1038,8 +1039,70 @@ async def test_llm_plan_with_tool_agent_falls_back_to_default(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_idempotency_revalidates_cached_plan_with_memory_agent() -> None:
-    """Cached plans with non-executable agents are sanitized on replay."""
+async def test_idempotency_sanitizes_cached_plan_in_place_when_min_steps_met() -> None:
+    """Drop non-executable steps from cache when enough assignable steps remain."""
+    from app.services.working_memory import BoundWorkingMemory
+
+    wm = MagicMock(spec=BoundWorkingMemory)
+    cached = ExecutionPlan(
+        plan_id="pln-stale-mem",
+        event_id="evt-stale-mem",
+        steps=[
+            PlanStep(
+                step_order=1,
+                step_goal="Collect evidence",
+                assigned_agent="evidence_agent",
+                required_tools=["query_threat_intel"],
+                success_criteria="ok",
+            ),
+            PlanStep.model_construct(
+                step_order=2,
+                step_goal="Persist memory",
+                assigned_agent="memory_agent",  # type: ignore[arg-type]
+                required_tools=[],
+                success_criteria="memory updated",
+            ),
+            PlanStep(
+                step_order=3,
+                step_goal="Risk scoring",
+                assigned_agent="risk_agent",
+                required_tools=[],
+                success_criteria="score computed",
+            ),
+            PlanStep(
+                step_order=4,
+                step_goal="Graph enrichment",
+                assigned_agent="graph_agent",
+                required_tools=[],
+                success_criteria="graph built",
+            ),
+            PlanStep(
+                step_order=5,
+                step_goal="Response plan",
+                assigned_agent="response_agent",
+                required_tools=[],
+                success_criteria="actions generated",
+            ),
+        ],
+        budget=PlanBudget(),
+        revision=0,
+    )
+    wm.read = AsyncMock(return_value=cached.model_dump(mode="json"))
+    wm.write = AsyncMock(return_value=None)
+
+    agent = PlannerAgent(llm_client=None, working_memory=wm)
+    plan = await agent._plan_impl("evt-stale-mem", _make_triage())
+
+    assert plan.plan_id == "pln-stale-mem"
+    assert len(plan.steps) == 4
+    assert "memory_agent" not in {s.assigned_agent for s in plan.steps}
+    assert plan.degraded is True
+    wm.write.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_idempotency_regenerates_when_cached_plan_below_min_steps() -> None:
+    """Cached plan that sanitizes below MIN_PLAN_STEPS triggers regeneration."""
     from app.services.working_memory import BoundWorkingMemory
 
     wm = MagicMock(spec=BoundWorkingMemory)
@@ -1085,9 +1148,182 @@ async def test_idempotency_revalidates_cached_plan_with_memory_agent() -> None:
     agent = PlannerAgent(llm_client=None, working_memory=wm)
     plan = await agent._plan_impl("evt-stale-mem", _make_triage())
 
+    assert plan.plan_id != "pln-stale-mem"
+    assert len(plan.steps) >= 4
     assert "memory_agent" not in {s.assigned_agent for s in plan.steps}
     assert plan.degraded is True
-    wm.write.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_llm_plan_unknown_agent_sets_degraded_when_enough_steps_remain(
+    tmp_path: Path,
+) -> None:
+    """Unknown wire agents are dropped and the surviving plan is marked degraded."""
+    _write_golden(
+        tmp_path,
+        "plan_generate",
+        {
+            "content": {
+                "plan_id": "pln-unknown",
+                "event_id": "evt-unknown-agent",
+                "steps": [
+                    {
+                        "step_order": 1,
+                        "step_goal": "Collect evidence",
+                        "assigned_agent": "evidence_agent",
+                        "required_tools": ["query_threat_intel"],
+                        "success_criteria": "ok",
+                    },
+                    {
+                        "step_order": 2,
+                        "step_goal": "Mystery step",
+                        "assigned_agent": "invalid_agent_xxx",
+                        "required_tools": [],
+                        "success_criteria": "n/a",
+                    },
+                    {
+                        "step_order": 3,
+                        "step_goal": "Risk scoring",
+                        "assigned_agent": "risk_agent",
+                        "required_tools": [],
+                        "success_criteria": "score computed",
+                    },
+                    {
+                        "step_order": 4,
+                        "step_goal": "Graph enrichment",
+                        "assigned_agent": "graph_agent",
+                        "required_tools": [],
+                        "success_criteria": "graph built",
+                    },
+                    {
+                        "step_order": 5,
+                        "step_goal": "Response plan",
+                        "assigned_agent": "response_agent",
+                        "required_tools": [],
+                        "success_criteria": "actions generated",
+                    },
+                ],
+                "budget": {"max_tool_calls": 30, "max_llm_calls": 20, "max_duration_s": 300},
+                "revision": 0,
+                "revise_reason": None,
+                "degraded": False,
+            },
+            "model_name": "mock-model",
+            "prompt_tokens": 100,
+            "completion_tokens": 200,
+            "total_tokens": 300,
+        },
+    )
+
+    llm = _make_mock_llm(tmp_path)
+    agent = PlannerAgent(llm_client=llm)
+    plan = await agent._plan_impl("evt-unknown-agent", _make_triage())
+
+    assert plan.degraded is True
+    assert len(plan.steps) == 4
+    assert all(s.assigned_agent in PLAN_STEP_ASSIGNABLE_AGENTS for s in plan.steps)
+
+
+@pytest.mark.asyncio
+async def test_llm_revise_with_memory_agent_falls_back_to_default(tmp_path: Path) -> None:
+    """LLM revise output naming memory_agent must trigger rule-based revision fallback."""
+    previous = ExecutionPlan(
+        plan_id="pln-prev-revise-mem",
+        event_id="evt-revise-mem",
+        steps=[
+            PlanStep(
+                step_order=1,
+                step_goal="Collect evidence",
+                assigned_agent="evidence_agent",
+                required_tools=["query_threat_intel"],
+                success_criteria="ok",
+            ),
+            PlanStep(
+                step_order=2,
+                step_goal="Risk scoring",
+                assigned_agent="risk_agent",
+                required_tools=[],
+                success_criteria="score computed",
+            ),
+            PlanStep(
+                step_order=3,
+                step_goal="Graph enrichment",
+                assigned_agent="graph_agent",
+                required_tools=[],
+                success_criteria="graph built",
+            ),
+            PlanStep(
+                step_order=4,
+                step_goal="Response plan",
+                assigned_agent="response_agent",
+                required_tools=[],
+                success_criteria="actions generated",
+            ),
+        ],
+        budget=PlanBudget(),
+        revision=0,
+    )
+
+    _write_golden(
+        tmp_path,
+        "plan_revise",
+        {
+            "content": {
+                "plan_id": "pln-prev-revise-mem",
+                "event_id": "evt-revise-mem",
+                "steps": [
+                    {
+                        "step_order": 1,
+                        "step_goal": "Collect evidence",
+                        "assigned_agent": "evidence_agent",
+                        "required_tools": ["query_threat_intel"],
+                        "success_criteria": "ok",
+                    },
+                    {
+                        "step_order": 2,
+                        "step_goal": "Persist memory",
+                        "assigned_agent": "memory_agent",
+                        "required_tools": [],
+                        "success_criteria": "memory updated",
+                    },
+                    {
+                        "step_order": 3,
+                        "step_goal": "Risk scoring",
+                        "assigned_agent": "risk_agent",
+                        "required_tools": [],
+                        "success_criteria": "score computed",
+                    },
+                    {
+                        "step_order": 4,
+                        "step_goal": "Response plan",
+                        "assigned_agent": "response_agent",
+                        "required_tools": [],
+                        "success_criteria": "actions generated",
+                    },
+                ],
+                "budget": {"max_tool_calls": 30, "max_llm_calls": 20, "max_duration_s": 300},
+                "revision": 1,
+                "revise_reason": "memory requested",
+                "degraded": False,
+            },
+            "model_name": "mock-model",
+            "prompt_tokens": 100,
+            "completion_tokens": 200,
+            "total_tokens": 300,
+        },
+    )
+
+    llm = _make_mock_llm(tmp_path)
+    agent = PlannerAgent(llm_client=llm)
+    plan = await agent._revise_impl(
+        "evt-revise-mem",
+        "need memory persistence",
+        previous,
+    )
+    assert plan.degraded is True
+    assert plan.revision == 1
+    assert "memory_agent" not in {s.assigned_agent for s in plan.steps}
+    assert all(s.assigned_agent in PLAN_STEP_ASSIGNABLE_AGENTS for s in plan.steps)
 
 
 @pytest.mark.asyncio

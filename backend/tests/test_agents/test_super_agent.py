@@ -1511,7 +1511,51 @@ class TestNonExecutablePlanAgents:
             writer="SuperAgent",
         )
 
-    async def test_execute_single_step_fails_on_tool_agent(self) -> None:
+    async def test_execute_single_step_does_not_record_step_on_non_executable_agent(
+        self,
+    ) -> None:
+        """Non-executable agents fail before _record_agent_step runs."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.models.context import EventContext
+        from app.models.enums import FinalVerdict, WritebackReadiness
+        from app.models.security_event import EventSummary
+
+        agent = SuperAgent(degraded_flags=MagicMock())
+        recorded: list[str] = []
+
+        async def _track_step(_event_id: str, name: str) -> None:
+            recorded.append(name)
+
+        agent._record_agent_step = _track_step  # type: ignore[method-assign]
+
+        ec = EventContext(
+            event=EventSummary(
+                event_id=_EVENT_ID,
+                event_type=EventType.INSIDER_THREAT,
+                title="Suspicious login",
+                status=EventStatus.NEW,
+                severity=Severity.MEDIUM,
+                risk_score=50,
+                final_verdict=FinalVerdict.NONE,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                disposition_policy=DispositionPolicy.NOT_REQUIRED,
+            )
+        )
+        step = PlanStep.model_construct(
+            step_order=2,
+            step_goal="Persist memory",
+            assigned_agent="memory_agent",  # type: ignore[arg-type]
+            required_tools=[],
+            success_criteria="memory updated",
+        )
+
+        with pytest.raises(ShadowTraceError):
+            await agent._execute_single_step(ec, step)
+
+        assert recorded == []
+
         from unittest.mock import AsyncMock, MagicMock
 
         from app.models.context import EventContext

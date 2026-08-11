@@ -935,14 +935,14 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                 await self._run_risk_step(ec)
             case "report_agent":
                 pass  # handled by dedicated report_node
+            case "response_agent":
+                pass  # deferred to workflow response_node / execute_plan_steps skip
             case "graph_agent":
                 await self._run_graph_step(ec, step)
             case "storyline_service":
                 await self._run_storyline_step(ec)
             case "react":
                 await self._run_react_step(ec, step)
-            case _:
-                await self._fail_non_executable_plan_step(event_id, agent_name, step.step_order)
 
         await self._check_convergence_stop(event_id, agent_name)
 
