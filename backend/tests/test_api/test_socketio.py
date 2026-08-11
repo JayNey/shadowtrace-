@@ -70,6 +70,8 @@ def _reset_socketio_health_state() -> None:
     reset_socketio_health_state_for_tests()
     yield
     reset_socketio_health_state_for_tests()
+
+
 SCHEMA_PATH = Path(__file__).resolve().parents[3] / "contracts" / "socketio" / "events.schema.json"
 
 EXPECTED_EVENT_TYPES = sorted(SOCKET_MESSAGE_TYPES)

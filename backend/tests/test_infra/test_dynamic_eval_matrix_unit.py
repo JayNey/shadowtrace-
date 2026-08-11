@@ -13,6 +13,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MATRIX_PATH = REPO_ROOT / "scripts" / "dynamic_eval_matrix.py"
+
+
+def _mock_subprocess_result() -> object:
+    return type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+
 FULL_LOOP_PATH = REPO_ROOT / "scripts" / "dynamic_eval_full_loop.py"
 
 
@@ -196,7 +202,7 @@ def test_run_scenario_finally_compose_down_with_volumes(matrix_mod, tmp_path: Pa
             "_run_full_loop_via_exec",
             return_value={"final_statuses": {"evt-a": "closed"}},
         ),
-        patch.object(matrix_mod, "_run", return_value=type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
+        patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
     ):
         manifest = matrix_mod.run_scenario(
             scenario="insider_data_exfiltration",
@@ -234,7 +240,7 @@ def test_run_scenario_cleanup_failure_after_pass_raises(matrix_mod, tmp_path: Pa
             "_run_full_loop_via_exec",
             return_value={"final_statuses": {"evt-a": "closed"}},
         ),
-        patch.object(matrix_mod, "_run", return_value=type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()),
+        patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
     ):
         with pytest.raises(matrix_mod.MatrixError, match="compose down failed"):
             matrix_mod.run_scenario(
@@ -339,9 +345,7 @@ def test_require_closed_rejects_heuristic_event_selection(full_loop_mod) -> None
     with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
         client = client_cls.return_value
         client.get_json.side_effect = lambda path: (
-            {"items": []}
-            if "/events" in path
-            else {"playbook_resources": {"status": "ready"}}
+            {"items": []} if "/events" in path else {"playbook_resources": {"status": "ready"}}
         )
         with pytest.raises(SystemExit, match="heuristic DB selection is forbidden"):
             full_loop_mod.main(["--require-closed"])
@@ -389,9 +393,7 @@ def test_signal_handler_writes_summary_when_cleanup_fails(matrix_mod, tmp_path: 
         summary_ref = active_run.get("summary")
         if scenario and isinstance(summary_ref, dict):
             manifest = (
-                active_run.get("manifest")
-                if isinstance(active_run.get("manifest"), dict)
-                else {}
+                active_run.get("manifest") if isinstance(active_run.get("manifest"), dict) else {}
             )
             interrupted = {
                 "status": "interrupted",

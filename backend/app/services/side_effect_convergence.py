@@ -150,23 +150,23 @@ def _summarize_outbox_fields(
             writebacks.append(WritebackStatus.PENDING)
 
     outbox_delivery: OutboxDeliveryStatus | None = None
-    for candidate in (
+    for delivery_candidate in (
         OutboxDeliveryStatus.DEAD_LETTER,
         OutboxDeliveryStatus.READY,
         OutboxDeliveryStatus.LEASED,
         OutboxDeliveryStatus.WAITING_RETRY,
         OutboxDeliveryStatus.PAUSED,
     ):
-        if candidate in deliveries:
-            outbox_delivery = candidate
+        if delivery_candidate in deliveries:
+            outbox_delivery = delivery_candidate
             break
     if outbox_delivery is None and deliveries:
         outbox_delivery = deliveries[0]
 
     outbox_wb: WritebackStatus | None = None
-    for candidate in _UNCONFIRMED_WRITEBACK_PRIORITIES:
-        if candidate in writebacks:
-            outbox_wb = candidate
+    for writeback_candidate in _UNCONFIRMED_WRITEBACK_PRIORITIES:
+        if writeback_candidate in writebacks:
+            outbox_wb = writeback_candidate
             break
     if outbox_wb is None and writebacks:
         outbox_wb = writebacks[0]
@@ -252,9 +252,7 @@ async def build_side_effect_convergence_summary(
     jobs: list[orm.ActionExecutionJob] = list(
         (
             await session.scalars(
-                select(orm.ActionExecutionJob).where(
-                    orm.ActionExecutionJob.event_id == event_id
-                )
+                select(orm.ActionExecutionJob).where(orm.ActionExecutionJob.event_id == event_id)
             )
         ).all()
     )

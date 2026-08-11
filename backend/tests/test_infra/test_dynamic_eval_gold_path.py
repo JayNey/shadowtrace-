@@ -392,9 +392,7 @@ def test_empty_event_id_is_ignored(full_loop_mod) -> None:
     with patch.object(full_loop_mod, "DynamicEvalClient") as client_cls:
         client = client_cls.return_value
         client.get_json.side_effect = lambda path: (
-            {"items": []}
-            if "/events" in path
-            else {"playbook_resources": {"status": "ready"}}
+            {"items": []} if "/events" in path else {"playbook_resources": {"status": "ready"}}
         )
         with pytest.raises(SystemExit, match="heuristic DB selection is forbidden"):
             full_loop_mod.main(["--require-closed", "--event-id", ""])

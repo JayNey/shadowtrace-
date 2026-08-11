@@ -431,7 +431,7 @@ def get_investigation_intent_enqueue_health() -> dict[str, object]:
 
 
 def record_socketio_subscriber_failure(*, reason: str) -> None:
-    """Record a Socket.IO Redis subscriber failure (``subscriber_error`` or ``recovery_backoff``)."""
+    """Record Socket.IO Redis subscriber failure (subscriber_error or recovery_backoff)."""
     global _process_socketio_subscriber_failures
     _process_socketio_subscriber_failures += 1
     _ensure_metrics()

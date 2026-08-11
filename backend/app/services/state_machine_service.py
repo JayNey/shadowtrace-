@@ -61,11 +61,11 @@ from app.services.context_service import (
 from app.services.degraded_flag_service import DegradedFlagService
 from app.services.event_audit_log_service import EventAuditLogService
 from app.services.event_service import _security_event_from_row
-from app.services.writeback_close_gate import build_closed_gate_actions
 from app.services.side_effect_convergence import (
     build_side_effect_convergence_summary,
     reconcile_stale_executions_before_close,
 )
+from app.services.writeback_close_gate import build_closed_gate_actions
 
 logger = logging.getLogger(__name__)
 

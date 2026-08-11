@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import socket
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, TypedDict
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, Query, status
 from sqlalchemy import exc as sa_exc
@@ -335,12 +335,37 @@ async def _generate_quick_close_report(
         )
 
 
+class SideEffectConvergenceResponseFields(TypedDict):
+    background_side_effects_pending: bool
+    outstanding_side_effect_count: int
+    gate_applicable_outstanding_count: int
+
+
+def _build_event_close_response(
+    *,
+    event_id: str,
+    status: EventStatus,
+    final_verdict: FinalVerdict,
+    external_unsynced: bool,
+    side_effect_fields: SideEffectConvergenceResponseFields | None = None,
+) -> s.EventCloseResponse:
+    close_kwargs: dict[str, Any] = {
+        "event_id": event_id,
+        "status": status,
+        "final_verdict": final_verdict,
+        "external_unsynced": external_unsynced,
+    }
+    if side_effect_fields is not None:
+        close_kwargs.update(side_effect_fields)
+    return s.EventCloseResponse(**close_kwargs)
+
+
 async def _load_side_effect_convergence_fields(
     event_id: str,
     *,
     event_status: EventStatus,
     disposition_policy: DispositionPolicy,
-) -> dict[str, int | bool]:
+) -> SideEffectConvergenceResponseFields:
     """Load side-effect convergence counts for API responses (ISSUE-302)."""
     from app.api.v1.deps import _get_session_factory
     from app.services.side_effect_convergence import build_side_effect_convergence_summary
@@ -367,7 +392,7 @@ async def _load_side_effect_convergence_fields(
     }
 
 
-async def _side_effect_fields_for_event(event: Any) -> dict[str, int | bool]:
+async def _side_effect_fields_for_event(event: Any) -> SideEffectConvergenceResponseFields:
     """Load side-effect counts for GET/detail (degrade sentinel on failure)."""
     try:
         return await _load_side_effect_convergence_fields(
@@ -389,7 +414,9 @@ async def _side_effect_fields_for_event(event: Any) -> dict[str, int | bool]:
         }
 
 
-async def _side_effect_fields_for_close_response(event: Any) -> dict[str, int | bool]:
+async def _side_effect_fields_for_close_response(
+    event: Any,
+) -> SideEffectConvergenceResponseFields | None:
     """Load side-effect counts after a successful close (omit fields on load failure)."""
     try:
         return await _load_side_effect_convergence_fields(
@@ -403,7 +430,7 @@ async def _side_effect_fields_for_close_response(event: Any) -> dict[str, int | 
             getattr(event, "event_id", "?"),
             exc_info=True,
         )
-        return {}
+        return None
 
 
 async def _validate_side_effect_convergence_gate(
@@ -854,6 +881,7 @@ async def get_event(
                 tenant_id=tenant_id,
             )
 
+    side_effect_fields = await _side_effect_fields_for_event(event)
     return s.EventDetailResponse(
         event=event,
         writeback_required=required,
@@ -862,7 +890,9 @@ async def get_event(
         pending_writeback_count=pending_count,
         detection_context_snapshot=detection_context_summary,
         detection_context_projection_error=detection_context_projection_error,
-        **(await _side_effect_fields_for_event(event)),
+        background_side_effects_pending=side_effect_fields["background_side_effects_pending"],
+        outstanding_side_effect_count=side_effect_fields["outstanding_side_effect_count"],
+        gate_applicable_outstanding_count=side_effect_fields["gate_applicable_outstanding_count"],
         **_guidance_fields(event, get_settings()),
     )
 
@@ -1395,15 +1425,15 @@ async def close_event(
             reason=body.reason,
         )
         event = await event_service.get_event(event_id)
-        side_effect_fields: dict[str, int | bool] = {}
+        side_effect_fields: SideEffectConvergenceResponseFields | None = None
         if event is not None:
             side_effect_fields = await _side_effect_fields_for_close_response(event)
-        return s.EventCloseResponse(
+        return _build_event_close_response(
             event_id=event_id,
             status=EventStatus.CLOSED,
             final_verdict=result.final_verdict,
             external_unsynced=True,
-            **side_effect_fields,
+            side_effect_fields=side_effect_fields,
         )
 
     # Validate close rules per ISSUE-038.
@@ -1553,12 +1583,12 @@ async def close_event(
             details={"event_id": event_id},
         )
     side_effect_fields = await _side_effect_fields_for_close_response(event)
-    return s.EventCloseResponse(
+    return _build_event_close_response(
         event_id=event_id,
         status=event.status,
         final_verdict=event.final_verdict,
         external_unsynced=event.external_unsynced,
-        **side_effect_fields,
+        side_effect_fields=side_effect_fields,
     )
 
 
