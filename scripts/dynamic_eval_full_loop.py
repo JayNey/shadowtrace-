@@ -412,17 +412,31 @@ def assert_fp_semantic_gate(client: DynamicEvalClient, event_id: str) -> dict[st
     status = str(event.get("status") or "")
     verdict = str(event.get("final_verdict") or "")
     if status != "closed":
+        diagnostics = collect_event_diagnostics(client, event_id)
         raise EvalFailure(
-            f"FP semantic gate requires status=closed, got {status!r} "
-            f"(final_verdict={verdict!r})",
+            format_eval_failure_message(
+                headline=(
+                    f"FP semantic gate requires status=closed, got {status!r} "
+                    f"(final_verdict={verdict!r})"
+                ),
+                event_id=event_id,
+                diagnostics=diagnostics,
+            ),
             event_id=event_id,
-            diagnostics=collect_event_diagnostics(client, event_id),
+            diagnostics=diagnostics,
         )
     if verdict != "false_positive":
+        diagnostics = collect_event_diagnostics(client, event_id)
         raise EvalFailure(
-            f"FP semantic gate requires final_verdict=false_positive, got {verdict!r}",
+            format_eval_failure_message(
+                headline=(
+                    f"FP semantic gate requires final_verdict=false_positive, got {verdict!r}"
+                ),
+                event_id=event_id,
+                diagnostics=diagnostics,
+            ),
             event_id=event_id,
-            diagnostics=collect_event_diagnostics(client, event_id),
+            diagnostics=diagnostics,
         )
     return {
         "status": status,
@@ -437,11 +451,18 @@ def assert_domain_semantic_gate(client: DynamicEvalClient, event_id: str) -> dic
     status = str(event.get("status") or "")
     verdict = str(event.get("final_verdict") or "")
     if status != "closed":
+        diagnostics = collect_event_diagnostics(client, event_id)
         raise EvalFailure(
-            f"domain semantic gate requires status=closed, got {status!r} "
-            f"(final_verdict={verdict!r})",
+            format_eval_failure_message(
+                headline=(
+                    f"domain semantic gate requires status=closed, got {status!r} "
+                    f"(final_verdict={verdict!r})"
+                ),
+                event_id=event_id,
+                diagnostics=diagnostics,
+            ),
             event_id=event_id,
-            diagnostics=collect_event_diagnostics(client, event_id),
+            diagnostics=diagnostics,
         )
     return {
         "status": status,
@@ -809,14 +830,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def _preflight_change_window_baseline(client: DynamicEvalClient, *, scenario: str) -> None:
     if not scenario_requires_demo_baseline(scenario):
         return
+    # Prefer in-process assert when the backend package is importable (compose exec).
+    try:
+        from app.services.change_window_baseline_loader import (
+            assert_demo_eval_baseline_available,
+        )
+
+        assert_demo_eval_baseline_available()
+        return
+    except ImportError:
+        pass
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+
     health = client.get_json("/api/v1/health")
     probe = (health or {}).get("change_window_baseline") or {}
     status = str(probe.get("status") or "")
     resolved_path = probe.get("resolved_path") or "(unknown)"
     tenant_ids = probe.get("tenant_ids") or []
-    if status == "ready" and "tenant-demo" in tenant_ids:
-        return
     reasons = probe.get("reasons") or []
+    if (
+        status == "ready"
+        and "tenant-demo" in tenant_ids
+        and not any(str(item).startswith("empty_change_windows:") for item in reasons)
+    ):
+        return
     detail = ", ".join(str(item) for item in reasons) if reasons else f"status={status!r}"
     raise SystemExit(
         "change-window baseline preflight failed for scenario="
@@ -985,6 +1023,15 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except EvalFailure as exc:
         print(f"[dynamic-eval] ERROR: {exc}", file=sys.stderr)
+        if exc.diagnostics and "status_trace" not in str(exc):
+            print(
+                format_eval_failure_message(
+                    headline="eval failure diagnostics",
+                    event_id=exc.event_id or "(unknown)",
+                    diagnostics=exc.diagnostics,
+                ),
+                file=sys.stderr,
+            )
         raise SystemExit(1) from exc
     except (DynamicEvalApiError, RuntimeError, TimeoutError, ValueError) as exc:
         print(f"[dynamic-eval] ERROR: {exc}", file=sys.stderr)

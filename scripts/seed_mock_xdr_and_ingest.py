@@ -56,8 +56,10 @@ _ALL_SOURCE_KINDS = [
 from app.mock_xdr.state import MOCK_XDR_DEFAULT_READ_TOKEN, MOCK_XDR_DEFAULT_WRITE_TOKEN
 
 
-async def _seed_mock_xdr(*, mock_xdr_url: str, scenario_id: str, seed: int) -> dict:
-    scenario = build_scenario(scenario_id, seed=seed)
+async def _seed_mock_xdr(
+    *, mock_xdr_url: str, scenario_id: str, seed: int, instance: int = 0
+) -> dict:
+    scenario = build_scenario(scenario_id, seed=seed, instance=instance)
     seed_url = f"{mock_xdr_url.rstrip('/')}/mock-xdr/v1/control/seed"
     payload = scenario.model_dump(mode="json")
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -94,7 +96,14 @@ async def _poll_ingest(*, mock_xdr_url: str) -> dict:
         await dispose_session_provider()
 
 
-async def _run(*, scenario_id: str, mock_xdr_url: str, seed: int, seed_only: bool) -> int:
+async def _run(
+    *,
+    scenario_id: str,
+    mock_xdr_url: str,
+    seed: int,
+    seed_only: bool,
+    instance: int = 0,
+) -> int:
     if scenario_id not in SCENARIO_BUILDERS:
         raise SystemExit(f"unknown scenario: {scenario_id!r}")
 
@@ -102,6 +111,7 @@ async def _run(*, scenario_id: str, mock_xdr_url: str, seed: int, seed_only: boo
         mock_xdr_url=mock_xdr_url,
         scenario_id=scenario_id,
         seed=seed,
+        instance=instance,
     )
     logger.info(
         "mock-xdr seeded scenario=%s counts=%s",
@@ -147,6 +157,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--instance",
+        type=int,
+        default=0,
+        help="Scenario instance suffix for distinct source object IDs (ISSUE-313 pressure gate).",
+    )
+    parser.add_argument(
         "--seed-only",
         action="store_true",
         help="Only seed mock-xdr control plane; skip SourceAdapter poll (ISSUE-107 scheduler smoke)",
@@ -158,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
             mock_xdr_url=args.mock_xdr_url,
             seed=args.seed,
             seed_only=args.seed_only,
+            instance=int(args.instance),
         )
     )
 

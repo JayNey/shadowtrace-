@@ -507,3 +507,139 @@ def test_run_scenario_records_cleanup_error_on_failure_path(
     )
     assert manifest["status"] == "failed"
     assert manifest["cleanup_error"]["message"]
+
+
+
+def test_run_scenario_profile_by_scenario_reseeds_distinct_pressure_event(
+    matrix_mod, tmp_path: Path
+) -> None:
+    seed_calls: list[int] = []
+    gate_calls: list[tuple[str, list[str]]] = []
+
+    def _fake_seed(*_args, instance: int = 0, **_kwargs):
+        seed_calls.append(instance)
+        if instance == 0:
+            return {"accepted": 1, "event_ids": ["evt-semantic"]}
+        return {"accepted": 1, "event_ids": ["evt-pressure"]}
+
+    def _fake_gate(*_args, event_ids: list[str], gate: str, **_kwargs):
+        gate_calls.append((gate, list(event_ids)))
+        if gate == "pressure":
+            raise matrix_mod.MatrixError("pressure boom")
+        return {"final_statuses": {event_ids[0]: "closed"}}
+
+    with (
+        patch.object(matrix_mod, "_compose_down"),
+        patch.object(matrix_mod, "_wait_stack_healthy"),
+        patch.object(matrix_mod, "_seed_scenario", side_effect=_fake_seed),
+        patch.object(matrix_mod, "_run_scenario_gate", side_effect=_fake_gate),
+        patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
+    ):
+        manifest = matrix_mod.run_scenario(
+            scenario="account_anomaly_fp",
+            run_id="run-fp",
+            artifact_root=tmp_path,
+            token="bootstrap-token",
+            seed=42,
+            mock_xdr_url="http://mock-xdr:8100",
+            require_closed=False,
+            profile_by_scenario=True,
+            fresh_volumes=True,
+            stack_timeout_s=10.0,
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+            max_events=1,
+            build=False,
+        )
+
+    assert seed_calls == [0, 1]
+    assert gate_calls[0] == ("semantic", ["evt-semantic"])
+    assert gate_calls[1] == ("pressure", ["evt-pressure"])
+    assert manifest["status"] == "passed"
+    assert manifest["pressure_error"]["type"] == "MatrixError"
+    assert manifest["semantic_event_ids"] == ["evt-semantic"]
+    assert manifest["pressure_event_ids"] == ["evt-pressure"]
+
+
+def test_run_scenario_profile_by_scenario_domain_pressure_failure_blocks(
+    matrix_mod, tmp_path: Path
+) -> None:
+    def _fake_seed(*_args, instance: int = 0, **_kwargs):
+        if instance == 0:
+            return {"accepted": 1, "event_ids": ["evt-semantic"]}
+        return {"accepted": 1, "event_ids": ["evt-pressure"]}
+
+    def _fake_gate(*_args, event_ids: list[str], gate: str, **_kwargs):
+        if gate == "pressure":
+            raise matrix_mod.MatrixError("pressure boom")
+        return {"final_statuses": {event_ids[0]: "closed"}}
+
+    with (
+        patch.object(matrix_mod, "_compose_down"),
+        patch.object(matrix_mod, "_wait_stack_healthy"),
+        patch.object(matrix_mod, "_seed_scenario", side_effect=_fake_seed),
+        patch.object(matrix_mod, "_run_scenario_gate", side_effect=_fake_gate),
+        patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
+    ):
+        with pytest.raises(matrix_mod.MatrixError, match="pressure boom"):
+            matrix_mod.run_scenario(
+                scenario="suspicious_domain_access",
+                run_id="run-domain",
+                artifact_root=tmp_path,
+                token="bootstrap-token",
+                seed=42,
+                mock_xdr_url="http://mock-xdr:8100",
+                require_closed=False,
+                profile_by_scenario=True,
+                fresh_volumes=True,
+                stack_timeout_s=10.0,
+                max_wait_s=10.0,
+                poll_interval_s=1.0,
+                max_events=1,
+                build=False,
+            )
+
+    manifest = json.loads(
+        (tmp_path / "suspicious_domain_access" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["pressure_error"]["message"]
+
+
+
+def test_assert_fp_semantic_gate_raises_with_diagnostics(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if path.endswith("/audit-logs?page=1&page_size=5"):
+                return {"items": []}
+            return {
+                "event": {
+                    "event_id": "evt-fp",
+                    "status": "closed",
+                    "final_verdict": "none",
+                    "disposition_policy": "not_required",
+                    "degraded_flags": ["demo_flag"],
+                }
+            }
+
+    with pytest.raises(full_loop_mod.EvalFailure) as exc:
+        full_loop_mod.assert_fp_semantic_gate(_Client(), "evt-fp")
+    assert "false_positive" in str(exc.value)
+    assert "demo_flag" in str(exc.value) or "status_trace" in str(exc.value)
+    assert exc.value.diagnostics.get("final_verdict") == "none"
+
+
+def test_assert_domain_semantic_gate_passes_on_closed(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            return {
+                "event": {
+                    "event_id": "evt-domain",
+                    "status": "closed",
+                    "final_verdict": "none",
+                    "disposition_policy": "not_required",
+                }
+            }
+
+    result = full_loop_mod.assert_domain_semantic_gate(_Client(), "evt-domain")
+    assert result["status"] == "closed"

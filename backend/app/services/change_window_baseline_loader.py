@@ -131,11 +131,16 @@ def probe_change_window_baseline(settings: Any | None = None) -> dict[str, Any]:
     indexed = _index_baseline(raw)
     tenant_ids = sorted(indexed.keys())
     required = _required_tenant_ids(settings)
+    empty_window_tenants = [
+        tenant_id for tenant_id, org in indexed.items() if not org.change_windows
+    ]
     missing_required = [
         tenant_id
         for tenant_id in required
         if tenant_id not in indexed or not indexed[tenant_id].change_windows
     ]
+    if empty_window_tenants:
+        reasons.append(f"empty_change_windows:{','.join(empty_window_tenants)}")
     if missing_required:
         reasons.append(f"missing_required_tenants:{','.join(missing_required)}")
     if not tenant_ids:
@@ -160,21 +165,28 @@ def probe_change_window_baseline(settings: Any | None = None) -> dict[str, Any]:
 def assert_demo_eval_baseline_available(settings: Any | None = None) -> None:
     """Fail-closed preflight for demo eval scenarios that depend on tenant-demo."""
     probe = probe_change_window_baseline(settings)
-    path = probe["resolved_path"]
-    tenant_ids = probe.get("tenant_ids") or []
-    if probe["status"] == "unavailable" or _DEMO_EVAL_REQUIRED_TENANT not in tenant_ids:
-        indexed = load_change_window_baseline(str(path))
-        tenant = indexed.get(_DEMO_EVAL_REQUIRED_TENANT)
-        if tenant is None or not tenant.change_windows:
-            reasons = probe.get("reasons") or []
-            detail = ", ".join(reasons) if reasons else "baseline unavailable"
-            raise RuntimeError(
-                f"change-window baseline preflight failed: resolved_path={path!r} "
-                f"missing tenant {_DEMO_EVAL_REQUIRED_TENANT!r} ({detail})"
-            )
+    path = str(probe["resolved_path"])
+    indexed = load_change_window_baseline(path)
+    tenant = indexed.get(_DEMO_EVAL_REQUIRED_TENANT)
+    if tenant is None or not tenant.change_windows:
+        reasons = list(probe.get("reasons") or [])
+        detail = ", ".join(str(item) for item in reasons) if reasons else "baseline unavailable"
+        raise RuntimeError(
+            f"change-window baseline preflight failed: resolved_path={path!r} "
+            f"missing tenant {_DEMO_EVAL_REQUIRED_TENANT!r} ({detail})"
+        )
 
 
 @lru_cache(maxsize=8)
+def _load_change_window_baseline_at(resolved_path: str) -> dict[str, OrgChangeWindowBaseline]:
+    path = Path(resolved_path)
+    raw, _reasons = _parse_baseline_file(path)
+    if raw is None:
+        logger.warning("change-window baseline missing or invalid at %s", path)
+        return {}
+    return _index_baseline(raw)
+
+
 def load_change_window_baseline(path: str | None = None) -> dict[str, OrgChangeWindowBaseline]:
     """Load tenant-indexed change-window baselines from *path* or settings default."""
     settings = None
@@ -186,15 +198,17 @@ def load_change_window_baseline(path: str | None = None) -> dict[str, OrgChangeW
         except Exception:
             settings = None
     resolved = resolve_change_window_baseline_path(path, settings=settings)
-    raw, _reasons = _parse_baseline_file(resolved)
-    if raw is None:
-        logger.warning("change-window baseline missing or invalid at %s", resolved)
-        return {}
-    return _index_baseline(raw)
+    return _load_change_window_baseline_at(str(resolved))
+
+
+def clear_change_window_baseline_cache() -> None:
+    """Drop cached baseline parses (settings/path changes in tests)."""
+    _load_change_window_baseline_at.cache_clear()
 
 
 __all__ = [
     "assert_demo_eval_baseline_available",
+    "clear_change_window_baseline_cache",
     "load_change_window_baseline",
     "probe_change_window_baseline",
     "resolve_change_window_baseline_path",

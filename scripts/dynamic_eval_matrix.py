@@ -334,6 +334,7 @@ def _seed_scenario(
     scenario: str,
     seed: int,
     mock_xdr_url: str,
+    instance: int = 0,
 ) -> dict[str, Any]:
     cmd = _compose_cmd(
         project,
@@ -349,6 +350,8 @@ def _seed_scenario(
         mock_xdr_url,
         "--seed",
         str(seed),
+        "--instance",
+        str(instance),
     )
     print(f"[dynamic-eval-matrix] seed scenario={scenario} project={project}")
     proc = _run(cmd, capture=True, check=False)
@@ -564,25 +567,20 @@ def run_scenario(
             scenario=scenario,
             seed=seed,
             mock_xdr_url=mock_xdr_url,
+            instance=0,
         )
-        effective_max_events = max_events
-        if (
-            profile_by_scenario
-            and scenario_profile is not None
-            and scenario_profile.pressure != "none"
-        ):
-            effective_max_events = max(max_events, 2)
         event_ids = event_ids_from_seed_summary(
             seed_summary,
             scenario=scenario,
-            max_events=effective_max_events,
+            max_events=max_events,
         )
         semantic_event_ids = [event_ids[0]]
-        pressure_event_ids = [event_ids[1]] if len(event_ids) > 1 else list(event_ids)
+        pressure_event_ids = [eid for eid in event_ids if eid not in semantic_event_ids][:1]
+        pressure_seed_summary: dict[str, Any] | None = None
         manifest["seed_summary"] = seed_summary
-        manifest["event_ids"] = event_ids
+        manifest["event_ids"] = list(event_ids)
         manifest["semantic_event_ids"] = semantic_event_ids
-        manifest["pressure_event_ids"] = pressure_event_ids
+        manifest["pressure_event_ids"] = list(pressure_event_ids)
         if manifest_sink is not None:
             manifest_sink.update(manifest)
 
@@ -602,6 +600,42 @@ def run_scenario(
             pressure_result: dict[str, Any] | None = None
             pressure_error: dict[str, Any] | None = None
             if scenario_profile.pressure != "none":
+                if not pressure_event_ids:
+                    # Reseed AFTER semantic gate so analysis-only still sees instance=0 mock data.
+                    pressure_seed_summary = _seed_scenario(
+                        project,
+                        compose_files,
+                        scenario=scenario,
+                        seed=seed,
+                        mock_xdr_url=mock_xdr_url,
+                        instance=1,
+                    )
+                    pressure_ids = event_ids_from_seed_summary(
+                        pressure_seed_summary,
+                        scenario=scenario,
+                        max_events=1,
+                    )
+                    pressure_event_ids = [
+                        eid for eid in pressure_ids if eid not in semantic_event_ids
+                    ]
+                    if not pressure_event_ids:
+                        raise MatrixError(
+                            "pressure gate could not obtain a distinct event_id after "
+                            f"instance=1 reseed for scenario={scenario}: "
+                            f"semantic={semantic_event_ids!r} pressure_seed={pressure_ids!r}"
+                        )
+                    event_ids = list(dict.fromkeys([*event_ids, *pressure_event_ids]))
+                    manifest["pressure_seed_summary"] = pressure_seed_summary
+                    manifest["event_ids"] = event_ids
+                    manifest["pressure_event_ids"] = pressure_event_ids
+                    if manifest_sink is not None:
+                        manifest_sink.update(manifest)
+                if set(pressure_event_ids) & set(semantic_event_ids):
+                    raise MatrixError(
+                        "pressure gate event_ids must be distinct from semantic gate "
+                        f"event_ids for scenario={scenario}: "
+                        f"semantic={semantic_event_ids!r} pressure={pressure_event_ids!r}"
+                    )
                 try:
                     pressure_result = _run_scenario_gate(
                         project,
@@ -619,11 +653,14 @@ def run_scenario(
                         "type": type(exc).__name__,
                         "message": _sanitize_error_text(str(exc)),
                     }
-                    if scenario_profile.pressure_blocks_pass:
-                        raise
-                manifest["pressure_result"] = pressure_result
-                if pressure_error is not None:
+                    manifest["pressure_result"] = pressure_result
                     manifest["pressure_error"] = pressure_error
+                    manifest["result"] = semantic_result
+                    if scenario_profile.pressure_blocks_pass:
+                        manifest["status"] = "failed"
+                        raise
+                else:
+                    manifest["pressure_result"] = pressure_result
             manifest["result"] = semantic_result
             manifest["status"] = (
                 "passed"

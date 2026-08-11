@@ -38,20 +38,27 @@ def build_suspicious_domain_access(
     *,
     seed: int = 42,
     variant: ScenarioVariant | str = ScenarioVariant.NORMAL,
+    instance: int = 0,
 ) -> MockXDRScenario:
     selected_variant = normalize_variant(variant)
     base = DEFAULT_BASE_TIME
     tenant = DEFAULT_TENANT
-    conn_log = log_only_connector(connector_id="conn-log-domain")
-    conn_disp = disposition_connector(connector_id="conn-disp-domain")
+    id_suffix = f"-i{instance}" if instance else ""
+    connector_suffix = f"-{instance}" if instance else ""
+    incident_id = f"{INCIDENT_ID}{id_suffix}"
+    alert_id = f"{ALERT_ID}{id_suffix}"
+    asset_id = f"{ASSET_ID}{id_suffix}"
+    log_id = f"{LOG_ID}{id_suffix}"
+    conn_log = log_only_connector(connector_id=f"conn-log-domain{connector_suffix}")
+    conn_disp = disposition_connector(connector_id=f"conn-disp-domain{connector_suffix}")
     conn_disp = conn_disp.model_copy(
         update={"disposition_policy_default": DispositionPolicy.NOT_REQUIRED}
     )
-    conn_gap = capability_gap_connector(connector_id="conn-gap-domain")
+    conn_gap = capability_gap_connector(connector_id=f"conn-gap-domain{connector_suffix}")
 
     asset_ref = make_ref(
         SourceObjectKind.ASSET,
-        ASSET_ID,
+        asset_id,
         connector_id=conn_disp.connector_id,
         status_raw="managed",
         updated_at=base,
@@ -105,9 +112,9 @@ def build_suspicious_domain_access(
 
     log_ref = make_ref(
         SourceObjectKind.LOG,
-        LOG_ID,
+        log_id,
         connector_id=conn_log.connector_id,
-        parent=ALERT_ID,
+        parent=alert_id,
         status_raw="indexed",
         updated_at=base,
     )
@@ -125,14 +132,14 @@ def build_suspicious_domain_access(
 
     incident_ref = make_ref(
         SourceObjectKind.INCIDENT,
-        INCIDENT_ID,
+        incident_id,
         connector_id=conn_disp.connector_id,
         status_raw="open",
         updated_at=base,
     )
     alert_ref = make_ref(
         SourceObjectKind.ALERT,
-        ALERT_ID,
+        alert_id,
         connector_id=conn_disp.connector_id,
         status_raw="open",
         updated_at=base,
