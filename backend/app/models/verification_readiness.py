@@ -76,7 +76,9 @@ def entity_effect_verified_for_action(
     for item in verification.results:
         if item.action_id != action_id:
             continue
-        if item.verification_phase not in (VerificationPhase.EFFECT, None):
+        # Require an explicit effect-phase row; disposition / unset phase must not
+        # satisfy entity-effect CLOSED convergence.
+        if item.verification_phase is not VerificationPhase.EFFECT:
             continue
         if item.effect_status is EffectStatus.VERIFIED:
             return True

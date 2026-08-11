@@ -260,9 +260,9 @@ class EventDetailResponse(BaseModel):
         default=0,
         description=(
             "Outstanding side effects on the current plan revision that block REQUIRED "
-            "CLOSED when non-zero. Reasons include in_flight_job, effect_unverified, "
-            "terminal_writeback_unconfirmed, and outbox_undelivered. "
-            "-1 means degraded/unavailable."
+            "CLOSED when non-zero. Reasons include in_flight_job, executing_action, "
+            "effect_unverified, terminal_writeback_unconfirmed, outbox_not_confirmed, "
+            "and outbox_undelivered. -1 means degraded/unavailable."
         ),
     )
 
@@ -319,9 +319,9 @@ class EventCloseResponse(BaseModel):
         default=0,
         description=(
             "Outstanding side effects on the current plan revision that block REQUIRED "
-            "CLOSED when non-zero. Reasons include in_flight_job, effect_unverified, "
-            "terminal_writeback_unconfirmed, and outbox_undelivered. "
-            "-1 means degraded/unavailable."
+            "CLOSED when non-zero. Reasons include in_flight_job, executing_action, "
+            "effect_unverified, terminal_writeback_unconfirmed, outbox_not_confirmed, "
+            "and outbox_undelivered. -1 means degraded/unavailable."
         ),
     )
 
