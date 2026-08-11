@@ -228,8 +228,12 @@ def _compose_down(
 
 
 def _scenario_project_name(scenario: str, run_id: str) -> str:
+    # Compose project names must be lowercase ([a-z0-9_-]); run_id often has T/Z.
     safe = "".join(ch if ch.isalnum() else "-" for ch in scenario.lower())
-    return f"shadowtrace-eval-{safe}-{run_id}"
+    safe_run = "".join(
+        ch if ch.isalnum() or ch in "-_" else "-" for ch in run_id.lower()
+    )
+    return f"shadowtrace-eval-{safe}-{safe_run}"
 
 
 def _sanitize(value: Any) -> Any:
@@ -278,7 +282,7 @@ def _append_cleanup_error_to_manifest(
     else:
         manifest = {}
     manifest["cleanup_error"] = payload
-    if manifest.get("status") == "passed":
+    if manifest.get("status") in {"passed", "passed_with_pressure_error"}:
         manifest["status"] = "passed_with_cleanup_error"
     _write_json(manifest_path, manifest)
     if manifest_sink is not None:
@@ -538,16 +542,17 @@ def run_scenario(
     _CLEANUP.set_project(project, fresh_volumes=fresh_volumes)
     started = time.monotonic()
     try:
+        # --profile is a compose GLOBAL option; must appear before the subcommand.
         up_cmd = _compose_cmd(
             project,
             compose_files,
+            "--profile",
+            "worker",
             "up",
             "-d",
             "--wait",
             "--wait-timeout",
             str(int(stack_timeout_s)),
-            "--profile",
-            "worker",
         )
         if build:
             up_cmd.insert(up_cmd.index("up") + 1, "--build")
@@ -649,24 +654,28 @@ def run_scenario(
                         poll_interval_s=poll_interval_s,
                     )
                 except MatrixError as exc:
+                    pressure_msg = _sanitize_error_text(str(exc))
+                    if not pressure_msg.startswith("[pressure gate]"):
+                        pressure_msg = f"[pressure gate] {pressure_msg}"
                     pressure_error = {
                         "type": type(exc).__name__,
-                        "message": _sanitize_error_text(str(exc)),
+                        "message": pressure_msg,
                     }
                     manifest["pressure_result"] = pressure_result
                     manifest["pressure_error"] = pressure_error
                     manifest["result"] = semantic_result
                     if scenario_profile.pressure_blocks_pass:
                         manifest["status"] = "failed"
-                        raise
+                        raise MatrixError(pressure_msg) from exc
                 else:
                     manifest["pressure_result"] = pressure_result
             manifest["result"] = semantic_result
-            manifest["status"] = (
-                "passed"
-                if pressure_error is None or not scenario_profile.pressure_blocks_pass
-                else "failed"
-            )
+            if pressure_error is not None and not scenario_profile.pressure_blocks_pass:
+                manifest["status"] = "passed_with_pressure_error"
+            elif pressure_error is None:
+                manifest["status"] = "passed"
+            else:
+                manifest["status"] = "failed"
         else:
             loop_result = _run_full_loop_via_exec(
                 project,
@@ -683,10 +692,23 @@ def run_scenario(
         manifest["elapsed_s"] = round(time.monotonic() - started, 2)
         _write_json(scenario_dir / "manifest.json", manifest)
         final = (manifest.get("result") or {}).get("final_statuses")
-        print(
-            f"[dynamic-eval-matrix] PASS scenario={scenario} "
-            f"elapsed_s={manifest['elapsed_s']} final={final}"
-        )
+        if (
+            profile_by_scenario
+            and scenario_profile is not None
+            and manifest.get("pressure_error") is not None
+            and not scenario_profile.pressure_blocks_pass
+        ):
+            print(
+                f"[dynamic-eval-matrix] PASS (semantic); pressure gate FAILED "
+                f"(non-blocking) scenario={scenario} "
+                f"elapsed_s={manifest['elapsed_s']} final={final} "
+                f"pressure_error={manifest['pressure_error'].get('message')}"
+            )
+        else:
+            print(
+                f"[dynamic-eval-matrix] PASS scenario={scenario} "
+                f"elapsed_s={manifest['elapsed_s']} final={final}"
+            )
         return manifest
     except Exception as exc:
         manifest["status"] = "failed"
@@ -815,7 +837,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.require_closed and args.profile_by_scenario:
         raise SystemExit("--require-closed cannot be combined with --profile-by-scenario")
 
-    run_id = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
+    run_id = (
+        datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
+    ).lower()
     artifact_root = Path(
         args.artifact_dir or (_ROOT_DIR / "artifacts" / "dynamic-eval-matrix" / run_id)
     )

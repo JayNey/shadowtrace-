@@ -236,7 +236,7 @@ Matrix 在容器内通过 `docker compose exec backend` 访问 `http://127.0.0.1
 
 **不要把 baseline 修复误解为 full-loop early close**：graph 中 `route_after_fp_adjudication` 在 full-loop 下仍继续；FP 短闭环属于 `include_response_execution=false` 的 analysis-only profile。
 
-推荐 matrix 合同（`--profile-by-scenario` / `EVAL_MATRIX_PROFILE_BY_SCENARIO=1`）：
+`make eval-full-loop-matrix` 默认启用 `--profile-by-scenario`（`EVAL_MATRIX_PROFILE_BY_SCENARIO=1`；设 `0` 可关闭）：
 
 ```bash
 python3 scripts/dynamic_eval_matrix.py \
@@ -244,7 +244,8 @@ python3 scripts/dynamic_eval_matrix.py \
   --fresh-volumes \
   --profile-by-scenario
 
-make eval-full-loop-matrix EVAL_MATRIX_PROFILE_BY_SCENARIO=1
+make eval-full-loop-matrix
+# opt out: make eval-full-loop-matrix EVAL_MATRIX_PROFILE_BY_SCENARIO=0
 ```
 
 | 场景 | 语义门（必须通过） | 压力门（独立报告） |

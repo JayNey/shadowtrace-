@@ -21,6 +21,7 @@ from app.models.enums import EventType, EvidenceSource, Severity
 from app.models.evidence import Evidence, EvidenceConflict
 from app.models.workflow import FP_HIGH_THRESHOLD, FP_LOW_THRESHOLD
 from app.services.change_window_baseline_loader import (
+    clear_change_window_baseline_cache,
     load_change_window_baseline,
     resolve_tenant_id,
 )
@@ -465,9 +466,7 @@ def test_verdict_resolver_honors_post_evidence_adjudication() -> None:
 
 
 def test_baseline_loader_indexes_tenants(tmp_path: Path) -> None:
-    from app.services.change_window_baseline_loader import load_change_window_baseline
-
-    load_change_window_baseline.cache_clear()
+    clear_change_window_baseline_cache()
     indexed = load_change_window_baseline(str(_baseline_file(tmp_path)))
     assert "tenant-demo" in indexed
     assert indexed["tenant-demo"].change_windows[0].window_id == "cw-test"

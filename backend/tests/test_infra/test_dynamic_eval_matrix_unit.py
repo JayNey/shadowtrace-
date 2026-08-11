@@ -155,6 +155,22 @@ def test_scenario_project_name_unique_for_all_gold_scenarios(matrix_mod) -> None
         for scenario in matrix_mod.GOLD_SCENARIOS
     ]
     assert len(names) == len(set(names))
+    for name in names:
+        assert name == name.lower()
+        assert "T" not in name and "Z" not in name
+
+
+def test_compose_up_places_profile_before_subcommand(matrix_mod) -> None:
+    cmd = matrix_mod._compose_cmd(
+        "shadowtrace-eval-fp-run",
+        [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+        "--profile",
+        "worker",
+        "up",
+        "-d",
+    )
+    assert cmd.index("--profile") < cmd.index("up")
+    assert cmd[cmd.index("--profile") + 1] == "worker"
 
 
 def test_parse_scenarios_rejects_duplicates(matrix_mod) -> None:
@@ -555,8 +571,9 @@ def test_run_scenario_profile_by_scenario_reseeds_distinct_pressure_event(
     assert seed_calls == [0, 1]
     assert gate_calls[0] == ("semantic", ["evt-semantic"])
     assert gate_calls[1] == ("pressure", ["evt-pressure"])
-    assert manifest["status"] == "passed"
+    assert manifest["status"] == "passed_with_pressure_error"
     assert manifest["pressure_error"]["type"] == "MatrixError"
+    assert "[pressure gate]" in manifest["pressure_error"]["message"]
     assert manifest["semantic_event_ids"] == ["evt-semantic"]
     assert manifest["pressure_event_ids"] == ["evt-pressure"]
 

@@ -31,7 +31,10 @@ def profiles_mod():
 
 @pytest.fixture(scope="module")
 def diagnostics_mod():
-    return _load_module("dynamic_eval_diagnostics_under_test", SCRIPTS / "dynamic_eval_diagnostics.py")
+    return _load_module(
+        "dynamic_eval_diagnostics_under_test",
+        SCRIPTS / "dynamic_eval_diagnostics.py",
+    )
 
 
 def test_fp_profile_uses_analysis_only_semantic_and_non_blocking_pressure(profiles_mod) -> None:

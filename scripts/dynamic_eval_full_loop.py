@@ -174,6 +174,7 @@ def seed_via_compose(
     scenario: str,
     mock_xdr_url: str,
     seed: int,
+    instance: int = 0,
 ) -> dict[str, Any]:
     """Seed mock-xdr + SourceAdapter ingest inside the backend container."""
     cmd = _compose_cmd() + [
@@ -188,6 +189,8 @@ def seed_via_compose(
         mock_xdr_url,
         "--seed",
         str(seed),
+        "--instance",
+        str(instance),
     ]
     print(f"[dynamic-eval] seeding via compose: scenario={scenario}")
     proc = subprocess.run(cmd, cwd=_ROOT_DIR, capture_output=True, text=True, check=False)
@@ -767,6 +770,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--instance",
+        type=int,
+        default=0,
+        help="Scenario instance suffix for distinct source object IDs (ISSUE-313)",
+    )
+    parser.add_argument(
         "--event-id",
         action="append",
         default=None,
@@ -847,15 +856,21 @@ def _preflight_change_window_baseline(client: DynamicEvalClient, *, scenario: st
     probe = (health or {}).get("change_window_baseline") or {}
     status = str(probe.get("status") or "")
     resolved_path = probe.get("resolved_path") or "(unknown)"
-    tenant_ids = probe.get("tenant_ids") or []
-    reasons = probe.get("reasons") or []
-    if (
-        status == "ready"
-        and "tenant-demo" in tenant_ids
-        and not any(str(item).startswith("empty_change_windows:") for item in reasons)
-    ):
+    tenant_ids = [str(item) for item in (probe.get("tenant_ids") or [])]
+    reasons = [str(item) for item in (probe.get("reasons") or [])]
+    # Demo eval only requires tenant-demo; other tenants may degrade global status.
+    demo_empty = any(
+        item.startswith("empty_change_windows:")
+        and "tenant-demo" in [part.strip() for part in item.split(":", 1)[-1].split(",")]
+        for item in reasons
+    )
+    demo_missing = "tenant-demo" not in tenant_ids or any(
+        item.startswith("missing_required_tenants:") and "tenant-demo" in item
+        for item in reasons
+    )
+    if not demo_missing and not demo_empty:
         return
-    detail = ", ".join(str(item) for item in reasons) if reasons else f"status={status!r}"
+    detail = ", ".join(reasons) if reasons else f"status={status!r}"
     raise SystemExit(
         "change-window baseline preflight failed for scenario="
         f"{scenario!r}: resolved_path={resolved_path!r} ({detail}). "
@@ -922,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
                 scenario=args.scenario,
                 mock_xdr_url=args.mock_xdr_url,
                 seed=args.seed,
+                instance=int(args.instance),
             )
             raw_ids = seed_summary.get("event_ids")
             if isinstance(raw_ids, list):
