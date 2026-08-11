@@ -1,4 +1,4 @@
-"""Session-backed side-effect convergence for the CLOSED gate (ISSUE-302)."""
+"""Session-backed side-effect convergence for the CLOSED gate (ISSUE-302 / ISSUE-312)."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import InvalidStateTransitionError
 from app.db import models as orm
+from app.models.agent_io import VerificationResult
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -17,22 +18,31 @@ from app.models.enums import (
     DispositionPolicy,
     EventStatus,
     ExecutionJobStatus,
+    ExecutionOwner,
     OutboxDeliveryStatus,
     WritebackStatus,
 )
 from app.models.side_effect_convergence import (
     OutstandingSideEffectView,
+    SideEffectConvergencePolicy,
     SideEffectConvergenceReason,
     SideEffectConvergenceSummary,
     SideEffectConvergenceViolation,
     SideEffectScope,
 )
+from app.models.verification_readiness import entity_effect_verified_for_action
 from app.services.writeback_close_gate import load_active_outboxes
 
 _ACTIVE_JOB_STATUSES = frozenset(
     {
         ExecutionJobStatus.QUEUED,
         ExecutionJobStatus.RUNNING,
+    }
+)
+_TERMINAL_JOB_STATUSES = frozenset(
+    {
+        ExecutionJobStatus.SUCCESS,
+        ExecutionJobStatus.PARTIAL_SUCCESS,
     }
 )
 _UNDELIVERED_OUTBOX_STATUSES = frozenset(
@@ -50,18 +60,27 @@ _UNCONFIRMED_WRITEBACK_PRIORITIES: tuple[WritebackStatus, ...] = (
     WritebackStatus.SENDING,
     WritebackStatus.PENDING,
 )
+_ENTITY_OUTBOX_FAILURE_STATUSES = frozenset(
+    {
+        WritebackStatus.FAILED,
+        WritebackStatus.CONFLICT,
+    }
+)
 
 
 def raise_side_effect_convergence_error(violation: SideEffectConvergenceViolation) -> NoReturn:
     """Map a convergence violation to StateMachine InvalidStateTransitionError."""
+    details: dict[str, str] = {
+        "action_id": violation.action_id,
+        "reason": violation.reason.value,
+        "scope": violation.scope.value,
+    }
+    if violation.convergence_policy is not None:
+        details["convergence_policy"] = violation.convergence_policy.value
     raise InvalidStateTransitionError(
         "required CLOSED gate: gate-applicable side effects have not converged",
         target=EventStatus.CLOSED,
-        details={
-            "action_id": violation.action_id,
-            "reason": violation.reason.value,
-            "scope": violation.scope.value,
-        },
+        details=details,
         error_code="closed_side_effects_pending",
     )
 
@@ -98,62 +117,97 @@ def _action_has_active_job(
     return None
 
 
-def _entity_effect_outbox_converged(
-    outbox: orm.DispositionOutbox,
-    job: orm.ActionExecutionJob | None,
-) -> bool:
-    if (
-        outbox.intent_kind != DispositionIntentKind.ENTITY_ACTION_SUBMIT.value
-        or outbox.delivery_status != OutboxDeliveryStatus.DELIVERED.value
-        or outbox.latest_writeback_status != WritebackStatus.ACCEPTED.value
-        or job is None
-        or job.status != ExecutionJobStatus.SUCCESS.value
+def _resolve_convergence_policy(
+    action_row: orm.Action,
+    active_outboxes: list[orm.DispositionOutbox],
+) -> SideEffectConvergencePolicy:
+    """Classify side-effect convergence evidence by action/outbox kind."""
+    if action_row.writeback_applicable:
+        return SideEffectConvergencePolicy.TERMINAL_WRITEBACK
+    if any(
+        outbox.intent_kind == DispositionIntentKind.ENTITY_ACTION_SUBMIT.value
+        for outbox in active_outboxes
     ):
-        return False
-    raw_result = job.raw_result or {}
-    if raw_result.get("effect_projection_pending") is not False:
-        return False
-    completion = raw_result.get("effect_completion")
-    if not isinstance(completion, dict):
-        return False
-    return (
-        completion.get("verified") is True
-        and completion.get("disposition_id") == outbox.disposition_id
-        and completion.get("writeback_id") == outbox.writeback_id
-        and completion.get("action_id") == outbox.action_id
-        and bool(completion.get("provider_record_id"))
-        and int(completion.get("observed_version") or 0) > 0
-    )
+        return SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
+    if (
+        action_row.execution_owner == ExecutionOwner.XDR_MANAGED.value
+        and action_row.writeback_required
+    ):
+        return SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
+    return SideEffectConvergencePolicy.EXECUTION_JOB_ONLY
 
 
-def _outbox_blocks_convergence(
+def _job_terminal_success(job: orm.ActionExecutionJob | None) -> bool:
+    if job is None:
+        return False
+    try:
+        status = ExecutionJobStatus(job.status)
+    except ValueError:
+        return False
+    return status in _TERMINAL_JOB_STATUSES
+
+
+def _action_terminal_success(action_row: orm.Action) -> bool:
+    status = _parse_action_status(action_row.status)
+    return status in {ActionStatus.SUCCESS, ActionStatus.PARTIAL_SUCCESS}
+
+
+def _outbox_blocks_terminal_writeback(
     outbox: orm.DispositionOutbox,
-    job: orm.ActionExecutionJob | None,
 ) -> tuple[bool, SideEffectConvergenceReason | None]:
     wb_raw = outbox.latest_writeback_status
     if wb_raw and wb_raw != WritebackStatus.CONFIRMED.value:
-        if _entity_effect_outbox_converged(outbox, job):
-            return False, None
         try:
             WritebackStatus(wb_raw)
         except ValueError:
-            return True, SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED
-        return True, SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED
+            return True, SideEffectConvergenceReason.TERMINAL_WRITEBACK_UNCONFIRMED
+        return True, SideEffectConvergenceReason.TERMINAL_WRITEBACK_UNCONFIRMED
     try:
         delivery = OutboxDeliveryStatus(outbox.delivery_status)
     except ValueError:
-        delivery = None
+        # Unknown / corrupt delivery_status must fail closed for CLOSED.
+        return True, SideEffectConvergenceReason.OUTBOX_UNDELIVERED
     if delivery in _UNDELIVERED_OUTBOX_STATUSES:
         return True, SideEffectConvergenceReason.OUTBOX_UNDELIVERED
     return False, None
 
 
+def _outbox_blocks_entity_effect(
+    outbox: orm.DispositionOutbox,
+) -> tuple[bool, SideEffectConvergenceReason | None]:
+    try:
+        delivery = OutboxDeliveryStatus(outbox.delivery_status)
+    except ValueError:
+        # Unknown / corrupt delivery_status must fail closed for CLOSED.
+        return True, SideEffectConvergenceReason.OUTBOX_UNDELIVERED
+    if delivery in _UNDELIVERED_OUTBOX_STATUSES:
+        return True, SideEffectConvergenceReason.OUTBOX_UNDELIVERED
+
+    wb_raw = outbox.latest_writeback_status
+    if not wb_raw:
+        return False, None
+    try:
+        wb_status = WritebackStatus(wb_raw)
+    except ValueError:
+        return True, SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED
+    if wb_status in _ENTITY_OUTBOX_FAILURE_STATUSES:
+        return True, SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED
+    # ACCEPTED / CONFIRMED / PENDING do not block entity-effect convergence alone.
+    return False, None
+
+
 def _scan_outboxes_for_block(
     active_outboxes: list[orm.DispositionOutbox],
-    job: orm.ActionExecutionJob | None,
+    *,
+    policy: SideEffectConvergencePolicy,
 ) -> SideEffectConvergenceReason | None:
+    checker = (
+        _outbox_blocks_terminal_writeback
+        if policy is SideEffectConvergencePolicy.TERMINAL_WRITEBACK
+        else _outbox_blocks_entity_effect
+    )
     for outbox in active_outboxes:
-        blocks, reason = _outbox_blocks_convergence(outbox, job)
+        blocks, reason = checker(outbox)
         if blocks and reason is not None:
             return reason
     return None
@@ -227,22 +281,86 @@ def _build_jobs_by_action(
     return result
 
 
+async def _load_verification_result(
+    session: AsyncSession,
+    event_id: str,
+) -> VerificationResult | None:
+    row = await session.scalar(
+        select(orm.EventContextJournal.value)
+        .where(
+            orm.EventContextJournal.event_id == event_id,
+            orm.EventContextJournal.field_name == "verification_result",
+        )
+        .order_by(orm.EventContextJournal.version.desc())
+        .limit(1)
+    )
+    if row is not None:
+        try:
+            return VerificationResult.model_validate(row)
+        except Exception:
+            # Journal present but unreadable: fail closed (do not fall open to
+            # a possibly stale snapshot that could falsely clear EFFECT gate).
+            return None
+
+    event_row = await session.get(orm.SecurityEvent, event_id)
+    if event_row is None or not isinstance(event_row.event_context_snapshot, dict):
+        return None
+    raw = event_row.event_context_snapshot.get("verification_result")
+    if raw is None:
+        return None
+    try:
+        return VerificationResult.model_validate(raw)
+    except Exception:
+        return None
+
+
 def _action_side_effect_blocks_convergence(
     action_row: orm.Action,
     *,
     jobs_by_action: dict[str, orm.ActionExecutionJob],
     active_outboxes: list[orm.DispositionOutbox],
-) -> SideEffectConvergenceReason | None:
-    """Return a blocking reason when jobs/outboxes for an action have not converged."""
+    verification: VerificationResult | None,
+) -> tuple[SideEffectConvergenceReason | None, SideEffectConvergencePolicy]:
+    """Return a blocking reason when jobs/outboxes/effects for an action have not converged."""
+    policy = _resolve_convergence_policy(action_row, active_outboxes)
     status = _parse_action_status(action_row.status)
     if status is ActionStatus.EXECUTING:
-        return SideEffectConvergenceReason.EXECUTING_ACTION
+        return SideEffectConvergenceReason.EXECUTING_ACTION, policy
     if _action_has_active_job(action_row.action_id, jobs_by_action) is not None:
-        return SideEffectConvergenceReason.IN_FLIGHT_JOB
-    return _scan_outboxes_for_block(
-        active_outboxes,
-        jobs_by_action.get(action_row.action_id),
-    )
+        return SideEffectConvergenceReason.IN_FLIGHT_JOB, policy
+
+    job = jobs_by_action.get(action_row.action_id)
+
+    if policy is SideEffectConvergencePolicy.EXECUTION_JOB_ONLY:
+        if _job_terminal_success(job) or _action_terminal_success(action_row):
+            return None, policy
+        if job is not None:
+            return SideEffectConvergenceReason.IN_FLIGHT_JOB, policy
+        return SideEffectConvergenceReason.IN_FLIGHT_JOB, policy
+
+    if policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT:
+        entity_outboxes = [
+            outbox
+            for outbox in active_outboxes
+            if outbox.intent_kind == DispositionIntentKind.ENTITY_ACTION_SUBMIT.value
+        ]
+        if not entity_outboxes:
+            # XDR heuristic without an entity submit outbox must not skip delivery.
+            return SideEffectConvergenceReason.OUTBOX_UNDELIVERED, policy
+        outbox_reason = _scan_outboxes_for_block(entity_outboxes, policy=policy)
+        if outbox_reason is not None:
+            return outbox_reason, policy
+        # Job terminal SUCCESS is required; Action SUCCESS alone is insufficient.
+        if not _job_terminal_success(job):
+            return SideEffectConvergenceReason.IN_FLIGHT_JOB, policy
+        if not entity_effect_verified_for_action(verification, action_row.action_id):
+            return SideEffectConvergenceReason.EFFECT_UNVERIFIED, policy
+        return None, policy
+
+    outbox_reason = _scan_outboxes_for_block(active_outboxes, policy=policy)
+    if outbox_reason is not None:
+        return outbox_reason, policy
+    return None, policy
 
 
 def _classify_scope(
@@ -293,6 +411,7 @@ async def build_side_effect_convergence_summary(
         ).all()
     )
     jobs_by_action = _build_jobs_by_action(jobs)
+    verification = await _load_verification_result(session, event_id)
 
     outstanding: list[OutstandingSideEffectView] = []
     gate_count = 0
@@ -308,10 +427,11 @@ async def build_side_effect_convergence_summary(
             disposition_policy=disposition_policy,
         )
         active_outboxes = await load_active_outboxes(session, action_row.action_id)
-        blocking_reason = _action_side_effect_blocks_convergence(
+        blocking_reason, policy = _action_side_effect_blocks_convergence(
             action_row,
             jobs_by_action=jobs_by_action,
             active_outboxes=active_outboxes,
+            verification=verification,
         )
         if blocking_reason is None:
             continue
@@ -332,6 +452,7 @@ async def build_side_effect_convergence_summary(
             action_status=_parse_action_status(action_row.status),
             execution_phase=_parse_exec_phase(action_row.execution_phase),
             writeback_applicable=bool(action_row.writeback_applicable),
+            convergence_policy=policy,
             job_status=job_status,
             outbox_delivery_status=outbox_delivery,
             outbox_writeback_status=outbox_wb,
@@ -367,6 +488,7 @@ def check_gate_applicable_side_effect_convergence(
                 reason=view.blocking_reason,
                 action_id=view.action_id,
                 scope=view.scope,
+                convergence_policy=view.convergence_policy,
             )
     return None
 

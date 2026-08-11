@@ -936,7 +936,12 @@ def validate_closed_gate(ctx: TransitionContext) -> None:
             target=EventStatus.CLOSED,
         )
 
-    # ISSUE-302: block required events while gate-applicable side effects converge.
+    # ISSUE-302 / ISSUE-312: block required events while gate-applicable side
+    # effects converge. Side-effect kind selects evidence:
+    # - terminal writeback (writeback_applicable=true): CONFIRMED receipts
+    # - entity submit (writeback_applicable=false): terminal job SUCCESS +
+    #   effect VERIFIED (Action SUCCESS alone is not enough; entity ACCEPTED
+    #   receipts alone do not satisfy the gate)
     from app.services.side_effect_convergence import (
         check_gate_applicable_side_effect_convergence,
         raise_side_effect_convergence_error,

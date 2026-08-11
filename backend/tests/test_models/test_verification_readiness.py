@@ -14,6 +14,7 @@ from app.models.agent_io import (
 from app.models.enums import WritebackReadiness
 from app.models.verification_readiness import (
     IMMEDIATE_PENDING_SKIP_DETAILS,
+    entity_effect_verified_for_action,
     has_unverified_applicable_effects,
 )
 
@@ -112,3 +113,54 @@ def test_has_unverified_applicable_effects_allows_all_verified_applicable() -> N
         verification_phase=VerificationPhase.EFFECT,
     )
     assert has_unverified_applicable_effects(verification) is False
+
+
+def test_entity_effect_verified_accepts_effect_phase() -> None:
+    verification = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id="act-entity",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    assert entity_effect_verified_for_action(verification, "act-entity") is True
+
+
+def test_entity_effect_verified_rejects_disposition_phase() -> None:
+    verification = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id="act-entity",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+                verification_phase=VerificationPhase.DISPOSITION,
+            )
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.DISPOSITION,
+    )
+    assert entity_effect_verified_for_action(verification, "act-entity") is False
+
+
+def test_entity_effect_verified_rejects_unset_phase() -> None:
+    verification = VerificationResult(
+        results=[
+            VerificationActionResult(
+                action_id="act-entity",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=False,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                verification_phase=None,
+            )
+        ],
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.EFFECT,
+    )
+    assert entity_effect_verified_for_action(verification, "act-entity") is False

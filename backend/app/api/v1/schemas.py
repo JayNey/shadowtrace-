@@ -51,6 +51,7 @@ from app.models.report import InvestigationReport, ReportSection
 from app.models.security_event import EventListItem as EventListItem
 from app.models.security_event import EventSummary as EventSummary
 from app.models.security_event import SecurityEvent
+from app.models.side_effect_convergence import OutstandingSideEffectView
 from app.models.source import SourceReference
 
 
@@ -260,7 +261,17 @@ class EventDetailResponse(BaseModel):
         default=0,
         description=(
             "Outstanding side effects on the current plan revision that block REQUIRED "
-            "CLOSED when non-zero. -1 means degraded/unavailable."
+            "CLOSED when non-zero. Reasons include in_flight_job, executing_action, "
+            "effect_unverified, terminal_writeback_unconfirmed, outbox_not_confirmed, "
+            "and outbox_undelivered. -1 means degraded/unavailable."
+        ),
+    )
+    outstanding_side_effects: list[OutstandingSideEffectView] = Field(
+        default_factory=list,
+        description=(
+            "Outstanding side effects with blocking_reason and convergence_policy "
+            "for operator diagnosis. Empty when none or when the projection "
+            "degraded (counts == -1)."
         ),
     )
 
@@ -317,7 +328,17 @@ class EventCloseResponse(BaseModel):
         default=0,
         description=(
             "Outstanding side effects on the current plan revision that block REQUIRED "
-            "CLOSED when non-zero. -1 means degraded/unavailable."
+            "CLOSED when non-zero. Reasons include in_flight_job, executing_action, "
+            "effect_unverified, terminal_writeback_unconfirmed, outbox_not_confirmed, "
+            "and outbox_undelivered. -1 means degraded/unavailable."
+        ),
+    )
+    outstanding_side_effects: list[OutstandingSideEffectView] = Field(
+        default_factory=list,
+        description=(
+            "Outstanding side effects with blocking_reason and convergence_policy "
+            "for operator diagnosis. Empty when none or when the projection "
+            "degraded (counts == -1)."
         ),
     )
 

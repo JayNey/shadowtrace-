@@ -1530,6 +1530,10 @@ async def test_get_event_surfaces_side_effect_convergence_counts(
     data = resp.json()
     assert data["gate_applicable_outstanding_count"] == 1
     assert data["outstanding_side_effect_count"] == 1
+    outstanding = data["outstanding_side_effects"]
+    assert isinstance(outstanding, list) and len(outstanding) == 1
+    assert outstanding[0]["blocking_reason"] is not None
+    assert outstanding[0]["convergence_policy"] is not None
 
 
 @pytest.mark.asyncio
