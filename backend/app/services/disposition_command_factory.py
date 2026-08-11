@@ -6,6 +6,7 @@ from app.agents.response_agent import compute_source_locator_hash
 from app.core.guardrails import allowlisted_message_code
 from app.models.action import Action
 from app.models.disposition import (
+    ENTITY_ACTION_EFFECT_SPECS,
     DispositionCommand,
     RecordCompensationParams,
     RecordExecutionResultParams,
@@ -44,7 +45,17 @@ class DispositionCommandFactory:
         closure_cycle: int,
         entity_action_code: str,
     ) -> DispositionCommand:
-        canonical_target = action.target or ""
+        spec = ENTITY_ACTION_EFFECT_SPECS.get(entity_action_code)
+        if spec is None:
+            raise ValueError(f"unsupported XDR_MANAGED entity action {entity_action_code}")
+        expected_target_type, _ = spec
+        if not action.target:
+            raise ValueError("XDR_MANAGED entity action requires a non-empty target")
+        if action.target_type and action.target_type != expected_target_type:
+            raise ValueError(
+                f"{entity_action_code} requires target_type={expected_target_type}"
+            )
+        canonical_target = f"{expected_target_type}:{action.target}"
         return DispositionCommand(
             disposition_id=disposition_id,
             action_id=action.action_id,
@@ -181,13 +192,9 @@ def _execution_summary_code(job: ActionExecutionJob) -> str:
 
 def entity_action_code_for(action: Action) -> str:
     """Map approved tool metadata to a stable Mock operation code."""
-    mapping: dict[str, str] = {
-        "block_ip": "block_ip",
-        "block_domain": "block_domain",
-        "block_process": "block_process",
-        "isolate_host": "isolate_host",
-    }
-    return mapping.get(action.tool_name, action.tool_name)
+    if action.tool_name not in ENTITY_ACTION_EFFECT_SPECS:
+        raise ValueError(f"unsupported XDR_MANAGED entity action {action.tool_name}")
+    return action.tool_name
 
 
 __all__ = [

@@ -29,6 +29,34 @@ from app.models.enums import (
     WritebackStatus,
 )
 
+ENTITY_ACTION_EFFECT_SPECS: dict[str, tuple[str, str]] = {
+    "block_ip": ("ip", "blocked"),
+    "block_domain": ("domain", "blocked"),
+    "block_process": ("process", "blocked"),
+    "isolate_host": ("host", "isolated"),
+    "quarantine_file": ("file", "quarantined"),
+    "scan_host_for_virus": ("host", "completed"),
+    "disable_account": ("account", "disabled"),
+    "force_logout": ("account", "terminated"),
+    "reset_password": ("account", "password_reset"),
+    "revoke_token": ("account", "revoked"),
+}
+
+
+def parse_entity_effect_target(
+    entity_action_code: str,
+    canonical_target: str,
+) -> tuple[str, str, str]:
+    """Return canonical target type/value and expected applied status."""
+    spec = ENTITY_ACTION_EFFECT_SPECS.get(entity_action_code)
+    if spec is None:
+        raise ValueError(f"unsupported entity_action_code {entity_action_code}")
+    expected_type, expected_status = spec
+    prefix, separator, target = canonical_target.partition(":")
+    if not separator or prefix != expected_type or not target:
+        raise ValueError(f"canonical_target must be {expected_type}:<non-empty-target>")
+    return prefix, target, expected_status
+
 
 class SourceObjectLocator(BaseModel):
     """Minimal writeback locator (intro §4.3.5 / ISSUE-002)."""
@@ -214,6 +242,46 @@ class DispositionReceipt(BaseModel):
         # the Mock adapter at runtime, ISSUE-012).
         if self.status is WritebackStatus.CONFIRMED and self.confirmation_evidence is None:
             raise ValueError("CONFIRMED receipt requires confirmation_evidence")
+        return self
+
+
+class EntityEffectCompletion(BaseModel):
+    """Independent provider-side entity effect readback (ISSUE-311).
+
+    Produced after Mock XDR applies and readbacks entity applied state. This is
+    intentionally separate from ``DispositionReceipt``: entity receipts remain
+    ``ACCEPTED`` while the execution job may reach ``SUCCESS`` only after this
+    evidence exists.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    verified: bool
+    disposition_id: str
+    writeback_id: str
+    provider_writeback_id: str
+    action_id: str
+    entity_action_code: str
+    canonical_target: str
+    target_type: str
+    target: str
+    applied_status: str
+    provider_record_id: str
+    observed_version: int
+    provider_code: str | None = None
+    provider_message: str | None = None
+
+    @model_validator(mode="after")
+    def _verified_requires_provider_evidence(self) -> EntityEffectCompletion:
+        if self.verified and (
+            not self.provider_record_id
+            or self.observed_version <= 0
+            or not self.action_id
+            or not self.writeback_id
+            or not self.provider_writeback_id
+            or not self.canonical_target
+        ):
+            raise ValueError("verified entity effect requires complete provider evidence")
         return self
 
 

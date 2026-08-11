@@ -35,15 +35,20 @@ from app.db import models as orm
 from app.mock_xdr.api import create_app
 from app.mock_xdr.state import MockXDRState
 from app.models.action import Action
-from app.models.disposition import DispositionCommand, SourceObjectLocator, TargetWritebackResult
+from app.models.disposition import (
+    DispositionCommand,
+    DispositionReceipt,
+    SourceObjectLocator,
+    TargetWritebackResult,
+)
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
     ActionLevel,
     ActionStatus,
     ConfirmationEvidence,
-    DispositionPolicy,
     DispositionIntentKind,
+    DispositionPolicy,
     EventStatus,
     EventType,
     ExecutionJobStatus,
@@ -2432,6 +2437,12 @@ async def test_adapter_not_found_dead_letters_without_pause(
         _locator,
         concurrency_token,
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=f"idem-failed-{_sfx()}",
+    )
     sync = _sync_service(session_factory, store, mock_xdr_client)
     missing_locator = SourceObjectLocator(
         source_product="mock_xdr",
@@ -2484,6 +2495,9 @@ async def test_adapter_not_found_dead_letters_without_pause(
         action = await session.get(orm.Action, action_id)
         assert action is not None
         assert action.writeback_status == WritebackStatus.FAILED.value
+        job = await session.get(orm.ActionExecutionJob, job_id)
+        assert job is not None
+        assert job.status == ExecutionJobStatus.FAILED.value
         receipts = (
             await session.scalars(
                 select(orm.DispositionReceipt).where(
@@ -2589,6 +2603,12 @@ async def test_adapter_unknown_submission_stays_paused_for_lookup(
         locator,
         concurrency_token,
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=f"idem-unknown-{_sfx()}",
+    )
     sync = _sync_service(session_factory, store, mock_xdr_client)
     outbox_id = f"obx-{_sfx()}"
     async with session_factory() as session:
@@ -2646,6 +2666,9 @@ async def test_adapter_unknown_submission_stays_paused_for_lookup(
         assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
         assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
         assert row.last_error_code == "submission_unknown"
+        job = await session.get(orm.ActionExecutionJob, job_id)
+        assert job is not None
+        assert job.status == ExecutionJobStatus.UNKNOWN.value
 
     monkeypatch.setattr(adapter, "submit", original_submit)
 
@@ -2666,6 +2689,12 @@ async def test_writeback_conflict_delivered_without_pause(
         locator,
         concurrency_token,
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=f"idem-conflict-{_sfx()}",
+    )
     sync = _sync_service(session_factory, store, mock_xdr_client)
     outbox_id = f"obx-{_sfx()}"
     async with session_factory() as session:
@@ -2714,6 +2743,9 @@ async def test_writeback_conflict_delivered_without_pause(
         assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
         assert row.latest_writeback_status == WritebackStatus.CONFLICT.value
         assert row.last_error_code == "version_conflict"
+        job = await session.get(orm.ActionExecutionJob, job_id)
+        assert job is not None
+        assert job.status == ExecutionJobStatus.FAILED.value
 
 
 @pytest.mark.asyncio
@@ -3797,9 +3829,13 @@ async def test_deliver_compensation_record_rejected_after_supersede(
     enqueue must not be delivered; delivery-time approval re-check fails closed."""
     from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
-    sync, _event_id, _source_record_id, outbox_row, rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     async with session_factory() as session:
         async with session.begin():
@@ -3851,9 +3887,13 @@ async def test_deliver_compensation_record_rejected_after_approval_revoked(
     """ISSUE-307: COMPENSATION_RECORD must fail-closed after rollback action revoke."""
     from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
-    sync, _event_id, _source_record_id, outbox_row, rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     async with session_factory() as session:
         async with session.begin():
@@ -3905,9 +3945,13 @@ async def test_worker_deliver_compensation_record_rejected_after_supersede(
     """ISSUE-307: worker lease path must fail-closed for superseded compensation."""
     from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
-    sync, _event_id, _source_record_id, outbox_row, rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     async with session_factory() as session:
         async with session.begin():
@@ -3960,9 +4004,13 @@ async def test_worker_deliver_compensation_record_rejected_after_approval_revoke
     """ISSUE-307: worker lease path must fail-closed for revoked compensation."""
     from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
-    sync, _event_id, _source_record_id, outbox_row, rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     async with session_factory() as session:
         async with session.begin():
@@ -4002,9 +4050,13 @@ async def test_deliver_compensation_record_succeeds_when_rollback_still_approved
     cleanup: None,
 ) -> None:
     """ISSUE-307 regression: valid compensation still delivers when rollback action is approved."""
-    sync, _event_id, _source_record_id, outbox_row, _rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        _rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     await sync.deliver_outbox(outbox_row.outbox_id)
 
@@ -4034,9 +4086,13 @@ async def test_worker_deliver_compensation_record_succeeds_when_rollback_still_a
     cleanup: None,
 ) -> None:
     """ISSUE-307 regression: worker lease path still delivers valid compensation."""
-    sync, _event_id, _source_record_id, outbox_row, _rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        _rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     worker = OutboxWorker(sync)
     assert await worker.run_once(limit=1) == 1
@@ -4562,3 +4618,727 @@ async def test_idempotent_enqueue_returns_existing_head_without_superseding(
             .where(orm.DispositionOutbox.event_id == event_id)
         )
     assert int(count or 0) == 1
+
+
+async def _attach_xdr_execution_job(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    action_id: str,
+    event_id: str,
+    idempotency_key: str,
+) -> str:
+    job_id = f"job-{_sfx()}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_xdr",
+                    idempotency_key=idempotency_key,
+                    status=ExecutionJobStatus.RUNNING.value,
+                    attempt=1,
+                    started_at=now,
+                )
+            )
+            action = await session.get(orm.Action, action_id, with_for_update=True)
+            assert action is not None
+            action.execution_job_id = job_id
+    return job_id
+
+
+@pytest.mark.asyncio
+async def test_entity_submit_accepted_receipt_stays_accepted_while_job_reaches_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+) -> None:
+    """ISSUE-311: entity receipt stays ACCEPTED; job SUCCESS requires effect readback."""
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    idempotency_key = f"idem-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            action = await session.get(orm.Action, action_id, with_for_update=True)
+            assert action is not None
+            action.idempotency_key = idempotency_key
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=idempotency_key,
+    )
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-mapper",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target_type": "ip",
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": idempotency_key,
+            "execution_job_id": job_id,
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            record = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+    assert await sync.process_ready_outboxes(limit=1) == 1
+    async with session_factory() as session:
+        receipt = await session.scalar(
+            select(orm.DispositionReceipt)
+            .where(orm.DispositionReceipt.writeback_id == record.writeback_id)
+            .order_by(orm.DispositionReceipt.sequence.desc())
+            .limit(1)
+        )
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert receipt is not None
+        assert receipt.status == WritebackStatus.ACCEPTED.value
+        assert job_row is not None
+        assert job_row.status == ExecutionJobStatus.SUCCESS.value
+
+
+@pytest.mark.asyncio
+async def test_entity_effect_completion_writes_scoped_observation_and_job_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-311: provider applied-state readback unlocks verify observation surfaces."""
+    from app.providers.tools.mock_provider import (
+        MockToolProvider,
+        bind_mock_tool_provider,
+        get_mock_tool_provider,
+    )
+    from app.tools.mock_state import MockEnvironmentState
+
+    observation_state = MockEnvironmentState.in_memory()
+    with bind_mock_tool_provider(MockToolProvider(observation_state)):
+        (
+            event_id,
+            action_id,
+            source_record_id,
+            locator,
+            concurrency_token,
+        ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+        idempotency_key = f"idem-{_sfx()}"
+        async with session_factory() as session:
+            async with session.begin():
+                action = await session.get(orm.Action, action_id, with_for_update=True)
+                assert action is not None
+                action.idempotency_key = idempotency_key
+        job_id = await _attach_xdr_execution_job(
+            session_factory,
+            action_id=action_id,
+            event_id=event_id,
+            idempotency_key=idempotency_key,
+        )
+        sync = _sync_service(session_factory, store, mock_xdr_client)
+        factory = DispositionCommandFactory()
+        action = Action.model_validate(
+            {
+                "action_id": action_id,
+                "event_id": event_id,
+                "plan_revision": 1,
+                "action_fingerprint": "fp-obs",
+                "action_category": ActionCategory.RESPONSE,
+                "action_name": "block ip",
+                "tool_name": "block_ip",
+                "action_level": ActionLevel.L2,
+                "execution_owner": ExecutionOwner.XDR_MANAGED,
+                "status": ActionStatus.EXECUTING,
+                "target_type": "ip",
+                "target": "203.0.113.88",
+                "writeback_required": True,
+                "writeback_applicable": True,
+                "writeback_readiness": WritebackReadiness.READY,
+                "disposition_source_ref": locator,
+                "idempotency_key": idempotency_key,
+                "execution_job_id": job_id,
+            }
+        )
+        command = factory.build_entity_action_submit(
+            action,
+            source_locator=locator,
+            source_concurrency_token=concurrency_token,
+            operator_id="ActionExecutionService",
+            disposition_id=new_disposition_id(),
+            writeback_id="pending",
+            closure_cycle=1,
+            entity_action_code="block_ip",
+        )
+        async with session_factory() as session:
+            async with session.begin():
+                record = await sync.enqueue_command(
+                    session,
+                    command=command,
+                    event_id=event_id,
+                    source_record_id=source_record_id,
+                )
+        original_publish = sync._publish_entity_effect_projection
+
+        async def _projection_unavailable(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("simulated observation projection outage")
+
+        monkeypatch.setattr(
+            sync,
+            "_publish_entity_effect_projection",
+            _projection_unavailable,
+        )
+        assert await sync.process_ready_outboxes(limit=1) == 1
+        async with session_factory() as session:
+            pending_job = await session.get(orm.ActionExecutionJob, job_id)
+            assert pending_job is not None
+            assert pending_job.status == ExecutionJobStatus.SUCCESS.value
+            assert (pending_job.raw_result or {}).get("effect_projection_pending") is True
+        assert (
+            await observation_state.get_observation(
+                "ip_blocks",
+                "203.0.113.88",
+                include_pending=True,
+                job_id=job_id,
+            )
+            is None
+        )
+        monkeypatch.setattr(
+            sync,
+            "_publish_entity_effect_projection",
+            original_publish,
+        )
+        assert await sync.reconcile_pending_entity_effects(limit=1) == 1
+
+        async with session_factory() as session:
+            receipt = await session.scalar(
+                select(orm.DispositionReceipt)
+                .where(orm.DispositionReceipt.writeback_id == record.writeback_id)
+                .order_by(orm.DispositionReceipt.sequence.desc())
+                .limit(1)
+            )
+            job_row = await session.get(orm.ActionExecutionJob, job_id)
+            assert receipt is not None
+            assert receipt.status == WritebackStatus.ACCEPTED.value
+            assert job_row is not None
+            assert job_row.status == ExecutionJobStatus.SUCCESS.value
+            assert isinstance(job_row.raw_result, dict)
+            assert job_row.raw_result.get("effect_completion", {}).get("writeback_id") == (
+                record.writeback_id
+            )
+            assert job_row.raw_result.get("effect_projection_pending") is False
+
+        observation = await get_mock_tool_provider().state.get_observation(
+            "ip_blocks",
+            "203.0.113.88",
+            include_pending=True,
+            job_id=job_id,
+        )
+        assert observation is not None
+        assert observation.status == "blocked"
+        assert observation.action_id == action_id
+        assert observation.job_id == job_id
+        assert observation.connector == locator.connector_id
+        assert observation.value.get("writeback_id") == record.writeback_id
+        assert observation.value.get("provider_record_id")
+
+        from app.models.tool_meta import ToolResult
+        from app.tools.verify._common import MockVerificationRuntime
+
+        verification = ToolResult.model_validate(
+            await MockVerificationRuntime(
+                observation_state,
+                wait_timeout_ms=100,
+                poll_interval_ms=1,
+            ).execute(
+                "check_ip_block_status",
+                {
+                    "target_type": "ip",
+                    "target": "203.0.113.88",
+                    "parameters": {"job_id": job_id},
+                },
+            )
+        )
+        assert verification.data["is_verified"] is True
+        assert verification.data["detail"] == "observed_status:blocked"
+        assert await sync.reconcile_pending_entity_effects(limit=1) == 0
+
+
+@pytest.mark.asyncio
+async def test_entity_submit_accepted_without_readback_keeps_job_non_terminal(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-311: ACCEPTED alone must not mark the execution job SUCCESS."""
+    from app.models.disposition import EntityEffectCompletion
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    idempotency_key = f"idem-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            action = await session.get(orm.Action, action_id, with_for_update=True)
+            assert action is not None
+            action.idempotency_key = idempotency_key
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=idempotency_key,
+    )
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-no-readback",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target_type": "ip",
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": idempotency_key,
+            "execution_job_id": job_id,
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+
+    async def _not_applied(
+        _self: object,
+        _command: DispositionCommand,
+        receipt: DispositionReceipt,
+    ) -> EntityEffectCompletion:
+        return EntityEffectCompletion(
+            verified=False,
+            disposition_id=command.disposition_id,
+            writeback_id=receipt.writeback_id,
+            provider_writeback_id=str(
+                (receipt.raw_result or {}).get("provider_writeback_id") or receipt.writeback_id
+            ),
+            action_id=command.action_id,
+            entity_action_code="block_ip",
+            canonical_target="ip:203.0.113.88",
+            target_type="ip",
+            target="203.0.113.88",
+            applied_status="",
+            provider_record_id="",
+            observed_version=0,
+            provider_code="effect_not_applied",
+            provider_message="provider-side entity effect not found",
+        )
+
+    from app.adapters.mock_xdr import MockXDRDispositionAdapter
+
+    monkeypatch.setattr(
+        MockXDRDispositionAdapter,
+        "read_entity_effect_completion",
+        _not_applied,
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+    assert await sync.process_ready_outboxes(limit=1) == 1
+    async with session_factory() as session:
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert job_row is not None
+        assert job_row.status == ExecutionJobStatus.RUNNING.value
+        assert (job_row.raw_result or {}).get("effect_completion") is None
+
+
+@pytest.mark.asyncio
+async def test_entity_effect_correlation_mismatch_marks_job_unknown(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-311: mismatched effect evidence must not finalize as SUCCESS."""
+    from app.adapters.mock_xdr import MockXDRDispositionAdapter
+    from app.models.disposition import EntityEffectCompletion
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    idempotency_key = f"idem-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            action = await session.get(orm.Action, action_id, with_for_update=True)
+            assert action is not None
+            action.idempotency_key = idempotency_key
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=idempotency_key,
+    )
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-mismatch",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target_type": "ip",
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": idempotency_key,
+            "execution_job_id": job_id,
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+
+    async def _mismatched(
+        _self: object,
+        _command: DispositionCommand,
+        receipt: DispositionReceipt,
+    ) -> EntityEffectCompletion:
+        return EntityEffectCompletion(
+            verified=True,
+            disposition_id=command.disposition_id,
+            writeback_id=receipt.writeback_id,
+            provider_writeback_id=str(
+                (receipt.raw_result or {}).get("provider_writeback_id") or receipt.writeback_id
+            ),
+            action_id=command.action_id,
+            entity_action_code="block_ip",
+            canonical_target="ip:198.51.100.1",
+            target_type="ip",
+            target="198.51.100.1",
+            applied_status="blocked",
+            provider_record_id="entfx-forged",
+            observed_version=1,
+            provider_code="effect_readback_verified",
+        )
+
+    monkeypatch.setattr(
+        MockXDRDispositionAdapter,
+        "read_entity_effect_completion",
+        _mismatched,
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+    assert await sync.process_ready_outboxes(limit=1) == 1
+    async with session_factory() as session:
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert job_row is not None
+        assert job_row.status == ExecutionJobStatus.UNKNOWN.value
+        assert (job_row.raw_result or {}).get("effect_completion", {}).get("verified") is False
+        assert (job_row.raw_result or {}).get("effect_completion", {}).get("provider_code") == (
+            "effect_correlation_mismatch"
+        )
+
+
+@pytest.mark.asyncio
+async def test_entity_effect_readback_transport_failure_retries_without_false_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-311: transport failures stay retryable; never invent Job SUCCESS."""
+    from app.adapters.mock_xdr import MockXDRDispositionAdapter
+    from app.core.errors import DependencyUnavailableError
+
+    (
+        event_id,
+        action_id,
+        source_record_id,
+        locator,
+        concurrency_token,
+    ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    idempotency_key = f"idem-{_sfx()}"
+    async with session_factory() as session:
+        async with session.begin():
+            action = await session.get(orm.Action, action_id, with_for_update=True)
+            assert action is not None
+            action.idempotency_key = idempotency_key
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=idempotency_key,
+    )
+    sync = _sync_service(session_factory, store, mock_xdr_client)
+    factory = DispositionCommandFactory()
+    action = Action.model_validate(
+        {
+            "action_id": action_id,
+            "event_id": event_id,
+            "plan_revision": 1,
+            "action_fingerprint": "fp-transport",
+            "action_category": ActionCategory.RESPONSE,
+            "action_name": "block ip",
+            "tool_name": "block_ip",
+            "action_level": ActionLevel.L2,
+            "execution_owner": ExecutionOwner.XDR_MANAGED,
+            "status": ActionStatus.EXECUTING,
+            "target_type": "ip",
+            "target": "203.0.113.88",
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadiness.READY,
+            "disposition_source_ref": locator,
+            "idempotency_key": idempotency_key,
+            "execution_job_id": job_id,
+        }
+    )
+    command = factory.build_entity_action_submit(
+        action,
+        source_locator=locator,
+        source_concurrency_token=concurrency_token,
+        operator_id="ActionExecutionService",
+        disposition_id=new_disposition_id(),
+        writeback_id="pending",
+        closure_cycle=1,
+        entity_action_code="block_ip",
+    )
+    calls = {"n": 0}
+    original = MockXDRDispositionAdapter.read_entity_effect_completion
+
+    async def _flaky(
+        self: MockXDRDispositionAdapter,
+        command_arg: DispositionCommand,
+        receipt: DispositionReceipt,
+    ):
+        calls["n"] += 1
+        # deliver-time reconcile + process_ready_outboxes reconcile both fail first
+        if calls["n"] <= 2:
+            raise DependencyUnavailableError(
+                "entity effect completion transport failed",
+                details={"disposition_id": command_arg.disposition_id},
+            )
+        return await original(self, command_arg, receipt)
+
+    monkeypatch.setattr(
+        MockXDRDispositionAdapter,
+        "read_entity_effect_completion",
+        _flaky,
+    )
+
+    async with session_factory() as session:
+        async with session.begin():
+            record = await sync.enqueue_command(
+                session,
+                command=command,
+                event_id=event_id,
+                source_record_id=source_record_id,
+            )
+    assert await sync.process_ready_outboxes(limit=1) == 1
+    async with session_factory() as session:
+        outbox = await session.get(orm.DispositionOutbox, record.outbox_id)
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert outbox is not None
+        assert outbox.delivery_status == OutboxDeliveryStatus.DELIVERED.value
+        assert job_row is not None
+        assert job_row.status == ExecutionJobStatus.RUNNING.value
+        assert (job_row.raw_result or {}).get("effect_completion") is None
+
+    assert await sync.reconcile_pending_entity_effects(limit=1) == 1
+    async with session_factory() as session:
+        job_row = await session.get(orm.ActionExecutionJob, job_id)
+        assert job_row is not None
+        assert job_row.status == ExecutionJobStatus.SUCCESS.value
+        assert (job_row.raw_result or {}).get("effect_completion", {}).get("verified") is True
+
+
+@pytest.mark.asyncio
+async def test_async_provider_job_entity_effect_reconciles_after_job_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    mock_xdr_state: MockXDRState,
+    cleanup: None,
+) -> None:
+    """ISSUE-311: async_disposition entity jobs still reach SUCCESS via readback."""
+    from app.mock_xdr.models import MockFailureProfile
+    from app.providers.tools.mock_provider import (
+        MockToolProvider,
+        bind_mock_tool_provider,
+    )
+    from app.tools.mock_state import MockEnvironmentState
+
+    mock_xdr_state.failure_profile = MockFailureProfile(async_disposition=True)
+    observation_state = MockEnvironmentState.in_memory()
+    with bind_mock_tool_provider(MockToolProvider(observation_state)):
+        (
+            event_id,
+            action_id,
+            source_record_id,
+            locator,
+            concurrency_token,
+        ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+        idempotency_key = f"idem-{_sfx()}"
+        async with session_factory() as session:
+            async with session.begin():
+                action = await session.get(orm.Action, action_id, with_for_update=True)
+                assert action is not None
+                action.idempotency_key = idempotency_key
+        job_id = await _attach_xdr_execution_job(
+            session_factory,
+            action_id=action_id,
+            event_id=event_id,
+            idempotency_key=idempotency_key,
+        )
+        sync = _sync_service(session_factory, store, mock_xdr_client)
+        factory = DispositionCommandFactory()
+        action = Action.model_validate(
+            {
+                "action_id": action_id,
+                "event_id": event_id,
+                "plan_revision": 1,
+                "action_fingerprint": "fp-async",
+                "action_category": ActionCategory.RESPONSE,
+                "action_name": "block ip",
+                "tool_name": "block_ip",
+                "action_level": ActionLevel.L2,
+                "execution_owner": ExecutionOwner.XDR_MANAGED,
+                "status": ActionStatus.EXECUTING,
+                "target_type": "ip",
+                "target": "203.0.113.88",
+                "writeback_required": True,
+                "writeback_applicable": True,
+                "writeback_readiness": WritebackReadiness.READY,
+                "disposition_source_ref": locator,
+                "idempotency_key": idempotency_key,
+                "execution_job_id": job_id,
+            }
+        )
+        command = factory.build_entity_action_submit(
+            action,
+            source_locator=locator,
+            source_concurrency_token=concurrency_token,
+            operator_id="ActionExecutionService",
+            disposition_id=new_disposition_id(),
+            writeback_id="pending",
+            closure_cycle=1,
+            entity_action_code="block_ip",
+        )
+        async with session_factory() as session:
+            async with session.begin():
+                record = await sync.enqueue_command(
+                    session,
+                    command=command,
+                    event_id=event_id,
+                    source_record_id=source_record_id,
+                )
+        assert await sync.process_ready_outboxes(limit=1) == 1
+        async with session_factory() as session:
+            receipt = await session.scalar(
+                select(orm.DispositionReceipt)
+                .where(orm.DispositionReceipt.writeback_id == record.writeback_id)
+                .order_by(orm.DispositionReceipt.sequence.desc())
+                .limit(1)
+            )
+            job_row = await session.get(orm.ActionExecutionJob, job_id)
+            assert receipt is not None
+            assert receipt.status == WritebackStatus.ACCEPTED.value
+            assert receipt.provider_job_id is not None
+            assert job_row is not None
+            assert job_row.status == ExecutionJobStatus.SUCCESS.value
+            assert (job_row.raw_result or {}).get("effect_completion", {}).get("verified") is True
+        observation = await observation_state.get_observation(
+            "ip_blocks",
+            "203.0.113.88",
+            include_pending=True,
+            job_id=job_id,
+        )
+        assert observation is not None
+        assert observation.status == "blocked"

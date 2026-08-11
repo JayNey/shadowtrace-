@@ -18,7 +18,12 @@ from app.adapters.disposition.error_classification import (  # noqa: F401
     is_deterministic_adapter_rejection_code,
 )
 from app.core.errors import WritebackUnsupportedError
-from app.models.disposition import DispositionCommand, DispositionReceipt, SourceObjectLocator
+from app.models.disposition import (
+    DispositionCommand,
+    DispositionReceipt,
+    EntityEffectCompletion,
+    SourceObjectLocator,
+)
 from app.models.enums import (
     CapabilityState,
     ConnectorStatus,
@@ -38,6 +43,7 @@ class DispositionAdapterCapabilities(BaseModel):
     supports_concurrency_token: bool = False
     supports_lookup_by_idempotency: bool = False
     supports_readback_confirmation: bool = False
+    supports_entity_effect_readback: bool = False
 
 
 class BaseDispositionAdapter(ABC):
@@ -94,6 +100,22 @@ class BaseDispositionAdapter(ABC):
         and promote the receipt to CONFIRMED+readback_verified.
         Default: unsupported (returns None).
         """
+        return None
+
+    async def read_entity_effect_completion(
+        self,
+        command: DispositionCommand,
+        receipt: DispositionReceipt,
+    ) -> EntityEffectCompletion | None:
+        """Read provider-owned applied-state evidence for an entity effect (ISSUE-311).
+
+        For ``ENTITY_ACTION_SUBMIT`` only. Must not promote the entity receipt
+        to ``CONFIRMED``. Mock adapters may finish deferred async provider jobs
+        before reading; the completion itself must still come from an
+        independent applied-state readback surface.
+        Default: unsupported (returns None).
+        """
+        _ = (command, receipt)
         return None
 
     @abstractmethod
