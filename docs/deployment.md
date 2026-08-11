@@ -491,7 +491,7 @@ Mock 模式下的 `ALLOW_*` 始终为 `false`。
 2. `bootstrap-token` 保留 admin 是为 seed / force-close 逃生舱；`StateMachineService.force_close` 在服务层校验 `admin` 角色（与 API 一致），Celery/脚本直调服务也无法绕过。
 3. **生产必须** `APP_ENV=production`：进程拒绝非空 `DEV_AUTH_TOKENS`，身份仅来自 trusted-proxy。
 
-前端 `VITE_DEV_AUTH_TOKEN` 默认 `bootstrap-token` 仅为 Compose 便利；本地若只跑 analyst 流程，可在 `infra/.env` 覆盖为 `e2e-token`。
+前端 `VITE_DEV_AUTH_TOKEN` 默认 `e2e-token`（Compose 日常 analyst 流程）；需 admin 逃生时在 `infra/.env` 覆盖为 `bootstrap-token`。
 
 ### 生产前端镜像构建检查清单（ISSUE-221）
 

@@ -502,6 +502,7 @@ def reset_metrics_for_tests() -> None:
     global _state_projection_failure_total, _state_projection_repair_total
     global _investigation_intent_enqueue_total, _graph_failed_transition_noop_total
     global _socketio_subscriber_failure_total, _socketio_subscriber_recovery_total
+    global _force_close_total
     global _process_checkpoint_fallback_active, _process_checkpoint_fallback_triggers
     global _process_checkpoint_loop_rebinds
     global _process_budget_redis_degraded, _process_reservation_redis_degraded
@@ -528,6 +529,7 @@ def reset_metrics_for_tests() -> None:
     _graph_failed_transition_noop_total = None
     _socketio_subscriber_failure_total = None
     _socketio_subscriber_recovery_total = None
+    _force_close_total = None
     _initialized = False
     _process_checkpoint_fallback_active = False
     _process_checkpoint_fallback_triggers = 0

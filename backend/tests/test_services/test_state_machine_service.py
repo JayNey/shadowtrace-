@@ -1181,6 +1181,77 @@ async def test_force_close_normalises_principal(
     assert close_entry["operator"] == "principal:admin"
 
 
+@pytest.mark.asyncio
+async def test_force_close_bypasses_side_effect_gate_at_service_layer(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    """ISSUE-308: admin force_close bypasses side-effect gate at service layer."""
+    sfx = uuid.uuid4().hex[:8]
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+        severity=Severity.HIGH.value,
+        final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+    )
+    await _walk_to_reporting(state_machine, event_id)
+    await _add_report(session_factory, event_id)
+
+    action_id = f"act-{sfx}"
+    job_id = f"job-{sfx}"
+    now = datetime.now(UTC)
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="isolate host",
+                    tool_name="isolate_host",
+                    action_level="l2",
+                    execution_owner=ExecutionOwner.DIRECT_TOOL.value,
+                    writeback_applicable=False,
+                    writeback_required=True,
+                    status=ActionStatus.APPROVED.value,
+                )
+            )
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_tool",
+                    idempotency_key=f"idem-{sfx}",
+                    status=ExecutionJobStatus.RUNNING.value,
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+    with pytest.raises(InvalidStateTransitionError, match="gate-applicable side effects") as exc:
+        await state_machine.transition(
+            event_id,
+            EventStatus.CLOSED,
+            operator="SuperAgent",
+            reason="close with running side effect",
+        )
+    assert exc.value.error_code == "closed_side_effects_pending"
+
+    result = await state_machine.force_close(
+        event_id,
+        principal=_admin_principal("admin1"),
+        reason="admin override side effect gate",
+    )
+    assert result.status == EventStatus.CLOSED
+    assert result.external_unsynced is True
+
+
 # ===================================================================
 # Optional dependencies = None
 # ===================================================================

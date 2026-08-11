@@ -52,6 +52,7 @@ from app.core.errors import (
     ReportQualityConflictError,
     ValidationError,
 )
+from app.core.metrics import record_force_close
 from app.db import models as orm
 from app.models.action import Action as ActionModel
 from app.models.enums import (
@@ -1418,6 +1419,7 @@ async def close_event(
     # Admin force_close bypass.
     if body.force_local_close:
         if not principal.has_any_role([ROLE_ADMIN]):
+            record_force_close(result="denied")
             raise AuthorizationError([ROLE_ADMIN])
         result = await state_machine.force_close(
             event_id,

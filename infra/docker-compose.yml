@@ -176,7 +176,7 @@ services:
         # ISSUE-221: dev token is explicit here — not baked into the Dockerfile default.
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
         VITE_SOCKET_URL: ${VITE_SOCKET_URL:-}
-        VITE_DEV_AUTH_TOKEN: ${VITE_DEV_AUTH_TOKEN:-bootstrap-token}
+        VITE_DEV_AUTH_TOKEN: ${VITE_DEV_AUTH_TOKEN:-e2e-token}
         VITE_AUTH_SUBJECT: ${VITE_AUTH_SUBJECT:-bootstrap}
         VITE_APPROVER_DISPLAY: ${VITE_APPROVER_DISPLAY:-Bootstrap Operator}
         VITE_EVENT_CHAT_ENABLED: ${VITE_EVENT_CHAT_ENABLED:-true}

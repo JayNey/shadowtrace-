@@ -10,6 +10,7 @@ import json
 import time
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from fastapi import BackgroundTasks
@@ -428,6 +429,7 @@ async def _seed_reporting_required_with_running_side_effect(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> str:
     """REPORTING + REQUIRED with gate-applicable RUNNING job (side-effect gate fixture)."""
+    import hashlib
     from uuid import uuid4
 
     sfx = uuid4().hex[:8]
@@ -449,12 +451,23 @@ async def _seed_reporting_required_with_running_side_effect(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={
+                        "source_kind": "incident",
+                        "source_product": "mock_xdr",
+                        "source_tenant_id": "t1",
+                        "connector_id": f"conn-{sfx}",
+                        "source_object_id": f"INC-{sfx}",
+                        "raw_payload_hash": hashlib.sha256(b"side-effect").hexdigest(),
+                        "ingested_at": now.isoformat(),
+                    },
+                    source_reference_snapshots=[],
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -1337,12 +1350,14 @@ async def test_force_close_requires_admin(
     """Force local close requires admin role."""
     event_id = await _create_test_event(event_service, title="Force close test")
 
-    resp = client.post(
-        f"/api/v1/events/{event_id}/close",
-        json={"reason": "forced", "force_local_close": True},
-        headers=_hdr("analyst"),
-    )
-    assert resp.status_code == 403
+    with patch("app.api.v1.events.record_force_close") as record:
+        resp = client.post(
+            f"/api/v1/events/{event_id}/close",
+            json={"reason": "forced", "force_local_close": True},
+            headers=_hdr("analyst"),
+        )
+        assert resp.status_code == 403
+        record.assert_called_once_with(result="denied")
 
 
 @pytest.mark.asyncio
