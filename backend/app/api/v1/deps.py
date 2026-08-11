@@ -1183,6 +1183,7 @@ async def get_super_agent() -> Any:
             graph_agent=stack["graph_agent"],
             storyline_service=stack["storyline_service"],
             output_quality_evaluator=stack["output_quality_evaluator"],
+            degraded_flags=_get_degraded_flags(),
         )
     return _super_agent
 

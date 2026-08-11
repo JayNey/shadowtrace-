@@ -1512,11 +1512,15 @@ class TestNonExecutablePlanAgents:
         )
 
     async def test_execute_single_step_fails_on_tool_agent(self) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
         from app.models.context import EventContext
         from app.models.enums import FinalVerdict, WritebackReadiness
         from app.models.security_event import EventSummary
 
-        agent = SuperAgent()
+        degraded = MagicMock()
+        degraded.set_flag = AsyncMock(return_value=["plan_step_not_executable=true"])
+        agent = SuperAgent(degraded_flags=degraded)
         ec = EventContext(
             event=EventSummary(
                 event_id=_EVENT_ID,
@@ -1544,3 +1548,9 @@ class TestNonExecutablePlanAgents:
 
         assert exc.value.error_code == "plan_step_not_executable"
         assert exc.value.details["assigned_agent"] == "tool_agent"
+        degraded.set_flag.assert_awaited_once_with(
+            _EVENT_ID,
+            "plan_step_not_executable",
+            True,
+            writer="SuperAgent",
+        )

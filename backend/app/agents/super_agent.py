@@ -39,6 +39,7 @@ from app.core.errors import (
     is_retryable,
 )
 from app.models.agent_io import (
+    PLAN_STEP_ASSIGNABLE_AGENTS,
     CollectionStatus,
     EvidenceAgentInput,
     EvidenceOutput,
@@ -46,7 +47,6 @@ from app.models.agent_io import (
     GraphOutput,
     InvestigationResult,
     MemoryAgentInput,
-    PLAN_STEP_ASSIGNABLE_AGENTS,
     PlanStep,
     RAGOutput,
     RiskAgentInput,
@@ -920,6 +920,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             agent_name,
             event_id,
         )
+
+        if agent_name not in PLAN_STEP_ASSIGNABLE_AGENTS:
+            await self._fail_non_executable_plan_step(event_id, agent_name, step.step_order)
 
         await self._record_agent_step(event_id, agent_name)
 

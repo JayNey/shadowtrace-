@@ -41,8 +41,8 @@ from app.models.agent_io import (
     AGENT_INPUT_BY_NAME as _AGENT_INPUT_BY_NAME,
 )
 from app.models.agent_io import (
-    ExecutionPlan,
     PLAN_STEP_ASSIGNABLE_AGENTS,
+    ExecutionPlan,
     PlanBudget,
     PlannerAgentInput,
     PlanStep,
@@ -184,6 +184,7 @@ def _steps_from_wire(wire_steps: list[PlanStepLLM]) -> list[PlanStep]:
 
 def _validate_execution_plan(plan: ExecutionPlan) -> ExecutionPlan:
     """Validate every step, dropping invalid ones and re-numbering survivors."""
+    original_len = len(plan.steps)
     raw_steps = (_validate_plan_step(s) for s in plan.steps)
     clean_steps = [s for s in raw_steps if s is not None]
     for idx, s in enumerate(clean_steps, start=1):
@@ -195,6 +196,7 @@ def _validate_execution_plan(plan: ExecutionPlan) -> ExecutionPlan:
                 required_tools=s.required_tools,
                 success_criteria=s.success_criteria,
             )
+    degraded = plan.degraded or len(clean_steps) < original_len
     return ExecutionPlan(
         plan_id=plan.plan_id,
         event_id=plan.event_id,
@@ -202,8 +204,34 @@ def _validate_execution_plan(plan: ExecutionPlan) -> ExecutionPlan:
         budget=plan.budget,
         revision=plan.revision,
         revise_reason=plan.revise_reason,
-        degraded=plan.degraded,
+        degraded=degraded,
     )
+
+
+def _revalidate_cached_plan(plan: ExecutionPlan) -> ExecutionPlan | None:
+    """Re-sanitize a cached plan for idempotent replay (ISSUE-305).
+
+    When non-assignable steps are dropped, require ``MIN_PLAN_STEPS`` again.
+    Unchanged assignable-only caches are returned as-is (legacy short plans).
+    """
+    original_agents = [s.assigned_agent for s in plan.steps]
+    sanitized = _validate_execution_plan(plan)
+    if [s.assigned_agent for s in sanitized.steps] == original_agents:
+        return sanitized
+    if not sanitized.degraded:
+        sanitized = ExecutionPlan(
+            plan_id=sanitized.plan_id,
+            event_id=sanitized.event_id,
+            steps=sanitized.steps,
+            budget=sanitized.budget,
+            revision=sanitized.revision,
+            revise_reason=sanitized.revise_reason,
+            degraded=True,
+        )
+    try:
+        return _ensure_min_steps(sanitized)
+    except ValueError:
+        return None
 
 
 def _ensure_min_steps(plan: ExecutionPlan) -> ExecutionPlan:
@@ -303,12 +331,20 @@ class PlannerAgent(BaseAgent[PlannerAgentInput, ExecutionPlan]):
         """Core plan generation: try LLM, fall back to DEFAULT_PLANS."""
         existing = await self._read_existing_plan(event_id, revision=0)
         if existing is not None:
-            logger.info(
-                "PlannerAgent: reusing existing plan %s for event=%s",
-                existing.plan_id,
+            revalidated = _revalidate_cached_plan(existing)
+            if revalidated is not None:
+                if revalidated.model_dump(mode="json") != existing.model_dump(mode="json"):
+                    await self._persist_plan(event_id, revalidated)
+                logger.info(
+                    "PlannerAgent: reusing existing plan %s for event=%s",
+                    revalidated.plan_id,
+                    event_id,
+                )
+                return revalidated
+            logger.warning(
+                "PlannerAgent: cached plan failed revalidation for event=%s, regenerating",
                 event_id,
             )
-            return existing
 
         if self.llm_client is not None:
             try:
@@ -359,13 +395,22 @@ class PlannerAgent(BaseAgent[PlannerAgentInput, ExecutionPlan]):
 
         existing = await self._read_existing_plan(event_id, revision=new_revision)
         if existing is not None:
-            logger.info(
-                "PlannerAgent: reusing existing revised plan %s rev=%d for event=%s",
-                existing.plan_id,
-                new_revision,
+            revalidated = _revalidate_cached_plan(existing)
+            if revalidated is not None:
+                if revalidated.model_dump(mode="json") != existing.model_dump(mode="json"):
+                    await self._persist_plan(event_id, revalidated)
+                logger.info(
+                    "PlannerAgent: reusing existing revised plan %s rev=%d for event=%s",
+                    revalidated.plan_id,
+                    new_revision,
+                    event_id,
+                )
+                return revalidated
+            logger.warning(
+                "PlannerAgent: cached revised plan failed revalidation for event=%s, "
+                "regenerating",
                 event_id,
             )
-            return existing
 
         if self.llm_client is not None:
             try:
