@@ -4,6 +4,7 @@ import {
   isTerminalTaskState,
   labelTaskState,
   normalizeTaskState,
+  shouldAcceptTaskStateUpdate,
 } from "../../src/utils/investigationTaskTracking";
 
 describe("investigationTaskTracking", () => {
@@ -30,5 +31,11 @@ describe("investigationTaskTracking", () => {
   it("labels task states for UI", () => {
     expect(labelTaskState("STARTED")).toBe("执行中");
     expect(labelTaskState("UNKNOWN")).toBe("状态未知");
+  });
+
+  it("rejects terminal to non-terminal task state updates", () => {
+    expect(shouldAcceptTaskStateUpdate("SUCCESS", "STARTED")).toBe(false);
+    expect(shouldAcceptTaskStateUpdate("STARTED", "SUCCESS")).toBe(true);
+    expect(shouldAcceptTaskStateUpdate("PENDING", "PENDING")).toBe(false);
   });
 });

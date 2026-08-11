@@ -37,6 +37,7 @@ import type {
 } from "../types/event";
 import { listEvents, triggerInvestigation, getHealth } from "../services/eventApi";
 import { useCeleryInvestigationTasks } from "../hooks/useCeleryInvestigationTasks";
+import type { RegisterCeleryTrackInput } from "../hooks/useCeleryInvestigationTasks";
 import {
   isCeleryTaskMode,
   isTerminalTaskState,
@@ -97,6 +98,8 @@ export default function EventListPage() {
   const [investigationHealth, setInvestigationHealth] = useState<InvestigationHealthConfig | null>(
     null,
   );
+  const [investigationHealthLoaded, setInvestigationHealthLoaded] = useState(false);
+  const pendingCeleryTracksRef = useRef<RegisterCeleryTrackInput[]>([]);
   const [investigateModalOpen, setInvestigateModalOpen] = useState(false);
   const [pendingInvestigateEventId, setPendingInvestigateEventId] = useState<string | null>(
     null,
@@ -112,6 +115,17 @@ export default function EventListPage() {
     celeryPollingEnabled,
   );
   const notifiedTerminalTasksRef = useRef<Set<string>>(new Set());
+
+  const flushPendingCeleryTracks = useCallback(() => {
+    if (!isCeleryTaskMode(investigationHealth?.task_mode)) {
+      pendingCeleryTracksRef.current = [];
+      return;
+    }
+    for (const input of pendingCeleryTracksRef.current) {
+      registerTrack(input);
+    }
+    pendingCeleryTracksRef.current = [];
+  }, [investigationHealth?.task_mode, registerTrack]);
 
   // Keep latest items in a ref so the socket handler (registered once) can
   // mutate without stale-closure issues.
@@ -266,9 +280,16 @@ export default function EventListPage() {
       } catch {
         setInvestigationHealth(null);
         setFullLoopAvailable(true);
+      } finally {
+        setInvestigationHealthLoaded(true);
       }
     })();
   }, []);
+
+  useEffect(() => {
+    if (!investigationHealthLoaded) return;
+    flushPendingCeleryTracks();
+  }, [investigationHealthLoaded, flushPendingCeleryTracks]);
 
   // Surface terminal celery task states once (do not infer event success from task).
   useEffect(() => {
@@ -312,18 +333,33 @@ export default function EventListPage() {
             it.event_id === eventId ? { ...it, status: newStatus } : it,
           ),
         );
-        if (celeryPollingEnabled && data.task_id) {
-          registerTrack({
+        if (data.task_id) {
+          const trackInput: RegisterCeleryTrackInput = {
             event_id: data.event_id,
             task_id: data.task_id,
             intent_id: data.intent_id ?? null,
             state: "PENDING",
-          });
-          message.success(
-            withResponse
-              ? `事件 ${eventId} 已受理完整调查（task: ${data.task_id}）`
-              : `事件 ${eventId} 已受理仅分析调查（task: ${data.task_id}）`,
-          );
+          };
+          if (celeryPollingEnabled) {
+            registerTrack(trackInput);
+          } else if (!investigationHealthLoaded) {
+            pendingCeleryTracksRef.current.push(trackInput);
+          }
+          const showCeleryAcceptedToast =
+            celeryPollingEnabled || !investigationHealthLoaded;
+          if (showCeleryAcceptedToast) {
+            message.success(
+              withResponse
+                ? `事件 ${eventId} 已受理完整调查（task: ${data.task_id}）`
+                : `事件 ${eventId} 已受理仅分析调查（task: ${data.task_id}）`,
+            );
+          } else {
+            message.success(
+              withResponse
+                ? `事件 ${eventId} 已触发完整调查（含处置方案）`
+                : `事件 ${eventId} 已触发仅分析调查`,
+            );
+          }
         } else {
           message.success(
             withResponse
@@ -358,7 +394,7 @@ export default function EventListPage() {
         });
       }
     },
-    [message, celeryPollingEnabled, registerTrack],
+    [message, celeryPollingEnabled, investigationHealthLoaded, registerTrack],
   );
 
   const handleTrigger = useCallback(

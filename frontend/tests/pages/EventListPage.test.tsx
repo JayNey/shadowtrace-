@@ -576,10 +576,16 @@ describe("EventListPage", () => {
         intent_id: "iin-evt-1",
       },
     });
+    let resolveFirstGetTask: (value: {
+      data: { task_id: string; state: string; event_id: string };
+    }) => void;
+    const firstGetTask = new Promise<{
+      data: { task_id: string; state: string; event_id: string };
+    }>((resolve) => {
+      resolveFirstGetTask = resolve;
+    });
     mockGetTask
-      .mockResolvedValueOnce({
-        data: { task_id: "task-celery-1", state: "STARTED", event_id: "evt-1" },
-      })
+      .mockReturnValueOnce(firstGetTask)
       .mockResolvedValue({
         data: { task_id: "task-celery-1", state: "SUCCESS", event_id: "evt-1" },
       });
@@ -601,7 +607,9 @@ describe("EventListPage", () => {
       "Celery PENDING",
     );
 
-    await vi.advanceTimersByTimeAsync(3_000);
+    resolveFirstGetTask!({
+      data: { task_id: "task-celery-1", state: "STARTED", event_id: "evt-1" },
+    });
     await waitFor(() => expect(mockGetTask).toHaveBeenCalledWith("task-celery-1"));
     await waitFor(() =>
       expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery STARTED"),
@@ -611,6 +619,170 @@ describe("EventListPage", () => {
     await waitFor(() =>
       expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery SUCCESS"),
     );
+  });
+
+  it("registers celery track after delayed health load", async () => {
+    let resolveHealth: (value: {
+      data: {
+        investigation: {
+          orchestration_mode: string;
+          full_loop_available: boolean;
+          task_mode: string;
+        };
+      };
+    }) => void;
+    mockGetHealth.mockReturnValue(
+      new Promise((resolve) => {
+        resolveHealth = resolve;
+      }),
+    );
+    mockTriggerInvestigation.mockResolvedValue({
+      data: {
+        event_id: "evt-1",
+        status: "new",
+        task_id: "task-early-1",
+        intent_id: "iin-early-1",
+      },
+    });
+    mockGetTask.mockResolvedValue({
+      data: { task_id: "task-early-1", state: "STARTED", event_id: "evt-1" },
+    });
+
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    await user.click(screen.getByText("开始调查"));
+
+    await waitFor(() => expect(mockTriggerInvestigation).toHaveBeenCalled());
+    expect(screen.queryByTestId("celery-task-evt-1")).not.toBeInTheDocument();
+
+    resolveHealth!({
+      data: {
+        investigation: {
+          orchestration_mode: "graph",
+          full_loop_available: true,
+          task_mode: "celery",
+        },
+      },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery PENDING"),
+    );
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await waitFor(() => expect(mockGetTask).toHaveBeenCalledWith("task-early-1"));
+  });
+
+  it("does not promote event row status when celery task reaches SUCCESS", async () => {
+    mockGetHealth.mockResolvedValue({
+      data: {
+        investigation: {
+          orchestration_mode: "graph",
+          full_loop_available: true,
+          task_mode: "celery",
+        },
+      },
+    });
+    mockTriggerInvestigation.mockResolvedValue({
+      data: {
+        event_id: "evt-1",
+        status: "new",
+        task_id: "task-no-fake-success",
+        intent_id: null,
+      },
+    });
+    mockGetTask.mockResolvedValue({
+      data: {
+        task_id: "task-no-fake-success",
+        state: "SUCCESS",
+        event_id: "evt-1",
+      },
+    });
+
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    await user.click(screen.getByText("开始调查"));
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await waitFor(() =>
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery SUCCESS"),
+    );
+    expect(screen.getByText("新建")).toBeInTheDocument();
+    expect(screen.queryByText("已关闭")).not.toBeInTheDocument();
+  });
+
+  it("shows FAILURE celery badge when task fails", async () => {
+    mockGetHealth.mockResolvedValue({
+      data: {
+        investigation: {
+          orchestration_mode: "graph",
+          full_loop_available: true,
+          task_mode: "celery",
+        },
+      },
+    });
+    mockTriggerInvestigation.mockResolvedValue({
+      data: {
+        event_id: "evt-1",
+        status: "new",
+        task_id: "task-fail-1",
+        intent_id: "iin-evt-1",
+      },
+    });
+    mockGetTask.mockResolvedValue({
+      data: { task_id: "task-fail-1", state: "FAILURE", event_id: "evt-1" },
+    });
+
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    await user.click(screen.getByText("开始调查"));
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await waitFor(() =>
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery FAILURE"),
+    );
+  });
+
+  it("surfaces intent_id in celery task tooltip when present", async () => {
+    mockGetHealth.mockResolvedValue({
+      data: {
+        investigation: {
+          orchestration_mode: "graph",
+          full_loop_available: true,
+          task_mode: "celery",
+        },
+      },
+    });
+    mockTriggerInvestigation.mockResolvedValue({
+      data: {
+        event_id: "evt-1",
+        status: "new",
+        task_id: "task-celery-1",
+        intent_id: "iin-evt-1",
+      },
+    });
+
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    await user.click(screen.getByText("开始调查"));
+
+    const tag = await screen.findByTestId("celery-task-evt-1");
+    await user.hover(tag);
+    expect(
+      await screen.findByText("task_id: task-celery-1 · intent_id: iin-evt-1"),
+    ).toBeInTheDocument();
   });
 
   it("does not poll celery tasks in background task_mode", async () => {

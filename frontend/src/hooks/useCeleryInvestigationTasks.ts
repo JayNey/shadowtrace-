@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CeleryInvestigationTrack } from "../types/event";
 import { getTask } from "../services/eventApi";
-import { isTerminalTaskState, normalizeTaskState } from "../utils/investigationTaskTracking";
+import {
+  isTerminalTaskState,
+  normalizeTaskState,
+  shouldAcceptTaskStateUpdate,
+} from "../utils/investigationTaskTracking";
 
 const POLL_INTERVAL_MS = 3_000;
+const MAX_POLL_FAILURES = 5;
 
 export interface RegisterCeleryTrackInput {
   event_id: string;
@@ -31,7 +36,11 @@ export function useCeleryInvestigationTasks(
   const tracksRef = useRef(tracksByEventId);
   tracksRef.current = tracksByEventId;
 
+  const pollInFlightRef = useRef(false);
+  const pollFailuresRef = useRef<Map<string, number>>(new Map());
+
   const registerTrack = useCallback((input: RegisterCeleryTrackInput) => {
+    pollFailuresRef.current.delete(input.event_id);
     setTracksByEventId((prev) => {
       const next = new Map(prev);
       next.set(input.event_id, {
@@ -45,6 +54,7 @@ export function useCeleryInvestigationTasks(
   }, []);
 
   const clearTrack = useCallback((eventId: string) => {
+    pollFailuresRef.current.delete(eventId);
     setTracksByEventId((prev) => {
       if (!prev.has(eventId)) return prev;
       const next = new Map(prev);
@@ -54,61 +64,96 @@ export function useCeleryInvestigationTasks(
   }, []);
 
   const pollOnce = useCallback(async () => {
+    if (pollInFlightRef.current) return;
+
     const current = tracksRef.current;
     if (current.size === 0) return;
 
-    const entries = [...current.entries()];
-    const results = await Promise.all(
-      entries.map(async ([eventId, track]) => {
-        if (isTerminalTaskState(track.state)) {
-          return [eventId, track] as const;
-        }
-        try {
-          const res = await getTask(track.task_id);
-          const nextState = normalizeTaskState(res.data.state);
-          if (nextState === track.state) {
+    pollInFlightRef.current = true;
+    try {
+      const entries = [...current.entries()];
+      const results = await Promise.all(
+        entries.map(async ([eventId, track]) => {
+          if (isTerminalTaskState(track.state)) {
             return [eventId, track] as const;
           }
-          return [
-            eventId,
-            {
-              ...track,
-              state: nextState,
-            },
-          ] as const;
-        } catch {
-          return [eventId, track] as const;
-        }
-      }),
-    );
+          try {
+            const res = await getTask(track.task_id);
+            pollFailuresRef.current.delete(eventId);
+            const nextState = normalizeTaskState(res.data.state);
+            if (!shouldAcceptTaskStateUpdate(track.state, nextState)) {
+              return [eventId, track] as const;
+            }
+            return [
+              eventId,
+              {
+                ...track,
+                state: nextState,
+              },
+            ] as const;
+          } catch {
+            const failures = (pollFailuresRef.current.get(eventId) ?? 0) + 1;
+            pollFailuresRef.current.set(eventId, failures);
+            if (failures >= MAX_POLL_FAILURES) {
+              return [
+                eventId,
+                {
+                  ...track,
+                  state: "UNKNOWN",
+                },
+              ] as const;
+            }
+            return [eventId, track] as const;
+          }
+        }),
+      );
 
-    setTracksByEventId((prev) => {
-      let changed = false;
-      const next = new Map(prev);
-      for (const [eventId, track] of results) {
-        const existing = prev.get(eventId);
-        if (
-          !existing ||
-          existing.state !== track.state ||
-          existing.task_id !== track.task_id ||
-          existing.intent_id !== track.intent_id
-        ) {
-          next.set(eventId, track);
-          changed = true;
+      setTracksByEventId((prev) => {
+        let changed = false;
+        const next = new Map(prev);
+        for (const [eventId, track] of results) {
+          const existing = prev.get(eventId);
+          if (
+            !existing ||
+            existing.state !== track.state ||
+            existing.task_id !== track.task_id ||
+            existing.intent_id !== track.intent_id
+          ) {
+            if (
+              existing &&
+              !shouldAcceptTaskStateUpdate(existing.state, track.state)
+            ) {
+              continue;
+            }
+            next.set(eventId, track);
+            changed = true;
+          }
         }
-      }
-      return changed ? next : prev;
-    });
+        return changed ? next : prev;
+      });
+    } finally {
+      pollInFlightRef.current = false;
+    }
   }, []);
 
   useEffect(() => {
     if (!enabled) return;
     void pollOnce();
     const timer = window.setInterval(() => {
+      const active = [...tracksRef.current.values()].some(
+        (track) => !isTerminalTaskState(track.state),
+      );
+      if (!active) return;
       void pollOnce();
     }, POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [enabled, pollOnce]);
+
+  const trackCount = tracksByEventId.size;
+  useEffect(() => {
+    if (!enabled || trackCount === 0) return;
+    void pollOnce();
+  }, [enabled, trackCount, pollOnce]);
 
   return { tracksByEventId, registerTrack, clearTrack };
 }

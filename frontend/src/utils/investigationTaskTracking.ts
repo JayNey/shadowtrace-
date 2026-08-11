@@ -10,6 +10,18 @@ export function isTerminalTaskState(state: string): boolean {
   return TERMINAL_TASK_STATES.has(normalizeTaskState(state));
 }
 
+/** Reject out-of-order poll updates that would regress terminal task state. */
+export function shouldAcceptTaskStateUpdate(
+  currentState: string,
+  nextState: string,
+): boolean {
+  const current = normalizeTaskState(currentState);
+  const next = normalizeTaskState(nextState);
+  if (current === next) return false;
+  if (isTerminalTaskState(current) && !isTerminalTaskState(next)) return false;
+  return true;
+}
+
 export function isCeleryTaskMode(taskMode?: string | null): boolean {
   return (taskMode ?? "").trim().toLowerCase() === "celery";
 }
