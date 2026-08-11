@@ -166,7 +166,10 @@ _DELIVERY_APPROVAL_RECHECK_INTENTS: frozenset[DispositionIntentKind] = frozenset
 
 
 def _action_still_approved_for_delivery(action: orm.Action) -> bool:
-    """True when the action row is still in the effective approved set (ISSUE-235)."""
+    """True when the action row is still in the effective approved set (ISSUE-235).
+
+    Includes post-execution SUCCESS for EXECUTION_RESULT_RECORD and COMPENSATION_RECORD.
+    """
     return (
         action.status
         in {
