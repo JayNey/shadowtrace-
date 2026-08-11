@@ -12,6 +12,8 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Literal
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.prompts.quality_judge_prompt import build_quality_judge_messages
 from app.core.errors import OutputQualityEvaluationBlockedError
 from app.models.agent_io import OutputQualityScore
@@ -143,6 +145,9 @@ class OutputQualityEvaluator:
                 continue
             try:
                 results[agent_name] = await self.evaluate(agent_name, output, event_context)
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: soft-limit must reach Celery task ownership, not become FAIL scores.
+                raise
             except Exception as exc:
                 logger.warning(
                     "Quality eval failed for agent=%s: %s",
@@ -241,6 +246,8 @@ class OutputQualityEvaluator:
                         f"llm_judge_calibrated: rule={_weighted_score(metrics):.3f} "
                         f"judge={judge_score:.3f} final={weighted_score:.3f}"
                     )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 logger.warning(
                     "LLM judge failed for agent=%s, using rule-only score: %s",
@@ -366,6 +373,8 @@ async def evaluate_investigation_quality_scores(
 
     try:
         scores = await evaluator.evaluate_all(ctx_dict)
+    except SoftTimeLimitExceeded:
+        raise
     except Exception as exc:
         logger.warning(
             "Investigation quality evaluation failed for event=%s",

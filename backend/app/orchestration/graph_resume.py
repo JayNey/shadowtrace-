@@ -15,6 +15,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from langchain_core.runnables import RunnableConfig
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -542,6 +543,10 @@ async def _resume_report_only_from_analysis(
     )
     try:
         report = await report_agent.execute(report_input)
+    except SoftTimeLimitExceeded:
+        # ISSUE-314: do not rewrite soft-limit into GraphResumeFailedError —
+        # task layer must apply atomic event/intent outcome.
+        raise
     except Exception as exc:
         await _persist_context_flag(context_store, event_id, "report_generated", False)
         raise GraphResumeFailedError(

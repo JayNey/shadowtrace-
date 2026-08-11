@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
+from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -474,6 +475,9 @@ class BaseLLMClient(ABC):
                         response_model=response_model,
                         timeout=timeout,
                     )
+                except SoftTimeLimitExceeded:
+                    # ISSUE-314: never wrap/retry soft-limit across fallback models.
+                    raise
                 except LLMAuditError:
                     raise
                 except LLMError as exc:
@@ -661,6 +665,9 @@ class BaseLLMClient(ABC):
                         "LLM request timed out",
                         details={"model_name": model_name},
                     ) from exc
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: preserve Celery soft-limit type for task-layer ownership.
+                raise
             except LLMError as exc:
                 status = exc.error_code
                 error = exc
@@ -687,6 +694,8 @@ class BaseLLMClient(ABC):
                     )
                     await self._charge_budget(raw, event_id=event_id, agent_name=agent_name)
                     status = "success"
+                except SoftTimeLimitExceeded:
+                    raise
                 except ShadowTraceError as exc:
                     status = exc.error_code
                     error = exc

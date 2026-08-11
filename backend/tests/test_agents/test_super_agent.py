@@ -918,6 +918,27 @@ class TestSoftTimeLimit:
 
         assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
 
+    async def test_quality_evaluation_step_reraises_soft_time_limit(self) -> None:
+        from celery.exceptions import SoftTimeLimitExceeded
+        from types import SimpleNamespace
+
+        agent = _build_super_agent(
+            lease=_InMemoryEventLease(),
+            event_service=_MockEventService({_EVENT_ID: {"status": EventStatus.NEW}}),
+        )
+        agent._output_quality_evaluator = object()  # type: ignore[assignment]
+        ec = SimpleNamespace(event=SimpleNamespace(event_id=_EVENT_ID))
+
+        async def _boom(*_a: Any, **_k: Any) -> None:
+            raise SoftTimeLimitExceeded()
+
+        with patch(
+            "app.services.output_quality_evaluator.evaluate_investigation_quality_scores",
+            new=_boom,
+        ):
+            with pytest.raises(SoftTimeLimitExceeded):
+                await agent._run_quality_evaluation_step(ec)  # type: ignore[arg-type]
+
 
 class TestReactEnabled:
     """Scenario 4: REACT_ENABLED toggle behaviour."""

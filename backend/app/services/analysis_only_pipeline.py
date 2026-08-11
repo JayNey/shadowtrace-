@@ -822,6 +822,9 @@ class AnalysisOnlyPipeline:
                 self._output_quality_evaluator,
                 context,
             )
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: soft-limit ownership stays at the Celery task layer.
+            raise
         except OutputQualityEvaluationBlockedError:
             raise
         except Exception:

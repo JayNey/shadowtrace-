@@ -890,3 +890,38 @@ async def test_cancelled_inflight_attempt_records_minimal_audit() -> None:
     assert len(audit.entries) == 1
     assert audit.entries[0].status == "llm_provider_error"
     assert audit.entries[0].error_class == "provider"
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_reraises_soft_time_limit_without_wrapping_or_fallback() -> None:
+    """ISSUE-314: SoftTimeLimitExceeded must not become retryable LLMProviderError."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.core.llm.base import BaseLLMClient, ProviderResponse
+
+    class _SoftLimitClient(BaseLLMClient):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.request_calls = 0
+
+        async def _request(self, *args: Any, **kwargs: Any) -> ProviderResponse:
+            self.request_calls += 1
+            raise SoftTimeLimitExceeded()
+
+    audit = InMemoryLLMCallAuditRecorder()
+    client = _SoftLimitClient(
+        primary_model="primary-model",
+        fallback_models=("fallback-model",),
+        audit_recorder=audit,
+        timeout_seconds=5.0,
+    )
+    with pytest.raises(SoftTimeLimitExceeded):
+        await client.chat(
+            MESSAGES,
+            event_id="evt-314-soft-llm",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+        )
+    # Soft-limit must not enter fallback model retry.
+    assert client.request_calls == 1
+    assert audit.entries == []

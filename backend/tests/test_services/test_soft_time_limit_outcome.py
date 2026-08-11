@@ -131,6 +131,37 @@ def test_decide_reporting_is_terminal_not_recovered() -> None:
     assert decision is SoftTimeLimitDecision.TERMINAL
 
 
+def test_decide_new_is_terminal_not_recovered() -> None:
+    """NEW is not dispatch-resumable; soft-limit must TERMINAL, not cold-start RECOVERED."""
+    probe = SoftTimeLimitProbe(
+        has_checkpoint=True,
+        checkpoint_recoverable=True,
+        last_checkpoint_node="triage",
+        side_effect_signals=(),
+        unknown_outbox_count=0,
+    )
+    decision = decide_soft_time_limit_outcome(
+        event_status=EventStatus.NEW.value,
+        probe=probe,
+        intent_attempt=0,
+        max_attempts=5,
+        has_intent=True,
+    )
+    assert decision is SoftTimeLimitDecision.TERMINAL
+
+
+def test_pure_investigation_statuses_are_dispatch_resumable() -> None:
+    """RECOVERED set must stay aligned with intent/celery resume sets (ISSUE-314)."""
+    from app.core.celery_delivery import REDELIVERY_RESUME_STATUSES
+    from app.services.investigation_intent_service import _EVENT_INVESTIGATION_RESUMABLE
+    from app.services.soft_time_limit_outcome import _PURE_INVESTIGATION_STATUSES
+
+    redelivery = {status.value for status in REDELIVERY_RESUME_STATUSES}
+    for status in _PURE_INVESTIGATION_STATUSES:
+        assert status in redelivery, status
+        assert status in _EVENT_INVESTIGATION_RESUMABLE, status
+
+
 def test_decide_closed_is_ignored() -> None:
     probe = SoftTimeLimitProbe(
         has_checkpoint=False,

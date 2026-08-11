@@ -927,6 +927,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         for attempt in range(max_attempts):
             try:
                 return await factory()
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: never retry after Celery soft-limit (do not rely on classify).
+                raise
             except Exception as exc:
                 last_error = exc
                 if not is_retryable(exc) or attempt >= MAX_AGENT_RETRIES:
@@ -1230,6 +1233,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         event_id = _event_id_from_context(ec)
         try:
             await evaluate_investigation_quality_scores(self._output_quality_evaluator, ec)
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: soft-limit ownership stays at the Celery task layer.
+            raise
         except OutputQualityEvaluationBlockedError:
             raise
         except Exception:

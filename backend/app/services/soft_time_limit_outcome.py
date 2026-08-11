@@ -43,7 +43,9 @@ _SOFT_LIMIT_OPERATOR = "InvestigationTask"
 # so RECOVERED actually invokes graph resume (ISSUE-314).
 _PURE_INVESTIGATION_STATUSES = frozenset(
     {
-        EventStatus.NEW.value,
+        # NEW is intentionally excluded: REDELIVERY_RESUME_STATUSES /
+        # _EVENT_INVESTIGATION_RESUMABLE do not resume NEW, so RECOVERED would
+        # schedule a cold restart instead of graph resume (ISSUE-314).
         EventStatus.TRIAGING.value,
         EventStatus.COLLECTING_EVIDENCE.value,
         EventStatus.ANALYZING.value,
