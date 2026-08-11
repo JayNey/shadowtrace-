@@ -44,11 +44,8 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
-from app.models.execution import ActionExecutionJob
-from app.models.ids import new_disposition_id, new_job_id
 from app.orchestration.workflow_graph import NODE_EXECUTE, invoke_investigation_graph
 from app.services.decision_record_service import DecisionRecordService
-from app.services.disposition_command_factory import DispositionCommandFactory
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService
 from tests.integration.autonomous_e2e.helpers import patch_production_session_factory
@@ -171,9 +168,6 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
     session_factory: async_sessionmaker[AsyncSession],
     context_store,
     mock_xdr_client,
-    tool_executor,
-    mock_provider,
-    job_store,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Use production service DI; only the replaceable Mock adapter transport is injected."""
@@ -183,7 +177,6 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
     monkeypatch.setenv("ALLOW_XDR_WRITEBACK", "false")
     monkeypatch.setenv("ORCHESTRATION_MODE", "graph")
     monkeypatch.setenv("BUDGET_ENABLED", "false")
-    monkeypatch.setattr("app.tools.executor.get_tool_executor", lambda: tool_executor)
     get_settings.cache_clear()
     deps.reset_deps()
     patch_production_session_factory(monkeypatch, session_factory)
@@ -209,13 +202,21 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
         assert type(disposition_sync) is DispositionSyncService
         assert type(disposition_service) is EventDispositionService
 
-        source_record_id = await _seed_connector_and_source(
+        _source_record_id = await _seed_connector_and_source(
             session_factory,
             mock_xdr_client=mock_xdr_client,
         )
         event_id = await _create_event(session_factory, context_store)
+        async with session_factory() as session:
+            async with session.begin():
+                event_row = await session.get(
+                    orm.SecurityEvent,
+                    event_id,
+                    with_for_update=True,
+                )
+                assert event_row is not None
+                event_row.status = EventStatus.EXECUTING_RESPONSE.value
         immediate_id = f"act-prod-{uuid.uuid4().hex[:8]}"
-        job_id = new_job_id()
         deferred = _deferred_action(event_id=event_id).model_copy(
             update={"action_name": "Deferred terminal disposition"}
         )
@@ -230,87 +231,20 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
                 "action_name": "Block the selected address",
                 "tool_name": "block_ip",
                 "action_level": ActionLevel.L2,
-                "execution_owner": ExecutionOwner.DIRECT_TOOL,
+                "execution_owner": ExecutionOwner.XDR_MANAGED,
                 "execution_phase": ActionExecutionPhase.IMMEDIATE,
-                "status": ActionStatus.SUCCESS,
+                "status": ActionStatus.APPROVED,
                 "target_type": "ip",
                 "target": "203.0.113.88",
                 "writeback_required": True,
                 "writeback_applicable": False,
                 "writeback_readiness": WritebackReadiness.NOT_REQUIRED,
                 "disposition_source_ref": deferred.disposition_source_ref,
-                "execution_job_id": job_id,
                 "idempotency_key": f"idem-{immediate_id}",
             }
         )
         await _insert_action(session_factory, event_id, immediate)
         await _insert_action(session_factory, event_id, deferred)
-        await job_store.seed_job(
-            ActionExecutionJob(
-                job_id=job_id,
-                event_id=event_id,
-                action_id=immediate_id,
-                provider_name="mock_tool_provider",
-                idempotency_key=immediate.idempotency_key,
-                status=ExecutionJobStatus.QUEUED,
-            )
-        )
-        await _insert_job(
-            session_factory,
-            event_id=event_id,
-            action_id=immediate_id,
-            job_id=job_id,
-        )
-        queued = await tool_executor.call(
-            "block_ip",
-            {
-                "target_type": "ip",
-                "target": immediate.target,
-                "parameters": {},
-            },
-            event_id,
-            action_id=immediate_id,
-            execution_job_id=job_id,
-            idempotency_key=immediate.idempotency_key,
-            execution_owner=ExecutionOwner.DIRECT_TOOL,
-        )
-        completed = await mock_provider.run_job(queued.job_id)
-        assert completed.status is ExecutionJobStatus.SUCCESS
-        execution_job = ActionExecutionJob(
-            job_id=job_id,
-            event_id=event_id,
-            action_id=immediate_id,
-            provider_name="mock_observation",
-            idempotency_key=f"idem-{job_id}",
-            status=ExecutionJobStatus.SUCCESS,
-        )
-        async with session_factory() as session:
-            async with session.begin():
-                source_row = await session.get(orm.SourceObject, source_record_id)
-                assert source_row is not None
-                execution_result_command = (
-                    DispositionCommandFactory().build_execution_result_record(
-                        immediate,
-                        execution_job,
-                        source_locator=deferred.disposition_source_ref,
-                        source_concurrency_token=source_row.current_concurrency_token,
-                        operator_id="production_disposition_smoke",
-                        disposition_id=new_disposition_id(),
-                        closure_cycle=1,
-                    )
-                )
-                await disposition_sync.enqueue_command(
-                    session,
-                    command=execution_result_command,
-                    event_id=event_id,
-                    source_record_id=source_record_id,
-                    logical_slot=f"execution_result:{immediate_id}",
-                    guard_context={
-                        "approved_action_ids": [immediate_id, deferred.action_id],
-                    },
-                )
-        delivered = await disposition_sync.process_ready_outboxes(limit=10)
-        assert delivered >= 1
         triage = TriageResult(
             event_type=EventType.OTHER,
             severity=Severity.HIGH,
@@ -337,6 +271,22 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
             input_data={"event_id": event_id},
             output_data=triage,
         )
+        execution_service = await deps.get_action_execution()
+        execution_summary = await execution_service.execute_plan(
+            event_id,
+            plan_revision=1,
+        )
+        assert any(
+            job.action_id == immediate_id and job.status is ExecutionJobStatus.SUCCESS
+            for job in execution_summary.jobs
+        )
+        state_machine = await deps.get_state_machine()
+        await state_machine.transition(
+            event_id,
+            EventStatus.VERIFYING,
+            operator="production_disposition_smoke",
+            reason="xdr_managed_execution_complete",
+        )
 
         super_agent = await deps.get_super_agent()
         production_graph = getattr(super_agent, "_investigation_graph", None)
@@ -361,8 +311,8 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
                 "degraded_flags": [],
                 "node_trace": [],
             },
-            # The next production node must be Verify; the test does not invoke
-            # VerifyAgent, report, or close directly.
+            # ActionExecutionService used production DI above; the next
+            # production graph node must perform Verify and legal closure.
             as_node=NODE_EXECUTE,
         )
         await invoke_investigation_graph(production_graph, None, graph_config)
@@ -377,7 +327,7 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
                     orm.DispositionOutbox.event_id == event_id,
                     orm.DispositionOutbox.action_id == immediate_id,
                     orm.DispositionOutbox.intent_kind
-                    == DispositionIntentKind.EXECUTION_RESULT_RECORD.value,
+                    == DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
                 )
             )
             execution_receipt = await session.scalar(
@@ -390,10 +340,19 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
                     orm.DispositionOutbox.event_id == event_id,
                     orm.DispositionOutbox.action_id == immediate_id,
                     orm.DispositionOutbox.intent_kind
-                    == DispositionIntentKind.EXECUTION_RESULT_RECORD.value,
+                    == DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
                 )
                 .order_by(orm.DispositionReceipt.sequence.desc())
                 .limit(1)
+            )
+            immediate_row = await session.get(orm.Action, immediate_id)
+            execution_job = (
+                await session.get(
+                    orm.ActionExecutionJob,
+                    immediate_row.execution_job_id,
+                )
+                if immediate_row is not None and immediate_row.execution_job_id
+                else None
             )
             terminal_count = int(
                 await session.scalar(
@@ -468,6 +427,14 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
         assert execution_outbox.delivery_status == "delivered"
         assert execution_receipt is not None
         assert execution_receipt.status == WritebackStatus.ACCEPTED.value
+        assert immediate_row is not None
+        assert immediate_row.execution_owner == ExecutionOwner.XDR_MANAGED.value
+        assert immediate_row.status == ActionStatus.SUCCESS.value
+        assert execution_job is not None
+        assert execution_job.status == ExecutionJobStatus.SUCCESS.value
+        assert (execution_job.raw_result or {}).get("effect_completion", {}).get(
+            "verified"
+        ) is True
         assert terminal_count == 1
         assert terminal_outbox is not None
         assert terminal_outbox.delivery_status == "delivered"

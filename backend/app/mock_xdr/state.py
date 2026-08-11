@@ -12,7 +12,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from app.mock_xdr.models import MockFailureProfile, MockXDRScenario, ScenarioTick, TickOperation
-from app.models.disposition import DispositionCommand, DispositionReceipt, TargetWritebackResult
+from app.models.disposition import (
+    DispositionCommand,
+    DispositionReceipt,
+    TargetWritebackResult,
+    parse_entity_effect_target,
+)
 from app.models.enums import (
     TERMINAL_SOURCE_DISPOSITIONS,
     ConfirmationEvidence,
@@ -239,43 +244,24 @@ class EntityAppliedEffect:
     applied_at: datetime
 
 
-_ENTITY_ACTION_APPLIED_STATUS: dict[str, str] = {
-    "block_ip": "blocked",
-    "block_domain": "blocked",
-    "block_process": "blocked",
-    "isolate_host": "isolated",
-    "quarantine_file": "quarantined",
-    "scan_host_for_virus": "completed",
-    "disable_account": "disabled",
-    "force_logout": "terminated",
-    "reset_password": "password_reset",
-    "revoke_token": "revoked",
-}
-
-_ENTITY_ACTION_TARGET_TYPE: dict[str, str] = {
-    "block_ip": "ip",
-    "block_domain": "domain",
-    "block_process": "process",
-    "isolate_host": "host",
-    "quarantine_file": "file",
-    "scan_host_for_virus": "host",
-    "disable_account": "account",
-    "force_logout": "account",
-    "reset_password": "account",
-    "revoke_token": "account",
-}
-
-
 def _split_canonical_target(
     canonical_target: str,
     *,
     entity_action_code: str,
 ) -> tuple[str, str]:
-    expected_type = _ENTITY_ACTION_TARGET_TYPE.get(entity_action_code, "unknown")
-    prefix, separator, target = canonical_target.partition(":")
-    if separator and prefix == expected_type and target:
-        return prefix, target
-    return expected_type, canonical_target
+    try:
+        target_type, target, _ = parse_entity_effect_target(
+            entity_action_code,
+            canonical_target,
+        )
+    except ValueError as exc:
+        error_code = (
+            "unsupported_operation"
+            if "unsupported entity_action_code" in str(exc)
+            else "validation_error"
+        )
+        raise MockValidationError(str(exc), error_code=error_code) from exc
+    return target_type, target
 
 
 @dataclass
@@ -853,6 +839,20 @@ class MockXDRState:
         self.disposition_by_idem_hash[idem_hash] = command.disposition_id
         if command.intent_kind is DispositionIntentKind.EVENT_STATUS_UPDATE and attempt.active:
             self.active_terminal_heads[(object_id, command.closure_cycle)] = command.disposition_id
+        if (
+            command.intent_kind is DispositionIntentKind.ENTITY_ACTION_SUBMIT
+            and status is WritebackStatus.ACCEPTED
+            and provider_job_id is None
+        ):
+            # The synchronous Mock provider applies the effect as provider-owned
+            # state after accepting the command.  Callers must still use the
+            # separate readback endpoint to obtain completion evidence.
+            self._apply_entity_effect_record(
+                attempt,
+                writeback_id=writeback_id,
+                provider_writeback_id=writeback_id,
+                action_id=command.action_id,
+            )
         return receipt
 
     def _apply_confirmed_source_disposition(self, command: DispositionCommand) -> None:
@@ -1025,6 +1025,12 @@ class MockXDRState:
                 if attempt.command.intent_kind is DispositionIntentKind.ENTITY_ACTION_SUBMIT:
                     confirmed = latest
                     job.terminal_writeback_status = WritebackStatus.ACCEPTED
+                    self._apply_entity_effect_record(
+                        attempt,
+                        writeback_id=latest.writeback_id,
+                        provider_writeback_id=latest.writeback_id,
+                        action_id=attempt.command.action_id,
+                    )
                 else:
                     confirmed = self.confirm_via_readback(job.disposition_id)
                     job.terminal_writeback_status = confirmed.status
@@ -1117,8 +1123,7 @@ class MockXDRState:
         existing = self.entity_applied_effects.get(attempt.command.disposition_id)
         if existing is not None:
             if (
-                existing.writeback_id != writeback_id
-                or existing.provider_writeback_id != provider_writeback_id
+                existing.provider_writeback_id != provider_writeback_id
                 or existing.action_id != action_id
             ):
                 raise MockValidationError(
@@ -1134,15 +1139,13 @@ class MockXDRState:
                 "entity action params missing",
                 error_code="validation_error",
             )
-        expected_status = _ENTITY_ACTION_APPLIED_STATUS.get(entity_action_code)
-        if expected_status is None:
-            raise MockValidationError(
-                f"unsupported entity_action_code {entity_action_code}",
-                error_code="unsupported_operation",
-            )
         target_type, target = _split_canonical_target(
             canonical_target,
             entity_action_code=entity_action_code,
+        )
+        _, _, expected_status = parse_entity_effect_target(
+            entity_action_code,
+            canonical_target,
         )
         self.entity_effect_seq += 1
         effect = EntityAppliedEffect(
@@ -1180,6 +1183,7 @@ class MockXDRState:
             "verified": False,
             "disposition_id": attempt.command.disposition_id,
             "writeback_id": writeback_id,
+            "provider_writeback_id": attempt.writeback_id,
             "action_id": attempt.command.action_id,
             "entity_action_code": entity_action_code,
             "canonical_target": canonical_target,
@@ -1199,6 +1203,7 @@ class MockXDRState:
                 "verified": False,
                 "disposition_id": disposition_id,
                 "writeback_id": "",
+                "provider_writeback_id": "",
                 "action_id": "",
                 "entity_action_code": "",
                 "canonical_target": "",
@@ -1218,6 +1223,7 @@ class MockXDRState:
             "verified": verified,
             "disposition_id": effect.disposition_id,
             "writeback_id": effect.writeback_id,
+            "provider_writeback_id": effect.provider_writeback_id,
             "action_id": effect.action_id,
             "entity_action_code": effect.entity_action_code,
             "canonical_target": effect.canonical_target,

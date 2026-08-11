@@ -1662,7 +1662,7 @@ async def write_xdr_entity_effect_observation(
     writeback_id: str,
     provider_record_id: str,
     observed_version: int,
-    connector: str = DEFAULT_CONNECTOR,
+    connector: str,
     observation_delay_ms: int | None = None,
 ) -> None:
     """Project Mock XDR entity applied-state readback onto verify observation surfaces."""

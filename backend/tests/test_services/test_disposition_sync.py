@@ -2432,6 +2432,12 @@ async def test_adapter_not_found_dead_letters_without_pause(
         _locator,
         concurrency_token,
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=f"idem-failed-{_sfx()}",
+    )
     sync = _sync_service(session_factory, store, mock_xdr_client)
     missing_locator = SourceObjectLocator(
         source_product="mock_xdr",
@@ -2484,6 +2490,9 @@ async def test_adapter_not_found_dead_letters_without_pause(
         action = await session.get(orm.Action, action_id)
         assert action is not None
         assert action.writeback_status == WritebackStatus.FAILED.value
+        job = await session.get(orm.ActionExecutionJob, job_id)
+        assert job is not None
+        assert job.status == ExecutionJobStatus.FAILED.value
         receipts = (
             await session.scalars(
                 select(orm.DispositionReceipt).where(
@@ -2589,6 +2598,12 @@ async def test_adapter_unknown_submission_stays_paused_for_lookup(
         locator,
         concurrency_token,
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=f"idem-unknown-{_sfx()}",
+    )
     sync = _sync_service(session_factory, store, mock_xdr_client)
     outbox_id = f"obx-{_sfx()}"
     async with session_factory() as session:
@@ -2646,6 +2661,9 @@ async def test_adapter_unknown_submission_stays_paused_for_lookup(
         assert row.delivery_status == OutboxDeliveryStatus.PAUSED.value
         assert row.latest_writeback_status == WritebackStatus.UNKNOWN.value
         assert row.last_error_code == "submission_unknown"
+        job = await session.get(orm.ActionExecutionJob, job_id)
+        assert job is not None
+        assert job.status == ExecutionJobStatus.UNKNOWN.value
 
     monkeypatch.setattr(adapter, "submit", original_submit)
 
@@ -2666,6 +2684,12 @@ async def test_writeback_conflict_delivered_without_pause(
         locator,
         concurrency_token,
     ) = await _seed_event_action_source(session_factory, store, mock_xdr_client)
+    job_id = await _attach_xdr_execution_job(
+        session_factory,
+        action_id=action_id,
+        event_id=event_id,
+        idempotency_key=f"idem-conflict-{_sfx()}",
+    )
     sync = _sync_service(session_factory, store, mock_xdr_client)
     outbox_id = f"obx-{_sfx()}"
     async with session_factory() as session:
@@ -2714,6 +2738,9 @@ async def test_writeback_conflict_delivered_without_pause(
         assert row.delivery_status == OutboxDeliveryStatus.DELIVERED.value
         assert row.latest_writeback_status == WritebackStatus.CONFLICT.value
         assert row.last_error_code == "version_conflict"
+        job = await session.get(orm.ActionExecutionJob, job_id)
+        assert job is not None
+        assert job.status == ExecutionJobStatus.FAILED.value
 
 
 @pytest.mark.asyncio
@@ -4707,6 +4734,7 @@ async def test_entity_effect_completion_writes_scoped_observation_and_job_succes
     store: EventContextStore,
     mock_xdr_client: httpx.AsyncClient,
     cleanup: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ISSUE-311: provider applied-state readback unlocks verify observation surfaces."""
     from app.providers.tools.mock_provider import (
@@ -4779,7 +4807,37 @@ async def test_entity_effect_completion_writes_scoped_observation_and_job_succes
                     event_id=event_id,
                     source_record_id=source_record_id,
                 )
+        original_publish = sync._publish_entity_effect_projection
+
+        async def _projection_unavailable(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("simulated observation projection outage")
+
+        monkeypatch.setattr(
+            sync,
+            "_publish_entity_effect_projection",
+            _projection_unavailable,
+        )
         assert await sync.process_ready_outboxes(limit=1) == 1
+        async with session_factory() as session:
+            pending_job = await session.get(orm.ActionExecutionJob, job_id)
+            assert pending_job is not None
+            assert pending_job.status == ExecutionJobStatus.SUCCESS.value
+            assert (pending_job.raw_result or {}).get("effect_projection_pending") is True
+        assert (
+            await observation_state.get_observation(
+                "ip_blocks",
+                "203.0.113.88",
+                include_pending=True,
+                job_id=job_id,
+            )
+            is None
+        )
+        monkeypatch.setattr(
+            sync,
+            "_publish_entity_effect_projection",
+            original_publish,
+        )
+        assert await sync.reconcile_pending_entity_effects(limit=1) == 1
 
         async with session_factory() as session:
             receipt = await session.scalar(
@@ -4797,6 +4855,7 @@ async def test_entity_effect_completion_writes_scoped_observation_and_job_succes
             assert job_row.raw_result.get("effect_completion", {}).get("writeback_id") == (
                 record.writeback_id
             )
+            assert job_row.raw_result.get("effect_projection_pending") is False
 
         observation = await get_mock_tool_provider().state.get_observation(
             "ip_blocks",
@@ -4808,6 +4867,7 @@ async def test_entity_effect_completion_writes_scoped_observation_and_job_succes
         assert observation.status == "blocked"
         assert observation.action_id == action_id
         assert observation.job_id == job_id
+        assert observation.connector == locator.connector_id
         assert observation.value.get("writeback_id") == record.writeback_id
         assert observation.value.get("provider_record_id")
 

@@ -13,6 +13,7 @@ from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
     ActionStatus,
+    DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
     ExecutionJobStatus,
@@ -97,11 +98,42 @@ def _action_has_active_job(
     return None
 
 
+def _entity_effect_outbox_converged(
+    outbox: orm.DispositionOutbox,
+    job: orm.ActionExecutionJob | None,
+) -> bool:
+    if (
+        outbox.intent_kind != DispositionIntentKind.ENTITY_ACTION_SUBMIT.value
+        or outbox.delivery_status != OutboxDeliveryStatus.DELIVERED.value
+        or outbox.latest_writeback_status != WritebackStatus.ACCEPTED.value
+        or job is None
+        or job.status != ExecutionJobStatus.SUCCESS.value
+    ):
+        return False
+    raw_result = job.raw_result or {}
+    if raw_result.get("effect_projection_pending") is not False:
+        return False
+    completion = raw_result.get("effect_completion")
+    if not isinstance(completion, dict):
+        return False
+    return (
+        completion.get("verified") is True
+        and completion.get("disposition_id") == outbox.disposition_id
+        and completion.get("writeback_id") == outbox.writeback_id
+        and completion.get("action_id") == outbox.action_id
+        and bool(completion.get("provider_record_id"))
+        and int(completion.get("observed_version") or 0) > 0
+    )
+
+
 def _outbox_blocks_convergence(
     outbox: orm.DispositionOutbox,
+    job: orm.ActionExecutionJob | None,
 ) -> tuple[bool, SideEffectConvergenceReason | None]:
     wb_raw = outbox.latest_writeback_status
     if wb_raw and wb_raw != WritebackStatus.CONFIRMED.value:
+        if _entity_effect_outbox_converged(outbox, job):
+            return False, None
         try:
             WritebackStatus(wb_raw)
         except ValueError:
@@ -118,9 +150,10 @@ def _outbox_blocks_convergence(
 
 def _scan_outboxes_for_block(
     active_outboxes: list[orm.DispositionOutbox],
+    job: orm.ActionExecutionJob | None,
 ) -> SideEffectConvergenceReason | None:
     for outbox in active_outboxes:
-        blocks, reason = _outbox_blocks_convergence(outbox)
+        blocks, reason = _outbox_blocks_convergence(outbox, job)
         if blocks and reason is not None:
             return reason
     return None
@@ -206,7 +239,10 @@ def _action_side_effect_blocks_convergence(
         return SideEffectConvergenceReason.EXECUTING_ACTION
     if _action_has_active_job(action_row.action_id, jobs_by_action) is not None:
         return SideEffectConvergenceReason.IN_FLIGHT_JOB
-    return _scan_outboxes_for_block(active_outboxes)
+    return _scan_outboxes_for_block(
+        active_outboxes,
+        jobs_by_action.get(action_row.action_id),
+    )
 
 
 def _classify_scope(

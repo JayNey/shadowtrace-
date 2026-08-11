@@ -102,15 +102,16 @@ class BaseDispositionAdapter(ABC):
         """
         return None
 
-    async def complete_entity_effect_readback(
+    async def read_entity_effect_completion(
         self,
         command: DispositionCommand,
         receipt: DispositionReceipt,
     ) -> EntityEffectCompletion | None:
-        """Optional entity effect completion via provider-side applied state (ISSUE-311).
+        """Read provider-owned applied-state evidence for an entity effect (ISSUE-311).
 
         For ``ENTITY_ACTION_SUBMIT`` only. Must not promote the entity receipt
-        to ``CONFIRMED``; returns independent effect evidence instead.
+        to ``CONFIRMED`` or mutate provider state; returns independent effect
+        evidence instead.
         Default: unsupported (returns None).
         """
         _ = (command, receipt)

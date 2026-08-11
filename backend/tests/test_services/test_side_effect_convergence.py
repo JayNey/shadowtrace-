@@ -14,6 +14,7 @@ from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
     ActionStatus,
+    DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
     ExecutionJobStatus,
@@ -72,6 +73,84 @@ def test_required_closed_gate_fails_without_convergence_summary() -> None:
                 side_effect_convergence=None,
             )
         )
+
+
+def test_verified_xdr_entity_effect_satisfies_accepted_outbox_gate() -> None:
+    action_id = "act-entity-converged"
+    disposition_id = "disp-entity-converged"
+    writeback_id = "wbk-entity-converged"
+    action = orm.Action(
+        action_id=action_id,
+        status=ActionStatus.SUCCESS.value,
+    )
+    outbox = orm.DispositionOutbox(
+        action_id=action_id,
+        disposition_id=disposition_id,
+        writeback_id=writeback_id,
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+        delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+        latest_writeback_status=WritebackStatus.ACCEPTED.value,
+    )
+    job = orm.ActionExecutionJob(
+        action_id=action_id,
+        status=ExecutionJobStatus.SUCCESS.value,
+        raw_result={
+            "effect_projection_pending": False,
+            "effect_completion": {
+                "verified": True,
+                "disposition_id": disposition_id,
+                "writeback_id": writeback_id,
+                "action_id": action_id,
+                "provider_record_id": "entfx-1",
+                "observed_version": 1,
+            },
+        },
+    )
+
+    assert (
+        _action_side_effect_blocks_convergence(
+            action,
+            jobs_by_action={action_id: job},
+            active_outboxes=[outbox],
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("projection_pending", [True, None])
+def test_unprojected_xdr_entity_effect_keeps_accepted_outbox_blocking(
+    projection_pending: bool | None,
+) -> None:
+    action_id = "act-entity-pending"
+    action = orm.Action(
+        action_id=action_id,
+        status=ActionStatus.SUCCESS.value,
+    )
+    outbox = orm.DispositionOutbox(
+        action_id=action_id,
+        disposition_id="disp-entity-pending",
+        writeback_id="wbk-entity-pending",
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+        delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+        latest_writeback_status=WritebackStatus.ACCEPTED.value,
+    )
+    job = orm.ActionExecutionJob(
+        action_id=action_id,
+        status=ExecutionJobStatus.SUCCESS.value,
+        raw_result={
+            "effect_projection_pending": projection_pending,
+            "effect_completion": {"verified": True},
+        },
+    )
+
+    assert (
+        _action_side_effect_blocks_convergence(
+            action,
+            jobs_by_action={action_id: job},
+            active_outboxes=[outbox],
+        )
+        is SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED
+    )
 
 
 async def _seed_not_required_closed_with_running_job(

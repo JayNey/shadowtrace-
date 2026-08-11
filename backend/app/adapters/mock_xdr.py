@@ -595,7 +595,7 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
         receipt = DispositionReceipt.model_validate(resp.json())
         return sanitize_disposition_receipt(receipt)
 
-    async def complete_entity_effect_readback(
+    async def read_entity_effect_completion(
         self,
         command: DispositionCommand,
         receipt: DispositionReceipt,
@@ -611,14 +611,9 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
             provider_writeback_id = receipt.writeback_id
         client = await self._http()
         try:
-            resp = await client.post(
-                f"/mock-xdr/v1/entity-effects/{command.disposition_id}/complete",
+            resp = await client.get(
+                f"/mock-xdr/v1/entity-effects/{command.disposition_id}",
                 headers=self._auth_headers(),
-                json={
-                    "writeback_id": receipt.writeback_id,
-                    "provider_writeback_id": provider_writeback_id,
-                    "action_id": command.action_id,
-                },
             )
         except httpx.HTTPError as exc:
             logger.warning(
@@ -647,6 +642,7 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
                 verified=False,
                 disposition_id=command.disposition_id,
                 writeback_id=receipt.writeback_id,
+                provider_writeback_id=provider_writeback_id,
                 action_id=command.action_id,
                 entity_action_code=getattr(command.operation_params, "entity_action_code", ""),
                 canonical_target=getattr(command.operation_params, "canonical_target", ""),
@@ -659,7 +655,13 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
                 provider_message=body.get("error_message"),
             )
         payload = resp.json()
-        return EntityEffectCompletion.model_validate(payload)
+        completion = EntityEffectCompletion.model_validate(payload)
+        return completion.model_copy(
+            update={
+                "writeback_id": receipt.writeback_id,
+                "provider_writeback_id": provider_writeback_id,
+            }
+        )
 
     async def health_check(self) -> ConnectorStatus:
         # Health is a read endpoint; use write token (also grants read on Mock).
