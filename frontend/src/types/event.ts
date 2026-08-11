@@ -694,6 +694,8 @@ export interface CeleryInvestigationTrack {
   task_id: string;
   intent_id: string | null;
   state: string;
+  /** Transient poll failures — not a backend terminal UNKNOWN. */
+  poll_interrupted?: boolean;
 }
 
 export interface InvestigationResult {

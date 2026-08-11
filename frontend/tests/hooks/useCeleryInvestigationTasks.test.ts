@@ -49,7 +49,7 @@ describe("useCeleryInvestigationTasks", () => {
     expect(mockGetTask.mock.calls.length).toBe(callsAtTerminal);
   });
 
-  it("marks track UNKNOWN after repeated getTask failures", async () => {
+  it("marks poll_interrupted after repeated getTask failures but keeps polling", async () => {
     mockGetTask.mockRejectedValue(new Error("503"));
 
     const { result } = renderHook(() => useCeleryInvestigationTasks(true));
@@ -61,6 +61,8 @@ describe("useCeleryInvestigationTasks", () => {
       });
     });
 
+    await waitFor(() => expect(mockGetTask.mock.calls.length).toBeGreaterThanOrEqual(1));
+
     for (let i = 0; i < 5; i += 1) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(3_000);
@@ -68,8 +70,18 @@ describe("useCeleryInvestigationTasks", () => {
     }
 
     await waitFor(() =>
-      expect(result.current.tracksByEventId.get("evt-1")?.state).toBe("UNKNOWN"),
+      expect(result.current.tracksByEventId.get("evt-1")?.poll_interrupted).toBe(true),
     );
+    expect(result.current.tracksByEventId.get("evt-1")?.state).toBe("PENDING");
+
+    mockGetTask.mockResolvedValue({ data: { task_id: "t1", state: "SUCCESS" } });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    await waitFor(() =>
+      expect(result.current.tracksByEventId.get("evt-1")?.state).toBe("SUCCESS"),
+    );
+    expect(result.current.tracksByEventId.get("evt-1")?.poll_interrupted).toBe(false);
   });
 
   it("does not regress terminal state on stale poll response", async () => {

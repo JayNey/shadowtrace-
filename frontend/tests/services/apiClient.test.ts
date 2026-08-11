@@ -82,9 +82,11 @@ describe("eventApi", () => {
     expect(mockGet).toHaveBeenCalledWith("/execution-jobs/job-1");
   });
 
-  it("getTask calls GET /tasks/:id", async () => {
+  it("getTask calls GET /tasks/:id without global error toast", async () => {
     await eventApi.getTask("task-1");
-    expect(mockGet).toHaveBeenCalledWith("/tasks/task-1");
+    expect(mockGet).toHaveBeenCalledWith("/tasks/task-1", {
+      skipGlobalErrorToast: true,
+    });
   });
 
   it("resolveUnknownAction calls POST /actions/:id/resolve-unknown", async () => {

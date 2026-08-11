@@ -99,6 +99,7 @@ export default function EventListPage() {
     null,
   );
   const [investigationHealthLoaded, setInvestigationHealthLoaded] = useState(false);
+  const [investigationHealthFailed, setInvestigationHealthFailed] = useState(false);
   const pendingCeleryTracksRef = useRef<RegisterCeleryTrackInput[]>([]);
   const [investigateModalOpen, setInvestigateModalOpen] = useState(false);
   const [pendingInvestigateEventId, setPendingInvestigateEventId] = useState<string | null>(
@@ -110,14 +111,20 @@ export default function EventListPage() {
   // actually generates a report during the investigation.
   const [generateReport, setGenerateReport] = useState(false);
 
-  const celeryPollingEnabled = isCeleryTaskMode(investigationHealth?.task_mode);
+  const celeryPollingEnabled =
+    isCeleryTaskMode(investigationHealth?.task_mode) ||
+    (investigationHealthLoaded && investigationHealthFailed);
   const { tracksByEventId, registerTrack } = useCeleryInvestigationTasks(
     celeryPollingEnabled,
   );
   const notifiedTerminalTasksRef = useRef<Set<string>>(new Set());
+  const notifiedPollInterruptedRef = useRef<Set<string>>(new Set());
 
   const flushPendingCeleryTracks = useCallback(() => {
-    if (!isCeleryTaskMode(investigationHealth?.task_mode)) {
+    if (
+      !isCeleryTaskMode(investigationHealth?.task_mode) &&
+      !investigationHealthFailed
+    ) {
       pendingCeleryTracksRef.current = [];
       return;
     }
@@ -125,7 +132,7 @@ export default function EventListPage() {
       registerTrack(input);
     }
     pendingCeleryTracksRef.current = [];
-  }, [investigationHealth?.task_mode, registerTrack]);
+  }, [investigationHealth?.task_mode, investigationHealthFailed, registerTrack]);
 
   // Keep latest items in a ref so the socket handler (registered once) can
   // mutate without stale-closure issues.
@@ -277,9 +284,11 @@ export default function EventListPage() {
         const investigation = res.data.investigation;
         setInvestigationHealth(investigation ?? null);
         setFullLoopAvailable(investigation?.full_loop_available ?? true);
+        setInvestigationHealthFailed(false);
       } catch {
         setInvestigationHealth(null);
         setFullLoopAvailable(true);
+        setInvestigationHealthFailed(true);
       } finally {
         setInvestigationHealthLoaded(true);
       }
@@ -315,6 +324,19 @@ export default function EventListPage() {
           5,
         );
       }
+    }
+  }, [celeryPollingEnabled, tracksByEventId, message]);
+
+  useEffect(() => {
+    if (!celeryPollingEnabled) return;
+    for (const track of tracksByEventId.values()) {
+      if (!track.poll_interrupted) continue;
+      if (notifiedPollInterruptedRef.current.has(track.task_id)) continue;
+      notifiedPollInterruptedRef.current.add(track.task_id);
+      message.warning(
+        `调查任务 ${track.task_id} 轮询暂时失败，将继续重试；请同时查看事件 ${track.event_id} 状态。`,
+        5,
+      );
     }
   }, [celeryPollingEnabled, tracksByEventId, message]);
 

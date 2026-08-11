@@ -604,7 +604,7 @@ describe("EventListPage", () => {
       }),
     );
     expect(await screen.findByTestId("celery-task-evt-1")).toHaveTextContent(
-      "Celery PENDING",
+      "Celery 排队中",
     );
 
     resolveFirstGetTask!({
@@ -612,12 +612,12 @@ describe("EventListPage", () => {
     });
     await waitFor(() => expect(mockGetTask).toHaveBeenCalledWith("task-celery-1"));
     await waitFor(() =>
-      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery STARTED"),
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery 执行中"),
     );
 
     await vi.advanceTimersByTimeAsync(3_000);
     await waitFor(() =>
-      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery SUCCESS"),
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery 已完成"),
     );
   });
 
@@ -669,7 +669,7 @@ describe("EventListPage", () => {
     });
 
     await waitFor(() =>
-      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery PENDING"),
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery 排队中"),
     );
 
     await vi.advanceTimersByTimeAsync(3_000);
@@ -711,7 +711,7 @@ describe("EventListPage", () => {
 
     await vi.advanceTimersByTimeAsync(3_000);
     await waitFor(() =>
-      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery SUCCESS"),
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery 已完成"),
     );
     expect(screen.getByText("新建")).toBeInTheDocument();
     expect(screen.queryByText("已关闭")).not.toBeInTheDocument();
@@ -748,7 +748,7 @@ describe("EventListPage", () => {
 
     await vi.advanceTimersByTimeAsync(3_000);
     await waitFor(() =>
-      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery FAILURE"),
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery 失败"),
     );
   });
 
@@ -816,5 +816,36 @@ describe("EventListPage", () => {
 
     await vi.advanceTimersByTimeAsync(6_000);
     expect(mockGetTask).not.toHaveBeenCalled();
+  });
+
+  it("tracks celery task when health fetch fails but investigate returns task_id", async () => {
+    mockGetHealth.mockRejectedValue(new Error("health unavailable"));
+    mockTriggerInvestigation.mockResolvedValue({
+      data: {
+        event_id: "evt-1",
+        status: "new",
+        task_id: "task-health-fail",
+        intent_id: "iin-health-fail",
+      },
+    });
+    mockGetTask.mockResolvedValue({
+      data: { task_id: "task-health-fail", state: "STARTED", event_id: "evt-1" },
+    });
+
+    renderPage();
+    expect(await screen.findByText("Suspicious login")).toBeInTheDocument();
+
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.click(screen.getByTestId("trigger-investigation-evt-1"));
+    await user.click(screen.getByText("开始调查"));
+
+    await waitFor(() => expect(mockTriggerInvestigation).toHaveBeenCalled());
+    expect(await screen.findByTestId("celery-task-evt-1")).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    await waitFor(() => expect(mockGetTask).toHaveBeenCalledWith("task-health-fail"));
+    await waitFor(() =>
+      expect(screen.getByTestId("celery-task-evt-1")).toHaveTextContent("Celery 执行中"),
+    );
   });
 });

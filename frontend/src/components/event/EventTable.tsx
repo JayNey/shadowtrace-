@@ -27,6 +27,7 @@ import {
   labelVerdictReasonCode,
   resolveVerdictDemotionCodes,
 } from "../../utils/verdictObservability";
+import { labelTaskState } from "../../utils/investigationTaskTracking";
 
 export interface EventTableProps {
   items: EventListItem[];
@@ -146,7 +147,8 @@ export default function EventTable({
                     style={{ marginInlineEnd: 0 }}
                     data-testid={`celery-task-${record.event_id}`}
                   >
-                    Celery {celeryTrack.state}
+                    Celery {labelTaskState(celeryTrack.state)}
+                    {celeryTrack.poll_interrupted ? "（轮询重试中）" : ""}
                   </Tag>
                 </Tooltip>
               ) : null}

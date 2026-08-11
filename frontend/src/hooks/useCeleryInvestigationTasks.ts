@@ -48,6 +48,7 @@ export function useCeleryInvestigationTasks(
         task_id: input.task_id,
         intent_id: input.intent_id ?? null,
         state: normalizeTaskState(input.state ?? "PENDING"),
+        poll_interrupted: false,
       });
       return next;
     });
@@ -89,21 +90,19 @@ export function useCeleryInvestigationTasks(
               {
                 ...track,
                 state: nextState,
+                poll_interrupted: false,
               },
             ] as const;
           } catch {
             const failures = (pollFailuresRef.current.get(eventId) ?? 0) + 1;
             pollFailuresRef.current.set(eventId, failures);
-            if (failures >= MAX_POLL_FAILURES) {
-              return [
-                eventId,
-                {
-                  ...track,
-                  state: "UNKNOWN",
-                },
-              ] as const;
-            }
-            return [eventId, track] as const;
+            return [
+              eventId,
+              {
+                ...track,
+                poll_interrupted: failures >= MAX_POLL_FAILURES,
+              },
+            ] as const;
           }
         }),
       );
@@ -117,10 +116,12 @@ export function useCeleryInvestigationTasks(
             !existing ||
             existing.state !== track.state ||
             existing.task_id !== track.task_id ||
-            existing.intent_id !== track.intent_id
+            existing.intent_id !== track.intent_id ||
+            existing.poll_interrupted !== track.poll_interrupted
           ) {
             if (
               existing &&
+              existing.state !== track.state &&
               !shouldAcceptTaskStateUpdate(existing.state, track.state)
             ) {
               continue;

@@ -96,7 +96,9 @@ export function triggerInvestigation(
 }
 
 export function getTask(taskId: string) {
-  return apiClient.get<TaskResponse>(`/tasks/${taskId}`);
+  return apiClient.get<TaskResponse>(`/tasks/${taskId}`, {
+    skipGlobalErrorToast: true,
+  });
 }
 
 export function getHealth() {
