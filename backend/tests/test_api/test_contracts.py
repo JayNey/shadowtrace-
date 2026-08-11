@@ -22,7 +22,7 @@ from app.api.v1.deps import get_execution_job_query_service as _real_get_executi
 from app.api.v1.deps import get_knowledge_query_service as _real_get_knowledge_query_service
 from app.api.v1.deps import get_state_machine as _real_get_state_machine
 from app.api.v1.errors import register_exception_handlers
-from app.core.auth import Principal
+from app.core.auth import Principal, ROLE_ADMIN, AuthorizationError
 from app.core.config import get_settings
 from app.core.errors import (
     DispositionPermissionDenied,
@@ -572,6 +572,8 @@ class _MockStateMachine:
         return EventStatus.NEW
 
     async def force_close(self, event_id: str, principal: Principal, reason: str) -> Any:
+        if not principal.has_any_role([ROLE_ADMIN]):
+            raise AuthorizationError([ROLE_ADMIN])
         evt = s.example_security_event(event_id)
         evt.status = EventStatus.CLOSED
         evt.external_unsynced = True

@@ -743,6 +743,7 @@ async def test_force_close_sets_external_unsynced(
     force_entries = [e for e in history if e["to_status"] == EventStatus.CLOSED.value]
     assert len(force_entries) >= 1
     assert "force_close" in force_entries[-1]["reason"]
+    assert "subject=admin1" in force_entries[-1]["reason"]
 
 
 @pytest.mark.asyncio
@@ -767,6 +768,7 @@ async def test_force_close_syncs_event_context(
     close_entries = [e for e in sh if e["to_status"] == "closed"]
     assert len(close_entries) >= 1
     assert "force_close" in close_entries[-1].get("reason", "")
+    assert "subject=admin" in close_entries[-1].get("reason", "")
 
     # Verify Redis event summary shows closed status.
     ev = await store.get(event_id, "event")
@@ -1088,12 +1090,75 @@ async def test_force_close_requires_admin_at_service_layer(
     event_id = await _create_event(session_factory, store, severity=Severity.LOW.value)
     await _walk_to_reporting(state_machine, event_id)
 
-    with pytest.raises(AuthorizationError, match="admin"):
+    with pytest.raises(AuthorizationError) as exc_info:
         await state_machine.force_close(
             event_id,
             principal=_analyst_principal(),
             reason="must fail",
         )
+    assert exc_info.value.required == [ROLE_ADMIN]
+
+
+@pytest.mark.asyncio
+async def test_force_close_denied_leaves_event_unchanged(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    """ISSUE-308: service-layer RBAC denial must not mutate event state."""
+    event_id = await _create_event(session_factory, store, severity=Severity.LOW.value)
+    await _walk_to_reporting(state_machine, event_id)
+
+    with pytest.raises(AuthorizationError):
+        await state_machine.force_close(
+            event_id,
+            principal=_analyst_principal(),
+            reason="must fail",
+        )
+
+    assert await state_machine.get_current_status(event_id) == EventStatus.REPORTING
+    async with session_factory() as session:
+        row = await session.get(orm.SecurityEvent, event_id)
+        assert row is not None
+        assert row.status == EventStatus.REPORTING.value
+        assert row.external_unsynced is False
+
+
+@pytest.mark.asyncio
+async def test_force_close_denied_records_denied_metric(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    event_id = await _create_event(session_factory, store, severity=Severity.LOW.value)
+    await _walk_to_reporting(state_machine, event_id)
+
+    with patch("app.services.state_machine_service.record_force_close") as record:
+        with pytest.raises(AuthorizationError):
+            await state_machine.force_close(
+                event_id,
+                principal=_analyst_principal(),
+                reason="must fail",
+            )
+        record.assert_called_once_with(result="denied")
+
+
+@pytest.mark.asyncio
+async def test_force_close_success_records_success_metric(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    event_id = await _create_event(session_factory, store, severity=Severity.LOW.value)
+    await _walk_to_reporting(state_machine, event_id)
+
+    with patch("app.services.state_machine_service.record_force_close") as record:
+        await state_machine.force_close(
+            event_id,
+            principal=_admin_principal("admin1"),
+            reason="manual override",
+        )
+        record.assert_called_once_with(result="success")
 
 
 @pytest.mark.asyncio
