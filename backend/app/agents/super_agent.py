@@ -1174,18 +1174,23 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         return ec
 
     async def _run_quality_evaluation_step(self, ec: EventContext) -> None:
-        """Persist rule-based quality scores after analysis (ISSUE-233).
+        """Persist rule-based quality scores after analysis (ISSUE-233 / ISSUE-309).
 
-        Fail-soft: evaluation errors must not block investigation completion or
-        downstream writeback paths.
+        Default fail-soft: evaluation errors become FAIL scores and degraded
+        flags without blocking investigation completion. When
+        ``OUTPUT_QUALITY_BLOCKING=true``, ``OutputQualityEvaluationBlockedError``
+        propagates and fails the investigation.
         """
         if self._output_quality_evaluator is None:
             return
+        from app.core.errors import OutputQualityEvaluationBlockedError
         from app.services.output_quality_evaluator import evaluate_investigation_quality_scores
 
         event_id = _event_id_from_context(ec)
         try:
             await evaluate_investigation_quality_scores(self._output_quality_evaluator, ec)
+        except OutputQualityEvaluationBlockedError:
+            raise
         except Exception:
             logger.warning(
                 "SuperAgent: quality evaluation failed for event=%s",
