@@ -1421,7 +1421,7 @@ async def close_event(
             raise AuthorizationError([ROLE_ADMIN])
         result = await state_machine.force_close(
             event_id,
-            principal=principal.subject,
+            principal=principal,
             reason=body.reason,
         )
         event = await event_service.get_event(event_id)
