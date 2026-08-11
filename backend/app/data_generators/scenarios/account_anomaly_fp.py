@@ -37,34 +37,48 @@ def build_account_anomaly_fp(
     *,
     seed: int = 42,
     variant: ScenarioVariant | str = ScenarioVariant.NORMAL,
+    instance: int = 0,
 ) -> MockXDRScenario:
     selected_variant = normalize_variant(variant)
     base = DEFAULT_BASE_TIME
     tenant = DEFAULT_TENANT
-    conn_log = log_only_connector(connector_id="conn-log-fp")
-    conn_disp = disposition_connector(connector_id="conn-disp-fp")
+    id_suffix = f"-i{instance}" if instance else ""
+    connector_suffix = f"-{instance}" if instance else ""
+    incident_id = f"{INCIDENT_ID}{id_suffix}"
+    alert_id = f"{ALERT_ID}{id_suffix}"
+    asset_id = f"{ASSET_ID}{id_suffix}"
+    log_id = f"{LOG_ID}{id_suffix}"
+    conn_log = log_only_connector(connector_id=f"conn-log-fp{connector_suffix}")
+    conn_disp = disposition_connector(connector_id=f"conn-disp-fp{connector_suffix}")
     conn_disp = conn_disp.model_copy(
         update={"disposition_policy_default": DispositionPolicy.NOT_REQUIRED}
     )
-    conn_gap = capability_gap_connector(connector_id="conn-gap-fp")
+    conn_gap = capability_gap_connector(connector_id=f"conn-gap-fp{connector_suffix}")
 
     asset_ref = make_ref(
         SourceObjectKind.ASSET,
-        ASSET_ID,
+        asset_id,
         connector_id=conn_disp.connector_id,
+        parent=alert_id,
         status_raw="managed",
         updated_at=base,
     )
+    # Keep numeric_asset_id aligned with reference.source_object_id. Instance
+    # suffixes are opaque; prefer the base ASSET_ID for numeric fields that
+    # tooling expects to be digits, while refs stay instance-scoped.
+    numeric_asset_id = ASSET_ID
+    asset_no_agent_id = f"7002{id_suffix}"
+    asset_offline_id = f"7003{id_suffix}"
     asset_no_agent = make_ref(
         SourceObjectKind.ASSET,
-        "7002",
+        asset_no_agent_id,
         connector_id=conn_disp.connector_id,
         status_raw="unmanaged",
         updated_at=base,
     )
     asset_offline = make_ref(
         SourceObjectKind.ASSET,
-        "7003",
+        asset_offline_id,
         connector_id=conn_disp.connector_id,
         status_raw="offline",
         updated_at=base,
@@ -73,13 +87,13 @@ def build_account_anomaly_fp(
     assets = [
         SourceAsset(
             reference=asset_ref,
-            numeric_asset_id=ASSET_ID,
+            numeric_asset_id=numeric_asset_id,
             hostname=OPS_HOST,
             ip="10.50.1.10",
             owner=OPS_ACCOUNT,
             agent_status="online",
             asset_group="ops",
-            normalized={"change_window": True},
+            normalized={"change_window": True, "account": OPS_ACCOUNT},
         )
     ]
     if selected_variant is ScenarioVariant.AGENT_NOT_INSTALLED:
@@ -105,9 +119,9 @@ def build_account_anomaly_fp(
 
     log_ref = make_ref(
         SourceObjectKind.LOG,
-        LOG_ID,
+        log_id,
         connector_id=conn_log.connector_id,
-        parent=ALERT_ID,
+        parent=alert_id,
         status_raw="indexed",
         updated_at=base,
     )
@@ -119,19 +133,24 @@ def build_account_anomaly_fp(
             logged_at=base,
             src_ip="10.50.1.10",
             raw_payload={"account": OPS_ACCOUNT, "batch": True},
+            normalized={
+                "account": OPS_ACCOUNT,
+                "event_type": "login",
+                "change_window": True,
+            },
         )
     ]
 
     incident_ref = make_ref(
         SourceObjectKind.INCIDENT,
-        INCIDENT_ID,
+        incident_id,
         connector_id=conn_disp.connector_id,
         status_raw="open",
         updated_at=base,
     )
     alert_ref = make_ref(
         SourceObjectKind.ALERT,
-        ALERT_ID,
+        alert_id,
         connector_id=conn_disp.connector_id,
         status_raw="open",
         updated_at=base,
@@ -149,12 +168,17 @@ def build_account_anomaly_fp(
     )
     incident = SourceIncident(
         reference=incident_ref,
-        title="Bulk login by ops account during change window",
+        title=f"Bulk login by {OPS_ACCOUNT} during change window",
         level="low",
         gpt_verdict_label="likely_false_positive",
         related_alert_refs=[alert_ref],
         impacted_asset_refs=[asset_ref],
-        normalized={"risk_score": 18, "fp_rule_match": True},
+        normalized={
+            "risk_score": 18,
+            "fp_rule_match": True,
+            "scenario": SCENARIO_ID,
+            "account": OPS_ACCOUNT,
+        },
     )
 
     timeline = telemetry_for_variant(

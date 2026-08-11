@@ -20,6 +20,7 @@ services:
       APPROVAL_TIMEOUT_MINUTES: ${EVAL_APPROVAL_TIMEOUT_MINUTES:-5}
       LLM_TIMEOUT_SECONDS: ${EVAL_LLM_TIMEOUT_SECONDS:-60}
       TASK_MODE: celery
+      CHANGE_WINDOW_BASELINE_PATH: /app/data/organization/change_windows.json
 
   frontend:
     profiles: ["eval-frontend"]
@@ -29,3 +30,4 @@ services:
     environment:
       APPROVAL_TIMEOUT_MINUTES: ${EVAL_APPROVAL_TIMEOUT_MINUTES:-5}
       LLM_TIMEOUT_SECONDS: ${EVAL_LLM_TIMEOUT_SECONDS:-60}
+      CHANGE_WINDOW_BASELINE_PATH: /app/data/organization/change_windows.json

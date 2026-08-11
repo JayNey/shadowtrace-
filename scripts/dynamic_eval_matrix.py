@@ -53,6 +53,10 @@ from dynamic_eval_full_loop import (  # noqa: E402
     GOLD_SCENARIOS,
     parse_seed_stdout,
 )
+from dynamic_eval_profiles import (  # noqa: E402
+    ScenarioEvalProfile,
+    profile_for_scenario,
+)
 
 _DEFAULT_SCENARIOS = ",".join(GOLD_SCENARIOS)
 _SENSITIVE_KEYS = frozenset(
@@ -224,8 +228,12 @@ def _compose_down(
 
 
 def _scenario_project_name(scenario: str, run_id: str) -> str:
+    # Compose project names must be lowercase ([a-z0-9_-]); run_id often has T/Z.
     safe = "".join(ch if ch.isalnum() else "-" for ch in scenario.lower())
-    return f"shadowtrace-eval-{safe}-{run_id}"
+    safe_run = "".join(
+        ch if ch.isalnum() or ch in "-_" else "-" for ch in run_id.lower()
+    )
+    return f"shadowtrace-eval-{safe}-{safe_run}"
 
 
 def _sanitize(value: Any) -> Any:
@@ -274,7 +282,7 @@ def _append_cleanup_error_to_manifest(
     else:
         manifest = {}
     manifest["cleanup_error"] = payload
-    if manifest.get("status") == "passed":
+    if manifest.get("status") in {"passed", "passed_with_pressure_error"}:
         manifest["status"] = "passed_with_cleanup_error"
     _write_json(manifest_path, manifest)
     if manifest_sink is not None:
@@ -330,6 +338,7 @@ def _seed_scenario(
     scenario: str,
     seed: int,
     mock_xdr_url: str,
+    instance: int = 0,
 ) -> dict[str, Any]:
     cmd = _compose_cmd(
         project,
@@ -345,6 +354,8 @@ def _seed_scenario(
         mock_xdr_url,
         "--seed",
         str(seed),
+        "--instance",
+        str(instance),
     )
     print(f"[dynamic-eval-matrix] seed scenario={scenario} project={project}")
     proc = _run(cmd, capture=True, check=False)
@@ -371,8 +382,11 @@ def _run_full_loop_via_exec(
     scenario: str,
     token: str,
     require_closed: bool,
+    analysis_only: bool = False,
+    semantic_profile: str | None = None,
     max_wait_s: float,
     poll_interval_s: float,
+    gate_label: str = "full_loop",
 ) -> dict[str, Any]:
     cmd = _compose_cmd(
         project,
@@ -398,13 +412,18 @@ def _run_full_loop_via_exec(
     )
     for event_id in event_ids:
         cmd.extend(["--event-id", event_id])
-    if require_closed:
+    if analysis_only:
+        cmd.append("--analysis-only")
+        if semantic_profile:
+            cmd.extend(["--semantic-profile", semantic_profile])
+    elif require_closed:
         cmd.append("--require-closed")
         cmd.append("--generate-report")
 
     print(
-        f"[dynamic-eval-matrix] full_loop scenario={scenario} "
-        f"event_ids={event_ids} require_closed={require_closed}"
+        f"[dynamic-eval-matrix] {gate_label} scenario={scenario} "
+        f"event_ids={event_ids} analysis_only={analysis_only} "
+        f"require_closed={require_closed}"
     )
     proc = _run(cmd, capture=True, check=False)
     stdout = proc.stdout.strip()
@@ -427,6 +446,59 @@ def _run_full_loop_via_exec(
     return result
 
 
+def _run_scenario_gate(
+    project: str,
+    compose_files: list[Path],
+    *,
+    event_ids: list[str],
+    scenario: str,
+    token: str,
+    profile: ScenarioEvalProfile,
+    gate: str,
+    max_wait_s: float,
+    poll_interval_s: float,
+) -> dict[str, Any]:
+    if gate == "semantic":
+        if profile.semantic == "full_loop_strict":
+            return _run_full_loop_via_exec(
+                project,
+                compose_files,
+                event_ids=event_ids,
+                scenario=scenario,
+                token=token,
+                require_closed=True,
+                max_wait_s=max_wait_s,
+                poll_interval_s=poll_interval_s,
+                gate_label="semantic_full_loop_strict",
+            )
+        return _run_full_loop_via_exec(
+            project,
+            compose_files,
+            event_ids=event_ids,
+            scenario=scenario,
+            token=token,
+            require_closed=False,
+            analysis_only=True,
+            semantic_profile=profile.semantic,
+            max_wait_s=max_wait_s,
+            poll_interval_s=poll_interval_s,
+            gate_label=f"semantic_{profile.semantic}",
+        )
+    if gate == "pressure" and profile.pressure != "none":
+        return _run_full_loop_via_exec(
+            project,
+            compose_files,
+            event_ids=event_ids,
+            scenario=scenario,
+            token=token,
+            require_closed=profile.pressure == "full_loop_strict",
+            max_wait_s=max_wait_s,
+            poll_interval_s=poll_interval_s,
+            gate_label=f"pressure_{profile.pressure}",
+        )
+    raise MatrixError(f"unsupported gate={gate!r} for scenario={scenario!r}")
+
+
 def run_scenario(
     *,
     scenario: str,
@@ -436,6 +508,7 @@ def run_scenario(
     seed: int,
     mock_xdr_url: str,
     require_closed: bool,
+    profile_by_scenario: bool,
     fresh_volumes: bool,
     stack_timeout_s: float,
     max_wait_s: float,
@@ -447,6 +520,7 @@ def run_scenario(
     project = _scenario_project_name(scenario, run_id)
     compose_files = [_BASE_COMPOSE, _EVAL_COMPOSE]
     scenario_dir = artifact_root / scenario
+    scenario_profile = profile_for_scenario(scenario) if profile_by_scenario else None
     manifest: dict[str, Any] = {
         "scenario": scenario,
         "compose_project_name": project,
@@ -454,7 +528,12 @@ def run_scenario(
         "started_at": datetime.now(tz=UTC).isoformat(),
         "fresh_volumes": fresh_volumes,
         "require_closed": require_closed,
-        "profile": "strict" if require_closed else "compat",
+        "profile_by_scenario": profile_by_scenario,
+        "profile": (
+            scenario_profile.semantic
+            if scenario_profile is not None
+            else ("strict" if require_closed else "compat")
+        ),
     }
     if manifest_sink is not None:
         manifest_sink.clear()
@@ -463,16 +542,17 @@ def run_scenario(
     _CLEANUP.set_project(project, fresh_volumes=fresh_volumes)
     started = time.monotonic()
     try:
+        # --profile is a compose GLOBAL option; must appear before the subcommand.
         up_cmd = _compose_cmd(
             project,
             compose_files,
+            "--profile",
+            "worker",
             "up",
             "-d",
             "--wait",
             "--wait-timeout",
             str(int(stack_timeout_s)),
-            "--profile",
-            "worker",
         )
         if build:
             up_cmd.insert(up_cmd.index("up") + 1, "--build")
@@ -492,35 +572,144 @@ def run_scenario(
             scenario=scenario,
             seed=seed,
             mock_xdr_url=mock_xdr_url,
+            instance=0,
         )
         event_ids = event_ids_from_seed_summary(
             seed_summary,
             scenario=scenario,
             max_events=max_events,
         )
+        semantic_event_ids = [event_ids[0]]
+        pressure_event_ids = [eid for eid in event_ids if eid not in semantic_event_ids][:1]
+        pressure_seed_summary: dict[str, Any] | None = None
         manifest["seed_summary"] = seed_summary
-        manifest["event_ids"] = event_ids
+        manifest["event_ids"] = list(event_ids)
+        manifest["semantic_event_ids"] = semantic_event_ids
+        manifest["pressure_event_ids"] = list(pressure_event_ids)
         if manifest_sink is not None:
             manifest_sink.update(manifest)
 
-        loop_result = _run_full_loop_via_exec(
-            project,
-            compose_files,
-            event_ids=event_ids,
-            scenario=scenario,
-            token=token,
-            require_closed=require_closed,
-            max_wait_s=max_wait_s,
-            poll_interval_s=poll_interval_s,
-        )
-        manifest["result"] = loop_result
+        if profile_by_scenario and scenario_profile is not None:
+            semantic_result = _run_scenario_gate(
+                project,
+                compose_files,
+                event_ids=semantic_event_ids,
+                scenario=scenario,
+                token=token,
+                profile=scenario_profile,
+                gate="semantic",
+                max_wait_s=max_wait_s,
+                poll_interval_s=poll_interval_s,
+            )
+            manifest["semantic_result"] = semantic_result
+            pressure_result: dict[str, Any] | None = None
+            pressure_error: dict[str, Any] | None = None
+            if scenario_profile.pressure != "none":
+                if not pressure_event_ids:
+                    # Reseed AFTER semantic gate so analysis-only still sees instance=0 mock data.
+                    pressure_seed_summary = _seed_scenario(
+                        project,
+                        compose_files,
+                        scenario=scenario,
+                        seed=seed,
+                        mock_xdr_url=mock_xdr_url,
+                        instance=1,
+                    )
+                    pressure_ids = event_ids_from_seed_summary(
+                        pressure_seed_summary,
+                        scenario=scenario,
+                        max_events=1,
+                    )
+                    pressure_event_ids = [
+                        eid for eid in pressure_ids if eid not in semantic_event_ids
+                    ]
+                    if not pressure_event_ids:
+                        raise MatrixError(
+                            "pressure gate could not obtain a distinct event_id after "
+                            f"instance=1 reseed for scenario={scenario}: "
+                            f"semantic={semantic_event_ids!r} pressure_seed={pressure_ids!r}"
+                        )
+                    event_ids = list(dict.fromkeys([*event_ids, *pressure_event_ids]))
+                    manifest["pressure_seed_summary"] = pressure_seed_summary
+                    manifest["event_ids"] = event_ids
+                    manifest["pressure_event_ids"] = pressure_event_ids
+                    if manifest_sink is not None:
+                        manifest_sink.update(manifest)
+                if set(pressure_event_ids) & set(semantic_event_ids):
+                    raise MatrixError(
+                        "pressure gate event_ids must be distinct from semantic gate "
+                        f"event_ids for scenario={scenario}: "
+                        f"semantic={semantic_event_ids!r} pressure={pressure_event_ids!r}"
+                    )
+                try:
+                    pressure_result = _run_scenario_gate(
+                        project,
+                        compose_files,
+                        event_ids=pressure_event_ids,
+                        scenario=scenario,
+                        token=token,
+                        profile=scenario_profile,
+                        gate="pressure",
+                        max_wait_s=max_wait_s,
+                        poll_interval_s=poll_interval_s,
+                    )
+                except MatrixError as exc:
+                    pressure_msg = _sanitize_error_text(str(exc))
+                    if not pressure_msg.startswith("[pressure gate]"):
+                        pressure_msg = f"[pressure gate] {pressure_msg}"
+                    pressure_error = {
+                        "type": type(exc).__name__,
+                        "message": pressure_msg,
+                    }
+                    manifest["pressure_result"] = pressure_result
+                    manifest["pressure_error"] = pressure_error
+                    manifest["result"] = semantic_result
+                    if scenario_profile.pressure_blocks_pass:
+                        manifest["status"] = "failed"
+                        raise MatrixError(pressure_msg) from exc
+                else:
+                    manifest["pressure_result"] = pressure_result
+            manifest["result"] = semantic_result
+            if pressure_error is not None and not scenario_profile.pressure_blocks_pass:
+                manifest["status"] = "passed_with_pressure_error"
+            elif pressure_error is None:
+                manifest["status"] = "passed"
+            elif pressure_error is not None:
+                # Blocking pressure failures raise above; keep for clarity.
+                manifest["status"] = "failed"
+        else:
+            loop_result = _run_full_loop_via_exec(
+                project,
+                compose_files,
+                event_ids=event_ids,
+                scenario=scenario,
+                token=token,
+                require_closed=require_closed,
+                max_wait_s=max_wait_s,
+                poll_interval_s=poll_interval_s,
+            )
+            manifest["result"] = loop_result
+            manifest["status"] = "passed"
         manifest["elapsed_s"] = round(time.monotonic() - started, 2)
-        manifest["status"] = "passed"
         _write_json(scenario_dir / "manifest.json", manifest)
-        print(
-            f"[dynamic-eval-matrix] PASS scenario={scenario} "
-            f"elapsed_s={manifest['elapsed_s']} final={loop_result.get('final_statuses')}"
-        )
+        final = (manifest.get("result") or {}).get("final_statuses")
+        if (
+            profile_by_scenario
+            and scenario_profile is not None
+            and manifest.get("pressure_error") is not None
+            and not scenario_profile.pressure_blocks_pass
+        ):
+            print(
+                f"[dynamic-eval-matrix] PASS (semantic); pressure gate FAILED "
+                f"(non-blocking) scenario={scenario} "
+                f"elapsed_s={manifest['elapsed_s']} final={final} "
+                f"pressure_error={manifest['pressure_error'].get('message')}"
+            )
+        else:
+            print(
+                f"[dynamic-eval-matrix] PASS scenario={scenario} "
+                f"elapsed_s={manifest['elapsed_s']} final={final}"
+            )
         return manifest
     except Exception as exc:
         manifest["status"] = "failed"
@@ -580,6 +769,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Strict CLOSED profile (reject reporting/contained/verifying)",
     )
+    parser.add_argument(
+        "--profile-by-scenario",
+        action="store_true",
+        help=(
+            "ISSUE-313: run per-scenario semantic + optional pressure gates "
+            "(insider strict full-loop; FP/domain analysis-only semantic + "
+            "compat full-loop pressure)"
+        ),
+    )
     parser.add_argument("--token", default="bootstrap-token")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -637,7 +835,12 @@ def main(argv: list[str] | None = None) -> int:
             "Refusing max-wait-s >= 30 minutes — use scripted approve, not timeout."
         )
 
-    run_id = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
+    if args.require_closed and args.profile_by_scenario:
+        raise SystemExit("--require-closed cannot be combined with --profile-by-scenario")
+
+    run_id = (
+        datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
+    ).lower()
     artifact_root = Path(
         args.artifact_dir or (_ROOT_DIR / "artifacts" / "dynamic-eval-matrix" / run_id)
     )
@@ -690,13 +893,14 @@ def main(argv: list[str] | None = None) -> int:
         "artifact_root": str(artifact_root),
         "fresh_volumes": bool(args.fresh_volumes),
         "require_closed": bool(args.require_closed),
+        "profile_by_scenario": bool(args.profile_by_scenario),
         "results": {},
     }
     active_run["summary"] = summary
 
     print(
         f"[dynamic-eval-matrix] run_id={run_id} scenarios={scenarios} "
-        f"profile={'strict' if args.require_closed else 'compat'} "
+        f"profile={'by_scenario' if args.profile_by_scenario else ('strict' if args.require_closed else 'compat')} "
         f"artifact_root={artifact_root}"
     )
 
@@ -715,6 +919,7 @@ def main(argv: list[str] | None = None) -> int:
                 seed=per_seed,
                 mock_xdr_url=str(args.mock_xdr_url),
                 require_closed=bool(args.require_closed),
+                profile_by_scenario=bool(args.profile_by_scenario),
                 fresh_volumes=bool(args.fresh_volumes),
                 stack_timeout_s=float(args.stack_timeout_s),
                 max_wait_s=float(args.max_wait_s),
@@ -728,7 +933,14 @@ def main(argv: list[str] | None = None) -> int:
                 "event_ids": manifest.get("event_ids"),
                 "compose_project_name": manifest.get("compose_project_name"),
                 "final_statuses": (manifest.get("result") or {}).get("final_statuses"),
+                "semantic_profile": manifest.get("profile"),
             }
+            if manifest.get("pressure_error"):
+                summary["results"][scenario]["pressure_error"] = manifest["pressure_error"]
+            if manifest.get("pressure_result"):
+                summary["results"][scenario]["pressure_final_statuses"] = (
+                    manifest["pressure_result"].get("final_statuses")
+                )
             if manifest.get("cleanup_error"):
                 summary["results"][scenario]["cleanup_error"] = manifest["cleanup_error"]
             active_run["manifest"] = manifest
@@ -758,9 +970,26 @@ def main(argv: list[str] | None = None) -> int:
             if failed_manifest.is_file():
                 try:
                     manifest_data = json.loads(failed_manifest.read_text(encoding="utf-8"))
-                    cleanup_error = manifest_data.get("cleanup_error")
-                    if cleanup_error:
-                        summary["results"][scenario]["cleanup_error"] = cleanup_error
+                    if isinstance(manifest_data, dict):
+                        cleanup_error = manifest_data.get("cleanup_error")
+                        if cleanup_error:
+                            summary["results"][scenario]["cleanup_error"] = cleanup_error
+                        if manifest_data.get("pressure_error"):
+                            summary["results"][scenario]["pressure_error"] = (
+                                manifest_data["pressure_error"]
+                            )
+                        if manifest_data.get("semantic_result") is not None:
+                            summary["results"][scenario]["semantic_result"] = (
+                                manifest_data["semantic_result"]
+                            )
+                        if manifest_data.get("pressure_event_ids") is not None:
+                            summary["results"][scenario]["pressure_event_ids"] = (
+                                manifest_data["pressure_event_ids"]
+                            )
+                        if manifest_data.get("semantic_event_ids") is not None:
+                            summary["results"][scenario]["semantic_event_ids"] = (
+                                manifest_data["semantic_event_ids"]
+                            )
                 except (OSError, json.JSONDecodeError):
                     pass
             summary["status"] = "failed"
@@ -770,6 +999,18 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             active_run["scenario"] = None
             active_run["manifest"] = None
+
+    if any(
+        isinstance(row, dict) and row.get("status") == "passed_with_pressure_error"
+        for row in summary["results"].values()
+    ):
+        summary["status"] = "passed_with_pressure_error"
+        _write_json(artifact_root / "summary.json", summary)
+        print(
+            f"[dynamic-eval-matrix] PASSED WITH PRESSURE ERRORS run_id={run_id} "
+            "(semantic gates passed; see per-scenario pressure_error)"
+        )
+        return 0
 
     summary["status"] = "passed"
     _write_json(artifact_root / "summary.json", summary)

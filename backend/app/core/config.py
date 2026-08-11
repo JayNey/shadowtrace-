@@ -201,6 +201,31 @@ class Settings(BaseSettings):
             "(investigation stack stays fail-soft)."
         ),
     )
+    change_window_baseline_path: str = Field(
+        default="",
+        alias="CHANGE_WINDOW_BASELINE_PATH",
+        description=(
+            "ISSUE-313: explicit path to change_windows.json. When empty, "
+            "resolve via container default (/app/data/organization/...) or "
+            "repository data/organization/... walk-up."
+        ),
+    )
+    change_window_baseline_required: bool = Field(
+        default=False,
+        alias="CHANGE_WINDOW_BASELINE_REQUIRED",
+        description=(
+            "When true in production, missing/invalid baseline or required tenant "
+            "entries fail startup and may surface as HTTP 503 on /health."
+        ),
+    )
+    change_window_baseline_required_tenants: str = Field(
+        default="",
+        alias="CHANGE_WINDOW_BASELINE_REQUIRED_TENANTS",
+        description=(
+            "Comma-separated tenant_ids that must exist in the baseline when "
+            "CHANGE_WINDOW_BASELINE_REQUIRED=true (e.g. tenant-demo)."
+        ),
+    )
     knowledge_release_require_active: bool = Field(
         default=False,
         alias="KNOWLEDGE_RELEASE_REQUIRE_ACTIVE",
@@ -600,6 +625,17 @@ class Settings(BaseSettings):
         if self.decision_rationale_mode.strip().lower() == "short_text":
             # ISSUE-243: production may only use off|structured (no free short_text path).
             violations.append("decision_rationale_mode=short_text")
+        if self.change_window_baseline_required:
+            from app.services.change_window_baseline_loader import probe_change_window_baseline
+
+            probe = probe_change_window_baseline(self)
+            if probe.get("status") != "ready":
+                path = probe.get("resolved_path", "")
+                reasons = probe.get("reasons") or []
+                detail = ", ".join(str(item) for item in reasons) or "baseline unavailable"
+                violations.append(
+                    f"CHANGE_WINDOW_BASELINE_REQUIRED: baseline not ready at {path} ({detail})"
+                )
         return violations
 
     def trusted_proxy_allowlist_hosts(self) -> frozenset[str]:

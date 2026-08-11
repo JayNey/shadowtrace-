@@ -140,6 +140,9 @@ services:
       # Demo/ops gate only — does not refuse investigations (fail-soft retained).
       PLAYBOOK_REQUIRED: ${PLAYBOOK_REQUIRED:-false}
 
+      # --- Org change-window baseline (ISSUE-313 / ISSUE-114) ---
+      CHANGE_WINDOW_BASELINE_PATH: /app/data/organization/change_windows.json
+
       # --- Optional graph mirror (override host default when neo4j profile is on) ---
       NEO4J_URI: bolt://neo4j:7687
 
@@ -225,6 +228,7 @@ services:
       DISPOSITION_BASE_URL: http://mock-xdr:8100
       TASK_MODE: celery
       CELERY_BROKER_URL: redis://redis:6379/0
+      CHANGE_WINDOW_BASELINE_PATH: /app/data/organization/change_windows.json
       # Backend owns migrate + playbook seed (ISSUE-245).
       SEED_PLAYBOOK_RELEASE: "false"
       # Optional OTel (ISSUE-092): point at host collector when observability stack runs locally
@@ -288,6 +292,7 @@ services:
       SOURCE_MODE: mock_xdr
       DISPOSITION_MODE: mock_xdr
       DISPOSITION_BASE_URL: http://mock-xdr:8100
+      CHANGE_WINDOW_BASELINE_PATH: /app/data/organization/change_windows.json
       SIMULATION_ENABLED: "true"
       INGESTION_SCHEDULER_ENABLED: "true"
       INGESTION_POLL_INTERVAL_S: ${INGESTION_POLL_INTERVAL_S:-60}
@@ -342,6 +347,7 @@ services:
       ALLOW_LIVE_SIDE_EFFECTS: "false"
       ALLOW_XDR_WRITEBACK: "false"
       DISPOSITION_BASE_URL: http://mock-xdr:8100
+      CHANGE_WINDOW_BASELINE_PATH: /app/data/organization/change_windows.json
       INGESTION_SCHEDULER_ENABLED: "true"
       INGESTION_POLL_INTERVAL_S: ${INGESTION_POLL_INTERVAL_S:-60}
       CELERY_BROKER_URL: redis://redis:6379/0

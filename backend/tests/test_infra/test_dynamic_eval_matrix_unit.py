@@ -116,7 +116,15 @@ def test_sanitize_error_text_redacts_password_key(matrix_mod) -> None:
 def test_parse_args_defaults_compat_profile(matrix_mod) -> None:
     args = matrix_mod.parse_args(["--scenarios", "insider_data_exfiltration"])
     assert args.require_closed is False
+    assert args.profile_by_scenario is False
     assert args.fresh_volumes is True
+
+
+def test_parse_args_profile_by_scenario(matrix_mod) -> None:
+    args = matrix_mod.parse_args(
+        ["--scenarios", "account_anomaly_fp", "--profile-by-scenario"]
+    )
+    assert args.profile_by_scenario is True
 
 
 def test_matrix_main_stops_after_first_scenario_failure(matrix_mod) -> None:
@@ -147,6 +155,22 @@ def test_scenario_project_name_unique_for_all_gold_scenarios(matrix_mod) -> None
         for scenario in matrix_mod.GOLD_SCENARIOS
     ]
     assert len(names) == len(set(names))
+    for name in names:
+        assert name == name.lower()
+        assert "T" not in name and "Z" not in name
+
+
+def test_compose_up_places_profile_before_subcommand(matrix_mod) -> None:
+    cmd = matrix_mod._compose_cmd(
+        "shadowtrace-eval-fp-run",
+        [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+        "--profile",
+        "worker",
+        "up",
+        "-d",
+    )
+    assert cmd.index("--profile") < cmd.index("up")
+    assert cmd[cmd.index("--profile") + 1] == "worker"
 
 
 def test_parse_scenarios_rejects_duplicates(matrix_mod) -> None:
@@ -212,6 +236,7 @@ def test_run_scenario_finally_compose_down_with_volumes(matrix_mod, tmp_path: Pa
             seed=42,
             mock_xdr_url="http://mock-xdr:8100",
             require_closed=False,
+            profile_by_scenario=False,
             fresh_volumes=True,
             stack_timeout_s=10.0,
             max_wait_s=10.0,
@@ -251,6 +276,7 @@ def test_run_scenario_cleanup_failure_after_pass_raises(matrix_mod, tmp_path: Pa
                 seed=42,
                 mock_xdr_url="http://mock-xdr:8100",
                 require_closed=False,
+                profile_by_scenario=False,
                 fresh_volumes=True,
                 stack_timeout_s=10.0,
                 max_wait_s=10.0,
@@ -263,6 +289,45 @@ def test_run_scenario_cleanup_failure_after_pass_raises(matrix_mod, tmp_path: Pa
     )
     assert manifest["status"] == "passed_with_cleanup_error"
     assert "cleanup_error" in manifest
+
+
+def test_matrix_main_rejects_require_closed_with_profile_by_scenario(matrix_mod) -> None:
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        matrix_mod.main(
+            [
+                "--scenarios",
+                "account_anomaly_fp",
+                "--require-closed",
+                "--profile-by-scenario",
+            ]
+        )
+
+
+def test_run_full_loop_via_exec_passes_analysis_only_flags(matrix_mod) -> None:
+    captured: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs):
+        captured.append(cmd)
+        return type("Proc", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
+
+    with patch.object(matrix_mod, "_run", side_effect=_fake_run):
+        matrix_mod._run_full_loop_via_exec(
+            "proj",
+            [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+            event_ids=["evt-a"],
+            scenario="account_anomaly_fp",
+            token="bootstrap-token",
+            require_closed=False,
+            analysis_only=True,
+            semantic_profile="analysis_only_fp",
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+        )
+    cmd = captured[0]
+    assert "--analysis-only" in cmd
+    assert "--semantic-profile" in cmd
+    assert "analysis_only_fp" in cmd
+    assert "--require-closed" not in cmd
 
 
 def test_run_full_loop_via_exec_passes_explicit_event_ids(matrix_mod) -> None:
@@ -445,6 +510,7 @@ def test_run_scenario_records_cleanup_error_on_failure_path(
                 seed=42,
                 mock_xdr_url="http://mock-xdr:8100",
                 require_closed=False,
+                profile_by_scenario=False,
                 fresh_volumes=True,
                 stack_timeout_s=10.0,
                 max_wait_s=10.0,
@@ -457,3 +523,292 @@ def test_run_scenario_records_cleanup_error_on_failure_path(
     )
     assert manifest["status"] == "failed"
     assert manifest["cleanup_error"]["message"]
+
+
+
+def test_run_scenario_profile_by_scenario_reseeds_distinct_pressure_event(
+    matrix_mod, tmp_path: Path
+) -> None:
+    seed_calls: list[int] = []
+    gate_calls: list[tuple[str, list[str]]] = []
+
+    def _fake_seed(*_args, instance: int = 0, **_kwargs):
+        seed_calls.append(instance)
+        if instance == 0:
+            return {"accepted": 1, "event_ids": ["evt-semantic"]}
+        return {"accepted": 1, "event_ids": ["evt-pressure"]}
+
+    def _fake_gate(*_args, event_ids: list[str], gate: str, **_kwargs):
+        gate_calls.append((gate, list(event_ids)))
+        if gate == "pressure":
+            raise matrix_mod.MatrixError("pressure boom")
+        return {"final_statuses": {event_ids[0]: "closed"}}
+
+    with (
+        patch.object(matrix_mod, "_compose_down"),
+        patch.object(matrix_mod, "_wait_stack_healthy"),
+        patch.object(matrix_mod, "_seed_scenario", side_effect=_fake_seed),
+        patch.object(matrix_mod, "_run_scenario_gate", side_effect=_fake_gate),
+        patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
+    ):
+        manifest = matrix_mod.run_scenario(
+            scenario="account_anomaly_fp",
+            run_id="run-fp",
+            artifact_root=tmp_path,
+            token="bootstrap-token",
+            seed=42,
+            mock_xdr_url="http://mock-xdr:8100",
+            require_closed=False,
+            profile_by_scenario=True,
+            fresh_volumes=True,
+            stack_timeout_s=10.0,
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+            max_events=1,
+            build=False,
+        )
+
+    assert seed_calls == [0, 1]
+    assert gate_calls[0] == ("semantic", ["evt-semantic"])
+    assert gate_calls[1] == ("pressure", ["evt-pressure"])
+    assert manifest["status"] == "passed_with_pressure_error"
+    assert manifest["pressure_error"]["type"] == "MatrixError"
+    assert "[pressure gate]" in manifest["pressure_error"]["message"]
+    assert manifest["semantic_event_ids"] == ["evt-semantic"]
+    assert manifest["pressure_event_ids"] == ["evt-pressure"]
+
+
+def test_run_scenario_profile_by_scenario_domain_pressure_failure_blocks(
+    matrix_mod, tmp_path: Path
+) -> None:
+    def _fake_seed(*_args, instance: int = 0, **_kwargs):
+        if instance == 0:
+            return {"accepted": 1, "event_ids": ["evt-semantic"]}
+        return {"accepted": 1, "event_ids": ["evt-pressure"]}
+
+    def _fake_gate(*_args, event_ids: list[str], gate: str, **_kwargs):
+        if gate == "pressure":
+            raise matrix_mod.MatrixError("pressure boom")
+        return {"final_statuses": {event_ids[0]: "closed"}}
+
+    with (
+        patch.object(matrix_mod, "_compose_down"),
+        patch.object(matrix_mod, "_wait_stack_healthy"),
+        patch.object(matrix_mod, "_seed_scenario", side_effect=_fake_seed),
+        patch.object(matrix_mod, "_run_scenario_gate", side_effect=_fake_gate),
+        patch.object(matrix_mod, "_run", return_value=_mock_subprocess_result()),
+    ):
+        with pytest.raises(matrix_mod.MatrixError, match="pressure boom"):
+            matrix_mod.run_scenario(
+                scenario="suspicious_domain_access",
+                run_id="run-domain",
+                artifact_root=tmp_path,
+                token="bootstrap-token",
+                seed=42,
+                mock_xdr_url="http://mock-xdr:8100",
+                require_closed=False,
+                profile_by_scenario=True,
+                fresh_volumes=True,
+                stack_timeout_s=10.0,
+                max_wait_s=10.0,
+                poll_interval_s=1.0,
+                max_events=1,
+                build=False,
+            )
+
+    manifest = json.loads(
+        (tmp_path / "suspicious_domain_access" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "failed"
+    assert manifest["pressure_error"]["message"]
+
+
+
+def test_matrix_main_summary_status_reflects_non_blocking_pressure_error(
+    matrix_mod, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+
+    def _fake_run_scenario(*, scenario: str, **kwargs):
+        return {
+            "status": "passed_with_pressure_error",
+            "event_ids": ["evt-s", "evt-p"],
+            "compose_project_name": "proj-fp",
+            "result": {"final_statuses": {"evt-s": "closed"}},
+            "pressure_error": {"type": "MatrixError", "message": "[pressure gate] boom"},
+            "profile": "analysis_only_fp",
+        }
+
+    with patch.object(matrix_mod, "run_scenario", side_effect=_fake_run_scenario):
+        rc = matrix_mod.main(
+            [
+                "--scenarios",
+                "account_anomaly_fp",
+                "--artifact-dir",
+                str(artifact_root),
+                "--profile-by-scenario",
+                "--no-build",
+            ]
+        )
+    assert rc == 0
+    summary = json.loads((artifact_root / "summary.json").read_text(encoding="utf-8"))
+    assert summary["status"] == "passed_with_pressure_error"
+    assert summary["results"]["account_anomaly_fp"]["pressure_error"]["message"]
+
+
+def test_matrix_failure_summary_copies_pressure_error_from_manifest(
+    matrix_mod, tmp_path: Path
+) -> None:
+    artifact_root = tmp_path / "artifacts"
+    scenario = "suspicious_domain_access"
+    manifest_path = artifact_root / scenario / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "compose_project_name": "shadowtrace-eval-domain-run",
+                "event_ids": ["evt-s", "evt-p"],
+                "semantic_event_ids": ["evt-s"],
+                "pressure_event_ids": ["evt-p"],
+                "status": "failed",
+                "pressure_error": {
+                    "type": "MatrixError",
+                    "message": "[pressure gate] boom",
+                },
+                "semantic_result": {"final_statuses": {"evt-s": "closed"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_run_scenario(*, scenario: str, **kwargs):
+        raise matrix_mod.MatrixError("[pressure gate] boom")
+
+    with patch.object(matrix_mod, "run_scenario", side_effect=_fake_run_scenario):
+        rc = matrix_mod.main(
+            [
+                "--scenarios",
+                scenario,
+                "--artifact-dir",
+                str(artifact_root),
+                "--profile-by-scenario",
+                "--no-build",
+            ]
+        )
+    assert rc == 1
+    summary = json.loads((artifact_root / "summary.json").read_text(encoding="utf-8"))
+    row = summary["results"][scenario]
+    assert row["pressure_error"]["message"] == "[pressure gate] boom"
+    assert row["pressure_event_ids"] == ["evt-p"]
+    assert row["semantic_event_ids"] == ["evt-s"]
+
+
+def test_run_analysis_only_loop_keeps_polling_on_reporting_until_closed(
+    full_loop_mod,
+) -> None:
+    statuses = ["triaging", "reporting", "closed"]
+    from dynamic_eval_approve import ApiResponse
+
+    class _Client:
+        def __init__(self) -> None:
+            self._idx = 0
+
+        def get_json(self, path: str):
+            if path.endswith("/audit-logs?page=1&page_size=5"):
+                return {"items": []}
+            if path.endswith("/decision-trace"):
+                return {}
+            if self._idx < len(statuses):
+                status = statuses[self._idx]
+                self._idx += 1
+            else:
+                status = "closed"
+            return {
+                "event": {
+                    "event_id": "evt-ao",
+                    "status": status,
+                    "final_verdict": "false_positive",
+                    "disposition_policy": "not_required",
+                    "event_context_snapshot": {"collection_status": "completed"},
+                }
+            }
+
+        def post_json(self, path: str, body: dict):
+            return ApiResponse(
+                status=202,
+                data={
+                    "event_id": "evt-ao",
+                    "task_id": "t1",
+                    "intent_id": "iin-1",
+                    "status": "new",
+                    "include_response_execution": False,
+                    "generate_report": True,
+                    "full_loop_available": True,
+                },
+            )
+
+    with patch.object(full_loop_mod.time, "sleep", return_value=None):
+        result = full_loop_mod.run_analysis_only_loop(
+            _Client(),  # type: ignore[arg-type]
+            event_ids=["evt-ao"],
+            generate_report=True,
+            poll_interval_s=0.01,
+            max_wait_s=5.0,
+            semantic_profile="analysis_only_fp",
+        )
+    assert result["final_statuses"]["evt-ao"] == "closed"
+    assert "reporting" in result["status_trace"]["evt-ao"]
+    assert result["semantic_assertions"]["evt-ao"]["final_verdict"] == "false_positive"
+
+
+def test_main_rejects_analysis_only_without_generate_report(full_loop_mod) -> None:
+    with pytest.raises(SystemExit, match="analysis-only requires report generation"):
+        full_loop_mod.main(
+            [
+                "--analysis-only",
+                "--semantic-profile",
+                "analysis_only_fp",
+                "--event-id",
+                "evt-x",
+                "--no-generate-report",
+                "--skip-baseline-preflight",
+            ]
+        )
+
+
+def test_assert_fp_semantic_gate_raises_with_diagnostics(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            if path.endswith("/audit-logs?page=1&page_size=5"):
+                return {"items": []}
+            return {
+                "event": {
+                    "event_id": "evt-fp",
+                    "status": "closed",
+                    "final_verdict": "none",
+                    "disposition_policy": "not_required",
+                    "degraded_flags": ["demo_flag"],
+                }
+            }
+
+    with pytest.raises(full_loop_mod.EvalFailure) as exc:
+        full_loop_mod.assert_fp_semantic_gate(_Client(), "evt-fp")
+    assert "false_positive" in str(exc.value)
+    assert "demo_flag" in str(exc.value) or "status_trace" in str(exc.value)
+    assert exc.value.diagnostics.get("final_verdict") == "none"
+
+
+def test_assert_domain_semantic_gate_passes_on_closed(full_loop_mod) -> None:
+    class _Client:
+        def get_json(self, path: str):
+            return {
+                "event": {
+                    "event_id": "evt-domain",
+                    "status": "closed",
+                    "final_verdict": "none",
+                    "disposition_policy": "not_required",
+                }
+            }
+
+    result = full_loop_mod.assert_domain_semantic_gate(_Client(), "evt-domain")
+    assert result["status"] == "closed"

@@ -145,6 +145,8 @@ eval-full-loop:
 EVAL_MATRIX_SCENARIOS ?= insider_data_exfiltration,account_anomaly_fp,suspicious_domain_access
 EVAL_MATRIX_ARTIFACT_DIR ?=
 EVAL_MATRIX_REQUIRE_CLOSED ?=
+# ISSUE-313: default on so matrix uses semantic/pressure gates (set 0 to disable).
+EVAL_MATRIX_PROFILE_BY_SCENARIO ?= 1
 EVAL_MATRIX_FRESH_VOLUMES ?= 1
 # ISSUE-304 smoke terminal profiles (see scripts/smoke_event_terminal.py)
 SMOKE_TERMINAL_MODE ?=
@@ -154,11 +156,14 @@ SMOKE_TERMINAL_POLL_S ?= 5
 eval-full-loop-matrix:
 	@echo "[eval-full-loop-matrix] scenarios=$(EVAL_MATRIX_SCENARIOS)"
 	@echo "[eval-full-loop-matrix] fresh project/volumes per scenario; in-network exec (no host ports)"
+	@# --require-closed and --profile-by-scenario are mutually exclusive; strict
+	@# CLOSED opts out of per-scenario semantic/pressure profiles automatically.
 	python3 "$(CURDIR)/scripts/dynamic_eval_matrix.py" \
 		--scenarios "$(EVAL_MATRIX_SCENARIOS)" \
 		$(if $(filter 0,$(EVAL_MATRIX_FRESH_VOLUMES)),--no-fresh-volumes,--fresh-volumes) \
 		$(if $(EVAL_MATRIX_ARTIFACT_DIR),--artifact-dir "$(EVAL_MATRIX_ARTIFACT_DIR)",) \
-		$(if $(EVAL_MATRIX_REQUIRE_CLOSED),--require-closed,)
+		$(if $(EVAL_MATRIX_REQUIRE_CLOSED),--require-closed,) \
+		$(if $(EVAL_MATRIX_REQUIRE_CLOSED),,$(if $(filter 0,$(EVAL_MATRIX_PROFILE_BY_SCENARIO)),,--profile-by-scenario))
 
 # ---------------------------------------------------------------------------
 # Mock demo full stack (ISSUE-141 / #647): core + worker + scheduler + OTEL
