@@ -42,8 +42,8 @@ from app.models.enums import (
     ActionLevel,
     ActionStatus,
     ConfirmationEvidence,
-    DispositionPolicy,
     DispositionIntentKind,
+    DispositionPolicy,
     EventStatus,
     EventType,
     ExecutionJobStatus,
@@ -3797,9 +3797,13 @@ async def test_deliver_compensation_record_rejected_after_supersede(
     enqueue must not be delivered; delivery-time approval re-check fails closed."""
     from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
-    sync, _event_id, _source_record_id, outbox_row, rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     async with session_factory() as session:
         async with session.begin():
@@ -3851,9 +3855,13 @@ async def test_deliver_compensation_record_rejected_after_approval_revoked(
     """ISSUE-307: COMPENSATION_RECORD must fail-closed after rollback action revoke."""
     from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
-    sync, _event_id, _source_record_id, outbox_row, rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     async with session_factory() as session:
         async with session.begin():
@@ -3905,9 +3913,13 @@ async def test_worker_deliver_compensation_record_rejected_after_supersede(
     """ISSUE-307: worker lease path must fail-closed for superseded compensation."""
     from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
-    sync, _event_id, _source_record_id, outbox_row, rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     async with session_factory() as session:
         async with session.begin():
@@ -3960,9 +3972,13 @@ async def test_worker_deliver_compensation_record_rejected_after_approval_revoke
     """ISSUE-307: worker lease path must fail-closed for revoked compensation."""
     from app.services.writeback_side_effect_fence import WRITEBACK_FENCE_BLOCKED_ERROR_CODE
 
-    sync, _event_id, _source_record_id, outbox_row, rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     async with session_factory() as session:
         async with session.begin():
@@ -4002,9 +4018,13 @@ async def test_deliver_compensation_record_succeeds_when_rollback_still_approved
     cleanup: None,
 ) -> None:
     """ISSUE-307 regression: valid compensation still delivers when rollback action is approved."""
-    sync, _event_id, _source_record_id, outbox_row, _rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        _rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     await sync.deliver_outbox(outbox_row.outbox_id)
 
@@ -4034,9 +4054,13 @@ async def test_worker_deliver_compensation_record_succeeds_when_rollback_still_a
     cleanup: None,
 ) -> None:
     """ISSUE-307 regression: worker lease path still delivers valid compensation."""
-    sync, _event_id, _source_record_id, outbox_row, _rollback_action_id = (
-        await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
-    )
+    (
+        sync,
+        _event_id,
+        _source_record_id,
+        outbox_row,
+        _rollback_action_id,
+    ) = await _enqueue_compensation_record(session_factory, store, mock_xdr_client)
 
     worker = OutboxWorker(sync)
     assert await worker.run_once(limit=1) == 1
@@ -4787,3 +4811,22 @@ async def test_entity_effect_completion_writes_scoped_observation_and_job_succes
         assert observation.value.get("writeback_id") == record.writeback_id
         assert observation.value.get("provider_record_id")
 
+        from app.models.tool_meta import ToolResult
+        from app.tools.verify._common import MockVerificationRuntime
+
+        verification = ToolResult.model_validate(
+            await MockVerificationRuntime(
+                observation_state,
+                wait_timeout_ms=100,
+                poll_interval_ms=1,
+            ).execute(
+                "check_ip_block_status",
+                {
+                    "target_type": "ip",
+                    "target": "203.0.113.88",
+                    "parameters": {"job_id": job_id},
+                },
+            )
+        )
+        assert verification.data["is_verified"] is True
+        assert verification.data["detail"] == "observed_status:blocked"

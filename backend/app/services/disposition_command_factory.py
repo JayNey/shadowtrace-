@@ -44,7 +44,11 @@ class DispositionCommandFactory:
         closure_cycle: int,
         entity_action_code: str,
     ) -> DispositionCommand:
-        canonical_target = action.target or ""
+        canonical_target = (
+            f"{action.target_type}:{action.target}"
+            if action.target_type and action.target
+            else (action.target or "")
+        )
         return DispositionCommand(
             disposition_id=disposition_id,
             action_id=action.action_id,

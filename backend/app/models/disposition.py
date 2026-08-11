@@ -242,6 +242,18 @@ class EntityEffectCompletion(BaseModel):
     provider_code: str | None = None
     provider_message: str | None = None
 
+    @model_validator(mode="after")
+    def _verified_requires_provider_evidence(self) -> EntityEffectCompletion:
+        if self.verified and (
+            not self.provider_record_id
+            or self.observed_version <= 0
+            or not self.action_id
+            or not self.writeback_id
+            or not self.canonical_target
+        ):
+            raise ValueError("verified entity effect requires complete provider evidence")
+        return self
+
 
 class DispositionOutboxRecord(BaseModel):
     """PostgreSQL outbox record: the source of truth for writeback delivery.

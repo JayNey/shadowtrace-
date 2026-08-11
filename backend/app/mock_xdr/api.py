@@ -296,19 +296,23 @@ def create_app(*, state: MockXDRState | None = None) -> FastAPI:
         st: MockXDRState = Depends(_state),
     ) -> dict[str, Any]:
         writeback_id = str(payload.get("writeback_id") or "")
+        provider_writeback_id = str(payload.get("provider_writeback_id") or "")
         action_id = str(payload.get("action_id") or "")
-        if not writeback_id or not action_id:
+        if not writeback_id or not provider_writeback_id or not action_id:
             raise HTTPException(
                 status_code=422,
                 detail={
                     "error_code": "validation_error",
-                    "error_message": "writeback_id and action_id are required",
+                    "error_message": (
+                        "writeback_id, provider_writeback_id, and action_id are required"
+                    ),
                     "details": {},
                 },
             )
         return st.complete_entity_effect(
             disposition_id,
             writeback_id=writeback_id,
+            provider_writeback_id=provider_writeback_id,
             action_id=action_id,
         )
 

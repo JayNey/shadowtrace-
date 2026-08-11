@@ -6,15 +6,16 @@ import pytest
 
 from app.mock_xdr.state import MockValidationError, MockXDRState
 from app.models.disposition import DispositionCommand
-from app.models.enums import DispositionIntentKind, WritebackStatus
-from app.providers.tools.mock_provider import (
-    MockToolProvider,
-    write_xdr_entity_effect_observation,
-)
+from app.models.enums import DispositionIntentKind, ExecutionJobStatus, WritebackStatus
+from app.providers.tools.mock_provider import write_xdr_entity_effect_observation
 from app.tools.mock_state import MockEnvironmentState
 
 
-def _entity_command(*, disposition_id: str = "disp-entity-1") -> DispositionCommand:
+def _entity_command(
+    *,
+    disposition_id: str = "disp-entity-1",
+    canonical_target: str = "ip:203.0.113.50",
+) -> DispositionCommand:
     return DispositionCommand.model_validate(
         {
             "disposition_id": disposition_id,
@@ -32,11 +33,11 @@ def _entity_command(*, disposition_id: str = "disp-entity-1") -> DispositionComm
             "operation_params": {
                 "operation_code": "submit_entity_action",
                 "entity_action_code": "block_ip",
-                "canonical_target": "203.0.113.50",
+                "canonical_target": canonical_target,
             },
             "target_results": [
                 {
-                    "canonical_target": "203.0.113.50",
+                    "canonical_target": canonical_target,
                     "status": "unknown",
                 }
             ],
@@ -70,6 +71,7 @@ def test_complete_entity_effect_applies_provider_state_and_readback() -> None:
     payload = state.complete_entity_effect(
         command.disposition_id,
         writeback_id=receipt.writeback_id,
+        provider_writeback_id=receipt.writeback_id,
         action_id=command.action_id,
     )
     assert payload["verified"] is True
@@ -81,6 +83,7 @@ def test_complete_entity_effect_applies_provider_state_and_readback() -> None:
     again = state.complete_entity_effect(
         command.disposition_id,
         writeback_id=receipt.writeback_id,
+        provider_writeback_id=receipt.writeback_id,
         action_id=command.action_id,
     )
     assert again["verified"] is True
@@ -103,8 +106,86 @@ def test_complete_entity_effect_rejects_non_accepted_receipt() -> None:
         state.complete_entity_effect(
             command.disposition_id,
             writeback_id=receipt.writeback_id,
+            provider_writeback_id=receipt.writeback_id,
             action_id=command.action_id,
         )
+
+
+def test_complete_entity_effect_rejects_mismatched_correlation() -> None:
+    state = MockXDRState()
+    state.upsert_object(
+        "incident",
+        "inc-1",
+        {"reference": {"source_object_id": "inc-1", "source_disposition": "processing"}},
+    )
+    command = _entity_command(disposition_id="disp-correlation")
+    receipt = state.submit_disposition(command)
+
+    with pytest.raises(MockValidationError, match="action correlation"):
+        state.complete_entity_effect(
+            command.disposition_id,
+            writeback_id="wbk-local",
+            provider_writeback_id=receipt.writeback_id,
+            action_id="act-forged",
+        )
+    with pytest.raises(MockValidationError, match="provider writeback correlation"):
+        state.complete_entity_effect(
+            command.disposition_id,
+            writeback_id="wbk-local",
+            provider_writeback_id="wbk-forged",
+            action_id=command.action_id,
+        )
+
+
+def test_complete_entity_effect_preserves_ipv6_target() -> None:
+    state = MockXDRState()
+    state.upsert_object(
+        "incident",
+        "inc-1",
+        {"reference": {"source_object_id": "inc-1", "source_disposition": "processing"}},
+    )
+    command = _entity_command(
+        disposition_id="disp-ipv6",
+        canonical_target="ip:2001:db8::1",
+    )
+    receipt = state.submit_disposition(command)
+
+    payload = state.complete_entity_effect(
+        command.disposition_id,
+        writeback_id="wbk-local-ipv6",
+        provider_writeback_id=receipt.writeback_id,
+        action_id=command.action_id,
+    )
+
+    assert payload["target_type"] == "ip"
+    assert payload["target"] == "2001:db8::1"
+
+
+def test_async_entity_job_completion_keeps_receipt_accepted_and_applies_effect() -> None:
+    from app.mock_xdr.models import MockFailureProfile
+
+    state = MockXDRState(failure_profile=MockFailureProfile(async_disposition=True))
+    state.upsert_object(
+        "incident",
+        "inc-1",
+        {"reference": {"source_object_id": "inc-1", "source_disposition": "processing"}},
+    )
+    command = _entity_command(disposition_id="disp-async")
+    receipt = state.submit_disposition(command)
+    assert receipt.provider_job_id is not None
+
+    payload = state.complete_entity_effect(
+        command.disposition_id,
+        writeback_id="wbk-local-async",
+        provider_writeback_id=receipt.writeback_id,
+        action_id=command.action_id,
+    )
+
+    assert payload["verified"] is True
+    assert state.get_job(receipt.provider_job_id).status is ExecutionJobStatus.SUCCESS
+    assert state.disposition_by_id[command.disposition_id].receipts[-1].status is (
+        WritebackStatus.ACCEPTED
+    )
 
 
 @pytest.mark.asyncio

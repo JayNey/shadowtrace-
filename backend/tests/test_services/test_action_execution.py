@@ -478,8 +478,9 @@ async def test_xdr_managed_execute_plan_submits_outbox(
         assert len(outboxes) == 1
         assert outboxes[0].intent_kind == "entity_action_submit"
     assert len(summary.jobs) == 1
-    assert summary.jobs[0].status is ExecutionJobStatus.RUNNING
+    assert summary.jobs[0].status is ExecutionJobStatus.SUCCESS
     assert summary.jobs[0].provider_name == "mock_xdr"
+    assert summary.jobs[0].target_results[0].canonical_target == "ip:203.0.113.88"
 
 
 @pytest.mark.asyncio

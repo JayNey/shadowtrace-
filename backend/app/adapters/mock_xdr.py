@@ -43,7 +43,12 @@ from app.core.errors import (
     ValidationError as ShadowTraceValidationError,
 )
 from app.mock_xdr.state import find_forbidden_analysis_keys, idempotency_key_hash
-from app.models.disposition import DispositionCommand, DispositionReceipt, EntityEffectCompletion, SourceObjectLocator
+from app.models.disposition import (
+    DispositionCommand,
+    DispositionReceipt,
+    EntityEffectCompletion,
+    SourceObjectLocator,
+)
 from app.models.enums import (
     CapabilityState,
     ConnectorCapability,
@@ -601,8 +606,9 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
             return None
         if receipt.status is not WritebackStatus.ACCEPTED:
             return None
-        if receipt.provider_job_id is not None:
-            return None
+        provider_writeback_id = receipt.raw_result.get("provider_writeback_id")
+        if not isinstance(provider_writeback_id, str) or not provider_writeback_id:
+            provider_writeback_id = receipt.writeback_id
         client = await self._http()
         try:
             resp = await client.post(
@@ -610,6 +616,7 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
                 headers=self._auth_headers(),
                 json={
                     "writeback_id": receipt.writeback_id,
+                    "provider_writeback_id": provider_writeback_id,
                     "action_id": command.action_id,
                 },
             )
@@ -619,33 +626,29 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
                 command.disposition_id,
                 type(exc).__name__,
             )
-            return EntityEffectCompletion(
-                verified=False,
-                disposition_id=command.disposition_id,
-                writeback_id=receipt.writeback_id,
-                action_id=command.action_id,
-                entity_action_code=getattr(
-                    command.operation_params, "entity_action_code", ""
-                ),
-                canonical_target=getattr(command.operation_params, "canonical_target", ""),
-                target_type="",
-                target="",
-                applied_status="",
-                provider_record_id="",
-                observed_version=0,
-                provider_code="transport_error",
-                provider_message=f"{type(exc).__name__}: {exc}",
-            )
+            raise DependencyUnavailableError(
+                "entity effect completion transport failed",
+                details={
+                    "disposition_id": command.disposition_id,
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
         if resp.status_code >= 400:
             body = resp.json() if resp.content else {}
+            if resp.status_code >= 500:
+                raise DependencyUnavailableError(
+                    body.get("error_message", "entity effect completion unavailable"),
+                    details={
+                        "disposition_id": command.disposition_id,
+                        "status_code": resp.status_code,
+                    },
+                )
             return EntityEffectCompletion(
                 verified=False,
                 disposition_id=command.disposition_id,
                 writeback_id=receipt.writeback_id,
                 action_id=command.action_id,
-                entity_action_code=getattr(
-                    command.operation_params, "entity_action_code", ""
-                ),
+                entity_action_code=getattr(command.operation_params, "entity_action_code", ""),
                 canonical_target=getattr(command.operation_params, "canonical_target", ""),
                 target_type="",
                 target="",

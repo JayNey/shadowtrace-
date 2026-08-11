@@ -1295,7 +1295,8 @@ class DispositionSyncService:
                     writeback_id=outbox.writeback_id,
                 ):
                     receipt = await adapter.submit(command)
-                await self._append_receipt(session, outbox, receipt=receipt)
+                parsed_receipt = await self._append_receipt(session, outbox, receipt=receipt)
+                receipt = parsed_receipt
 
                 # B1 fix (ISSUE-064): For EVENT_STATUS_UPDATE intents,
                 # perform readback confirmation to produce the P0
@@ -1317,8 +1318,11 @@ class DispositionSyncService:
                         ):
                             confirmed = await adapter.confirm_readback(command)
                         if confirmed is not None:
-                            await self._append_receipt(session, outbox, receipt=confirmed)
-                            receipt = confirmed
+                            receipt = await self._append_receipt(
+                                session,
+                                outbox,
+                                receipt=confirmed,
+                            )
                     except Exception as exc:
                         logger.warning(
                             "readback confirmation failed for %s; receipt stays at %s",
@@ -1404,6 +1408,7 @@ class DispositionSyncService:
         )
         sequence = int(seq_row or 0) + 1
         if receipt is not None:
+            provider_writeback_id = receipt.writeback_id
             parsed = receipt.model_copy(
                 update={
                     "sequence": sequence,
@@ -1411,6 +1416,10 @@ class DispositionSyncService:
                     "disposition_id": outbox.disposition_id,
                     "action_id": outbox.action_id,
                     "source_record_id": outbox.source_record_id,
+                    "raw_result": {
+                        **dict(receipt.raw_result or {}),
+                        "provider_writeback_id": provider_writeback_id,
+                    },
                 }
             )
         else:
@@ -1537,7 +1546,10 @@ class DispositionSyncService:
         command: DispositionCommand,
         outbox: orm.DispositionOutbox,
     ) -> ActionExecutionJob | None:
-        if ExecutionOwner(action.execution_owner) is not ExecutionOwner.XDR_MANAGED:
+        if (
+            action.execution_owner is None
+            or ExecutionOwner(action.execution_owner) is not ExecutionOwner.XDR_MANAGED
+        ):
             return None
         job_id = action.execution_job_id
         if not job_id:
@@ -1564,6 +1576,12 @@ class DispositionSyncService:
                 "provider_name": row.provider_name,
             }
         )
+        if (
+            current is ExecutionJobStatus.RUNNING
+            and receipt.status is WritebackStatus.ACCEPTED
+            and mapped.status is ExecutionJobStatus.QUEUED
+        ):
+            mapped = mapped.model_copy(update={"status": ExecutionJobStatus.RUNNING})
         if mapped.status is not current:
             validate_job_status_transition(
                 current,
@@ -1585,6 +1603,19 @@ class DispositionSyncService:
                     receipt.writeback_id,
                 )
         _apply_job_row(row, mapped)
+        settings = get_settings()
+        if (
+            receipt.simulated
+            and settings.simulation_enabled
+            and settings.disposition_mode.strip().lower() == "mock_xdr"
+            and row.provider_name == "mock_xdr"
+        ):
+            from app.providers.tools.mock_provider import get_mock_tool_provider
+
+            await get_mock_tool_provider().state.set_job(
+                job_id,
+                mapped.model_dump(mode="json"),
+            )
         _ = command  # correlation for future live adapters
         return mapped
 
@@ -1594,7 +1625,11 @@ class DispositionSyncService:
         receipt: DispositionReceipt,
     ) -> bool:
         settings = get_settings()
-        if "mock" not in settings.disposition_mode.strip().lower():
+        if settings.disposition_mode.strip().lower() != "mock_xdr":
+            return False
+        if not settings.simulation_enabled:
+            return False
+        if adapter.name != "mock_xdr":
             return False
         if not receipt.simulated:
             return False
@@ -1618,7 +1653,35 @@ class DispositionSyncService:
             return None
         completion = await adapter.complete_entity_effect_readback(command, receipt)
         if completion is None or not completion.verified:
+            await self._mark_entity_effect_unverified(
+                session,
+                action,
+                outbox,
+                receipt,
+                completion,
+            )
             return completion
+        if not self._entity_effect_completion_matches(
+            action,
+            command,
+            receipt,
+            completion,
+        ):
+            rejected = completion.model_copy(
+                update={
+                    "verified": False,
+                    "provider_code": "effect_correlation_mismatch",
+                    "provider_message": "entity effect completion correlation mismatch",
+                }
+            )
+            await self._mark_entity_effect_unverified(
+                session,
+                action,
+                outbox,
+                receipt,
+                rejected,
+            )
+            return rejected
         await self._finalize_entity_effect_completion(
             session,
             action,
@@ -1627,6 +1690,117 @@ class DispositionSyncService:
             completion,
         )
         return completion
+
+    @staticmethod
+    def _entity_effect_completion_matches(
+        action: orm.Action,
+        command: DispositionCommand,
+        receipt: DispositionReceipt,
+        completion: EntityEffectCompletion,
+    ) -> bool:
+        params = command.operation_params
+        return (
+            completion.disposition_id == command.disposition_id
+            and completion.action_id == action.action_id == command.action_id
+            and completion.writeback_id == receipt.writeback_id
+            and completion.entity_action_code == getattr(params, "entity_action_code", None)
+            and completion.canonical_target == getattr(params, "canonical_target", None)
+            and bool(completion.provider_record_id)
+            and completion.observed_version > 0
+        )
+
+    async def _mark_entity_effect_unverified(
+        self,
+        session: AsyncSession,
+        action: orm.Action,
+        outbox: orm.DispositionOutbox,
+        receipt: DispositionReceipt,
+        completion: EntityEffectCompletion | None,
+    ) -> None:
+        job_id = action.execution_job_id
+        if not job_id:
+            return
+        row = await session.get(orm.ActionExecutionJob, job_id, with_for_update=True)
+        if row is None:
+            return
+        current = ExecutionJobStatus(row.status)
+        if current in _TERMINAL_JOB_STATUSES or current is ExecutionJobStatus.UNKNOWN:
+            return
+        validate_job_status_transition(
+            current,
+            ExecutionJobStatus.UNKNOWN,
+            provider_confirmed_terminal=False,
+        )
+        now = datetime.now(UTC)
+        canonical_target = (
+            completion.canonical_target
+            if completion is not None and completion.canonical_target
+            else (
+                f"{action.target_type}:{action.target}"
+                if action.target_type and action.target
+                else (action.target or "")
+            )
+        )
+        target_result = TargetExecutionResult(
+            canonical_target=canonical_target,
+            status=TargetExecutionStatus.UNKNOWN,
+            code=(
+                completion.provider_code
+                if completion is not None and completion.provider_code
+                else "effect_readback_unavailable"
+            ),
+            message=completion.provider_message if completion is not None else None,
+            raw_result={"writeback_id": receipt.writeback_id},
+        )
+        await sync_target_results_in_tx(
+            session,
+            job_id=job_id,
+            attempt=row.attempt,
+            targets=[target_result],
+        )
+        row.status = ExecutionJobStatus.UNKNOWN.value
+        row.claimed_by = None
+        row.lease_expires_at = None
+        row.updated_at = now
+        row.provider_code = target_result.code
+        row.provider_message = target_result.message
+        row.raw_result = sanitize_raw_result(
+            {
+                **dict(row.raw_result or {}),
+                "effect_completion": (
+                    completion.model_dump(mode="json") if completion is not None else None
+                ),
+                "writeback_id": receipt.writeback_id,
+                "simulated": receipt.simulated,
+            }
+        )
+        from app.providers.tools.mock_provider import get_mock_tool_provider
+
+        job_projection = ActionExecutionJob(
+            job_id=job_id,
+            event_id=outbox.event_id,
+            action_id=action.action_id,
+            provider_name=row.provider_name,
+            idempotency_key=row.idempotency_key,
+            provider_job_id=row.provider_job_id,
+            status=ExecutionJobStatus.UNKNOWN,
+            claimed_by=None,
+            lease_expires_at=None,
+            created_at=row.created_at,
+            updated_at=now,
+            started_at=row.started_at,
+            finished_at=None,
+            poll_after_ms=row.poll_after_ms,
+            attempt=row.attempt,
+            target_results=[target_result],
+            provider_code=row.provider_code,
+            provider_message=row.provider_message,
+            raw_result=dict(row.raw_result or {}),
+        )
+        await get_mock_tool_provider().state.set_job(
+            job_id,
+            job_projection.model_dump(mode="json"),
+        )
 
     async def _finalize_entity_effect_completion(
         self,
@@ -1645,6 +1819,9 @@ class DispositionSyncService:
         current = ExecutionJobStatus(row.status)
         if current in _TERMINAL_JOB_STATUSES:
             return
+        from app.providers.tools.mock_provider import get_mock_tool_provider
+
+        provider_state = get_mock_tool_provider().state
         now = datetime.now(UTC)
         target_result = TargetExecutionResult(
             canonical_target=completion.canonical_target,
@@ -1679,6 +1856,8 @@ class DispositionSyncService:
             )
             return
         row.status = ExecutionJobStatus.SUCCESS.value
+        row.claimed_by = None
+        row.lease_expires_at = None
         row.finished_at = now
         row.updated_at = now
         row.provider_code = completion.provider_code
@@ -1691,13 +1870,32 @@ class DispositionSyncService:
                 "simulated": receipt.simulated,
             }
         )
-        from app.providers.tools.mock_provider import (
-            get_mock_tool_provider,
-            write_xdr_entity_effect_observation,
+        job_projection = ActionExecutionJob(
+            job_id=job_id,
+            event_id=outbox.event_id,
+            action_id=action.action_id,
+            provider_name=row.provider_name,
+            idempotency_key=row.idempotency_key,
+            provider_job_id=row.provider_job_id,
+            status=ExecutionJobStatus.SUCCESS,
+            claimed_by=None,
+            lease_expires_at=None,
+            created_at=row.created_at,
+            updated_at=now,
+            started_at=row.started_at,
+            finished_at=now,
+            poll_after_ms=row.poll_after_ms,
+            attempt=row.attempt,
+            target_results=[target_result],
+            provider_code=row.provider_code,
+            provider_message=row.provider_message,
+            raw_result=dict(row.raw_result or {}),
         )
+        await provider_state.set_job(job_id, job_projection.model_dump(mode="json"))
+        from app.providers.tools.mock_provider import write_xdr_entity_effect_observation
 
         await write_xdr_entity_effect_observation(
-            get_mock_tool_provider().state,
+            provider_state,
             entity_action_code=completion.entity_action_code,
             target_type=completion.target_type or (action.target_type or ""),
             target=completion.target or (action.target or ""),

@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import secrets
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -226,6 +227,7 @@ class EntityAppliedEffect:
 
     disposition_id: str
     writeback_id: str
+    provider_writeback_id: str
     action_id: str
     entity_action_code: str
     canonical_target: str
@@ -269,11 +271,11 @@ def _split_canonical_target(
     *,
     entity_action_code: str,
 ) -> tuple[str, str]:
-    if ":" in canonical_target:
-        target_type, target = canonical_target.split(":", 1)
-        return target_type, target
-    target_type = _ENTITY_ACTION_TARGET_TYPE.get(entity_action_code, "unknown")
-    return target_type, canonical_target
+    expected_type = _ENTITY_ACTION_TARGET_TYPE.get(entity_action_code, "unknown")
+    prefix, separator, target = canonical_target.partition(":")
+    if separator and prefix == expected_type and target:
+        return prefix, target
+    return expected_type, canonical_target
 
 
 @dataclass
@@ -297,6 +299,11 @@ class MockXDRState:
     jobs: dict[str, ProviderJob] = field(default_factory=dict)
     entity_applied_effects: dict[str, EntityAppliedEffect] = field(default_factory=dict)
     entity_effect_seq: int = 0
+    _entity_effect_lock: threading.RLock = field(
+        default_factory=threading.RLock,
+        init=False,
+        repr=False,
+    )
     # (source_object_id, closure_cycle) -> active EVENT_STATUS_UPDATE disposition_id
     active_terminal_heads: dict[tuple[str, int], str] = field(default_factory=dict)
     writeback_seq: int = 0
@@ -1015,8 +1022,12 @@ class MockXDRState:
             attempt = self.disposition_by_id[job.disposition_id]
             latest = attempt.receipts[-1]
             if target is ExecutionJobStatus.SUCCESS:
-                confirmed = self.confirm_via_readback(job.disposition_id)
-                job.terminal_writeback_status = confirmed.status
+                if attempt.command.intent_kind is DispositionIntentKind.ENTITY_ACTION_SUBMIT:
+                    confirmed = latest
+                    job.terminal_writeback_status = WritebackStatus.ACCEPTED
+                else:
+                    confirmed = self.confirm_via_readback(job.disposition_id)
+                    job.terminal_writeback_status = confirmed.status
             else:
                 wb_status = (
                     WritebackStatus.PARTIAL
@@ -1040,6 +1051,7 @@ class MockXDRState:
         disposition_id: str,
         *,
         writeback_id: str,
+        provider_writeback_id: str,
         action_id: str,
     ) -> dict[str, Any]:
         """Apply and read back provider-side entity effect (ISSUE-311).
@@ -1047,27 +1059,73 @@ class MockXDRState:
         The entity disposition receipt remains ``ACCEPTED``; this path only
         materializes independent applied-state evidence for execution/verify.
         """
-        attempt = self.disposition_by_id.get(disposition_id)
-        if attempt is None:
-            raise MockValidationError("disposition not found", error_code="not_found")
-        if attempt.command.intent_kind is not DispositionIntentKind.ENTITY_ACTION_SUBMIT:
-            raise MockValidationError("not an entity action", error_code="invalid_operation")
-        latest = attempt.receipts[-1]
-        if latest.status is not WritebackStatus.ACCEPTED:
-            raise MockValidationError(
-                f"entity effect completion requires ACCEPTED receipt, got {latest.status.value}",
-                error_code="invalid_state_transition",
+        with self._entity_effect_lock:
+            attempt = self.disposition_by_id.get(disposition_id)
+            if attempt is None:
+                raise MockValidationError("disposition not found", error_code="not_found")
+            if attempt.command.intent_kind is not DispositionIntentKind.ENTITY_ACTION_SUBMIT:
+                raise MockValidationError("not an entity action", error_code="invalid_operation")
+            latest = attempt.receipts[-1]
+            if latest.status is not WritebackStatus.ACCEPTED:
+                raise MockValidationError(
+                    "entity effect completion requires ACCEPTED receipt, "
+                    f"got {latest.status.value}",
+                    error_code="invalid_state_transition",
+                )
+            if action_id != attempt.command.action_id:
+                raise MockValidationError(
+                    "entity effect action correlation mismatch",
+                    error_code="correlation_mismatch",
+                )
+            if provider_writeback_id != latest.writeback_id:
+                raise MockValidationError(
+                    "entity effect provider writeback correlation mismatch",
+                    error_code="correlation_mismatch",
+                )
+            if latest.provider_job_id is not None:
+                provider_job = self.get_job(latest.provider_job_id)
+                if provider_job.status is ExecutionJobStatus.QUEUED:
+                    self.advance_job(latest.provider_job_id, ExecutionJobStatus.RUNNING)
+                if provider_job.status is ExecutionJobStatus.RUNNING:
+                    self.advance_job(
+                        latest.provider_job_id,
+                        ExecutionJobStatus.SUCCESS,
+                        provider_confirmed_terminal=True,
+                    )
+                if provider_job.status is not ExecutionJobStatus.SUCCESS:
+                    return self._entity_effect_unverified_payload(
+                        attempt,
+                        writeback_id=writeback_id,
+                        provider_code=f"provider_job_{provider_job.status.value}",
+                    )
+            effect = self._apply_entity_effect_record(
+                attempt,
+                writeback_id=writeback_id,
+                provider_writeback_id=provider_writeback_id,
+                action_id=action_id,
             )
-        if latest.provider_job_id is not None:
-            raise MockValidationError(
-                "async entity disposition requires provider job completion first",
-                error_code="invalid_operation",
-            )
+            return self._entity_effect_payload(effect, verified=True)
 
-        existing = self.entity_applied_effects.get(disposition_id)
+    def _apply_entity_effect_record(
+        self,
+        attempt: DispositionAttempt,
+        *,
+        writeback_id: str,
+        provider_writeback_id: str,
+        action_id: str,
+    ) -> EntityAppliedEffect:
+        existing = self.entity_applied_effects.get(attempt.command.disposition_id)
         if existing is not None:
-            return self._entity_effect_payload(existing, verified=True)
-
+            if (
+                existing.writeback_id != writeback_id
+                or existing.provider_writeback_id != provider_writeback_id
+                or existing.action_id != action_id
+            ):
+                raise MockValidationError(
+                    "entity effect replay correlation mismatch",
+                    error_code="correlation_mismatch",
+                )
+            return existing
         params = attempt.command.operation_params
         entity_action_code = getattr(params, "entity_action_code", None)
         canonical_target = getattr(params, "canonical_target", None)
@@ -1088,8 +1146,9 @@ class MockXDRState:
         )
         self.entity_effect_seq += 1
         effect = EntityAppliedEffect(
-            disposition_id=disposition_id,
+            disposition_id=attempt.command.disposition_id,
             writeback_id=writeback_id,
+            provider_writeback_id=provider_writeback_id,
             action_id=action_id,
             entity_action_code=entity_action_code,
             canonical_target=canonical_target,
@@ -1100,30 +1159,38 @@ class MockXDRState:
             version=1,
             applied_at=self.clock,
         )
-        self.entity_applied_effects[disposition_id] = effect
-        readback = self.entity_applied_effects.get(disposition_id)
-        verified = (
-            readback is not None
-            and readback.applied_status == expected_status
-            and readback.canonical_target == canonical_target
+        self.entity_applied_effects[attempt.command.disposition_id] = effect
+        return effect
+
+    @staticmethod
+    def _entity_effect_unverified_payload(
+        attempt: DispositionAttempt,
+        *,
+        writeback_id: str,
+        provider_code: str,
+    ) -> dict[str, Any]:
+        params = attempt.command.operation_params
+        entity_action_code = str(getattr(params, "entity_action_code", ""))
+        canonical_target = str(getattr(params, "canonical_target", ""))
+        target_type, target = _split_canonical_target(
+            canonical_target,
+            entity_action_code=entity_action_code,
         )
-        if readback is None:
-            return {
-                "verified": False,
-                "disposition_id": disposition_id,
-                "writeback_id": writeback_id,
-                "action_id": action_id,
-                "entity_action_code": entity_action_code,
-                "canonical_target": canonical_target,
-                "target_type": target_type,
-                "target": target,
-                "applied_status": expected_status,
-                "provider_record_id": None,
-                "observed_version": 0,
-                "provider_code": "effect_not_applied",
-                "provider_message": "provider-side entity effect missing after apply",
-            }
-        return self._entity_effect_payload(readback, verified=verified)
+        return {
+            "verified": False,
+            "disposition_id": attempt.command.disposition_id,
+            "writeback_id": writeback_id,
+            "action_id": attempt.command.action_id,
+            "entity_action_code": entity_action_code,
+            "canonical_target": canonical_target,
+            "target_type": target_type,
+            "target": target,
+            "applied_status": "",
+            "provider_record_id": "",
+            "observed_version": 0,
+            "provider_code": provider_code,
+            "provider_message": "provider-side entity effect is not terminal",
+        }
 
     def readback_entity_effect(self, disposition_id: str) -> dict[str, Any]:
         effect = self.entity_applied_effects.get(disposition_id)
