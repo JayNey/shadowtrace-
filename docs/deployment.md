@@ -34,7 +34,7 @@ make smoke-demo
 #    http://localhost:3000
 ```
 
-`make smoke-demo` 在事件超时未达约定终态时 **非零退出**，并打印 `event_id` 状态轨迹。
+`make smoke-demo` 在事件超时未达约定终态时 **非零退出**，并打印 `event_id` 状态轨迹。建议在干净 volume 上运行（`make down-v` 后再 `up-demo`）；idempotent bootstrap 会跳过 re-seed，terminal poll 仅监控 API 返回的最新 3 条事件。
 
 ### 全闭环金路径（seed → investigate → 脚本审批 → writeback → verify → CLOSED）
 
@@ -137,7 +137,7 @@ make smoke-demo        # exit 0 并打印 URL/端口表
 | 命令 | 说明 |
 |------|------|
 | `make up` | 启动核心服务（--build 构建镜像） |
-| `make up WORKER=1` | 启动核心服务 + Celery investigation worker（需同时设 `TASK_MODE=celery`） |
+| `make up WORKER=1` | 启动核心服务 + Celery investigation worker（Makefile 自动 `TASK_MODE=celery`） |
 | `make up SCHEDULER=1` | 启动核心服务 + Mock XDR 摄取调度器（Beat + ingestion worker，见下文） |
 | `make bootstrap` | 迁移 + **playbook release 激活** + mock-xdr 种子 + 摄取 + 自动触发研判 |
 | `make bootstrap LOAD_KB=true` | 同上 + 加载 attack/case 知识库（约 30-60 秒） |

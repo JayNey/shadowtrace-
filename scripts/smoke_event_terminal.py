@@ -39,26 +39,12 @@ from dynamic_eval_approve import (  # noqa: E402
     DynamicEvalClient,
     unwrap_event_detail_payload,
 )
-from dynamic_eval_full_loop import (  # noqa: E402
-    _strict_assert_budget,
+from strict_closed_acceptance import (  # noqa: E402
     assert_strict_closed_acceptance,
+    strict_assert_budget,
 )
 
 _COMPAT_TERMINAL_STATUSES = frozenset({"closed", "contained"})
-_IN_FLIGHT = frozenset(
-    {
-        "new",
-        "triaging",
-        "collecting_evidence",
-        "analyzing",
-        "scoring",
-        "planning_response",
-        "executing_response",
-        "verifying",
-        "replanning",
-        "waiting_approval",
-    }
-)
 _DEFAULT_POLL_S = 5.0
 
 
@@ -110,7 +96,8 @@ def list_demo_events(
         raise DynamicEvalApiError(
             f"expected at least {min_events} demo event(s), found {len(events)}"
         )
-    return events
+    # GET /events defaults to created_at desc — monitor only the newest batch.
+    return events[:min_events]
 
 
 def wait_for_terminal_events(
@@ -151,7 +138,7 @@ def wait_for_terminal_events(
             if mode == "strict":
                 if status == "closed":
                     remaining = max(0.0, deadline - time.monotonic())
-                    strict_budget = _strict_assert_budget(
+                    strict_budget = strict_assert_budget(
                         max_wait_s=timeout_s, elapsed_s=timeout_s - remaining
                     )
                     assert_strict_closed_acceptance(

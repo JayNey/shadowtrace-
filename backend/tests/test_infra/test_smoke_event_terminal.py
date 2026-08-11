@@ -139,6 +139,63 @@ def test_list_demo_events_raises_when_fewer_than_min(smoke_terminal_mod) -> None
         smoke_terminal_mod.list_demo_events(_Client(), min_events=3)  # type: ignore[arg-type]
 
 
+def test_list_demo_events_monitors_only_newest_min_events(smoke_terminal_mod) -> None:
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            return {
+                "items": [
+                    {"event_id": "evt-new-1"},
+                    {"event_id": "evt-new-2"},
+                    {"event_id": "evt-new-3"},
+                    {"event_id": "evt-stale-inflight"},
+                    {"event_id": "evt-stale-failed"},
+                ]
+            }
+
+    events = smoke_terminal_mod.list_demo_events(_Client(), min_events=3)  # type: ignore[arg-type]
+    assert [e["event_id"] for e in events] == [
+        "evt-new-1",
+        "evt-new-2",
+        "evt-new-3",
+    ]
+
+
+def test_list_demo_events_ignores_stale_beyond_min_when_polling(
+    smoke_terminal_mod, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: stale in-flight events beyond min_events must not block compat smoke."""
+
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            if path.startswith("/api/v1/events?page_size"):
+                return {
+                    "items": [
+                        {"event_id": "evt-demo-1"},
+                        {"event_id": "evt-demo-2"},
+                        {"event_id": "evt-demo-3"},
+                        {"event_id": "evt-stale"},
+                    ]
+                }
+            event_id = path.rsplit("/", 1)[-1]
+            if event_id == "evt-stale":
+                return {"event": {"event_id": event_id, "status": "analyzing"}}
+            return {
+                "event": {
+                    "event_id": event_id,
+                    "status": "closed",
+                }
+            }
+
+    summary = smoke_terminal_mod.wait_for_terminal_events(
+        _Client(),  # type: ignore[arg-type]
+        mode="compat",
+        timeout_s=1.0,
+        min_events=3,
+        poll_s=0.01,
+    )
+    assert set(summary["events"]) == {"evt-demo-1", "evt-demo-2", "evt-demo-3"}
+
+
 def test_wait_for_terminal_events_times_out_with_in_flight_trajectory(smoke_terminal_mod) -> None:
     class _Client:
         def get_json(self, path: str) -> dict[str, Any]:
@@ -246,6 +303,30 @@ def test_main_returns_1_on_terminal_timeout(
 
     monkeypatch.setattr(smoke_terminal_mod, "wait_for_terminal_events", _boom)
     assert smoke_terminal_mod.main(["--mode", "compat", "--timeout-s", "1"]) == 1
+
+
+def test_main_returns_1_on_strict_assert_failure(
+    smoke_terminal_mod, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _strict_fail(*args, **kwargs):
+        raise RuntimeError("strict profile: report_quality missing for evt-x")
+
+    monkeypatch.setattr(smoke_terminal_mod, "wait_for_terminal_events", _strict_fail)
+    assert smoke_terminal_mod.main(["--mode", "strict"]) == 1
+
+
+def test_main_returns_0_when_all_compat_terminal(
+    smoke_terminal_mod, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        smoke_terminal_mod,
+        "wait_for_terminal_events",
+        lambda *args, **kwargs: {
+            "mode": "compat",
+            "events": {"evt-1": {"status": "closed", "profile": "compat"}},
+        },
+    )
+    assert smoke_terminal_mod.main(["--mode", "compat"]) == 0
 
 
 def test_main_returns_1_on_api_error(smoke_terminal_mod, monkeypatch: pytest.MonkeyPatch) -> None:
