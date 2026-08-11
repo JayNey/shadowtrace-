@@ -10,7 +10,7 @@
 #
 # Terminal profiles (ISSUE-304):
 #   off    — health + event count only (legacy short-path analysis demo)
-#   compat — analysis_only_complete or closed/contained/reporting; never failed
+#   compat — analysis_only_complete or closed/contained; never failed
 #   strict — CLOSED + report + writeback gate (full-loop / eval profile)
 
 set -euo pipefail
@@ -74,8 +74,8 @@ event_count="$(
   curl -sf -H "Authorization: Bearer ${AUTH_TOKEN}" "${EVENTS_URL}" \
     | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('items', [])))"
 )"
-if [ "${event_count}" -lt 3 ]; then
-  echo "[smoke] ERROR: expected >=3 events, got ${event_count}" >&2
+if [ "${event_count}" -lt "${SMOKE_TERMINAL_MIN_EVENTS}" ]; then
+  echo "[smoke] ERROR: expected >=${SMOKE_TERMINAL_MIN_EVENTS} events, got ${event_count}" >&2
   exit 1
 fi
 echo "  ok: ${event_count} event(s)"
@@ -92,8 +92,8 @@ if [[ "${SMOKE_TERMINAL_MODE}" != "off" ]]; then
     echo "[smoke] ERROR: terminal acceptance failed (mode=${SMOKE_TERMINAL_MODE})" >&2
     echo "[smoke] Hint: official demo path requires Celery worker — use:" >&2
     echo "[smoke]   make up-demo && make bootstrap-demo && make smoke-demo" >&2
-    echo "[smoke] Full CLOSED gold path:" >&2
-    echo "[smoke]   make eval-full-loop   # or EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix" >&2
+    echo "[smoke] Strict CLOSED gold path:" >&2
+    echo "[smoke]   make demo-full-loop   # EVAL_REQUIRE_CLOSED=1 make eval-full-loop" >&2
     exit 1
   fi
 fi

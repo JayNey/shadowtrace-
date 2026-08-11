@@ -15,7 +15,8 @@ make up-demo && make bootstrap-demo && make smoke-demo
 
 ```bash
 make up-demo && make demo-full-loop
-# 或：make eval-full-loop SCENARIO=insider_data_exfiltration
+# 或：EVAL_SCENARIO=insider_data_exfiltration make demo-full-loop
+# compat 剖面：make eval-full-loop（不含 strict CLOSED gate）
 ```
 
 详见 [docs/deployment.md](docs/deployment.md)。

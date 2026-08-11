@@ -50,10 +50,42 @@ def test_compat_accepts_analysis_only_complete(smoke_terminal_mod) -> None:
     assert status == "scoring"
 
 
-def test_compat_accepts_reporting(smoke_terminal_mod) -> None:
+def test_compat_rejects_reporting_without_analysis_only_complete(smoke_terminal_mod) -> None:
     detail = {"event": {"event_id": "evt-2", "status": "reporting"}}
-    reached, _ = smoke_terminal_mod.compat_terminal_reached(detail)
+    reached, status = smoke_terminal_mod.compat_terminal_reached(detail)
+    assert reached is False
+    assert status == "reporting"
+
+
+def test_compat_accepts_reporting_with_analysis_only_complete(smoke_terminal_mod) -> None:
+    detail = {
+        "event": {"event_id": "evt-2b", "status": "reporting"},
+        "analysis_only_complete": True,
+    }
+    reached, status = smoke_terminal_mod.compat_terminal_reached(detail)
     assert reached is True
+    assert status == "reporting"
+
+
+def test_compat_accepts_closed_and_contained(smoke_terminal_mod) -> None:
+    for status in ("closed", "contained"):
+        detail = {"event": {"event_id": f"evt-{status}", "status": status}}
+        reached, observed = smoke_terminal_mod.compat_terminal_reached(detail)
+        assert reached is True
+        assert observed == status
+
+
+def test_compat_accepts_analysis_only_complete_via_snapshot(smoke_terminal_mod) -> None:
+    detail = {
+        "event": {
+            "event_id": "evt-snap",
+            "status": "analyzing",
+            "event_context_snapshot": {"analysis_only_complete": True},
+        }
+    }
+    reached, status = smoke_terminal_mod.compat_terminal_reached(detail)
+    assert reached is True
+    assert status == "analyzing"
 
 
 def test_compat_rejects_failed(smoke_terminal_mod) -> None:
@@ -80,6 +112,8 @@ def test_format_terminal_failure_includes_trajectory(smoke_terminal_mod) -> None
     )
     assert "evt-a" in msg
     assert "new -> analyzing" in msg
+    assert "mode=compat" in msg
+    assert "timeout" in msg
 
 
 def test_wait_for_terminal_events_off_is_noop(smoke_terminal_mod) -> None:
@@ -96,11 +130,145 @@ def test_wait_for_terminal_events_off_is_noop(smoke_terminal_mod) -> None:
     assert summary["mode"] == "off"
 
 
+def test_list_demo_events_raises_when_fewer_than_min(smoke_terminal_mod) -> None:
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            return {"items": [{"event_id": "evt-only"}]}
+
+    with pytest.raises(smoke_terminal_mod.DynamicEvalApiError, match="expected at least 3"):
+        smoke_terminal_mod.list_demo_events(_Client(), min_events=3)  # type: ignore[arg-type]
+
+
+def test_wait_for_terminal_events_times_out_with_in_flight_trajectory(smoke_terminal_mod) -> None:
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            if path.startswith("/api/v1/events?page_size"):
+                return {
+                    "items": [
+                        {"event_id": "evt-1"},
+                        {"event_id": "evt-2"},
+                        {"event_id": "evt-3"},
+                    ]
+                }
+            return {"event": {"event_id": path.rsplit("/", 1)[-1], "status": "analyzing"}}
+
+    with pytest.raises(RuntimeError, match="timeout") as exc_info:
+        smoke_terminal_mod.wait_for_terminal_events(
+            _Client(),  # type: ignore[arg-type]
+            mode="compat",
+            timeout_s=0.05,
+            min_events=3,
+            poll_s=0.01,
+        )
+    assert "evt-1" in str(exc_info.value)
+    assert "analyzing" in str(exc_info.value)
+
+
+def test_wait_for_terminal_events_raises_on_failed_status(smoke_terminal_mod) -> None:
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            if path.startswith("/api/v1/events?page_size"):
+                return {"items": [{"event_id": "evt-fail"}]}
+            return {"event": {"event_id": "evt-fail", "status": "failed"}}
+
+    with pytest.raises(RuntimeError, match="status=failed"):
+        smoke_terminal_mod.wait_for_terminal_events(
+            _Client(),  # type: ignore[arg-type]
+            mode="compat",
+            timeout_s=1.0,
+            min_events=1,
+            poll_s=0.01,
+        )
+
+
+def test_wait_for_terminal_events_compat_succeeds_when_all_terminal(smoke_terminal_mod) -> None:
+    class _Client:
+        def get_json(self, path: str) -> dict[str, Any]:
+            if path.startswith("/api/v1/events?page_size"):
+                return {
+                    "items": [
+                        {"event_id": "evt-1"},
+                        {"event_id": "evt-2"},
+                    ]
+                }
+            event_id = path.rsplit("/", 1)[-1]
+            return {
+                "event": {"event_id": event_id, "status": "closed"},
+            }
+
+    summary = smoke_terminal_mod.wait_for_terminal_events(
+        _Client(),  # type: ignore[arg-type]
+        mode="compat",
+        timeout_s=1.0,
+        min_events=2,
+        poll_s=0.01,
+    )
+    assert summary["mode"] == "compat"
+    assert set(summary["events"]) == {"evt-1", "evt-2"}
+
+
+def test_wait_for_terminal_events_strict_waits_for_closed(
+    smoke_terminal_mod, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, float]] = []
+
+    def _assert(client, event_id: str, *, max_wait_s: float = 10.0) -> None:
+        calls.append((event_id, max_wait_s))
+
+    monkeypatch.setattr(smoke_terminal_mod, "assert_strict_closed_acceptance", _assert)
+
+    class _Client:
+        poll = 0
+
+        def get_json(self, path: str) -> dict[str, Any]:
+            if path.startswith("/api/v1/events?page_size"):
+                return {"items": [{"event_id": "evt-strict"}]}
+            self.poll += 1
+            status = "reporting" if self.poll == 1 else "closed"
+            return {"event": {"event_id": "evt-strict", "status": status}}
+
+    summary = smoke_terminal_mod.wait_for_terminal_events(
+        _Client(),  # type: ignore[arg-type]
+        mode="strict",
+        timeout_s=30.0,
+        min_events=1,
+        poll_s=0.01,
+    )
+    assert summary["events"]["evt-strict"]["profile"] == "strict_closed"
+    assert calls == [("evt-strict", pytest.approx(30.0, abs=5.0))]
+
+
+def test_main_returns_1_on_terminal_timeout(
+    smoke_terminal_mod, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _boom(*args, **kwargs):
+        raise RuntimeError("timeout after 0s")
+
+    monkeypatch.setattr(smoke_terminal_mod, "wait_for_terminal_events", _boom)
+    assert smoke_terminal_mod.main(["--mode", "compat", "--timeout-s", "1"]) == 1
+
+
+def test_main_returns_1_on_api_error(smoke_terminal_mod, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _api_err(*args, **kwargs):
+        raise smoke_terminal_mod.DynamicEvalApiError("bad payload")
+
+    monkeypatch.setattr(smoke_terminal_mod, "wait_for_terminal_events", _api_err)
+    assert smoke_terminal_mod.main(["--mode", "compat"]) == 1
+
+
 def test_smoke_bootstrap_wires_terminal_mode() -> None:
     text = SMOKE_BOOTSTRAP_PATH.read_text(encoding="utf-8")
     assert "smoke_event_terminal.py" in text
     assert "SMOKE_TERMINAL_MODE" in text
     assert "ISSUE-304" in text
+    assert "SMOKE_TERMINAL_MIN_EVENTS" in text
+
+
+def test_smoke_demo_runs_worker_before_bootstrap_smoke() -> None:
+    text = SMOKE_DEMO_PATH.read_text(encoding="utf-8")
+    worker_idx = text.index("celery investigation worker")
+    bootstrap_idx = text.index("core bootstrap smoke")
+    assert worker_idx < bootstrap_idx
 
 
 def test_smoke_demo_defaults_compat_terminal_mode() -> None:
@@ -115,6 +283,36 @@ def test_makefile_issue_304_targets() -> None:
     assert "test-ci-lite:" in text
     assert "test_smoke_event_terminal.py" in text
     assert "SMOKE_TERMINAL_MODE" in text
+    assert "EVAL_REQUIRE_CLOSED" in text
+
+
+def test_makefile_bootstrap_demo_full_loop_sets_response_and_report() -> None:
+    text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    block_start = text.index("bootstrap-demo-full-loop:")
+    block = text[block_start : text.index("# Official single-scenario CLOSED", block_start)]
+    assert "BOOTSTRAP_GENERATE_REPORT=true" in block
+    assert "BOOTSTRAP_INCLUDE_RESPONSE=true" in block
+
+
+def test_makefile_demo_full_loop_invokes_eval_with_require_closed() -> None:
+    text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    block_start = text.index("demo-full-loop:")
+    block = text[block_start : text.index("smoke-demo:", block_start)]
+    assert "eval-full-loop EVAL_REQUIRE_CLOSED=1" in block
+
+
+def test_makefile_eval_full_loop_supports_require_closed_flag() -> None:
+    text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    block_start = text.index("eval-full-loop:")
+    block = text[block_start : text.index("eval-full-loop-matrix:", block_start)]
+    assert "--require-closed" in block
+
+
+def test_makefile_smoke_bootstrap_defaults_terminal_off() -> None:
+    text = MAKEFILE_PATH.read_text(encoding="utf-8")
+    block_start = text.index("smoke-bootstrap:")
+    block = text[block_start : text.index("# ---", block_start)]
+    assert "SMOKE_TERMINAL_MODE),off)" in block.replace(" ", "")
 
 
 def test_deployment_docs_official_demo_path_first() -> None:
@@ -128,6 +326,7 @@ def test_deployment_docs_official_demo_path_first() -> None:
     assert "make smoke-demo" in official_block
     assert "make test-ci-lite" in text
     assert "bootstrap-demo-full-loop" in text
+    assert "EVAL_REQUIRE_CLOSED=1 make eval-full-loop" in text
 
 
 def test_readme_points_to_up_demo_smoke_demo() -> None:
@@ -135,3 +334,4 @@ def test_readme_points_to_up_demo_smoke_demo() -> None:
     assert "make up-demo && make bootstrap-demo && make smoke-demo" in text
     assert "make demo-full-loop" in text
     assert "make test-ci-lite" in text
+    assert "EVAL_SCENARIO=" in text

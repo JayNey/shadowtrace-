@@ -42,19 +42,7 @@ print_demo_urls() {
 EOF
 }
 
-echo "[smoke-demo] core bootstrap smoke (requires make bootstrap-demo) ..."
-if ! BACKEND_PORT="${BACKEND_PORT}" FRONTEND_PORT="${FRONTEND_PORT}" MOCK_XDR_PORT="${MOCK_XDR_PORT}" \
-  BOOTSTRAP_AUTH_TOKEN="${BOOTSTRAP_AUTH_TOKEN:-bootstrap-token}" \
-  SMOKE_TERMINAL_MODE="${SMOKE_TERMINAL_MODE:-compat}" \
-  SMOKE_TERMINAL_TIMEOUT_S="${SMOKE_TERMINAL_TIMEOUT_S:-600}" \
-  SMOKE_TERMINAL_MIN_EVENTS="${SMOKE_TERMINAL_MIN_EVENTS:-3}" \
-  SMOKE_TERMINAL_POLL_S="${SMOKE_TERMINAL_POLL_S:-5}" \
-  bash "${ROOT}/scripts/smoke_bootstrap.sh"; then
-  echo "[smoke-demo] ERROR: bootstrap smoke failed — run: make bootstrap-demo" >&2
-  exit 1
-fi
-
-echo "[smoke-demo] celery investigation worker ..."
+echo "[smoke-demo] celery investigation worker (before terminal poll) ..."
 COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME}" \
   COMPOSE_PROFILE="demo" \
   OBS_COMPOSE_FILE="${OBS_COMPOSE_FILE}" \
@@ -84,6 +72,18 @@ if ! docker exec "${beat_id}" pgrep -f 'celery.*beat' >/dev/null; then
   exit 1
 fi
 echo "  ok: scheduler beat + ingestion worker healthy"
+
+echo "[smoke-demo] core bootstrap smoke (requires make bootstrap-demo) ..."
+if ! BACKEND_PORT="${BACKEND_PORT}" FRONTEND_PORT="${FRONTEND_PORT}" MOCK_XDR_PORT="${MOCK_XDR_PORT}" \
+  BOOTSTRAP_AUTH_TOKEN="${BOOTSTRAP_AUTH_TOKEN:-bootstrap-token}" \
+  SMOKE_TERMINAL_MODE="${SMOKE_TERMINAL_MODE:-compat}" \
+  SMOKE_TERMINAL_TIMEOUT_S="${SMOKE_TERMINAL_TIMEOUT_S:-600}" \
+  SMOKE_TERMINAL_MIN_EVENTS="${SMOKE_TERMINAL_MIN_EVENTS:-3}" \
+  SMOKE_TERMINAL_POLL_S="${SMOKE_TERMINAL_POLL_S:-5}" \
+  bash "${ROOT}/scripts/smoke_bootstrap.sh"; then
+  echo "[smoke-demo] ERROR: bootstrap smoke failed — run: make bootstrap-demo" >&2
+  exit 1
+fi
 
 echo "[smoke-demo] observability stack ..."
 curl -sf "http://127.0.0.1:${PROMETHEUS_PORT}/-/ready" >/dev/null

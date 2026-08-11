@@ -7,8 +7,8 @@ Modes
 -----
 compat (default for ``make smoke-demo``):
   Each event is OK when status is not ``failed`` and either
-  ``analysis_only_complete`` is true or status is ``closed`` / ``contained`` /
-  ``reporting``.
+  ``analysis_only_complete`` is true or status is ``closed`` / ``contained``.
+  Bare ``reporting`` without ``analysis_only_complete`` keeps polling.
 
 strict:
   Each event must reach ``closed`` with a non-placeholder report (ISSUE-301 /
@@ -39,9 +39,12 @@ from dynamic_eval_approve import (  # noqa: E402
     DynamicEvalClient,
     unwrap_event_detail_payload,
 )
-from dynamic_eval_full_loop import assert_strict_closed_acceptance  # noqa: E402
+from dynamic_eval_full_loop import (  # noqa: E402
+    _strict_assert_budget,
+    assert_strict_closed_acceptance,
+)
 
-_COMPAT_TERMINAL_STATUSES = frozenset({"closed", "contained", "reporting"})
+_COMPAT_TERMINAL_STATUSES = frozenset({"closed", "contained"})
 _IN_FLIGHT = frozenset(
     {
         "new",
@@ -147,7 +150,13 @@ def wait_for_terminal_events(
 
             if mode == "strict":
                 if status == "closed":
-                    assert_strict_closed_acceptance(client, event_id, max_wait_s=0.0)
+                    remaining = max(0.0, deadline - time.monotonic())
+                    strict_budget = _strict_assert_budget(
+                        max_wait_s=timeout_s, elapsed_s=timeout_s - remaining
+                    )
+                    assert_strict_closed_acceptance(
+                        client, event_id, max_wait_s=strict_budget
+                    )
                     results[event_id] = {"status": status, "profile": "strict_closed"}
                     finished_this_round.append(event_id)
                 continue

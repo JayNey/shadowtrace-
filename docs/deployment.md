@@ -27,7 +27,7 @@ make up-demo
 # 2. 迁移 + playbook + 三场景 seed/ingest + 自动 investigate（默认短路径剖面）
 make bootstrap-demo
 
-# 3. 冒烟：health + worker + 每场景终态（compat：analysis_only_complete 或非 failed）
+# 3. 冒烟：health + worker + 每场景终态（compat：analysis_only_complete 或 closed/contained；非 failed）
 make smoke-demo
 
 # 4. 打开浏览器
@@ -43,8 +43,9 @@ make smoke-demo
 ```bash
 make up-demo
 make demo-full-loop
-# 等价：make eval-full-loop
-# 单场景：make eval-full-loop SCENARIO=insider_data_exfiltration
+# 等价：EVAL_REQUIRE_CLOSED=1 make eval-full-loop
+# 单场景：EVAL_SCENARIO=insider_data_exfiltration make demo-full-loop
+# compat 剖面（非 strict CLOSED）：make eval-full-loop
 ```
 
 三场景 matrix + strict CLOSED：
@@ -218,7 +219,7 @@ EVAL_MATRIX_REQUIRE_CLOSED=1 make eval-full-loop-matrix
 | Compose project | 每场景唯一 `shadowtrace-eval-<scenario>-<run>` | 同左 | 固定 `COMPOSE_PROJECT_NAME` |
 | Host ports | **不发布**（`infra/docker-compose.eval.yml`） | 同左 | 默认映射 8000/5432/… |
 | seed → harness | seed JSON **显式 event_ids** → `--event-id` | 同左 | 单场景可 `--seed-via-compose` |
-| 终态 | `reporting` / `contained` / `closed` 等 | 必须 `closed` + `GET /report` + writeback gate | 同 compat |
+| 终态 | `reporting` / `contained` / `closed` 等 | 必须 `closed` + `GET /report` + writeback gate | strict：`closed` + report + writeback（`demo-full-loop`）；compat：`eval-full-loop` |
 | Eval 超时 | `infra/docker-compose.eval.yml` 覆盖 `APPROVAL_TIMEOUT_MINUTES` / `LLM_TIMEOUT_SECONDS`（默认 5min / 60s） | 同左 | 本地 `.env` 评测 profile |
 | 失败行为 | 停止后续场景；`down -v --remove-orphans` 清理 | 同左 | 依使用者手动清理 |
 | Artifact | `artifacts/dynamic-eval-matrix/<run-id>/<scenario>/manifest.json` 与根目录 `summary.json` | 同左 | 无官方目录 |

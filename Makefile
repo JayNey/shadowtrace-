@@ -114,14 +114,20 @@ smoke-bootstrap:
 # Does NOT change production APPROVAL_TIMEOUT_MINUTES (default 30).
 # ---------------------------------------------------------------------------
 EVAL_SCENARIO ?= insider_data_exfiltration
+# Deprecated CLI alias — prefer EVAL_SCENARIO= on the command line.
+ifneq ($(origin SCENARIO),undefined)
+EVAL_SCENARIO := $(SCENARIO)
+endif
 EVAL_MAX_EVENTS ?= 1
 EVAL_DECISION ?= approve
+EVAL_REQUIRE_CLOSED ?=
 BOOTSTRAP_AUTH_TOKEN ?= bootstrap-token
 BOOTSTRAP_GENERATE_REPORT ?= false
 BOOTSTRAP_INCLUDE_RESPONSE ?= false
 eval-full-loop:
 	@echo "[eval-full-loop] gold fixture=seed_mock_xdr_and_ingest scenario=$(EVAL_SCENARIO)"
 	@echo "[eval-full-loop] scripted $(EVAL_DECISION) — never finish via APPROVAL_TIMEOUT"
+	@echo "[eval-full-loop] profile=$(if $(EVAL_REQUIRE_CLOSED),strict CLOSED,compat)"
 	COMPOSE_PROJECT_NAME="$(COMPOSE_PROJECT_NAME)" \
 	BACKEND_PORT="$(BACKEND_PORT)" \
 	python3 "$(CURDIR)/scripts/dynamic_eval_full_loop.py" \
@@ -130,7 +136,8 @@ eval-full-loop:
 		--base-url "http://127.0.0.1:$(BACKEND_PORT)" \
 		--token "$(BOOTSTRAP_AUTH_TOKEN)" \
 		--max-events "$(EVAL_MAX_EVENTS)" \
-		--decision "$(EVAL_DECISION)"
+		--decision "$(EVAL_DECISION)" \
+		$(if $(EVAL_REQUIRE_CLOSED),--require-closed,)
 
 # ---------------------------------------------------------------------------
 # ISSUE-301 dynamic-eval matrix (fresh Compose project + volumes per scenario)
@@ -179,7 +186,7 @@ bootstrap-demo-full-loop:
 # Official single-scenario CLOSED gold path (requires up-demo or WORKER=1).
 demo-full-loop:
 	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
-	@$(MAKE) eval-full-loop
+	@$(MAKE) eval-full-loop EVAL_REQUIRE_CLOSED=1
 
 smoke-demo:
 	@bash "$(CURDIR)/scripts/demo_mock_guard.sh"
