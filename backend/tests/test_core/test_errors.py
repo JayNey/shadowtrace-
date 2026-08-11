@@ -288,7 +288,7 @@ def test_register_error_code_rejects_bad_names() -> None:
 
 
 def test_llm_error_subclass_retry_rules() -> None:
-    """ISSUE-027: auth/audit/invalid-json are non-retryable; timeout/rate-limited retryable."""
+    """ISSUE-027/299: auth/audit/invalid-json/timeout non-retryable; rate-limited retryable."""
     # Non-retryable
     assert is_retryable(LLMAuthError("bad credentials")) is False
     assert is_retryable(LLMAuditError("audit down")) is False
@@ -296,8 +296,8 @@ def test_llm_error_subclass_retry_rules() -> None:
         is_retryable(LLMInvalidJSONError("bad json", invalid_content="x", validation_error="e"))
         is False
     )
+    assert is_retryable(LLMTimeoutError("timed out")) is False
     # Retryable
-    assert is_retryable(LLMTimeoutError("timed out")) is True
     assert is_retryable(LLMRateLimitedError("rate limited")) is True
     assert is_retryable(LLMProviderError("provider error")) is True
 

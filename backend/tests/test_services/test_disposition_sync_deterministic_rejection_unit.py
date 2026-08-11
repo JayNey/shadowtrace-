@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.models.enums import OutboxDeliveryStatus, WritebackStatus
+from app.models.enums import OutboxDeliveryStatus
 from app.services.disposition_sync_service import DispositionSyncService
 
 
