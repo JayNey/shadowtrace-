@@ -5470,7 +5470,7 @@
           "background_side_effects_pending": {
             "type": "boolean",
             "title": "Background Side Effects Pending",
-            "description": "True when detached/background response or rollback side effects are still outstanding. For REQUIRED events before CLOSED, prefer gate_applicable_outstanding_count. -1 counts mean degraded/unavailable.",
+            "description": "True when detached/background response or rollback side effects are still outstanding. For REQUIRED events before CLOSED, prefer gate_applicable_outstanding_count.",
             "default": false
           },
           "outstanding_side_effect_count": {
@@ -5608,7 +5608,7 @@
           "background_side_effects_pending": {
             "type": "boolean",
             "title": "Background Side Effects Pending",
-            "description": "True when detached/background response or rollback side effects are still outstanding. For REQUIRED events before CLOSED, prefer gate_applicable_outstanding_count. -1 counts mean degraded/unavailable.",
+            "description": "True when detached/background response or rollback side effects are still outstanding. For REQUIRED events before CLOSED, prefer gate_applicable_outstanding_count.",
             "default": false
           },
           "outstanding_side_effect_count": {

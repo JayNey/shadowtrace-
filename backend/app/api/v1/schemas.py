@@ -246,7 +246,7 @@ class EventDetailResponse(BaseModel):
         description=(
             "True when detached/background response or rollback side effects are still "
             "outstanding. For REQUIRED events before CLOSED, prefer "
-            "gate_applicable_outstanding_count. -1 counts mean degraded/unavailable."
+            "gate_applicable_outstanding_count."
         ),
     )
     outstanding_side_effect_count: int = Field(
@@ -303,7 +303,7 @@ class EventCloseResponse(BaseModel):
         description=(
             "True when detached/background response or rollback side effects are still "
             "outstanding. For REQUIRED events before CLOSED, prefer "
-            "gate_applicable_outstanding_count. -1 counts mean degraded/unavailable."
+            "gate_applicable_outstanding_count."
         ),
     )
     outstanding_side_effect_count: int = Field(
