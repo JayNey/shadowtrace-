@@ -891,6 +891,34 @@ class TestRenewalFailure:
         assert events[_EVENT_ID]["status"] is not EventStatus.REPORTING
 
 
+class TestSoftTimeLimit:
+    """ISSUE-314: SoftTimeLimitExceeded must not mark event FAILED in SuperAgent."""
+
+    async def test_soft_time_limit_re_raises_without_marking_failed(self) -> None:
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+
+        class _SoftLimitTriageAgent:
+            agent_name = "triage_agent"
+
+            async def execute(self, input: Any) -> TriageResult:
+                raise SoftTimeLimitExceeded()
+
+        agent = _build_super_agent(
+            lease=_InMemoryEventLease(),
+            event_service=_MockEventService(events),
+        )
+        agent.triage_agent = _SoftLimitTriageAgent()  # type: ignore[assignment]
+
+        with pytest.raises(SoftTimeLimitExceeded):
+            await agent.investigate(_EVENT_ID)
+
+        assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
+
+
 class TestReactEnabled:
     """Scenario 4: REACT_ENABLED toggle behaviour."""
 

@@ -1185,6 +1185,14 @@ def test_run_investigation_soft_time_limit_releases_with_resolved_owner(
 
     monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _TrackingLease())
 
+    async def _noop_apply(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.services.soft_time_limit_outcome.apply_soft_time_limit_outcome",
+        _noop_apply,
+    )
+
     async def _boom(*_args: object, **_kwargs: object) -> dict[str, str]:
         raise SoftTimeLimitExceeded()
 
@@ -1210,44 +1218,27 @@ def test_run_investigation_soft_timeout_invalidates_checkpoint_and_marks_intent_
     celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ISSUE-296: soft time limit must fence checkpoint and mark intent dead."""
+    """ISSUE-314: soft time limit delegates to centralized task handler."""
     from celery.app.task import Context
     from celery.exceptions import SoftTimeLimitExceeded
 
-    invalidated: list[str] = []
-    marked_dead: list[tuple[str, str, str]] = []
+    handled: list[tuple[str, str | None, str]] = []
 
-    class _TrackingLease:
-        async def release(self, event_id: str, owner_id: str) -> bool:
-            return True
-
-    async def _invalidate(event_id: str) -> None:
-        invalidated.append(event_id)
-
-    class _IntentService:
-        async def mark_dead(
-            self,
-            intent_id: str,
-            *,
-            error: str,
-            broker_task_id: str,
-        ) -> None:
-            marked_dead.append((intent_id, error, broker_task_id))
+    async def _handle(
+        event_id: str,
+        *,
+        resolved_owner: str,
+        intent_id: str | None,
+        broker_task_id: str,
+    ) -> None:
+        handled.append((event_id, intent_id, broker_task_id))
 
     from app.models.investigation_intent import IntentDeliveryAdmission
 
-    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _TrackingLease())
-    monkeypatch.setattr(
-        "app.orchestration.checkpointer.invalidate_event_checkpoint",
-        _invalidate,
-    )
+    monkeypatch.setattr(tasks, "_handle_soft_time_limit_exceeded", _handle)
     monkeypatch.setattr(
         "app.tasks.investigation_tasks._admit_intent_delivery",
         AsyncMock(return_value=IntentDeliveryAdmission.ACCEPTED),
-    )
-    monkeypatch.setattr(
-        "app.services.investigation_intent_service.InvestigationIntentService",
-        lambda _factory: _IntentService(),
     )
 
     async def _boom(*_args: object, **_kwargs: object) -> dict[str, str]:
@@ -1268,9 +1259,8 @@ def test_run_investigation_soft_timeout_invalidates_checkpoint_and_marks_intent_
     finally:
         tasks.run_investigation.request_stack.pop()
 
-    assert invalidated == ["evt-soft-checkpoint"]
-    assert marked_dead == [
-        ("intent-soft-296", "soft_time_limit_exceeded", "task-soft-checkpoint-001"),
+    assert handled == [
+        ("evt-soft-checkpoint", "intent-soft-296", "task-soft-checkpoint-001"),
     ]
 
 

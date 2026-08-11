@@ -141,12 +141,17 @@ def _raise_eval_failure(
         status_trace=status_trace,
         elapsed_s=elapsed_s,
     )
+    soft_limit_diag = format_soft_limit_failure_diagnostics(client, event_id)
+    diagnostics["soft_limit_diagnostics"] = soft_limit_diag
+    message = format_eval_failure_message(
+        headline=headline,
+        event_id=event_id,
+        diagnostics=diagnostics,
+    )
+    if soft_limit_diag:
+        message = f"{message}\nsoft_limit_diagnostics={soft_limit_diag}"
     raise EvalFailure(
-        format_eval_failure_message(
-            headline=headline,
-            event_id=event_id,
-            diagnostics=diagnostics,
-        ),
+        message,
         event_id=event_id,
         diagnostics=diagnostics,
     )
@@ -337,6 +342,43 @@ def assert_evidence_ok(event: dict[str, Any], *, event_id: str) -> str:
             f"{sorted(_EVIDENCE_OK_STATUSES)})."
         )
     return status
+
+
+def format_soft_limit_failure_diagnostics(
+    client: DynamicEvalClient,
+    event_id: str,
+) -> str:
+    """Summarize audit + status hints when eval hits FAILED (ISSUE-314)."""
+    parts: list[str] = []
+    try:
+        audit = client.get_json(f"/api/v1/events/{event_id}/audit-logs?page=1&page_size=20")
+        items = audit.get("items") if isinstance(audit, dict) else None
+        if isinstance(items, list):
+            for row in reversed(items):
+                if not isinstance(row, dict):
+                    continue
+                reason = str(row.get("reason") or "")
+                if "soft_time_limit" in reason or reason.endswith(":exception"):
+                    parts.append(
+                        "audit_reason="
+                        f"{reason!r} operator={row.get('operator')!r} "
+                        f"to={row.get('to_status')!r}"
+                    )
+                    break
+    except Exception as exc:
+        parts.append(f"audit_unavailable={exc!r}")
+    try:
+        event = get_event(client, event_id)
+        snap = event.get("event_context_snapshot")
+        node_hint = None
+        if isinstance(snap, dict):
+            trace = snap.get("node_trace")
+            if isinstance(trace, list) and trace:
+                node_hint = str(trace[-1])
+        parts.append(f"event_status={event.get('status')!r} last_node={node_hint!r}")
+    except Exception as exc:
+        parts.append(f"event_unavailable={exc!r}")
+    return "; ".join(parts) if parts else "no_soft_limit_correlation_found"
 
 
 def trigger_investigate(

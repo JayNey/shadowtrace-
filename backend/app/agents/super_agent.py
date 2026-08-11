@@ -27,6 +27,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.base import AgentOutput, BaseAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
@@ -491,6 +493,33 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             guard_reset_needed = False
             if lifecycle_started:
                 await self._publish_agent_failed(lifecycle_input, str(exc))
+            raise
+        except SoftTimeLimitExceeded as exc:
+            # ISSUE-314: task/intent layer owns terminal vs bounded recovery.
+            guard_reset_needed = False
+            if lifecycle_started:
+                await self._publish_agent_failed(lifecycle_input, str(exc))
+            if self.audit_service is not None:
+                try:
+                    await self.audit_service.log_transition(
+                        event_id,
+                        str(event_context.event.status.value)
+                        if event_context is not None
+                        and event_context.event is not None
+                        else EventStatus.NEW.value,
+                        str(event_context.event.status.value)
+                        if event_context is not None
+                        and event_context.event is not None
+                        else EventStatus.NEW.value,
+                        _SUPER_AGENT_OPERATOR,
+                        f"soft_time_limit_exceeded:{type(exc).__name__}",
+                    )
+                except Exception:
+                    logger.warning(
+                        "SuperAgent: failed to audit soft time limit event=%s",
+                        event_id,
+                        exc_info=True,
+                    )
             raise
         except Exception as exc:
             if lifecycle_started:

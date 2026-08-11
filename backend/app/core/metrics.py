@@ -30,6 +30,7 @@ _state_projection_failure_total: Any | None = None
 _state_projection_repair_total: Any | None = None
 _investigation_intent_enqueue_total: Any | None = None
 _graph_failed_transition_noop_total: Any | None = None
+_soft_time_limit_outcome_total: Any | None = None
 _socketio_subscriber_failure_total: Any | None = None
 _socketio_subscriber_recovery_total: Any | None = None
 _force_close_total: Any | None = None
@@ -43,6 +44,9 @@ _process_state_projection_failures = 0
 _process_state_projection_repairs = 0
 _process_investigation_intent_enqueue_success = 0
 _process_investigation_intent_enqueue_failure = 0
+_process_soft_time_limit_terminal = 0
+_process_soft_time_limit_recovered = 0
+_process_soft_time_limit_reconcile_required = 0
 _process_socketio_subscriber_failures = 0
 _process_socketio_subscriber_recoveries = 0
 
@@ -55,6 +59,7 @@ def _ensure_metrics() -> None:
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _state_projection_failure_total, _state_projection_repair_total
     global _investigation_intent_enqueue_total, _graph_failed_transition_noop_total
+    global _soft_time_limit_outcome_total
     global _socketio_subscriber_failure_total, _socketio_subscriber_recovery_total
     global _force_close_total
 
@@ -140,6 +145,11 @@ def _ensure_metrics() -> None:
             description=(
                 "Bounded no-op outcomes when graph failure marking would duplicate terminal state"
             ),
+            unit="1",
+        )
+        _soft_time_limit_outcome_total = _meter.create_counter(
+            name="shadowtrace_soft_time_limit_outcome_total",
+            description="Investigation soft time limit outcomes by decision class",
             unit="1",
         )
         _socketio_subscriber_failure_total = _meter.create_counter(
@@ -421,6 +431,49 @@ def record_investigation_intent_enqueue(*, result: str) -> None:
         logger.debug("investigation intent enqueue metric export failed", exc_info=True)
 
 
+def record_soft_time_limit_outcome(*, decision: str) -> None:
+    """Increment ``shadowtrace_soft_time_limit_outcome_total{decision=...}``."""
+    global \
+        _process_soft_time_limit_terminal, \
+        _process_soft_time_limit_recovered, \
+        _process_soft_time_limit_reconcile_required
+    normalized = decision.strip().lower()
+    if normalized == "recovered":
+        _process_soft_time_limit_recovered += 1
+    elif normalized == "reconcile_required":
+        _process_soft_time_limit_reconcile_required += 1
+    else:
+        _process_soft_time_limit_terminal += 1
+
+    _ensure_metrics()
+    if _soft_time_limit_outcome_total is None:
+        return
+    try:
+        _soft_time_limit_outcome_total.add(1, {"decision": normalized})
+    except Exception:
+        logger.debug("soft time limit outcome metric export failed", exc_info=True)
+
+
+def soft_time_limit_outcome_health_snapshot() -> dict[str, int]:
+    """Process-local soft time limit counters for health probes and tests."""
+    return {
+        "soft_limit_terminal": _process_soft_time_limit_terminal,
+        "soft_limit_recovered": _process_soft_time_limit_recovered,
+        "soft_limit_reconcile_required": _process_soft_time_limit_reconcile_required,
+    }
+
+
+def reset_soft_time_limit_metrics_for_tests() -> None:
+    """Reset soft time limit process counters."""
+    global \
+        _process_soft_time_limit_terminal, \
+        _process_soft_time_limit_recovered, \
+        _process_soft_time_limit_reconcile_required
+    _process_soft_time_limit_terminal = 0
+    _process_soft_time_limit_recovered = 0
+    _process_soft_time_limit_reconcile_required = 0
+
+
 def record_graph_failed_transition_noop(*, reason: str) -> None:
     """Increment bounded no-op counter when graph failure marking is skipped."""
     _ensure_metrics()
@@ -501,6 +554,7 @@ def reset_metrics_for_tests() -> None:
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _state_projection_failure_total, _state_projection_repair_total
     global _investigation_intent_enqueue_total, _graph_failed_transition_noop_total
+    global _soft_time_limit_outcome_total
     global _socketio_subscriber_failure_total, _socketio_subscriber_recovery_total
     global _force_close_total
     global _process_checkpoint_fallback_active, _process_checkpoint_fallback_triggers
@@ -510,6 +564,10 @@ def reset_metrics_for_tests() -> None:
     global \
         _process_investigation_intent_enqueue_success, \
         _process_investigation_intent_enqueue_failure
+    global \
+        _process_soft_time_limit_terminal, \
+        _process_soft_time_limit_recovered, \
+        _process_soft_time_limit_reconcile_required
     global _process_socketio_subscriber_failures, _process_socketio_subscriber_recoveries
     _meter = None
     _writeback_total = None
@@ -527,6 +585,7 @@ def reset_metrics_for_tests() -> None:
     _state_projection_repair_total = None
     _investigation_intent_enqueue_total = None
     _graph_failed_transition_noop_total = None
+    _soft_time_limit_outcome_total = None
     _socketio_subscriber_failure_total = None
     _socketio_subscriber_recovery_total = None
     _force_close_total = None
@@ -540,6 +599,9 @@ def reset_metrics_for_tests() -> None:
     _process_state_projection_repairs = 0
     _process_investigation_intent_enqueue_success = 0
     _process_investigation_intent_enqueue_failure = 0
+    _process_soft_time_limit_terminal = 0
+    _process_soft_time_limit_recovered = 0
+    _process_soft_time_limit_reconcile_required = 0
     _process_socketio_subscriber_failures = 0
     _process_socketio_subscriber_recoveries = 0
 
@@ -584,7 +646,9 @@ __all__ = [
     "record_checkpoint_loop_rebind",
     "record_force_close",
     "record_graph_failed_transition_noop",
-    "record_investigation_intent_enqueue",
+    "record_soft_time_limit_outcome",
+    "reset_soft_time_limit_metrics_for_tests",
+    "soft_time_limit_outcome_health_snapshot",
     "record_state_projection_failure",
     "record_state_projection_repair",
     "record_writeback",

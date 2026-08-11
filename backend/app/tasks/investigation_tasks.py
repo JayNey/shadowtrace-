@@ -569,6 +569,45 @@ async def _run_investigation_body(
     )
 
 
+async def _handle_soft_time_limit_exceeded(
+    event_id: str,
+    *,
+    resolved_owner: str,
+    intent_id: str | None,
+    broker_task_id: str,
+) -> None:
+    """Release lease and apply atomic soft-limit outcome (ISSUE-314)."""
+    try:
+        from app.api.v1.deps import get_event_lease
+
+        lease = get_event_lease()
+        await lease.release(event_id, resolved_owner)
+    except Exception:
+        logger.warning(
+            "run_investigation: best-effort lease release failed after soft limit "
+            "event=%s owner=%s",
+            event_id,
+            resolved_owner,
+            exc_info=True,
+        )
+
+    from app.api.v1.deps import _get_degraded_flags, _get_session_factory
+    from app.db.session import get_session_factory
+    from app.services.investigation_intent_service import InvestigationIntentService
+    from app.services.soft_time_limit_outcome import apply_soft_time_limit_outcome
+
+    session_factory = _get_session_factory()
+    intent_service = InvestigationIntentService(get_session_factory())
+    await apply_soft_time_limit_outcome(
+        event_id,
+        session_factory=session_factory,
+        intent_id=intent_id,
+        broker_task_id=broker_task_id,
+        intent_service=intent_service,
+        degraded_flags=_get_degraded_flags(),
+    )
+
+
 @celery_app.task(  # type: ignore[untyped-decorator]
     name=TASK_NAME,
     bind=True,
@@ -649,40 +688,14 @@ def run_investigation(
             _release_celery_task_loop_resources()
     except SoftTimeLimitExceeded:
         logger.warning("run_investigation soft time limit exceeded for event=%s", event_id)
-        try:
-            from app.api.v1.deps import get_event_lease
-
-            lease = get_event_lease()
-            asyncio.run(lease.release(event_id, resolved_owner))
-        except Exception:
-            logger.warning(
-                "run_investigation: best-effort lease release failed after soft limit "
-                "event=%s owner=%s",
+        asyncio.run(
+            _handle_soft_time_limit_exceeded(
                 event_id,
-                resolved_owner,
-                exc_info=True,
+                resolved_owner=resolved_owner,
+                intent_id=intent_id,
+                broker_task_id=task_id,
             )
-        try:
-            from app.orchestration.checkpointer import invalidate_event_checkpoint
-
-            asyncio.run(invalidate_event_checkpoint(event_id))
-        except Exception:
-            logger.warning(
-                "run_investigation: checkpoint fence advance failed after soft limit event=%s",
-                event_id,
-                exc_info=True,
-            )
-        if intent_id:
-            from app.db.session import get_session_factory
-            from app.services.investigation_intent_service import InvestigationIntentService
-
-            asyncio.run(
-                InvestigationIntentService(get_session_factory()).mark_dead(
-                    intent_id,
-                    error="soft_time_limit_exceeded",
-                    broker_task_id=task_id,
-                )
-            )
+        )
         raise
     except (RedeliveryLookupRetry, RedeliveryDeferRetry) as exc:
         _celery_redelivery_retry(self, exc, request_headers=request_headers)
@@ -996,40 +1009,14 @@ def run_analysis_only_investigation(
             _release_celery_task_loop_resources()
     except SoftTimeLimitExceeded:
         logger.warning("run_analysis_only soft time limit exceeded for event=%s", event_id)
-        try:
-            from app.api.v1.deps import get_event_lease
-
-            lease = get_event_lease()
-            asyncio.run(lease.release(event_id, resolved_owner))
-        except Exception:
-            logger.warning(
-                "run_analysis_only: best-effort lease release failed after "
-                "soft limit event=%s owner=%s",
+        asyncio.run(
+            _handle_soft_time_limit_exceeded(
                 event_id,
-                resolved_owner,
-                exc_info=True,
+                resolved_owner=resolved_owner,
+                intent_id=intent_id,
+                broker_task_id=task_id,
             )
-        try:
-            from app.orchestration.checkpointer import invalidate_event_checkpoint
-
-            asyncio.run(invalidate_event_checkpoint(event_id))
-        except Exception:
-            logger.warning(
-                "run_analysis_only: checkpoint fence advance failed after soft limit event=%s",
-                event_id,
-                exc_info=True,
-            )
-        if intent_id:
-            from app.db.session import get_session_factory
-            from app.services.investigation_intent_service import InvestigationIntentService
-
-            asyncio.run(
-                InvestigationIntentService(get_session_factory()).mark_dead(
-                    intent_id,
-                    error="soft_time_limit_exceeded",
-                    broker_task_id=task_id,
-                )
-            )
+        )
         raise
     except (RedeliveryLookupRetry, RedeliveryDeferRetry) as exc:
         _celery_redelivery_retry(self, exc, request_headers=request_headers)
