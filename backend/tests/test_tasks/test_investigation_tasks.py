@@ -1597,6 +1597,10 @@ def test_run_analysis_only_eager_executes_task(
     "status",
     [
         EventStatus.WAITING_APPROVAL,
+        EventStatus.TRIAGING,
+        EventStatus.COLLECTING_EVIDENCE,
+        EventStatus.ANALYZING,
+        EventStatus.SCORING,
         EventStatus.EXECUTING_RESPONSE,
         EventStatus.VERIFYING,
         EventStatus.REPLANNING,
@@ -1637,6 +1641,58 @@ async def test_execute_redelivery_resume_calls_checkpoint_resume_with_public_di(
     assert call_kwargs["get_super_agent"] is deps.get_super_agent
     assert call_kwargs["get_workflow_runtime"] is deps.get_workflow_runtime
     assert call_kwargs["degraded_flags"] is degraded_flags
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_soft_limit_does_not_mark_failed_before_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-314: analysis-only SoftTimeLimit must not write FAILED before task owner."""
+    import contextlib
+
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.api.v1 import deps
+
+    transitions: list[EventStatus] = []
+
+    class _SM:
+        async def transition(self, event_id: str, target: EventStatus, **kwargs: object) -> None:
+            transitions.append(target)
+
+    class _Lease:
+        async def start_renewal(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def release(self, event_id: str, owner_id: str) -> bool:
+            return True
+
+    class _Pipeline:
+        async def run(self, event_id: str, **kwargs: object) -> object:
+            raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(deps, "get_state_machine", AsyncMock(return_value=_SM()))
+    monkeypatch.setattr(deps, "get_event_lease", lambda: _Lease())
+    monkeypatch.setattr(deps, "get_pipeline", AsyncMock(return_value=_Pipeline()))
+    monkeypatch.setattr(deps, "_get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.evidence_projection.EvidenceProjection",
+        lambda *_a, **_k: object(),
+    )
+    monkeypatch.setattr(
+        "app.services.evidence_projection.bind_evidence_projection",
+        lambda *_a, **_k: contextlib.nullcontext(),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        await tasks.execute_analysis_only_investigation(
+            "evt-ao-soft",
+            generate_report=True,
+            owner_id="owner-ao",
+            lease_acquired=True,
+        )
+
+    assert transitions == []
 
 
 @pytest.mark.asyncio

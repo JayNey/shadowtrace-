@@ -721,6 +721,9 @@ class AnalysisOnlyPipeline:
                 )
             await self._persist_report_generated(event_id, True)
             return report
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: soft-limit must not look like report_generation_failed.
+            raise
         except Exception as exc:
             await self._mark_report_generation_failed(event_id, exc)
             raise

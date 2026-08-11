@@ -875,6 +875,9 @@ async def execute_analysis_only_investigation(
             "event_id": event_id,
             "reason": "investigation_lease_lost",
         }
+    except SoftTimeLimitExceeded:
+        # ISSUE-314: task/intent layer owns soft-limit terminal vs recovery.
+        raise
     except Exception as exc:
         logger.error(
             "AnalysisOnlyPipeline failed for event=%s: %s",
@@ -898,7 +901,15 @@ async def execute_analysis_only_investigation(
             with contextlib.suppress(asyncio.CancelledError):
                 await renewal_task
         if owns_lease:
-            await lease.release(event_id, owner_id)
+            try:
+                await lease.release(event_id, owner_id)
+            except Exception:
+                logger.warning(
+                    "analysis_only best-effort lease release failed event=%s owner=%s",
+                    event_id,
+                    owner_id,
+                    exc_info=True,
+                )
 
 
 async def dispatch_analysis_only_investigation(

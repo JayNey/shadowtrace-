@@ -38,9 +38,9 @@ _SOFT_LIMIT_REASON = "soft_time_limit_exceeded"
 _SOFT_LIMIT_OPERATOR = "InvestigationTask"
 
 # Pure investigation phases — safe for one bounded checkpoint resume (no execute replay).
-# REPORTING is intentionally excluded: dispatch resume set does not include it
-# (investigation_intent_service._EVENT_INVESTIGATION_RESUMABLE), so RECOVERED would
-# leave REPORTING + SKIPPED — a forbidden event/intent fork (ISSUE-314).
+# REPORTING is excluded: soft-limit there is TERMINAL/RECONCILE, not RECOVERED.
+# These statuses must stay aligned with celery_delivery.REDELIVERY_RESUME_STATUSES
+# so RECOVERED actually invokes graph resume (ISSUE-314).
 _PURE_INVESTIGATION_STATUSES = frozenset(
     {
         EventStatus.NEW.value,
@@ -59,11 +59,11 @@ _EVENT_TERMINAL_STATUSES = frozenset(
     }
 )
 
-# Successful / non-FAILED terminals — never rewrite to FAILED on late soft-limit.
+# True success terminal only — CLOSED has no outbound edges.
+# CONTAINED may still transition to REPORTING, so late soft-limit must reconcile.
 _EVENT_SUCCESS_TERMINAL_STATUSES = frozenset(
     {
         EventStatus.CLOSED.value,
-        EventStatus.CONTAINED.value,
     }
 )
 
@@ -199,12 +199,16 @@ def decide_soft_time_limit_outcome(
     max_attempts: int,
     has_intent: bool,
 ) -> SoftTimeLimitDecision:
-    # Late soft-limit after a successful terminal must not poison CLOSED/CONTAINED.
+    # Late soft-limit after CLOSED must not poison a finished event.
     if event_status in _EVENT_SUCCESS_TERMINAL_STATUSES:
         return SoftTimeLimitDecision.IGNORED
 
     if event_status == EventStatus.FAILED.value:
         return SoftTimeLimitDecision.TERMINAL
+
+    # CONTAINED still allows REPORTING; force explicit reconciliation.
+    if event_status == EventStatus.CONTAINED.value:
+        return SoftTimeLimitDecision.RECONCILE_REQUIRED
 
     if probe.unknown_outbox_count > 0 or any(
         signal.startswith("unknown_") for signal in probe.side_effect_signals
@@ -247,6 +251,20 @@ def _is_stale_broker_owner(
         return False
     current_broker = intent_row.broker_task_id
     return bool(current_broker) and str(current_broker) != str(broker_task_id)
+
+
+def _missing_broker_fence(
+    intent_row: orm.InvestigationIntent | None,
+    broker_task_id: str | None,
+) -> bool:
+    """Fail-closed when a non-terminal intent is mutated without a broker fence."""
+    if intent_row is None or broker_task_id is not None:
+        return False
+    try:
+        current = InvestigationIntentStatus(intent_row.status)
+    except ValueError:
+        return True
+    return current not in TERMINAL_INTENT_STATUSES
 
 
 def _mark_intent_dead_in_session(
@@ -377,7 +395,15 @@ async def apply_soft_time_limit_outcome(
 
             # ISSUE-314: stale/old broker owner must be a full no-op (no event
             # FAILED, no intent DEAD, no checkpoint invalidation, no dispatch).
-            if _is_stale_broker_owner(intent_row, broker_task_id):
+            # Missing broker id against a live intent is also fail-closed no-op.
+            if _missing_broker_fence(intent_row, broker_task_id):
+                logger.info(
+                    "soft time limit ignored missing broker fence intent=%s",
+                    intent_id,
+                )
+                decision = SoftTimeLimitDecision.IGNORED
+                ignore_reason = f"{_SOFT_LIMIT_REASON}:missing_broker"
+            elif _is_stale_broker_owner(intent_row, broker_task_id):
                 logger.info(
                     "soft time limit ignored stale broker intent=%s expected=%s got=%s",
                     intent_id,
@@ -402,7 +428,7 @@ async def apply_soft_time_limit_outcome(
                 recovered_applied = False
                 if decision is SoftTimeLimitDecision.IGNORED:
                     ignore_reason = f"{_SOFT_LIMIT_REASON}:already_terminal"
-                    # CLOSED/CONTAINED: never FAILED-rewrite; heal dangling intent.
+                    # CLOSED: never FAILED-rewrite; heal dangling intent.
                     if (
                         event_status in _EVENT_SUCCESS_TERMINAL_STATUSES
                         and intent_row is not None

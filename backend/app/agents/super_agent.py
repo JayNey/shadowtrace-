@@ -496,9 +496,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             raise
         except SoftTimeLimitExceeded as exc:
             # ISSUE-314: task/intent layer owns terminal vs bounded recovery.
+            # Do not publish agent_failed — outcome may still be RECOVERED.
             guard_reset_needed = False
-            if lifecycle_started:
-                await self._publish_agent_failed(lifecycle_input, str(exc))
             if self.audit_service is not None:
                 try:
                     await self.audit_service.log_transition(
@@ -541,7 +540,15 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             if guard_reset_needed:
                 self._reset_convergence_guard(event_id)
             if acquired and self.lease is not None:
-                await self.lease.release(event_id, resolved_owner)
+                try:
+                    await self.lease.release(event_id, resolved_owner)
+                except Exception:
+                    logger.warning(
+                        "SuperAgent: best-effort lease release failed event=%s owner=%s",
+                        event_id,
+                        resolved_owner,
+                        exc_info=True,
+                    )
 
     # ------------------------------------------------------------------ #
     # _run — BaseAgent template integration

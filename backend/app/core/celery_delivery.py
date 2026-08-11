@@ -39,8 +39,14 @@ REDELIVERY_ACK_TERMINAL_STATUSES: frozenset[EventStatus] = frozenset(
 REDELIVERY_TERMINAL_EVENT_STATUSES = REDELIVERY_ACK_TERMINAL_STATUSES
 
 # Intermediate / unfinished statuses that require durable handoff / checkpoint resume.
+# Pure investigation phases are included so ISSUE-314 soft-limit RECOVERED (and
+# broker redelivery mid-analysis) invoke graph resume instead of a cold restart.
 REDELIVERY_RESUME_STATUSES: frozenset[EventStatus] = frozenset(
     {
+        EventStatus.TRIAGING,
+        EventStatus.COLLECTING_EVIDENCE,
+        EventStatus.ANALYZING,
+        EventStatus.SCORING,
         EventStatus.WAITING_APPROVAL,
         EventStatus.EXECUTING_RESPONSE,
         EventStatus.VERIFYING,
