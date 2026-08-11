@@ -1210,7 +1210,7 @@ class MockXDRState:
                 "target_type": "",
                 "target": "",
                 "applied_status": "",
-                "provider_record_id": None,
+                "provider_record_id": "",
                 "observed_version": 0,
                 "provider_code": "effect_not_applied",
                 "provider_message": "provider-side entity effect not found",

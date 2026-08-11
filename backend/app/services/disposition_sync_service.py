@@ -26,6 +26,7 @@ from app.adapters.disposition.error_classification import (
 from app.adapters.registry import DispositionAdapterRegistry
 from app.core.config import get_settings
 from app.core.errors import (
+    DependencyUnavailableError,
     EventNotFoundError,
     GuardrailViolationError,
     ValidationError,
@@ -1395,11 +1396,7 @@ class DispositionSyncService:
                         command.intent_kind is DispositionIntentKind.ENTITY_ACTION_SUBMIT
                         and receipt.status is WritebackStatus.ACCEPTED
                     )
-        if (
-            receipt_job_projection is not None
-            and receipt.simulated
-            and not reconcile_entity_effect
-        ):
+        if receipt_job_projection is not None and receipt.simulated and not reconcile_entity_effect:
             await self._publish_mock_job_projection(receipt_job_projection)
         if reconcile_entity_effect:
             await self._reconcile_entity_effect_for_outbox(outbox_id)
@@ -1690,8 +1687,14 @@ class DispositionSyncService:
             )
         reconciled = 0
         for outbox_id in outbox_ids:
-            if await self._reconcile_entity_effect_for_outbox(outbox_id):
-                reconciled += 1
+            try:
+                if await self._reconcile_entity_effect_for_outbox(outbox_id):
+                    reconciled += 1
+            except Exception:
+                logger.exception(
+                    "entity effect reconcile skipped for durable retry outbox=%s",
+                    outbox_id,
+                )
         return reconciled
 
     async def _reconcile_entity_effect_for_outbox(self, outbox_id: str) -> bool:
@@ -1734,12 +1737,20 @@ class DispositionSyncService:
             adapter = self._resolve_adapter(outbox)
             action_id = action.action_id
             job_id = action.execution_job_id
-        completion = await self._maybe_complete_entity_effect(
-            action,
-            command,
-            receipt,
-            adapter,
-        )
+        try:
+            completion = await self._maybe_complete_entity_effect(
+                action,
+                command,
+                receipt,
+                adapter,
+            )
+        except DependencyUnavailableError as exc:
+            logger.warning(
+                "entity effect readback unavailable; will retry outbox=%s error=%s",
+                outbox_id,
+                type(exc).__name__,
+            )
+            return False
         if completion is None:
             return False
         if not completion.verified and completion.provider_code == "effect_not_applied":
@@ -1815,8 +1826,7 @@ class DispositionSyncService:
                         row.raw_result = sanitize_raw_result(raw_result)
         except Exception:
             logger.exception(
-                "entity effect projection deferred for durable retry "
-                "outbox=%s job=%s",
+                "entity effect projection deferred for durable retry outbox=%s job=%s",
                 outbox_id,
                 projection.job_id,
             )
@@ -1829,6 +1839,13 @@ class DispositionSyncService:
         command: DispositionCommand,
         completion: EntityEffectCompletion,
     ) -> None:
+        settings = get_settings()
+        if (
+            not settings.simulation_enabled
+            or settings.disposition_mode.strip().lower() != "mock_xdr"
+            or projection.provider_name != "mock_xdr"
+        ):
+            return
         from app.providers.tools.mock_provider import (
             get_mock_tool_provider,
             write_xdr_entity_effect_observation,
@@ -2027,9 +2044,8 @@ class DispositionSyncService:
             return None
         current = ExecutionJobStatus(row.status)
         if current in _TERMINAL_JOB_STATUSES:
-            if (
-                current is ExecutionJobStatus.SUCCESS
-                and bool((row.raw_result or {}).get("effect_projection_pending"))
+            if current is ExecutionJobStatus.SUCCESS and bool(
+                (row.raw_result or {}).get("effect_projection_pending")
             ):
                 targets = await load_target_results_for_job(
                     session,

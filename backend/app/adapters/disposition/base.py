@@ -110,8 +110,9 @@ class BaseDispositionAdapter(ABC):
         """Read provider-owned applied-state evidence for an entity effect (ISSUE-311).
 
         For ``ENTITY_ACTION_SUBMIT`` only. Must not promote the entity receipt
-        to ``CONFIRMED`` or mutate provider state; returns independent effect
-        evidence instead.
+        to ``CONFIRMED``. Mock adapters may finish deferred async provider jobs
+        before reading; the completion itself must still come from an
+        independent applied-state readback surface.
         Default: unsupported (returns None).
         """
         _ = (command, receipt)

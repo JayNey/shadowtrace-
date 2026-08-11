@@ -610,6 +610,44 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
         if not isinstance(provider_writeback_id, str) or not provider_writeback_id:
             provider_writeback_id = receipt.writeback_id
         client = await self._http()
+        completion = await self._get_entity_effect_completion(
+            client,
+            command=command,
+            receipt=receipt,
+            provider_writeback_id=provider_writeback_id,
+        )
+        if (
+            completion is not None
+            and not completion.verified
+            and completion.provider_code == "effect_not_applied"
+            and receipt.provider_job_id
+        ):
+            # Async mock dispositions apply only after the provider job reaches
+            # SUCCESS.  Finish that deferred apply via the control-plane
+            # endpoint, then re-read so ShadowTrace still consumes independent
+            # readback evidence rather than the apply response itself.
+            await self._complete_async_entity_effect(
+                client,
+                command=command,
+                receipt=receipt,
+                provider_writeback_id=provider_writeback_id,
+            )
+            completion = await self._get_entity_effect_completion(
+                client,
+                command=command,
+                receipt=receipt,
+                provider_writeback_id=provider_writeback_id,
+            )
+        return completion
+
+    async def _get_entity_effect_completion(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        command: DispositionCommand,
+        receipt: DispositionReceipt,
+        provider_writeback_id: str,
+    ) -> EntityEffectCompletion:
         try:
             resp = await client.get(
                 f"/mock-xdr/v1/entity-effects/{command.disposition_id}",
@@ -662,6 +700,42 @@ class MockXDRDispositionAdapter(BaseDispositionAdapter):
                 "provider_writeback_id": provider_writeback_id,
             }
         )
+
+    async def _complete_async_entity_effect(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        command: DispositionCommand,
+        receipt: DispositionReceipt,
+        provider_writeback_id: str,
+    ) -> None:
+        try:
+            resp = await client.post(
+                f"/mock-xdr/v1/entity-effects/{command.disposition_id}/complete",
+                headers=self._auth_headers(),
+                json={
+                    "writeback_id": receipt.writeback_id,
+                    "provider_writeback_id": provider_writeback_id,
+                    "action_id": command.action_id,
+                },
+            )
+        except httpx.HTTPError as exc:
+            raise DependencyUnavailableError(
+                "entity effect async completion transport failed",
+                details={
+                    "disposition_id": command.disposition_id,
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
+        if resp.status_code >= 500:
+            body = resp.json() if resp.content else {}
+            raise DependencyUnavailableError(
+                body.get("error_message", "entity effect async completion unavailable"),
+                details={
+                    "disposition_id": command.disposition_id,
+                    "status_code": resp.status_code,
+                },
+            )
 
     async def health_check(self) -> ConnectorStatus:
         # Health is a read endpoint; use write token (also grants read on Mock).

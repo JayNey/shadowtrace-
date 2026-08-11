@@ -53,7 +53,6 @@ from tests.integration.test_verify_agent_eds_integration import (
     _create_event,
     _deferred_action,
     _insert_action,
-    _insert_job,
     _seed_connector_and_source,
 )
 
@@ -432,9 +431,7 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
         assert immediate_row.status == ActionStatus.SUCCESS.value
         assert execution_job is not None
         assert execution_job.status == ExecutionJobStatus.SUCCESS.value
-        assert (execution_job.raw_result or {}).get("effect_completion", {}).get(
-            "verified"
-        ) is True
+        assert (execution_job.raw_result or {}).get("effect_completion", {}).get("verified") is True
         assert terminal_count == 1
         assert terminal_outbox is not None
         assert terminal_outbox.delivery_status == "delivered"

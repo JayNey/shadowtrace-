@@ -153,6 +153,38 @@ def test_unprojected_xdr_entity_effect_keeps_accepted_outbox_blocking(
     )
 
 
+async def _ensure_source_record(
+    session: AsyncSession,
+    *,
+    source_record_id: str,
+    object_suffix: str,
+) -> None:
+    connector_id = "conn-side-effect"
+    existing = await session.get(orm.SourceConnector, connector_id)
+    if existing is None:
+        session.add(
+            orm.SourceConnector(
+                connector_id=connector_id,
+                source_product="mock_xdr",
+                display_name="Mock XDR",
+            )
+        )
+        await session.flush()
+    if await session.get(orm.SourceObject, source_record_id) is None:
+        session.add(
+            orm.SourceObject(
+                source_record_id=source_record_id,
+                source_product="mock_xdr",
+                source_tenant_id="tenant-demo",
+                connector_id=connector_id,
+                source_kind="incident",
+                source_object_id=f"inc-{object_suffix}",
+                next_outbox_sequence=0,
+            )
+        )
+        await session.flush()
+
+
 async def _seed_not_required_closed_with_running_job(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> str:
@@ -175,12 +207,14 @@ async def _seed_not_required_closed_with_running_job(
                     final_verdict=FinalVerdict.FALSE_POSITIVE.value,
                     risk_score=10,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.NOT_REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -234,12 +268,14 @@ async def _seed_required_with_executing_action(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -358,12 +394,14 @@ async def _seed_superseded_outbox_not_gate_applicable(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -380,6 +418,11 @@ async def _seed_superseded_outbox_not_gate_applicable(
                     status=ActionStatus.SUCCESS.value,
                     superseded_by_revision=1,
                 )
+            )
+            await _ensure_source_record(
+                session,
+                source_record_id=f"src-{sfx}",
+                object_suffix=f"src-{sfx}".removeprefix("src-"),
             )
             session.add(
                 orm.DispositionOutbox(
@@ -423,8 +466,10 @@ async def test_superseded_revision_outbox_is_background_detached(
     assert summary.gate_applicable_outstanding_count == 0
     assert summary.background_outstanding_count == 1
     assert summary.outstanding_actions[0].scope is SideEffectScope.BACKGROUND_DETACHED
+    # Superseded revision is background-detached; PENDING writeback surfaces as
+    # not-confirmed before the undelivered delivery-status check.
     assert summary.outstanding_actions[0].blocking_reason is (
-        SideEffectConvergenceReason.OUTBOX_UNDELIVERED
+        SideEffectConvergenceReason.OUTBOX_NOT_CONFIRMED
     )
     assert check_gate_applicable_side_effect_convergence(summary) is None
 
@@ -451,12 +496,14 @@ async def _seed_required_with_running_job(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -510,12 +557,14 @@ async def _seed_required_with_undelivered_outbox(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -531,6 +580,11 @@ async def _seed_required_with_undelivered_outbox(
                     writeback_required=True,
                     status=ActionStatus.APPROVED.value,
                 )
+            )
+            await _ensure_source_record(
+                session,
+                source_record_id=f"src-{sfx}",
+                object_suffix=f"src-{sfx}".removeprefix("src-"),
             )
             session.add(
                 orm.DispositionOutbox(
@@ -577,12 +631,14 @@ async def _seed_required_multi_outbox_tail_blocks(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -598,6 +654,11 @@ async def _seed_required_multi_outbox_tail_blocks(
                     writeback_required=True,
                     status=ActionStatus.APPROVED.value,
                 )
+            )
+            await _ensure_source_record(
+                session,
+                source_record_id=f"src-head-{sfx}",
+                object_suffix=f"src-head-{sfx}".removeprefix("src-"),
             )
             session.add(
                 orm.DispositionOutbox(
@@ -619,6 +680,11 @@ async def _seed_required_multi_outbox_tail_blocks(
                     latest_writeback_status=WritebackStatus.CONFIRMED.value,
                     created_at=earlier,
                 )
+            )
+            await _ensure_source_record(
+                session,
+                source_record_id=f"src-tail-{sfx}",
+                object_suffix=f"src-tail-{sfx}".removeprefix("src-"),
             )
             session.add(
                 orm.DispositionOutbox(
@@ -666,12 +732,14 @@ async def _seed_executing_with_terminal_job(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -836,12 +904,14 @@ async def _seed_required_with_dead_letter_outbox(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -857,6 +927,11 @@ async def _seed_required_with_dead_letter_outbox(
                     writeback_required=True,
                     status=ActionStatus.SUCCESS.value,
                 )
+            )
+            await _ensure_source_record(
+                session,
+                source_record_id=f"src-{sfx}",
+                object_suffix=f"src-{sfx}".removeprefix("src-"),
             )
             session.add(
                 orm.DispositionOutbox(
@@ -903,12 +978,14 @@ async def _seed_required_rollback_with_running_job(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -1136,12 +1213,14 @@ async def _seed_unknown_with_running_job(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
@@ -1196,12 +1275,14 @@ async def _seed_required_with_system_running_job(
                     final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
                     risk_score=90,
                     entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
                     disposition_policy=DispositionPolicy.REQUIRED.value,
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
                 )
             )
+            await session.flush()
             session.add(
                 orm.Action(
                     action_id=action_id,
