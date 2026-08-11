@@ -332,11 +332,16 @@ async def evaluate_investigation_quality_scores(
     evaluator: OutputQualityEvaluator | None,
     event_context: Any,
 ) -> dict[str, OutputQualityScore]:
-    """Evaluate agent outputs at investigation completion; fail-soft (ISSUE-233).
+    """Evaluate agent outputs at investigation completion (ISSUE-233 / ISSUE-309).
 
     Persists ``quality_scores`` via the evaluator's bound WorkingMemory when
     configured. Updates ``EventContext.quality_scores`` in-place when an
     ``EventContext`` instance is supplied.
+
+    Default is fail-soft: per-agent eval errors become FAIL scores and set
+    ``output_quality_evaluator_unavailable`` without halting the pipeline.
+    When ``OUTPUT_QUALITY_BLOCKING=true``, raises
+    ``OutputQualityEvaluationBlockedError`` instead.
     """
     if evaluator is None:
         return {}

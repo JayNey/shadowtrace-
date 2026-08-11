@@ -236,6 +236,51 @@ def _high_quality_report() -> dict[str, Any]:
     }
 
 
+def _event_context_for_quality(
+    event_id: str = "evt-309",
+    *,
+    include_evidence: bool = False,
+    include_risk: bool = False,
+) -> Any:
+    from app.models.context import EventContext
+    from app.models.enums import (
+        DispositionPolicy,
+        EventStatus,
+        EventType,
+        FinalVerdict,
+        Severity,
+        WritebackReadiness,
+    )
+    from app.models.security_event import EventSummary
+
+    ec = EventContext(
+        event=EventSummary(
+            event_id=event_id,
+            title="Quality eval test",
+            event_type=EventType.DATA_EXFILTRATION,
+            severity=Severity.HIGH,
+            status=EventStatus.REPORTING,
+            final_verdict=FinalVerdict.NONE,
+            risk_score=0,
+            writeback_required=False,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            disposition_policy=DispositionPolicy.NOT_REQUIRED,
+        ),
+        triage_result=_high_quality_triage(),
+    )
+    if include_evidence:
+        ec.evidence_output = _high_quality_evidence()
+    if include_risk:
+        ec.risk_assessment = _high_quality_risk()
+    return ec
+
+
+def _metric_boom(
+    _agent_name: str, _output: dict[str, Any], _context: dict[str, Any]
+) -> dict[str, float]:
+    raise RuntimeError("metric computation exploded")
+
+
 # ====================================================================== #
 # Mock LLM Client
 # ====================================================================== #
@@ -550,7 +595,10 @@ class TestLLMJudge:
         assert len(llm.chat_calls) == 0
 
     async def test_llm_failure_falls_back_to_rule(self) -> None:
-        """LLM judge failure should not crash — fall back to rule score."""
+        """LLM judge failure should not crash — fall back to rule score.
+
+        Intentionally different from ISSUE-309 rule-metric eval_error path.
+        """
         llm = _FailingLLMClient()
         evaluator = OutputQualityEvaluator(llm_client=llm, judge_enabled=True)
         result = await evaluator.evaluate("triage", _high_quality_triage(), {"event_id": "evt-012"})
@@ -600,7 +648,7 @@ class TestEvaluateAll:
         def _boom(
             _agent_name: str, _output: dict[str, Any], _context: dict[str, Any]
         ) -> dict[str, float]:
-            raise RuntimeError("metric computation exploded")
+            return _metric_boom(_agent_name, _output, _context)
 
         monkeypatch.setattr(
             "app.services.output_quality_evaluator._compute_rule_metrics",
@@ -618,7 +666,9 @@ class TestEvaluateAll:
         assert set(results.keys()) == {"triage"}
         score = results["triage"]
         assert score.verdict == QualityVerdict.FAIL
+        assert score.verdict != QualityVerdict.PASS
         assert score.score == 0.0
+        assert score.score != 0.75
         assert score.metrics == {
             "completeness": 0.0,
             "grounding_ratio": 0.0,
@@ -640,40 +690,40 @@ class TestEvaluateAll:
     ) -> None:
         """Default blocking=false keeps investigation completion fail-soft."""
 
-        def _boom(
-            _agent_name: str, _output: dict[str, Any], _context: dict[str, Any]
-        ) -> dict[str, float]:
-            raise RuntimeError("metric computation exploded")
-
         monkeypatch.setattr(
             "app.services.output_quality_evaluator._compute_rule_metrics",
-            _boom,
+            _metric_boom,
         )
-        evaluator = OutputQualityEvaluator(blocking_enabled=False, judge_enabled=False)
-        from app.models.context import EventContext
-
-        ec = EventContext(triage_result=_high_quality_triage())
+        degraded = _MockDegradedFlags()
+        evaluator = OutputQualityEvaluator(
+            degraded_flags=degraded,
+            blocking_enabled=False,
+            judge_enabled=False,
+        )
+        ec = _event_context_for_quality("evt-309-soft")
         scores = await evaluate_investigation_quality_scores(evaluator, ec)
         assert scores["triage"].verdict == QualityVerdict.FAIL
+        assert len(ec.quality_scores) == 1
+        assert degraded.calls == [
+            {
+                "event_id": "evt-309-soft",
+                "flag_name": OUTPUT_QUALITY_EVALUATOR_UNAVAILABLE_FLAG,
+                "value": True,
+                "writer": "OutputQualityEvaluator",
+            }
+        ]
 
     async def test_eval_failure_blocks_when_configured(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """OUTPUT_QUALITY_BLOCKING=true raises to halt downstream nodes."""
 
-        def _boom(
-            _agent_name: str, _output: dict[str, Any], _context: dict[str, Any]
-        ) -> dict[str, float]:
-            raise RuntimeError("metric computation exploded")
-
         monkeypatch.setattr(
             "app.services.output_quality_evaluator._compute_rule_metrics",
-            _boom,
+            _metric_boom,
         )
         evaluator = OutputQualityEvaluator(blocking_enabled=True, judge_enabled=False)
-        from app.models.context import EventContext
-
-        ec = EventContext(triage_result=_high_quality_triage())
+        ec = _event_context_for_quality("evt-309-block")
         with pytest.raises(OutputQualityEvaluationBlockedError):
             await evaluate_investigation_quality_scores(evaluator, ec)
 
@@ -784,6 +834,13 @@ class TestBuildOutputQualityEvaluator:
         assert evaluator is not None
         assert evaluator._judge_enabled is False  # noqa: SLF001
 
+    def test_blocking_disabled_by_default(self) -> None:
+        from app.core.config import get_settings
+
+        assert get_settings().output_quality_blocking is False
+        evaluator = build_output_quality_evaluator(judge_enabled=False)
+        assert evaluator._blocking_enabled is False  # noqa: SLF001
+
 
 @pytest.mark.asyncio
 class TestEvaluateInvestigationQualityScores:
@@ -842,23 +899,59 @@ class TestEvaluateInvestigationQualityScores:
         assert scores == {}
         assert ec.quality_scores == []
 
-    async def test_fail_soft_on_evaluator_error(self) -> None:
-        class _BrokenEvaluator:
-            _blocking_enabled = False
-            eval_errors_encountered = False
+    async def test_fail_soft_on_evaluator_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        degraded = _MockDegradedFlags()
+        evaluator = OutputQualityEvaluator(
+            degraded_flags=degraded,
+            blocking_enabled=False,
+            judge_enabled=False,
+        )
 
-            async def evaluate_all(self, _ctx: dict[str, Any]) -> dict[str, OutputQualityScore]:
-                raise RuntimeError("evaluator exploded")
+        async def _explode(_ctx: dict[str, Any]) -> dict[str, OutputQualityScore]:
+            raise RuntimeError("evaluator exploded")
 
-            async def _persist_eval_degraded_flag(self, _ctx: dict[str, Any]) -> None:
-                return None
+        monkeypatch.setattr(evaluator, "evaluate_all", _explode)
 
-        from app.models.context import EventContext
-
-        ec = EventContext(triage_result=_high_quality_triage())
-        scores = await evaluate_investigation_quality_scores(_BrokenEvaluator(), ec)  # type: ignore[arg-type]
+        ec = _event_context_for_quality("evt-309-catastrophic")
+        scores = await evaluate_investigation_quality_scores(evaluator, ec)
         assert scores == {}
         assert ec.quality_scores == []
+        assert degraded.calls == [
+            {
+                "event_id": "evt-309-catastrophic",
+                "flag_name": OUTPUT_QUALITY_EVALUATOR_UNAVAILABLE_FLAG,
+                "value": True,
+                "writer": "OutputQualityEvaluator",
+            }
+        ]
+
+    async def test_eval_failure_sets_degraded_flag_via_event_context(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "app.services.output_quality_evaluator._compute_rule_metrics",
+            _metric_boom,
+        )
+        degraded = _MockDegradedFlags()
+        evaluator = OutputQualityEvaluator(
+            degraded_flags=degraded,
+            blocking_enabled=False,
+            judge_enabled=False,
+        )
+        ec = _event_context_for_quality("evt-309-context")
+
+        scores = await evaluate_investigation_quality_scores(evaluator, ec)
+
+        assert scores["triage"].verdict == QualityVerdict.FAIL
+        assert len(ec.quality_scores) == 1
+        assert degraded.calls == [
+            {
+                "event_id": "evt-309-context",
+                "flag_name": OUTPUT_QUALITY_EVALUATOR_UNAVAILABLE_FLAG,
+                "value": True,
+                "writer": "OutputQualityEvaluator",
+            }
+        ]
 
     async def test_blocking_on_evaluator_catastrophic_error(self) -> None:
         class _BrokenBlockingEvaluator:
@@ -937,3 +1030,61 @@ class TestAnalysisOnlyPipelineQualityWiring:
         assert len(stored) == 3
         EventContext.model_validate({"quality_scores": stored})
         context_store.set.assert_awaited_once_with(event_id, "analysis_only_complete", True)
+
+    async def test_persist_complete_survives_eval_failure_non_blocking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Non-blocking eval failure must not prevent analysis_only_complete."""
+        monkeypatch.setattr(
+            "app.services.output_quality_evaluator._compute_rule_metrics",
+            _metric_boom,
+        )
+        from app.models.context import EventContext
+        from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
+
+        event_id = "evt-309-pipeline-soft"
+        ec = _event_context_for_quality(
+            event_id,
+            include_evidence=True,
+            include_risk=True,
+        )
+        degraded = _MockDegradedFlags()
+        wm = _FakeWorkingMemory()
+        evaluator = build_output_quality_evaluator(
+            working_memory=wm,
+            degraded_flags=degraded,
+            judge_enabled=False,
+            blocking_enabled=False,
+        )
+
+        context_store = MagicMock()
+        context_store.get_full_context = AsyncMock(return_value=ec)
+        context_store.set = AsyncMock()
+
+        pipeline = AnalysisOnlyPipeline(
+            triage_agent=MagicMock(),
+            evidence_agent=MagicMock(),
+            rag_agent=MagicMock(),
+            risk_agent=MagicMock(),
+            report_agent=MagicMock(),
+            context_store=context_store,
+            output_quality_evaluator=evaluator,
+        )
+
+        await pipeline._persist_analysis_only_complete(event_id)
+
+        stored = await wm.read(event_id, "quality_scores")
+        assert stored is not None
+        assert isinstance(stored, list)
+        assert len(stored) == 3
+        assert all(entry["verdict"] == QualityVerdict.FAIL.value for entry in stored)
+        EventContext.model_validate({"quality_scores": stored})
+        context_store.set.assert_awaited_once_with(event_id, "analysis_only_complete", True)
+        assert degraded.calls == [
+            {
+                "event_id": event_id,
+                "flag_name": OUTPUT_QUALITY_EVALUATOR_UNAVAILABLE_FLAG,
+                "value": True,
+                "writer": "OutputQualityEvaluator",
+            }
+        ]
