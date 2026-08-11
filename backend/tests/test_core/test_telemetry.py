@@ -712,7 +712,11 @@ async def test_async_httpx_span_redacts_authorization(
 
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == f"Bearer {secret}"
-        return httpx.Response(200, request=request)
+        return httpx.Response(
+            200,
+            headers={"Set-Cookie": "async-session=abc123"},
+            request=request,
+        )
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as client:
@@ -734,3 +738,107 @@ async def test_async_httpx_span_redacts_authorization(
     attrs = dict(finished[0].attributes or {})
     assert secret not in str(attrs)
     assert _header_attr_value(attrs, "http.request.header.authorization") == [REDACTED]
+    assert _header_attr_value(attrs, "http.response.header.set_cookie") == [REDACTED]
+
+
+def test_setup_telemetry_registers_httpx_redaction_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_ENABLED", "true")
+    get_settings.cache_clear()
+    reset_telemetry_for_tests()
+
+    captured: dict[str, Any] = {}
+
+    class _FakeInstrumentor:
+        def instrument(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        "opentelemetry.instrumentation.httpx.HTTPXClientInstrumentor",
+        lambda: _FakeInstrumentor(),
+    )
+
+    setup_telemetry()
+
+    assert captured.get("request_hook") is _httpx_request_hook
+    assert captured.get("response_hook") is _httpx_response_hook
+    assert captured.get("async_request_hook") is _httpx_async_request_hook
+    assert captured.get("async_response_hook") is _httpx_async_response_hook
+
+
+def test_setup_telemetry_otel_disabled_skips_httpx_instrument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OTEL_ENABLED", "false")
+    get_settings.cache_clear()
+    reset_telemetry_for_tests()
+
+    instrument_called = False
+
+    class _FakeInstrumentor:
+        def instrument(self, **kwargs: Any) -> None:
+            del kwargs
+            nonlocal instrument_called
+            instrument_called = True
+
+    monkeypatch.setattr(
+        "opentelemetry.instrumentation.httpx.HTTPXClientInstrumentor",
+        lambda: _FakeInstrumentor(),
+    )
+
+    setup_telemetry()
+
+    assert instrument_called is False
+    assert is_telemetry_enabled() is False
+
+
+def test_httpx_span_redacts_request_cookie_header(
+    httpx_instrumentation: tuple[InMemorySpanExporter, TracerProvider],
+) -> None:
+    span_exporter, tracer_provider = httpx_instrumentation
+    cookie_value = "session=super-secret-cookie-value"
+    observed_cookie: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed_cookie.append(request.headers.get("Cookie", ""))
+        return httpx.Response(200, request=request)
+
+    transport = httpx.MockTransport(handler)
+    with httpx.Client(transport=transport) as client:
+        _instrument_httpx_client(client, tracer_provider)
+        response = client.get(
+            "https://example.com/disposition",
+            headers={"Cookie": cookie_value},
+        )
+    assert response.status_code == 200
+    assert observed_cookie == [cookie_value]
+
+    span_exporter.force_flush()
+    finished = span_exporter.get_finished_spans()
+    assert finished
+    attrs = dict(finished[0].attributes or {})
+    assert cookie_value not in str(attrs)
+    assert _header_attr_value(attrs, "http.request.header.cookie") == [REDACTED]
+
+
+def test_httpx_span_preserves_non_sensitive_request_headers(
+    httpx_instrumentation: tuple[InMemorySpanExporter, TracerProvider],
+) -> None:
+    span_exporter, tracer_provider = httpx_instrumentation
+    user_agent = "ShadowTrace-Test/1.0"
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, request=request))
+    with httpx.Client(transport=transport) as client:
+        _instrument_httpx_client(client, tracer_provider)
+        response = client.get(
+            "https://example.com/disposition",
+            headers={"User-Agent": user_agent},
+        )
+    assert response.status_code == 200
+
+    span_exporter.force_flush()
+    finished = span_exporter.get_finished_spans()
+    assert finished
+    attrs = dict(finished[0].attributes or {})
+    assert _header_attr_value(attrs, "http.request.header.user_agent") == [user_agent]
