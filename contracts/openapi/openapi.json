@@ -5466,6 +5466,24 @@
             "type": "boolean",
             "title": "External Unsynced",
             "default": false
+          },
+          "background_side_effects_pending": {
+            "type": "boolean",
+            "title": "Background Side Effects Pending",
+            "description": "True when detached/background response or rollback side effects are still outstanding. For REQUIRED events before CLOSED, prefer gate_applicable_outstanding_count. -1 counts mean degraded/unavailable.",
+            "default": false
+          },
+          "outstanding_side_effect_count": {
+            "type": "integer",
+            "title": "Outstanding Side Effect Count",
+            "description": "Total gate-applicable plus background detached outstanding side effects. -1 means the count could not be loaded (degraded).",
+            "default": 0
+          },
+          "gate_applicable_outstanding_count": {
+            "type": "integer",
+            "title": "Gate Applicable Outstanding Count",
+            "description": "Outstanding side effects on the current plan revision that block REQUIRED CLOSED when non-zero. -1 means degraded/unavailable.",
+            "default": 0
           }
         },
         "type": "object",
@@ -5586,6 +5604,24 @@
               }
             ],
             "title": "Phase Message"
+          },
+          "background_side_effects_pending": {
+            "type": "boolean",
+            "title": "Background Side Effects Pending",
+            "description": "True when detached/background response or rollback side effects are still outstanding. For REQUIRED events before CLOSED, prefer gate_applicable_outstanding_count. -1 counts mean degraded/unavailable.",
+            "default": false
+          },
+          "outstanding_side_effect_count": {
+            "type": "integer",
+            "title": "Outstanding Side Effect Count",
+            "description": "Total gate-applicable plus background detached outstanding side effects. -1 means the count could not be loaded (degraded).",
+            "default": 0
+          },
+          "gate_applicable_outstanding_count": {
+            "type": "integer",
+            "title": "Gate Applicable Outstanding Count",
+            "description": "Outstanding side effects on the current plan revision that block REQUIRED CLOSED when non-zero. -1 means degraded/unavailable.",
+            "default": 0
           }
         },
         "type": "object",
