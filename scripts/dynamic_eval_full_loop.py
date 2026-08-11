@@ -58,6 +58,14 @@ from strict_closed_acceptance import (  # noqa: E402
     list_all_event_actions,
     strict_assert_budget as _strict_assert_budget,
 )
+from dynamic_eval_diagnostics import (  # noqa: E402
+    collect_event_diagnostics,
+    format_eval_failure_message,
+)
+from dynamic_eval_profiles import (  # noqa: E402
+    profile_for_scenario,
+    scenario_requires_demo_baseline,
+)
 
 # Demo scenarios from bootstrap / ISSUE-088. Gold path uses one at a time by default.
 GOLD_SCENARIOS = (
@@ -98,6 +106,48 @@ _EVIDENCE_REQUIRED_STATUSES = frozenset(
 _EVIDENCE_OK_STATUSES = frozenset({"completed", "partial_done", "degraded"})
 # waiting_approval with zero selectable actions for this many polls → fail fast.
 _WAITING_STALL_POLLS = 5
+
+_ANALYSIS_ONLY_TERMINAL = frozenset({"closed", "contained", "reporting"})
+
+
+class EvalFailure(RuntimeError):
+    """Eval failure with structured diagnostics attached."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        event_id: str | None = None,
+        diagnostics: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.event_id = event_id
+        self.diagnostics = diagnostics or {}
+
+
+def _raise_eval_failure(
+    client: DynamicEvalClient,
+    *,
+    headline: str,
+    event_id: str,
+    status_trace: list[str] | None = None,
+    elapsed_s: float | None = None,
+) -> None:
+    diagnostics = collect_event_diagnostics(
+        client,
+        event_id,
+        status_trace=status_trace,
+        elapsed_s=elapsed_s,
+    )
+    raise EvalFailure(
+        format_eval_failure_message(
+            headline=headline,
+            event_id=event_id,
+            diagnostics=diagnostics,
+        ),
+        event_id=event_id,
+        diagnostics=diagnostics,
+    )
 
 
 def _compose_cmd() -> list[str]:
@@ -284,15 +334,16 @@ def assert_evidence_ok(event: dict[str, Any], *, event_id: str) -> str:
     return status
 
 
-def trigger_full_loop(
+def trigger_investigate(
     client: DynamicEvalClient,
     event_id: str,
     *,
+    include_response_execution: bool,
     generate_report: bool = True,
 ) -> dict[str, Any]:
-    """POST investigate with include_response_execution=true (gold path)."""
+    """POST investigate with explicit response/report flags."""
     body = {
-        "include_response_execution": True,
+        "include_response_execution": include_response_execution,
         "generate_report": generate_report,
         "force_replan": False,
     }
@@ -302,12 +353,42 @@ def trigger_full_loop(
             f"investigate {event_id} failed HTTP {resp.status}: {resp.data}"
         )
     data = resp.data if isinstance(resp.data, dict) else {}
-    if data.get("include_response_execution") is not True:
+    if data.get("include_response_execution") is not include_response_execution:
         raise DynamicEvalApiError(
-            "investigate response missing include_response_execution=true — "
-            f"got {data!r}"
+            "investigate response missing expected include_response_execution="
+            f"{include_response_execution} — got {data!r}"
         )
     return data
+
+
+def trigger_full_loop(
+    client: DynamicEvalClient,
+    event_id: str,
+    *,
+    generate_report: bool = True,
+) -> dict[str, Any]:
+    """POST investigate with include_response_execution=true (gold path)."""
+    return trigger_investigate(
+        client,
+        event_id,
+        include_response_execution=True,
+        generate_report=generate_report,
+    )
+
+
+def trigger_analysis_only(
+    client: DynamicEvalClient,
+    event_id: str,
+    *,
+    generate_report: bool = True,
+) -> dict[str, Any]:
+    """POST investigate without response execution (semantic gate path)."""
+    return trigger_investigate(
+        client,
+        event_id,
+        include_response_execution=False,
+        generate_report=generate_report,
+    )
 
 
 def event_outcome_ok(status: str, *, require_closed: bool = False) -> bool:
@@ -323,6 +404,152 @@ def _terminal_enough(status: str, *, require_closed: bool) -> bool:
     if require_closed:
         return status == "closed"
     return status in SUCCESSISH_EVENT_STATUSES
+
+
+def assert_fp_semantic_gate(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
+    """Analysis-only FP semantic gate: CLOSED + false_positive verdict."""
+    event = get_event(client, event_id)
+    status = str(event.get("status") or "")
+    verdict = str(event.get("final_verdict") or "")
+    if status != "closed":
+        raise EvalFailure(
+            f"FP semantic gate requires status=closed, got {status!r} "
+            f"(final_verdict={verdict!r})",
+            event_id=event_id,
+            diagnostics=collect_event_diagnostics(client, event_id),
+        )
+    if verdict != "false_positive":
+        raise EvalFailure(
+            f"FP semantic gate requires final_verdict=false_positive, got {verdict!r}",
+            event_id=event_id,
+            diagnostics=collect_event_diagnostics(client, event_id),
+        )
+    return {
+        "status": status,
+        "final_verdict": verdict,
+        "disposition_policy": event.get("disposition_policy"),
+    }
+
+
+def assert_domain_semantic_gate(client: DynamicEvalClient, event_id: str) -> dict[str, Any]:
+    """Analysis-only domain semantic gate: CLOSED without response pressure."""
+    event = get_event(client, event_id)
+    status = str(event.get("status") or "")
+    verdict = str(event.get("final_verdict") or "")
+    if status != "closed":
+        raise EvalFailure(
+            f"domain semantic gate requires status=closed, got {status!r} "
+            f"(final_verdict={verdict!r})",
+            event_id=event_id,
+            diagnostics=collect_event_diagnostics(client, event_id),
+        )
+    return {
+        "status": status,
+        "final_verdict": verdict,
+        "disposition_policy": event.get("disposition_policy"),
+    }
+
+
+def run_analysis_only_loop(
+    client: DynamicEvalClient,
+    *,
+    event_ids: list[str],
+    generate_report: bool,
+    poll_interval_s: float,
+    max_wait_s: float,
+    semantic_profile: str,
+) -> dict[str, Any]:
+    """Drive analysis-only investigate until semantic terminal acceptance."""
+    started = time.monotonic()
+    triggered: list[dict[str, Any]] = []
+    status_trace: dict[str, list[str]] = {eid: [] for eid in event_ids}
+    last_seen: dict[str, str | None] = {eid: None for eid in event_ids}
+    for event_id in event_ids:
+        inv = trigger_analysis_only(
+            client,
+            event_id,
+            generate_report=generate_report,
+        )
+        triggered.append({"event_id": event_id, "investigate": inv})
+        print(
+            f"[dynamic-eval] triggered analysis_only event_id={event_id} "
+            f"generate_report={generate_report}"
+        )
+
+    finals: dict[str, str] = {}
+    evidence_statuses: dict[str, str] = {}
+    semantic_assertions: dict[str, Any] = {}
+
+    while True:
+        elapsed = time.monotonic() - started
+        if elapsed > max_wait_s:
+            sample_id = event_ids[0]
+            _raise_eval_failure(
+                client,
+                headline=(
+                    f"analysis-only semantic gate exceeded max_wait_s={max_wait_s} "
+                    f"(elapsed={elapsed:.1f}s)"
+                ),
+                event_id=sample_id,
+                status_trace=status_trace.get(sample_id),
+                elapsed_s=elapsed,
+            )
+
+        all_done = True
+        for event_id in event_ids:
+            event = get_event(client, event_id)
+            status = str(event.get("status") or "")
+            finals[event_id] = status
+            if status != last_seen[event_id]:
+                status_trace[event_id].append(status)
+                last_seen[event_id] = status
+
+            if status == "failed":
+                _raise_eval_failure(
+                    client,
+                    headline=f"analysis-only semantic gate FAILED for {event_id}",
+                    event_id=event_id,
+                    status_trace=status_trace[event_id],
+                    elapsed_s=elapsed,
+                )
+
+            if status in _EVIDENCE_REQUIRED_STATUSES:
+                evidence_statuses[event_id] = assert_evidence_ok(
+                    event, event_id=event_id
+                )
+
+            if status not in _ANALYSIS_ONLY_TERMINAL:
+                all_done = False
+
+        if all_done:
+            break
+        time.sleep(poll_interval_s)
+
+    for event_id in event_ids:
+        if semantic_profile == "analysis_only_fp":
+            semantic_assertions[event_id] = assert_fp_semantic_gate(client, event_id)
+        elif semantic_profile == "analysis_only_domain":
+            semantic_assertions[event_id] = assert_domain_semantic_gate(client, event_id)
+        else:
+            raise EvalFailure(
+                f"unsupported analysis-only semantic profile: {semantic_profile!r}",
+                event_id=event_id,
+            )
+
+    return {
+        "triggered": triggered,
+        "decisions": {},
+        "final_statuses": finals,
+        "evidence_statuses": evidence_statuses,
+        "status_trace": status_trace,
+        "semantic_assertions": semantic_assertions,
+        "strict_assertions": None,
+        "profile": semantic_profile,
+        "elapsed_s": round(time.monotonic() - started, 2),
+        "approval_timeout_used": False,
+        "fixture": "seed_mock_xdr_and_ingest",
+        "include_response_execution": False,
+    }
 
 
 def run_gold_loop(
@@ -357,11 +584,18 @@ def run_gold_loop(
     while True:
         elapsed = time.monotonic() - started
         if elapsed > max_wait_s:
-            raise TimeoutError(
-                f"gold-path exceeded max_wait_s={max_wait_s} "
-                f"(elapsed={elapsed:.1f}s). finals={finals!r} "
-                "Do NOT raise APPROVAL_TIMEOUT to 'finish' the eval — "
-                "script approve/reject instead."
+            sample_id = next(iter(finals), event_ids[0])
+            _raise_eval_failure(
+                client,
+                headline=(
+                    f"gold-path exceeded max_wait_s={max_wait_s} "
+                    f"(elapsed={elapsed:.1f}s). finals={finals!r}. "
+                    "Do NOT raise APPROVAL_TIMEOUT to 'finish' the eval — "
+                    "script approve/reject instead."
+                ),
+                event_id=sample_id,
+                status_trace=status_trace.get(sample_id),
+                elapsed_s=elapsed,
             )
 
         all_done = True
@@ -374,10 +608,12 @@ def run_gold_loop(
                 last_seen[event_id] = status
 
             if status == "failed":
-                raise RuntimeError(
-                    f"gold-path FAILED for {event_id}. "
-                    "Check evidence/entities (must use seed_mock_xdr_and_ingest, "
-                    "not hand-crafted POST /events)."
+                _raise_eval_failure(
+                    client,
+                    headline=f"gold-path FAILED for {event_id}",
+                    event_id=event_id,
+                    status_trace=status_trace[event_id],
+                    elapsed_s=elapsed,
                 )
 
             if status in _EVIDENCE_REQUIRED_STATUSES:
@@ -547,12 +783,53 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "must succeed, and gate-applicable writeback actions must converge"
         ),
     )
+    parser.add_argument(
+        "--analysis-only",
+        action="store_true",
+        help=(
+            "ISSUE-313 semantic gate: investigate with include_response_execution=false "
+            "(FP/domain analysis-only acceptance)"
+        ),
+    )
+    parser.add_argument(
+        "--semantic-profile",
+        choices=("analysis_only_fp", "analysis_only_domain"),
+        default=None,
+        help="Semantic assertion profile when --analysis-only is set",
+    )
+    parser.add_argument(
+        "--skip-baseline-preflight",
+        action="store_true",
+        help="Skip tenant-demo change-window baseline preflight (not recommended)",
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
 
+def _preflight_change_window_baseline(client: DynamicEvalClient, *, scenario: str) -> None:
+    if not scenario_requires_demo_baseline(scenario):
+        return
+    health = client.get_json("/api/v1/health")
+    probe = (health or {}).get("change_window_baseline") or {}
+    status = str(probe.get("status") or "")
+    resolved_path = probe.get("resolved_path") or "(unknown)"
+    tenant_ids = probe.get("tenant_ids") or []
+    if status == "ready" and "tenant-demo" in tenant_ids:
+        return
+    reasons = probe.get("reasons") or []
+    detail = ", ".join(str(item) for item in reasons) if reasons else f"status={status!r}"
+    raise SystemExit(
+        "change-window baseline preflight failed for scenario="
+        f"{scenario!r}: resolved_path={resolved_path!r} ({detail}). "
+        "Set CHANGE_WINDOW_BASELINE_PATH or ensure data/organization/change_windows.json "
+        "is readable in the backend container."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+    if args.analysis_only and args.require_closed:
+        raise SystemExit("--analysis-only cannot be combined with --require-closed")
     if args.require_closed and not args.generate_report:
         raise SystemExit(
             "--require-closed requires report generation; omit --no-generate-report"
@@ -569,6 +846,20 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     client = DynamicEvalClient(base_url=args.base_url, token=args.token)
+
+    if not args.skip_baseline_preflight:
+        _preflight_change_window_baseline(client, scenario=str(args.scenario))
+
+    semantic_profile = args.semantic_profile
+    if args.analysis_only and semantic_profile is None:
+        profile = profile_for_scenario(str(args.scenario))
+        if profile.semantic.startswith("analysis_only_"):
+            semantic_profile = profile.semantic
+        else:
+            raise SystemExit(
+                f"--analysis-only requires a NOT_REQUIRED semantic profile; "
+                f"scenario={args.scenario!r} uses {profile.semantic!r}"
+            )
 
     # Health / playbook readiness (demo honesty).
     health = client.get_json("/api/v1/health")
@@ -630,33 +921,49 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         f"[dynamic-eval] gold path events={event_ids} "
-        f"(fixture=seed_mock_xdr_and_ingest, include_response_execution=true)"
+        f"(fixture=seed_mock_xdr_and_ingest, "
+        f"include_response_execution={not args.analysis_only})"
     )
-    if len(event_ids) > 2:
+    if len(event_ids) > 2 and not args.analysis_only:
         print(
             "[dynamic-eval] NOTE: compose worker uses celery -c 2; "
             f"{len(event_ids)} parallel investigations will queue (R2-017)."
         )
 
-    result = run_gold_loop(
-        client,
-        event_ids=event_ids,
-        decision=args.decision,
-        generate_report=bool(args.generate_report),
-        poll_interval_s=float(args.poll_interval_s),
-        max_wait_s=float(args.max_wait_s),
-        require_closed=bool(args.require_closed),
-    )
+    if args.analysis_only:
+        result = run_analysis_only_loop(
+            client,
+            event_ids=event_ids,
+            generate_report=bool(args.generate_report),
+            poll_interval_s=float(args.poll_interval_s),
+            max_wait_s=float(args.max_wait_s),
+            semantic_profile=str(semantic_profile),
+        )
+    else:
+        result = run_gold_loop(
+            client,
+            event_ids=event_ids,
+            decision=args.decision,
+            generate_report=bool(args.generate_report),
+            poll_interval_s=float(args.poll_interval_s),
+            max_wait_s=float(args.max_wait_s),
+            require_closed=bool(args.require_closed),
+        )
     result["seed_summary"] = seed_summary
     result["scenario"] = args.scenario
     result["event_ids"] = event_ids
     result["require_closed"] = bool(args.require_closed)
+    result["analysis_only"] = bool(args.analysis_only)
     result["notes"] = [
         "Gold fixture is seed_mock_xdr_and_ingest — not POST /events.",
         "Approvals were scripted — APPROVAL_TIMEOUT_MINUTES was not used to finish.",
         "Production APPROVAL_TIMEOUT_MINUTES default remains 30.",
         "EMBEDDING_MODE defaults to mock even when LLM_MODE is real (R2-014).",
     ]
+    if args.analysis_only:
+        result["notes"].append(
+            "ISSUE-313 analysis-only semantic gate — response chain is intentionally skipped."
+        )
     if args.require_closed:
         result["notes"].append(
             "Strict profile (ISSUE-301): reporting/contained/verifying are not success."
@@ -676,6 +983,9 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except EvalFailure as exc:
+        print(f"[dynamic-eval] ERROR: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     except (DynamicEvalApiError, RuntimeError, TimeoutError, ValueError) as exc:
         print(f"[dynamic-eval] ERROR: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

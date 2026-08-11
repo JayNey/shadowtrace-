@@ -228,6 +228,33 @@ Makefile 可选：`EVAL_MATRIX_FRESH_VOLUMES=0`（保留 volume）、`EVAL_MATRI
 
 Matrix 在容器内通过 `docker compose exec backend` 访问 `http://127.0.0.1:8000`，**不**探测或绑定 host port。
 
+### 场景 profile 与 FP baseline（ISSUE-313）
+
+`account_anomaly_fp` 的 post-evidence FP adjudication 依赖 `data/organization/change_windows.json`（默认 tenant-demo）。Compose 显式设置 `CHANGE_WINDOW_BASELINE_PATH=/app/data/organization/change_windows.json`；宿主 dev 留空时会向上查找仓库 `data/organization/...`。
+
+评测 preflight（FP 场景）在 baseline 不可读或非零退出，并打印实际解析路径（`/api/v1/health` → `change_window_baseline.resolved_path`）。
+
+**不要把 baseline 修复误解为 full-loop early close**：graph 中 `route_after_fp_adjudication` 在 full-loop 下仍继续；FP 短闭环属于 `include_response_execution=false` 的 analysis-only profile。
+
+推荐 matrix 合同（`--profile-by-scenario` / `EVAL_MATRIX_PROFILE_BY_SCENARIO=1`）：
+
+```bash
+python3 scripts/dynamic_eval_matrix.py \
+  --scenarios insider_data_exfiltration,account_anomaly_fp,suspicious_domain_access \
+  --fresh-volumes \
+  --profile-by-scenario
+
+make eval-full-loop-matrix EVAL_MATRIX_PROFILE_BY_SCENARIO=1
+```
+
+| 场景 | 语义门（必须通过） | 压力门（独立报告） |
+|------|-------------------|-------------------|
+| `insider_data_exfiltration` | full-loop strict CLOSED | 无 |
+| `account_anomaly_fp` | analysis-only **CLOSED + false_positive** | compat full-loop（失败不推翻语义门） |
+| `suspicious_domain_access` | analysis-only CLOSED | compat full-loop（两者均须通过） |
+
+失败输出包含 `event_id`、elapsed、`status_trace`、`degraded_flags`、最近 transition audit，而不再统一提示 “Check evidence/entities”。
+
 ---
 
 ## 可选组件

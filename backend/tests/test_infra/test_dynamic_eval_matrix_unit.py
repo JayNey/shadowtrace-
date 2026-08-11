@@ -116,7 +116,15 @@ def test_sanitize_error_text_redacts_password_key(matrix_mod) -> None:
 def test_parse_args_defaults_compat_profile(matrix_mod) -> None:
     args = matrix_mod.parse_args(["--scenarios", "insider_data_exfiltration"])
     assert args.require_closed is False
+    assert args.profile_by_scenario is False
     assert args.fresh_volumes is True
+
+
+def test_parse_args_profile_by_scenario(matrix_mod) -> None:
+    args = matrix_mod.parse_args(
+        ["--scenarios", "account_anomaly_fp", "--profile-by-scenario"]
+    )
+    assert args.profile_by_scenario is True
 
 
 def test_matrix_main_stops_after_first_scenario_failure(matrix_mod) -> None:
@@ -212,6 +220,7 @@ def test_run_scenario_finally_compose_down_with_volumes(matrix_mod, tmp_path: Pa
             seed=42,
             mock_xdr_url="http://mock-xdr:8100",
             require_closed=False,
+            profile_by_scenario=False,
             fresh_volumes=True,
             stack_timeout_s=10.0,
             max_wait_s=10.0,
@@ -251,6 +260,7 @@ def test_run_scenario_cleanup_failure_after_pass_raises(matrix_mod, tmp_path: Pa
                 seed=42,
                 mock_xdr_url="http://mock-xdr:8100",
                 require_closed=False,
+                profile_by_scenario=False,
                 fresh_volumes=True,
                 stack_timeout_s=10.0,
                 max_wait_s=10.0,
@@ -263,6 +273,45 @@ def test_run_scenario_cleanup_failure_after_pass_raises(matrix_mod, tmp_path: Pa
     )
     assert manifest["status"] == "passed_with_cleanup_error"
     assert "cleanup_error" in manifest
+
+
+def test_matrix_main_rejects_require_closed_with_profile_by_scenario(matrix_mod) -> None:
+    with pytest.raises(SystemExit, match="cannot be combined"):
+        matrix_mod.main(
+            [
+                "--scenarios",
+                "account_anomaly_fp",
+                "--require-closed",
+                "--profile-by-scenario",
+            ]
+        )
+
+
+def test_run_full_loop_via_exec_passes_analysis_only_flags(matrix_mod) -> None:
+    captured: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **kwargs):
+        captured.append(cmd)
+        return type("Proc", (), {"returncode": 0, "stdout": "{}", "stderr": ""})()
+
+    with patch.object(matrix_mod, "_run", side_effect=_fake_run):
+        matrix_mod._run_full_loop_via_exec(
+            "proj",
+            [matrix_mod._BASE_COMPOSE, matrix_mod._EVAL_COMPOSE],
+            event_ids=["evt-a"],
+            scenario="account_anomaly_fp",
+            token="bootstrap-token",
+            require_closed=False,
+            analysis_only=True,
+            semantic_profile="analysis_only_fp",
+            max_wait_s=10.0,
+            poll_interval_s=1.0,
+        )
+    cmd = captured[0]
+    assert "--analysis-only" in cmd
+    assert "--semantic-profile" in cmd
+    assert "analysis_only_fp" in cmd
+    assert "--require-closed" not in cmd
 
 
 def test_run_full_loop_via_exec_passes_explicit_event_ids(matrix_mod) -> None:
@@ -445,6 +494,7 @@ def test_run_scenario_records_cleanup_error_on_failure_path(
                 seed=42,
                 mock_xdr_url="http://mock-xdr:8100",
                 require_closed=False,
+                profile_by_scenario=False,
                 fresh_volumes=True,
                 stack_timeout_s=10.0,
                 max_wait_s=10.0,

@@ -433,6 +433,7 @@ def test_makefile_eval_full_loop_target() -> None:
     assert "dynamic_eval_matrix.py" in text
     assert "--seed-via-compose" in text
     assert "--fresh-volumes" in text
+    assert "EVAL_MATRIX_PROFILE_BY_SCENARIO" in text
     assert "BOOTSTRAP_GENERATE_REPORT" in text
 
 
@@ -441,8 +442,11 @@ def test_deployment_docs_gold_path_honesty() -> None:
     assert "ISSUE-256" in text
     assert "ISSUE-301" in text
     assert "ISSUE-304" in text
+    assert "ISSUE-313" in text
     assert "eval-full-loop" in text
     assert "eval-full-loop-matrix" in text
+    assert "profile-by-scenario" in text
+    assert "CHANGE_WINDOW_BASELINE_PATH" in text
     assert "make up-demo" in text
     assert "make smoke-demo" in text
     assert "smoke_event_terminal" in text or "SMOKE_TERMINAL_MODE" in text
@@ -461,6 +465,7 @@ def test_full_loop_documents_seed_fixture_not_post_events() -> None:
     assert "include_response_execution" in text
     assert "APPROVAL_TIMEOUT" in text
     assert "--require-closed" in text
+    assert "--analysis-only" in text
     assert "unwrap_event_detail" in text
 
 
@@ -477,6 +482,7 @@ def test_matrix_script_contains_isolation_keywords() -> None:
     assert "down" in text and "remove-orphans" in text
     assert "docker-compose.eval.yml" in text
     assert "--require-closed" in text
+    assert "--profile-by-scenario" in text
     assert "127.0.0.1:8000" in text
     assert "BooleanOptionalAction" in text or "default=True" in text
 

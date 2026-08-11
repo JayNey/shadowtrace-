@@ -145,6 +145,7 @@ eval-full-loop:
 EVAL_MATRIX_SCENARIOS ?= insider_data_exfiltration,account_anomaly_fp,suspicious_domain_access
 EVAL_MATRIX_ARTIFACT_DIR ?=
 EVAL_MATRIX_REQUIRE_CLOSED ?=
+EVAL_MATRIX_PROFILE_BY_SCENARIO ?=
 EVAL_MATRIX_FRESH_VOLUMES ?= 1
 # ISSUE-304 smoke terminal profiles (see scripts/smoke_event_terminal.py)
 SMOKE_TERMINAL_MODE ?=
@@ -158,7 +159,8 @@ eval-full-loop-matrix:
 		--scenarios "$(EVAL_MATRIX_SCENARIOS)" \
 		$(if $(filter 0,$(EVAL_MATRIX_FRESH_VOLUMES)),--no-fresh-volumes,--fresh-volumes) \
 		$(if $(EVAL_MATRIX_ARTIFACT_DIR),--artifact-dir "$(EVAL_MATRIX_ARTIFACT_DIR)",) \
-		$(if $(EVAL_MATRIX_REQUIRE_CLOSED),--require-closed,)
+		$(if $(EVAL_MATRIX_REQUIRE_CLOSED),--require-closed,) \
+		$(if $(EVAL_MATRIX_PROFILE_BY_SCENARIO),--profile-by-scenario,)
 
 # ---------------------------------------------------------------------------
 # Mock demo full stack (ISSUE-141 / #647): core + worker + scheduler + OTEL

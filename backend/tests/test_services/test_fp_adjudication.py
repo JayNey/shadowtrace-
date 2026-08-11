@@ -465,6 +465,8 @@ def test_verdict_resolver_honors_post_evidence_adjudication() -> None:
 
 
 def test_baseline_loader_indexes_tenants(tmp_path: Path) -> None:
+    from app.services.change_window_baseline_loader import load_change_window_baseline
+
     load_change_window_baseline.cache_clear()
     indexed = load_change_window_baseline(str(_baseline_file(tmp_path)))
     assert "tenant-demo" in indexed

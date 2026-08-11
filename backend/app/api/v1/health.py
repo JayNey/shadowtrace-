@@ -76,6 +76,13 @@ async def _check_playbook_resources(settings: Settings | None = None) -> dict[st
     return await check_playbook_resources(settings)
 
 
+async def _check_change_window_baseline(settings: Settings | None = None) -> dict[str, object]:
+    """Return sanitized org change-window baseline readiness (ISSUE-313)."""
+    from app.services.change_window_baseline_loader import probe_change_window_baseline
+
+    return probe_change_window_baseline(settings)
+
+
 async def _check_loaded_resources(settings: Settings | None = None) -> dict[str, object]:
     """Return sanitized retrieval resource readiness (ISSUE-138)."""
     from app.rag.resources import check_loaded_resources
@@ -132,6 +139,7 @@ async def health(
     llm_provider = await check_llm_provider(settings)
     loaded_resources = await _check_loaded_resources(settings)
     playbook_resources = await _check_playbook_resources(settings)
+    change_window_baseline = await _check_change_window_baseline(settings)
 
     # NOTE: capability values below are UNVERIFIED placeholders for the Mock
     # phase. Once real adapters land they must be replaced with actual
@@ -209,6 +217,8 @@ async def health(
     llm_ok = llm_provider.get("status") == "ok"
     loaded_ok = loaded_resources.get("status") == "ready"
     playbook_ok = playbook_resources.get("status") == "ready"
+    baseline_ok = change_window_baseline.get("status") == "ready"
+    baseline_required = bool(settings.change_window_baseline_required)
     # Production / PLAYBOOK_RELEASE_REQUIRE_ACTIVE / demo PLAYBOOK_REQUIRED gate
     # health only — investigation stack remains fail-soft (ISSUE-245 / #820).
     playbook_required = settings.app_env.strip().lower() == "production" or (
@@ -228,6 +238,8 @@ async def health(
     elif not loaded_ok:
         overall = "degraded"
     elif playbook_required and not playbook_ok:
+        overall = "degraded"
+    elif baseline_required and not baseline_ok:
         overall = "degraded"
     elif llm_required and not llm_ok:
         overall = "degraded"
@@ -254,6 +266,7 @@ async def health(
         or not embedding_ok
         or (llm_required and not llm_ok)
         or (playbook_required and not playbook_ok)
+        or (baseline_required and not baseline_ok)
     ):
         response.status_code = 503
 
@@ -268,6 +281,7 @@ async def health(
         "embedding_provider": embedding_provider,
         "loaded_resources": loaded_resources,
         "playbook_resources": playbook_resources,
+        "change_window_baseline": change_window_baseline,
         "llm": llm_provider,
         "celery": celery_health,
         "source_adapter": source_adapter,
