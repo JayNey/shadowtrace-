@@ -7,6 +7,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from functools import partial
 from typing import Any, Protocol, cast
 
+from celery.exceptions import SoftTimeLimitExceeded
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -419,6 +420,14 @@ async def _mark_graph_failed(
     event_id = str(state.get("event_id") or "")
     if not event_id:
         return
+    # ISSUE-314: SoftTimeLimit terminal ownership belongs to task/intent apply.
+    if isinstance(error, SoftTimeLimitExceeded):
+        logger.info(
+            "skip graph FAILED transition for SoftTimeLimitExceeded event=%s",
+            event_id,
+        )
+        record_graph_failed_transition_noop(reason="soft_time_limit")
+        return
     if _is_state_mismatch_validation(error):
         logger.warning(
             "skip graph FAILED transition for state mismatch event=%s",
@@ -483,6 +492,9 @@ def _wrap_node(
     async def wrapped(state: InvestigationState) -> InvestigationState:
         try:
             return await fn(state)
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: do not write EventStatus.FAILED; re-raise for task owner.
+            raise
         except Exception as exc:
             await _mark_graph_failed(services, state, exc)
             raise
@@ -2226,6 +2238,9 @@ def build_investigation_graph(
                     error_code="report_generation_failed",
                     details={"event_id": event_id},
                 )
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: soft-limit must not look like report_generation_failed.
+            raise
         except Exception:
             # ISSUE-242: never leave REPORTING with a silent missing row —
             # persist explicit failure markers before _wrap_node marks FAILED.

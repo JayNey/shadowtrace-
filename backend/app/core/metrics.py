@@ -47,6 +47,7 @@ _process_investigation_intent_enqueue_failure = 0
 _process_soft_time_limit_terminal = 0
 _process_soft_time_limit_recovered = 0
 _process_soft_time_limit_reconcile_required = 0
+_process_soft_time_limit_ignored = 0
 _process_socketio_subscriber_failures = 0
 _process_socketio_subscriber_recoveries = 0
 
@@ -436,12 +437,15 @@ def record_soft_time_limit_outcome(*, decision: str) -> None:
     global \
         _process_soft_time_limit_terminal, \
         _process_soft_time_limit_recovered, \
-        _process_soft_time_limit_reconcile_required
+        _process_soft_time_limit_reconcile_required, \
+        _process_soft_time_limit_ignored
     normalized = decision.strip().lower()
     if normalized == "recovered":
         _process_soft_time_limit_recovered += 1
     elif normalized == "reconcile_required":
         _process_soft_time_limit_reconcile_required += 1
+    elif normalized == "ignored":
+        _process_soft_time_limit_ignored += 1
     else:
         _process_soft_time_limit_terminal += 1
 
@@ -460,6 +464,7 @@ def soft_time_limit_outcome_health_snapshot() -> dict[str, int]:
         "soft_limit_terminal": _process_soft_time_limit_terminal,
         "soft_limit_recovered": _process_soft_time_limit_recovered,
         "soft_limit_reconcile_required": _process_soft_time_limit_reconcile_required,
+        "soft_limit_ignored": _process_soft_time_limit_ignored,
     }
 
 
@@ -468,10 +473,12 @@ def reset_soft_time_limit_metrics_for_tests() -> None:
     global \
         _process_soft_time_limit_terminal, \
         _process_soft_time_limit_recovered, \
-        _process_soft_time_limit_reconcile_required
+        _process_soft_time_limit_reconcile_required, \
+        _process_soft_time_limit_ignored
     _process_soft_time_limit_terminal = 0
     _process_soft_time_limit_recovered = 0
     _process_soft_time_limit_reconcile_required = 0
+    _process_soft_time_limit_ignored = 0
 
 
 def record_graph_failed_transition_noop(*, reason: str) -> None:
@@ -567,7 +574,8 @@ def reset_metrics_for_tests() -> None:
     global \
         _process_soft_time_limit_terminal, \
         _process_soft_time_limit_recovered, \
-        _process_soft_time_limit_reconcile_required
+        _process_soft_time_limit_reconcile_required, \
+        _process_soft_time_limit_ignored
     global _process_socketio_subscriber_failures, _process_socketio_subscriber_recoveries
     _meter = None
     _writeback_total = None
@@ -602,6 +610,7 @@ def reset_metrics_for_tests() -> None:
     _process_soft_time_limit_terminal = 0
     _process_soft_time_limit_recovered = 0
     _process_soft_time_limit_reconcile_required = 0
+    _process_soft_time_limit_ignored = 0
     _process_socketio_subscriber_failures = 0
     _process_socketio_subscriber_recoveries = 0
 
@@ -646,6 +655,7 @@ __all__ = [
     "record_checkpoint_loop_rebind",
     "record_force_close",
     "record_graph_failed_transition_noop",
+    "record_investigation_intent_enqueue",
     "record_soft_time_limit_outcome",
     "reset_soft_time_limit_metrics_for_tests",
     "soft_time_limit_outcome_health_snapshot",

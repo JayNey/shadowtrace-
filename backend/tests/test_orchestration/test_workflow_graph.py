@@ -2659,6 +2659,57 @@ async def test_mark_graph_failed_is_noop_for_terminal_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_graph_failed_skips_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.workflow_graph import _mark_graph_failed
+
+    noop_calls: list[str] = []
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph.record_graph_failed_transition_noop",
+        lambda *, reason: noop_calls.append(reason),
+    )
+
+    event_id = "evt-soft-limit-noop"
+    machine = FakeStateMachine(
+        status=EventStatus.ANALYZING,
+        statuses={event_id: EventStatus.ANALYZING},
+    )
+    services = {"state_machine": machine}
+    state = _base_state(event_id=event_id, event_status=EventStatus.ANALYZING.value)
+
+    await _mark_graph_failed(services, state, SoftTimeLimitExceeded())
+
+    assert machine.transitions == []
+    assert noop_calls == ["soft_time_limit"]
+
+
+@pytest.mark.asyncio
+async def test_wrap_node_soft_time_limit_does_not_mark_failed() -> None:
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.workflow_graph import _wrap_node
+
+    event_id = "evt-soft-wrap"
+    machine = FakeStateMachine(
+        status=EventStatus.ANALYZING,
+        statuses={event_id: EventStatus.ANALYZING},
+    )
+    services = {"state_machine": machine}
+
+    async def _boom(_state: dict[str, Any]) -> dict[str, Any]:
+        raise SoftTimeLimitExceeded()
+
+    wrapped = _wrap_node(services, _boom)
+    with pytest.raises(SoftTimeLimitExceeded):
+        await wrapped(_base_state(event_id=event_id, event_status=EventStatus.ANALYZING.value))
+
+    assert machine.transitions == []
+
+
+@pytest.mark.asyncio
 async def test_mark_graph_failed_skips_failed_self_loop() -> None:
     from app.orchestration.workflow_graph import _mark_graph_failed
 

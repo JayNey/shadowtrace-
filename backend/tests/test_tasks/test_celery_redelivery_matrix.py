@@ -605,6 +605,67 @@ async def test_real_redis_lease_acquire_conflict(redis_client: RedisClient) -> N
         await lease.release(event_id, second_owner)
 
 
+@pytest.mark.asyncio
+async def test_redelivery_matrix_soft_limit_old_owner_noop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-314: stale soft-limit owner must not mutate event/intent via task handler."""
+    from app.services.soft_time_limit_outcome import (
+        SoftTimeLimitDecision,
+        SoftTimeLimitOutcomeResult,
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_apply(event_id: str, **kwargs: Any) -> SoftTimeLimitOutcomeResult:
+        captured["event_id"] = event_id
+        captured.update(kwargs)
+        return SoftTimeLimitOutcomeResult(
+            decision=SoftTimeLimitDecision.IGNORED,
+            event_id=event_id,
+            intent_id=kwargs.get("intent_id"),
+            event_status="analyzing",
+            intent_status="started",
+            intent_error=None,
+            last_checkpoint_node=None,
+            reason="soft_time_limit_exceeded:stale_broker",
+        )
+
+    lease = AsyncMock()
+    monkeypatch.setattr(
+        "app.api.v1.deps.get_event_lease",
+        lambda: lease,
+    )
+    monkeypatch.setattr(
+        "app.api.v1.deps._get_session_factory",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.deps._get_degraded_flags",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "app.db.session.get_session_factory",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "app.services.soft_time_limit_outcome.apply_soft_time_limit_outcome",
+        _fake_apply,
+    )
+
+    await tasks._handle_soft_time_limit_exceeded(
+        "evt-soft-stale",
+        resolved_owner="celery-task-OLD",
+        intent_id="iin-soft-stale",
+        broker_task_id="task-OLD-OWNER",
+    )
+
+    lease.release.assert_awaited_once_with("evt-soft-stale", "celery-task-OLD")
+    assert captured["event_id"] == "evt-soft-stale"
+    assert captured["intent_id"] == "iin-soft-stale"
+    assert captured["broker_task_id"] == "task-OLD-OWNER"
+
+
 @pytest.mark.integration
 def test_run_investigation_non_eager_worker_forwards_generate_report(
     monkeypatch: pytest.MonkeyPatch,

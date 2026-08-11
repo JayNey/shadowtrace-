@@ -348,8 +348,8 @@ def format_soft_limit_failure_diagnostics(
     client: DynamicEvalClient,
     event_id: str,
 ) -> str:
-    """Summarize audit + status hints when eval hits FAILED (ISSUE-314)."""
-    parts: list[str] = []
+    """Summarize audit + intent + checkpoint hints when eval hits FAILED (ISSUE-314)."""
+    parts: list[str] = [f"event_id={event_id!r}"]
     try:
         audit = client.get_json(f"/api/v1/events/{event_id}/audit-logs?page=1&page_size=20")
         items = audit.get("items") if isinstance(audit, dict) else None
@@ -371,11 +371,43 @@ def format_soft_limit_failure_diagnostics(
         event = get_event(client, event_id)
         snap = event.get("event_context_snapshot")
         node_hint = None
+        checkpoint_hint = None
         if isinstance(snap, dict):
             trace = snap.get("node_trace")
             if isinstance(trace, list) and trace:
                 node_hint = str(trace[-1])
-        parts.append(f"event_status={event.get('status')!r} last_node={node_hint!r}")
+            for key in (
+                "last_checkpoint_node",
+                "checkpoint_node",
+                "graph_checkpoint_node",
+            ):
+                if snap.get(key) is not None:
+                    checkpoint_hint = str(snap.get(key))
+                    break
+        parts.append(
+            f"event_status={event.get('status')!r} last_node={node_hint!r} "
+            f"checkpoint_node={checkpoint_hint!r}"
+        )
+        try:
+            from dynamic_eval_diagnostics import _intent_summary
+
+            intent, intent_error = _intent_summary(
+                client,
+                event_id,
+                snapshot=snap if isinstance(snap, dict) else None,
+                detail={"event": event},
+            )
+            if intent is not None:
+                parts.append(
+                    "intent_id="
+                    f"{intent.get('intent_id')!r} intent_status={intent.get('status')!r}"
+                )
+            elif intent_error:
+                parts.append(f"intent_unavailable={intent_error!r}")
+            else:
+                parts.append("intent_status=None")
+        except Exception as exc:
+            parts.append(f"intent_unavailable={exc!r}")
     except Exception as exc:
         parts.append(f"event_unavailable={exc!r}")
     return "; ".join(parts) if parts else "no_soft_limit_correlation_found"
