@@ -172,6 +172,126 @@ def test_entity_job_raw_result_without_verification_blocks_effect_unverified() -
     assert policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
 
 
+def test_entity_failed_job_with_success_action_and_verified_effect_blocks_gate() -> None:
+    """Job FAILED must block even when Action SUCCESS + EFFECT VERIFIED (ISSUE-312)."""
+    action_id = "act-entity-failed-job"
+    action = orm.Action(
+        action_id=action_id,
+        status=ActionStatus.SUCCESS.value,
+        writeback_applicable=False,
+        writeback_required=True,
+        execution_owner="xdr_managed",
+    )
+    outbox = orm.DispositionOutbox(
+        action_id=action_id,
+        disposition_id="disp-entity-failed-job",
+        writeback_id="wbk-entity-failed-job",
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+        delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+        latest_writeback_status=WritebackStatus.ACCEPTED.value,
+    )
+    job = orm.ActionExecutionJob(
+        action_id=action_id,
+        status=ExecutionJobStatus.FAILED.value,
+    )
+
+    reason, policy = _action_side_effect_blocks_convergence(
+        action,
+        jobs_by_action={action_id: job},
+        active_outboxes=[outbox],
+        verification=_unit_verified_entity_result(action_id),
+    )
+    assert reason is SideEffectConvergenceReason.IN_FLIGHT_JOB
+    assert policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
+
+
+def test_entity_missing_job_with_success_action_and_verified_effect_blocks_gate() -> None:
+    """Missing job must not be substituted by Action SUCCESS for entity effects."""
+    action_id = "act-entity-missing-job"
+    action = orm.Action(
+        action_id=action_id,
+        status=ActionStatus.SUCCESS.value,
+        writeback_applicable=False,
+        writeback_required=True,
+        execution_owner="xdr_managed",
+    )
+    outbox = orm.DispositionOutbox(
+        action_id=action_id,
+        disposition_id="disp-entity-missing-job",
+        writeback_id="wbk-entity-missing-job",
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+        delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+        latest_writeback_status=WritebackStatus.ACCEPTED.value,
+    )
+
+    reason, policy = _action_side_effect_blocks_convergence(
+        action,
+        jobs_by_action={},
+        active_outboxes=[outbox],
+        verification=_unit_verified_entity_result(action_id),
+    )
+    assert reason is SideEffectConvergenceReason.IN_FLIGHT_JOB
+    assert policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
+
+
+def test_entity_xdr_heuristic_without_entity_outbox_blocks_gate() -> None:
+    """XDR_MANAGED + writeback_required with no entity outbox must fail closed."""
+    action_id = "act-entity-no-outbox"
+    action = orm.Action(
+        action_id=action_id,
+        status=ActionStatus.SUCCESS.value,
+        writeback_applicable=False,
+        writeback_required=True,
+        execution_owner="xdr_managed",
+    )
+    job = orm.ActionExecutionJob(
+        action_id=action_id,
+        status=ExecutionJobStatus.SUCCESS.value,
+    )
+
+    reason, policy = _action_side_effect_blocks_convergence(
+        action,
+        jobs_by_action={action_id: job},
+        active_outboxes=[],
+        verification=_unit_verified_entity_result(action_id),
+    )
+    assert reason is SideEffectConvergenceReason.OUTBOX_UNDELIVERED
+    assert policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
+
+
+def test_entity_unknown_delivery_status_blocks_gate() -> None:
+    """Corrupt/unknown outbox delivery_status must fail closed."""
+    action_id = "act-entity-bad-delivery"
+    action = orm.Action(
+        action_id=action_id,
+        status=ActionStatus.SUCCESS.value,
+        writeback_applicable=False,
+        writeback_required=True,
+        execution_owner="xdr_managed",
+    )
+    outbox = orm.DispositionOutbox(
+        action_id=action_id,
+        disposition_id="disp-entity-bad-delivery",
+        writeback_id="wbk-entity-bad-delivery",
+        intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+        delivery_status="not_a_real_delivery_status",
+        latest_writeback_status=WritebackStatus.ACCEPTED.value,
+    )
+    job = orm.ActionExecutionJob(
+        action_id=action_id,
+        status=ExecutionJobStatus.SUCCESS.value,
+    )
+
+    reason, policy = _action_side_effect_blocks_convergence(
+        action,
+        jobs_by_action={action_id: job},
+        active_outboxes=[outbox],
+        verification=_unit_verified_entity_result(action_id),
+    )
+    assert reason is SideEffectConvergenceReason.OUTBOX_UNDELIVERED
+    assert policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
+
+
 async def _ensure_source_record(
     session: AsyncSession,
     *,
@@ -1533,6 +1653,14 @@ async def test_entity_accepted_without_effect_proof_blocks_gate(
     view = summary.outstanding_actions[0]
     assert view.convergence_policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
     assert view.outbox_writeback_status is WritebackStatus.ACCEPTED
+    with pytest.raises(InvalidStateTransitionError, match="gate-applicable side effects"):
+        validate_closed_gate(
+            TransitionContext(
+                disposition_policy=DispositionPolicy.REQUIRED,
+                report_exists=True,
+                side_effect_convergence=summary,
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -1789,3 +1917,281 @@ async def test_required_entity_verified_and_terminal_confirmed_allows_close(
     assert check_gate_applicable_side_effect_convergence(summary) is None
     # Side-effect gate is clear; full CLOSED still needs writeback receipt views
     # (covered by test_state_machine / production full-loop).
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.usefixtures("clean_state")
+async def test_entity_verified_terminal_accepted_still_blocks_gate(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Contract matrix: entity VERIFIED + terminal ACCEPTED still blocks CLOSED."""
+    from app.models.action import TERMINAL_DISPOSITION_TOOL
+    from app.models.enums import DispositionIntentKind, ExecutionOwner
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    entity_id = f"act-ent-{sfx}"
+    terminal_id = f"act-term-{sfx}"
+    job_id = f"job-{sfx}"
+    now = datetime.now(UTC)
+    verification = _verification_with_verified_entity(entity_id)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="entity verified terminal accepted blocks",
+                    description="ISSUE-312 fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=90,
+                    entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                    event_context_snapshot={
+                        "verification_result": verification.model_dump(mode="json")
+                    },
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.Action(
+                    action_id=entity_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-ent-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="contain device",
+                    tool_name="contain_device",
+                    action_level="l2",
+                    execution_owner=ExecutionOwner.XDR_MANAGED.value,
+                    writeback_applicable=False,
+                    writeback_required=True,
+                    status=ActionStatus.SUCCESS.value,
+                    execution_job_id=job_id,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=terminal_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-term-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name=TERMINAL_DISPOSITION_TOOL,
+                    tool_name=TERMINAL_DISPOSITION_TOOL,
+                    action_level="l1",
+                    execution_owner=ExecutionOwner.XDR_MANAGED.value,
+                    execution_phase=ActionExecutionPhase.POST_VERIFY.value,
+                    writeback_applicable=True,
+                    writeback_required=True,
+                    status=ActionStatus.SUCCESS.value,
+                )
+            )
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=entity_id,
+                    provider_name="mock_xdr",
+                    idempotency_key=f"idem-{sfx}",
+                    status=ExecutionJobStatus.SUCCESS.value,
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await _ensure_source_record(
+                session,
+                source_record_id=f"src-{sfx}",
+                object_suffix=sfx,
+            )
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-ent-{sfx}",
+                    writeback_id=f"wbk-ent-{sfx}",
+                    disposition_id=f"disp-ent-{sfx}",
+                    action_id=entity_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=f"src-{sfx}",
+                    source_locator_hash="h" * 64,
+                    source_sequence=1,
+                    intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    logical_slot="entity_action",
+                    idempotency_key=f"idem-ent-{sfx}",
+                    command_payload={},
+                    command_payload_sha256="a" * 64,
+                    delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+                    latest_writeback_status=WritebackStatus.ACCEPTED.value,
+                )
+            )
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-term-{sfx}",
+                    writeback_id=f"wbk-term-{sfx}",
+                    disposition_id=f"disp-term-{sfx}",
+                    action_id=terminal_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=f"src-{sfx}",
+                    source_locator_hash="i" * 64,
+                    source_sequence=2,
+                    intent_kind=DispositionIntentKind.EVENT_STATUS_UPDATE.value,
+                    logical_slot="terminal",
+                    idempotency_key=f"idem-term-{sfx}",
+                    command_payload={},
+                    command_payload_sha256="b" * 64,
+                    delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+                    latest_writeback_status=WritebackStatus.ACCEPTED.value,
+                )
+            )
+
+    async with session_factory() as session:
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=1,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+
+    violation = check_gate_applicable_side_effect_convergence(summary)
+    assert violation is not None
+    assert violation.reason is SideEffectConvergenceReason.TERMINAL_WRITEBACK_UNCONFIRMED
+    assert violation.convergence_policy is SideEffectConvergencePolicy.TERMINAL_WRITEBACK
+    with pytest.raises(InvalidStateTransitionError, match="gate-applicable side effects"):
+        validate_closed_gate(
+            TransitionContext(
+                disposition_policy=DispositionPolicy.REQUIRED,
+                report_exists=True,
+                side_effect_convergence=summary,
+            )
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.usefixtures("clean_state")
+async def test_corrupt_journal_verification_does_not_fall_back_to_snapshot(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Corrupt journal verification_result must fail closed (no snapshot open)."""
+    from app.models.enums import DispositionIntentKind, ExecutionOwner
+    from app.services.side_effect_convergence import _load_verification_result
+
+    sfx = uuid4().hex[:8]
+    event_id = f"evt-{sfx}"
+    action_id = f"act-{sfx}"
+    job_id = f"job-{sfx}"
+    now = datetime.now(UTC)
+    good = _verification_with_verified_entity(action_id)
+
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="data_exfiltration",
+                    title="corrupt journal fixture",
+                    description="ISSUE-312 fixture",
+                    status=EventStatus.REPORTING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict=FinalVerdict.CONFIRMED_THREAT.value,
+                    risk_score=90,
+                    entities={},
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    disposition_policy=DispositionPolicy.REQUIRED.value,
+                    source_type="mock_xdr",
+                    occurred_at=now,
+                    row_version=1,
+                    event_context_snapshot={
+                        "verification_result": good.model_dump(mode="json")
+                    },
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.EventContextJournal(
+                    event_id=event_id,
+                    field_name="verification_result",
+                    version=1,
+                    value={"not": "a valid VerificationResult"},
+                    created_at=now,
+                )
+            )
+            session.add(
+                orm.Action(
+                    action_id=action_id,
+                    event_id=event_id,
+                    plan_revision=1,
+                    action_fingerprint=f"fp-{sfx}",
+                    action_category=ActionCategory.RESPONSE.value,
+                    action_name="contain device",
+                    tool_name="contain_device",
+                    action_level="l2",
+                    execution_owner=ExecutionOwner.XDR_MANAGED.value,
+                    writeback_applicable=False,
+                    writeback_required=True,
+                    status=ActionStatus.SUCCESS.value,
+                    execution_job_id=job_id,
+                )
+            )
+            session.add(
+                orm.ActionExecutionJob(
+                    job_id=job_id,
+                    event_id=event_id,
+                    action_id=action_id,
+                    provider_name="mock_xdr",
+                    idempotency_key=f"idem-{sfx}",
+                    status=ExecutionJobStatus.SUCCESS.value,
+                    attempt=1,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await _ensure_source_record(
+                session,
+                source_record_id=f"src-{sfx}",
+                object_suffix=sfx,
+            )
+            session.add(
+                orm.DispositionOutbox(
+                    outbox_id=f"obx-{sfx}",
+                    writeback_id=f"wbk-{sfx}",
+                    disposition_id=f"disp-{sfx}",
+                    action_id=action_id,
+                    event_id=event_id,
+                    closure_cycle=1,
+                    source_record_id=f"src-{sfx}",
+                    source_locator_hash="h" * 64,
+                    source_sequence=1,
+                    intent_kind=DispositionIntentKind.ENTITY_ACTION_SUBMIT.value,
+                    logical_slot="entity_action",
+                    idempotency_key=f"idem-outbox-{sfx}",
+                    command_payload={},
+                    command_payload_sha256="a" * 64,
+                    delivery_status=OutboxDeliveryStatus.DELIVERED.value,
+                    latest_writeback_status=WritebackStatus.ACCEPTED.value,
+                )
+            )
+
+    async with session_factory() as session:
+        loaded = await _load_verification_result(session, event_id)
+        assert loaded is None
+        summary = await build_side_effect_convergence_summary(
+            session,
+            event_id,
+            current_revision=1,
+            disposition_policy=DispositionPolicy.REQUIRED,
+        )
+
+    violation = check_gate_applicable_side_effect_convergence(summary)
+    assert violation is not None
+    assert violation.reason is SideEffectConvergenceReason.EFFECT_UNVERIFIED
+

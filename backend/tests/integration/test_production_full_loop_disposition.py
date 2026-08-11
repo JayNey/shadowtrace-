@@ -19,6 +19,7 @@ from app.db import models as orm
 from app.models.action import Action
 from app.models.agent_io import (
     CollectionStatus,
+    EffectStatus,
     EvidenceOutput,
     ResponsePlan,
     ResponsePlanGeneratedBy,
@@ -26,6 +27,7 @@ from app.models.agent_io import (
     ScoringMode,
     TriageResult,
     VerificationOverallStatus,
+    VerificationPhase,
 )
 from app.models.enums import (
     ActionCategory,
@@ -432,6 +434,26 @@ async def test_production_disposition_di_confirms_terminal_and_closes(
         assert execution_job is not None
         assert execution_job.status == ExecutionJobStatus.SUCCESS.value
         assert (execution_job.raw_result or {}).get("effect_completion", {}).get("verified") is True
+        verification_raw = await context_store.get(event_id, "verification_result")
+        assert verification_raw is not None
+        from app.models.agent_io import VerificationResult as _VerificationResult
+
+        verification_result = (
+            verification_raw
+            if isinstance(verification_raw, _VerificationResult)
+            else _VerificationResult.model_validate(verification_raw)
+        )
+        entity_effect_rows = [
+            item
+            for item in verification_result.results
+            if item.action_id == immediate_id
+            and item.verification_phase is VerificationPhase.EFFECT
+            and item.effect_status is EffectStatus.VERIFIED
+        ]
+        assert entity_effect_rows, (
+            "ISSUE-312: CLOSED gold path requires independent EFFECT/VERIFIED "
+            "in verification_result, not only job.raw_result.effect_completion"
+        )
         assert terminal_count == 1
         assert terminal_outbox is not None
         assert terminal_outbox.delivery_status == "delivered"

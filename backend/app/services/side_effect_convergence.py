@@ -70,14 +70,17 @@ _ENTITY_OUTBOX_FAILURE_STATUSES = frozenset(
 
 def raise_side_effect_convergence_error(violation: SideEffectConvergenceViolation) -> NoReturn:
     """Map a convergence violation to StateMachine InvalidStateTransitionError."""
+    details: dict[str, str] = {
+        "action_id": violation.action_id,
+        "reason": violation.reason.value,
+        "scope": violation.scope.value,
+    }
+    if violation.convergence_policy is not None:
+        details["convergence_policy"] = violation.convergence_policy.value
     raise InvalidStateTransitionError(
         "required CLOSED gate: gate-applicable side effects have not converged",
         target=EventStatus.CLOSED,
-        details={
-            "action_id": violation.action_id,
-            "reason": violation.reason.value,
-            "scope": violation.scope.value,
-        },
+        details=details,
         error_code="closed_side_effects_pending",
     )
 
@@ -162,7 +165,8 @@ def _outbox_blocks_terminal_writeback(
     try:
         delivery = OutboxDeliveryStatus(outbox.delivery_status)
     except ValueError:
-        delivery = None
+        # Unknown / corrupt delivery_status must fail closed for CLOSED.
+        return True, SideEffectConvergenceReason.OUTBOX_UNDELIVERED
     if delivery in _UNDELIVERED_OUTBOX_STATUSES:
         return True, SideEffectConvergenceReason.OUTBOX_UNDELIVERED
     return False, None
@@ -174,7 +178,8 @@ def _outbox_blocks_entity_effect(
     try:
         delivery = OutboxDeliveryStatus(outbox.delivery_status)
     except ValueError:
-        delivery = None
+        # Unknown / corrupt delivery_status must fail closed for CLOSED.
+        return True, SideEffectConvergenceReason.OUTBOX_UNDELIVERED
     if delivery in _UNDELIVERED_OUTBOX_STATUSES:
         return True, SideEffectConvergenceReason.OUTBOX_UNDELIVERED
 
@@ -293,7 +298,9 @@ async def _load_verification_result(
         try:
             return VerificationResult.model_validate(row)
         except Exception:
-            pass
+            # Journal present but unreadable: fail closed (do not fall open to
+            # a possibly stale snapshot that could falsely clear EFFECT gate).
+            return None
 
     event_row = await session.get(orm.SecurityEvent, event_id)
     if event_row is None or not isinstance(event_row.event_context_snapshot, dict):
@@ -332,10 +339,19 @@ def _action_side_effect_blocks_convergence(
         return SideEffectConvergenceReason.IN_FLIGHT_JOB, policy
 
     if policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT:
-        outbox_reason = _scan_outboxes_for_block(active_outboxes, policy=policy)
+        entity_outboxes = [
+            outbox
+            for outbox in active_outboxes
+            if outbox.intent_kind == DispositionIntentKind.ENTITY_ACTION_SUBMIT.value
+        ]
+        if not entity_outboxes:
+            # XDR heuristic without an entity submit outbox must not skip delivery.
+            return SideEffectConvergenceReason.OUTBOX_UNDELIVERED, policy
+        outbox_reason = _scan_outboxes_for_block(entity_outboxes, policy=policy)
         if outbox_reason is not None:
             return outbox_reason, policy
-        if not _job_terminal_success(job) and not _action_terminal_success(action_row):
+        # Job terminal SUCCESS is required; Action SUCCESS alone is insufficient.
+        if not _job_terminal_success(job):
             return SideEffectConvergenceReason.IN_FLIGHT_JOB, policy
         if not entity_effect_verified_for_action(verification, action_row.action_id):
             return SideEffectConvergenceReason.EFFECT_UNVERIFIED, policy
@@ -472,6 +488,7 @@ def check_gate_applicable_side_effect_convergence(
                 reason=view.blocking_reason,
                 action_id=view.action_id,
                 scope=view.scope,
+                convergence_policy=view.convergence_policy,
             )
     return None
 

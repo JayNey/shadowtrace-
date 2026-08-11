@@ -6,9 +6,10 @@ Convergence policy (required ``disposition_policy``):
   active outbox must be delivered with ``WritebackStatus.CONFIRMED`` and
   readback-verified evidence on the terminal disposition path.
 - ``INDEPENDENT_ENTITY_EFFECT`` (``entity_action_submit``,
-  ``writeback_applicable=false``): terminal execution job success plus an
-  independent provider effect observation ``EffectStatus.VERIFIED`` (VerifyAgent
-  phase ``effect``). Entity submit receipts may remain ``ACCEPTED``.
+  ``writeback_applicable=false``): terminal execution **job** success (Action
+  SUCCESS alone is not sufficient) plus an independent provider effect
+  observation ``EffectStatus.VERIFIED`` (VerifyAgent phase ``effect``). Entity
+  submit receipts may remain ``ACCEPTED``.
 - ``EXECUTION_JOB_ONLY`` (``writeback_applicable=false`` direct-tool paths without
   entity outbox): terminal job / action success; outbox receipts are not gate
   inputs.
@@ -89,3 +90,4 @@ class SideEffectConvergenceViolation(BaseModel):
     reason: SideEffectConvergenceReason
     action_id: str
     scope: SideEffectScope = SideEffectScope.GATE_APPLICABLE
+    convergence_policy: SideEffectConvergencePolicy | None = None

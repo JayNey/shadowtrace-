@@ -340,6 +340,7 @@ class SideEffectConvergenceResponseFields(TypedDict):
     background_side_effects_pending: bool
     outstanding_side_effect_count: int
     gate_applicable_outstanding_count: int
+    outstanding_side_effects: list[Any]
 
 
 def _build_event_close_response(
@@ -390,6 +391,7 @@ async def _load_side_effect_convergence_fields(
         "background_side_effects_pending": pending,
         "outstanding_side_effect_count": total,
         "gate_applicable_outstanding_count": summary.gate_applicable_outstanding_count,
+        "outstanding_side_effects": list(summary.outstanding_actions),
     }
 
 
@@ -412,6 +414,7 @@ async def _side_effect_fields_for_event(event: Any) -> SideEffectConvergenceResp
             "background_side_effects_pending": True,
             "outstanding_side_effect_count": -1,
             "gate_applicable_outstanding_count": -1,
+            "outstanding_side_effects": [],
         }
 
 
@@ -471,7 +474,15 @@ async def _validate_side_effect_convergence_gate(
                 "action_id": violation.action_id,
                 "reason": violation.reason.value,
                 "scope": violation.scope.value,
+                "convergence_policy": (
+                    violation.convergence_policy.value
+                    if violation.convergence_policy is not None
+                    else None
+                ),
                 "gate_applicable_outstanding_count": summary.gate_applicable_outstanding_count,
+                "outstanding_side_effects": [
+                    view.model_dump(mode="json") for view in summary.outstanding_actions
+                ],
             },
         )
 
@@ -894,6 +905,7 @@ async def get_event(
         background_side_effects_pending=side_effect_fields["background_side_effects_pending"],
         outstanding_side_effect_count=side_effect_fields["outstanding_side_effect_count"],
         gate_applicable_outstanding_count=side_effect_fields["gate_applicable_outstanding_count"],
+        outstanding_side_effects=side_effect_fields["outstanding_side_effects"],
         **_guidance_fields(event, get_settings()),
     )
 
