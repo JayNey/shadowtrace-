@@ -97,6 +97,30 @@ async def test_shared_helper_non_retryable_fails_immediately() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shared_helper_preserves_soft_time_limit() -> None:
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    attempts = 0
+
+    async def _call() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise SoftTimeLimitExceeded()
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        await transition_with_bounded_retry(
+            _call,
+            event_id="evt-soft",
+            target=EventStatus.FAILED,
+            max_retries=2,
+            backoff_seconds=0.0,
+            log_prefix="Test",
+        )
+
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_workflow_graph_transition_status_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

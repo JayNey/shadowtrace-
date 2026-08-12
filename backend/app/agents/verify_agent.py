@@ -27,6 +27,8 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import InternalError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.base import BaseAgent
 from app.agents.rules.verification_mapping import (
     VERIFICATION_MAPPING,
@@ -783,6 +785,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                     verification_action,
                     target_status=ActionStatus.UNKNOWN,
                 )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             logger.warning(
                 "Verification tool %s failed for action %s: %s",
@@ -1025,6 +1029,8 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                         activate_result.writeback_id,
                         event_id,
                     )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 logger.error(
                     "Phase 2 activation exception event=%s: %s",

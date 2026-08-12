@@ -11,6 +11,8 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.core.config import get_settings
 from app.core.errors import EventNotFoundError, InvalidStateTransitionError, ValidationError
 from app.core.event_bus import EventBus
@@ -245,6 +247,10 @@ class ActionExecutionService:
         for action in immediate:
             try:
                 await self.execute_action(action.action_id, operator=operator)
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: task/intent owns soft-limit terminal outcome; do not
+                # continue sibling actions or outbox writeback after soft-limit.
+                raise
             except Exception:
                 logger.exception(
                     "execute_plan action failed event=%s action=%s",
@@ -272,6 +278,9 @@ class ActionExecutionService:
                     "action missing execution_owner",
                     details={"action_id": action_id},
                 )
+        except SoftTimeLimitExceeded:
+            # Preserve ambiguous/in-flight action state for the task owner.
+            raise
         except Exception:
             await self._fail_executing_action(action_id)
             raise

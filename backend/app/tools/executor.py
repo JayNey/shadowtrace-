@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
+from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import ValidationError
 
 from app.core.errors import BudgetExceededError, is_retryable
@@ -436,6 +437,10 @@ class ToolExecutor:
                     raise
 
                 except BudgetExceededError:
+                    raise
+
+                except SoftTimeLimitExceeded:
+                    # ISSUE-314: never convert soft-limit into FAILED/UNKNOWN ToolResult.
                     raise
 
                 except Exception as exc:

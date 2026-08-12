@@ -11,6 +11,8 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.core.errors import InvalidStateTransitionError, ShadowTraceError, is_retryable
 from app.models.enums import EventStatus
 
@@ -46,6 +48,9 @@ async def transition_with_bounded_retry(
                 target.value,
                 exc_info=True,
             )
+            raise
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: preserve type for Celery task/intent soft-limit owner.
             raise
         except Exception as exc:
             if not is_retryable(exc):

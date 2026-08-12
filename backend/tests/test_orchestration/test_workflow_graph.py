@@ -37,6 +37,7 @@ from app.models.agent_io import (
     VerificationResult,
 )
 from app.models.context import EventContext
+from app.models.security_event import EventSummary
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -2875,3 +2876,61 @@ async def test_mark_graph_failed_skips_on_state_mismatch_validation_error(
 
     assert machine.transitions == []
     assert noop_calls == ["state_mismatch"]
+
+
+@pytest.mark.asyncio
+async def test_planner_revise_soft_limit_not_fresh_plan() -> None:
+    """ISSUE-314: SoftTimeLimit in planner.revise must not fall back to fresh plan."""
+    from celery.exceptions import SoftTimeLimitExceeded
+    from app.orchestration.workflow_graph import planner_node
+
+    class SoftPlanner:
+        async def revise(self, *_a: Any, **_k: Any) -> Any:
+            raise SoftTimeLimitExceeded()
+
+        async def execute(self, *_a: Any, **_k: Any) -> Any:
+            raise AssertionError("fresh plan must not run after soft-limit")
+
+        async def plan_disposition_only(self, *_a: Any, **_k: Any) -> Any:
+            raise AssertionError("disposition-only must not run")
+
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        decision_summary="soft-limit replan",
+    )
+    plan = ExecutionPlan(
+        plan_id="pln-soft-replan",
+        event_id="evt-soft-replan",
+        steps=[
+            PlanStep(
+                step_order=1,
+                step_goal="risk",
+                assigned_agent="risk_agent",
+                required_tools=[],
+                success_criteria="ok",
+            )
+        ],
+        budget=PlanBudget(max_tool_calls=10),
+        revision=0,
+    )
+    event_context = EventContext(
+        event=EventSummary(
+            event_id="evt-soft-replan",
+            event_type=EventType.MALICIOUS_PROCESS,
+            title="soft replan",
+            status=EventStatus.ANALYZING,
+            severity=Severity.MEDIUM,
+            risk_score=0,
+            final_verdict=FinalVerdict.NONE,
+            writeback_required=False,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            disposition_policy=DispositionPolicy.NOT_REQUIRED,
+        ),
+        triage_result=triage.model_dump(mode="json"),
+        execution_plan=plan.model_dump(mode="json"),
+        replan_count=1,
+    )
+    with pytest.raises(SoftTimeLimitExceeded):
+        await planner_node(event_context, SoftPlanner())  # type: ignore[arg-type]

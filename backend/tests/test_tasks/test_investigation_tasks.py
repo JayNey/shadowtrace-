@@ -1810,3 +1810,49 @@ async def test_schedule_investigation_analysis_only_celery_routes_to_dispatch(
     )
     assert task_id == "task-analysis-only-schedule"
     assert captured == {"scheduled": True}
+
+
+@pytest.mark.asyncio
+async def test_soft_limit_handler_applies_before_lease_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-314: durable soft-limit outcome must commit before lease.release."""
+    order: list[str] = []
+
+    class _Lease:
+        async def release(self, event_id: str, owner_id: str) -> bool:
+            order.append(f"release:{event_id}:{owner_id}")
+            return True
+
+    async def _apply(*_a, **_k):
+        order.append("apply")
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
+    monkeypatch.setattr(
+        "app.api.v1.deps._get_session_factory",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.deps._get_degraded_flags",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "app.db.session.get_session_factory",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda *_a, **_k: object(),
+    )
+    monkeypatch.setattr(
+        "app.services.soft_time_limit_outcome.apply_soft_time_limit_outcome",
+        _apply,
+    )
+
+    await tasks._handle_soft_time_limit_exceeded(
+        "evt-order",
+        resolved_owner="owner-1",
+        intent_id="iin-1",
+        broker_task_id="task-1",
+    )
+    assert order == ["apply", "release:evt-order:owner-1"]

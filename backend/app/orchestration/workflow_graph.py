@@ -2548,6 +2548,8 @@ async def planner_node(
                     failure_reason=(f"replan triggered (count={event_context.replan_count})"),
                     previous_plan=previous_plan,
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 logger.warning(
                     "planner_node: failed to parse existing plan for revision, "

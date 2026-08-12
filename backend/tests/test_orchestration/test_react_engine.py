@@ -915,3 +915,19 @@ async def test_readonly_react_executor_rejects_plain_executor_when_grant_require
 
     with pytest.raises(ReActActionDenied, match="BoundToolExecutor"):
         await executor.execute(action)
+
+
+@pytest.mark.asyncio
+async def test_react_engine_soft_limit_reraises_from_action() -> None:
+    """ISSUE-314: SoftTimeLimit from action executor must not become error observation."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    class SoftExecutor:
+        async def execute(self, action: ReActAction) -> dict[str, Any]:
+            raise SoftTimeLimitExceeded()
+
+    llm = ScriptedLLM()
+    llm.think_queue.append(think_tool("query_threat_intel", {"domain": "example.com"}))
+    engine = ReActEngine(llm)  # type: ignore[arg-type]
+    with pytest.raises(SoftTimeLimitExceeded):
+        await engine.run(GOAL, MAIN_CONTEXT, SoftExecutor())  # type: ignore[arg-type]

@@ -576,36 +576,37 @@ async def _handle_soft_time_limit_exceeded(
     intent_id: str | None,
     broker_task_id: str,
 ) -> None:
-    """Release lease and apply atomic soft-limit outcome (ISSUE-314)."""
-    try:
-        from app.api.v1.deps import get_event_lease
-
-        lease = get_event_lease()
-        await lease.release(event_id, resolved_owner)
-    except Exception:
-        logger.warning(
-            "run_investigation: best-effort lease release failed after soft limit "
-            "event=%s owner=%s",
-            event_id,
-            resolved_owner,
-            exc_info=True,
-        )
-
-    from app.api.v1.deps import _get_degraded_flags, _get_session_factory
+    """Apply atomic soft-limit outcome while still holding lease, then release."""
+    from app.api.v1.deps import _get_degraded_flags, _get_session_factory, get_event_lease
     from app.db.session import get_session_factory
     from app.services.investigation_intent_service import InvestigationIntentService
     from app.services.soft_time_limit_outcome import apply_soft_time_limit_outcome
 
     session_factory = _get_session_factory()
     intent_service = InvestigationIntentService(get_session_factory())
-    await apply_soft_time_limit_outcome(
-        event_id,
-        session_factory=session_factory,
-        intent_id=intent_id,
-        broker_task_id=broker_task_id,
-        intent_service=intent_service,
-        degraded_flags=_get_degraded_flags(),
-    )
+    try:
+        await apply_soft_time_limit_outcome(
+            event_id,
+            session_factory=session_factory,
+            intent_id=intent_id,
+            broker_task_id=broker_task_id,
+            intent_service=intent_service,
+            degraded_flags=_get_degraded_flags(),
+        )
+    finally:
+        # Release only after durable outcome commit so a concurrent delivery cannot
+        # rotate broker ownership and force this soft-limit into a stale no-op.
+        try:
+            lease = get_event_lease()
+            await lease.release(event_id, resolved_owner)
+        except Exception:
+            logger.warning(
+                "run_investigation: best-effort lease release failed after soft limit "
+                "event=%s owner=%s",
+                event_id,
+                resolved_owner,
+                exc_info=True,
+            )
 
 
 @celery_app.task(  # type: ignore[untyped-decorator]
@@ -817,6 +818,7 @@ async def execute_analysis_only_investigation(
     renewal_failed: asyncio.Event | None = None
     renewal_task: asyncio.Task[None] | None = None
     owns_lease = bool(lease_acquired)
+    soft_limited = False
     try:
         if not lease_acquired:
             acquired = await lease.acquire(event_id, owner_id)
@@ -877,6 +879,9 @@ async def execute_analysis_only_investigation(
         }
     except SoftTimeLimitExceeded:
         # ISSUE-314: task/intent layer owns soft-limit terminal vs recovery.
+        # Defer lease release to `_handle_soft_time_limit_exceeded` so outcome
+        # is applied before another delivery can reclaim the lease.
+        soft_limited = True
         raise
     except Exception as exc:
         logger.error(
@@ -900,7 +905,7 @@ async def execute_analysis_only_investigation(
             renewal_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await renewal_task
-        if owns_lease:
+        if owns_lease and not soft_limited:
             try:
                 await lease.release(event_id, owner_id)
             except Exception:

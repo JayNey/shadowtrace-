@@ -209,11 +209,7 @@ def decide_soft_time_limit_outcome(
     if event_status == EventStatus.FAILED.value:
         return SoftTimeLimitDecision.TERMINAL
 
-    # CONTAINED is not a success terminal (still may → REPORTING). Soft-limit
-    # must TERMINAL (FAILED+DEAD) so we never leave non-terminal event + DEAD intent.
-    if event_status == EventStatus.CONTAINED.value:
-        return SoftTimeLimitDecision.TERMINAL
-
+    # Ambiguous side effects / UNKNOWN outbox always win over CONTAINED terminal.
     if probe.unknown_outbox_count > 0 or any(
         signal.startswith("unknown_") for signal in probe.side_effect_signals
     ):
@@ -221,6 +217,11 @@ def decide_soft_time_limit_outcome(
 
     if event_status in _SIDE_EFFECT_PHASE_STATUSES or probe.side_effect_signals:
         return SoftTimeLimitDecision.RECONCILE_REQUIRED
+
+    # CONTAINED is not a success terminal (still may → REPORTING). Soft-limit
+    # must TERMINAL (FAILED+DEAD) so we never leave non-terminal event + DEAD intent.
+    if event_status == EventStatus.CONTAINED.value:
+        return SoftTimeLimitDecision.TERMINAL
 
     next_attempt = int(intent_attempt or 0) + 1 if has_intent else max_attempts
     if (
@@ -239,36 +240,32 @@ def _is_stale_broker_owner(
     intent_row: orm.InvestigationIntent | None,
     broker_task_id: str | None,
 ) -> bool:
-    """True when the caller no longer owns the intent broker id.
+    """True when the caller no longer owns the durable intent broker id.
 
-    Applies to any non-terminal intent status (STARTED/RETRY/ENQUEUED/CLAIMED/…);
-    after RECOVERED the broker id rotates, so a late soft-limit from the old
-    delivery must be a full no-op.
+    Applies to live and terminal intents: after RECOVERED the broker id rotates,
+    and a late soft-limit from an old delivery (or a mismatched terminal owner)
+    must be a full no-op so event/intent state is not rewritten by a non-owner.
     """
     if intent_row is None or broker_task_id is None:
         return False
-    try:
-        current = InvestigationIntentStatus(intent_row.status)
-    except ValueError:
-        return False
-    if current in TERMINAL_INTENT_STATUSES:
-        return False
     current_broker = intent_row.broker_task_id
-    return bool(current_broker) and str(current_broker) != str(broker_task_id)
+    if not current_broker:
+        return False
+    return str(current_broker) != str(broker_task_id)
 
 
 def _missing_broker_fence(
     intent_row: orm.InvestigationIntent | None,
     broker_task_id: str | None,
 ) -> bool:
-    """Fail-closed when a non-terminal intent is mutated without a broker fence."""
-    if intent_row is None or broker_task_id is not None:
+    """Fail-closed when an intent exists but either broker identity is missing.
+
+    Durable owner fence requires both sides present before any soft-limit mutation.
+    """
+    if intent_row is None:
         return False
-    try:
-        current = InvestigationIntentStatus(intent_row.status)
-    except ValueError:
-        return True
-    return current not in TERMINAL_INTENT_STATUSES
+    durable = intent_row.broker_task_id
+    return broker_task_id is None or not durable
 
 
 def _mark_intent_dead_in_session(
