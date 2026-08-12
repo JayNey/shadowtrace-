@@ -149,7 +149,8 @@ def resolve_verification_tool(
     """Return the verification tool name for a response tool + target_type.
 
     Returns ``None`` when the response tool has no registered verification
-    counterpart (e.g. ``create_ticket`` → effect_status=skipped).
+    counterpart (e.g. ``create_ticket`` → effect_status=skipped on SUCCESS;
+    execution FAILED still surfaces via ``execution_failed_non_verifiable``).
 
     ``provider_manifest_overrides`` allows a live Provider to extend or
     restrict the baseline mapping at runtime. Overrides are validated
