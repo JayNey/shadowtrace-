@@ -24,6 +24,7 @@ from app.models.agent_io import EffectStatus, VerificationActionResult
 from app.models.enums import ActionCategory, ActionStatus, WritebackStatus
 from app.models.ids import new_call_id
 from app.models.tool_meta import ToolResult, ToolResultStatus
+from app.tools.executor import ToolExecutorStoreForwarding
 
 _PROVIDER_NAME = "mock_xdr_writeback_observation"
 
@@ -108,7 +109,7 @@ class AdversarialVerifyAgent(VerifyAgent):
         return result
 
 
-class XdrManagedVerifyToolExecutor:
+class XdrManagedVerifyToolExecutor(ToolExecutorStoreForwarding):
     """Route ``check_*`` verify tools through XDR writeback/execution facts."""
 
     def __init__(self, inner: Any, session_factory: async_sessionmaker[AsyncSession]) -> None:

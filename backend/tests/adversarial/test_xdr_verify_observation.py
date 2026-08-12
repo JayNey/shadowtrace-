@@ -115,6 +115,25 @@ async def test_verified_via_xdr_writeback_missing_action(
     assert await verified_via_xdr_writeback(session_factory, event_id, "10.0.0.1") is False
 
 
+def test_xdr_managed_executor_forwards_mutable_di_attrs_to_inner() -> None:
+    from types import SimpleNamespace
+
+    from app.tools.executor import InMemoryExecutionJobStore, NullAuditService
+
+    inner = SimpleNamespace(
+        job_store=None,
+        budget_service=None,
+        audit_service=NullAuditService(),
+    )
+    executor = XdrManagedVerifyToolExecutor(inner, session_factory=None)  # type: ignore[arg-type]
+    mem_store = InMemoryExecutionJobStore()
+    executor.job_store = mem_store
+    assert inner.job_store is mem_store
+    budget = object()
+    executor.budget_service = budget
+    assert inner.budget_service is budget
+
+
 @pytest.mark.asyncio
 async def test_xdr_managed_executor_routes_check_tools(
     session_factory: async_sessionmaker[AsyncSession],
