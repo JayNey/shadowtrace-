@@ -14,7 +14,12 @@ import pytest
 from app.core.errors import ValidationError
 from app.core.guardrails import OutboundDispositionGuard
 from app.models.action import Action
-from app.models.disposition import SourceObjectLocator, TargetDispositionResult
+from app.models.disposition import (
+    ENTITY_ACTION_EFFECT_SPECS,
+    SourceObjectLocator,
+    TargetDispositionResult,
+    parse_entity_effect_target,
+)
 from app.models.enums import (
     ActionCategory,
     ActionLevel,
@@ -25,7 +30,6 @@ from app.models.enums import (
     WritebackReadiness,
 )
 from app.models.execution import ActionExecutionJob, TargetExecutionResult
-from app.models.disposition import ENTITY_ACTION_EFFECT_SPECS
 from app.services.disposition_command_factory import (
     DispositionCommandFactory,
     entity_action_code_for,
@@ -225,6 +229,39 @@ def test_build_entity_action_submit_rejects_stale_contain_device_alias() -> None
             closure_cycle=1,
             entity_action_code="contain_device",
         )
+    message = str(exc.value)
+    assert "allowed=[" in message
+    assert "isolate_host" in message
+
+
+def test_entity_action_code_for_rejects_contain_device_tool_name() -> None:
+    """ISSUE-316: production path rejects legacy tool_name via ValidationError."""
+    action = Action(
+        action_id="act-host-legacy",
+        event_id="evt-1",
+        plan_revision=1,
+        action_fingerprint="fp-host-legacy",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Contain Device",
+        tool_name="contain_device",
+        action_level=ActionLevel.L3,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+        target="host-1",
+        target_type="host",
+    )
+    with pytest.raises(ValidationError, match="entity submit") as exc_info:
+        entity_action_code_for(action)
+    assert exc_info.value.error_code == "unsupported"
+    assert exc_info.value.details.get("tool_name") == "contain_device"
+    assert exc_info.value.details.get("reason") == "not_in_entity_action_effect_specs"
+
+
+def test_parse_entity_effect_target_lists_allowed_specs_keys() -> None:
+    with pytest.raises(ValueError, match="unsupported entity_action_code contain_device") as exc:
+        parse_entity_effect_target("contain_device", "host:host-1")
     message = str(exc.value)
     assert "allowed=[" in message
     assert "isolate_host" in message

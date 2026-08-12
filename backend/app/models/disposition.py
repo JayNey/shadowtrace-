@@ -50,7 +50,10 @@ def parse_entity_effect_target(
     """Return canonical target type/value and expected applied status."""
     spec = ENTITY_ACTION_EFFECT_SPECS.get(entity_action_code)
     if spec is None:
-        raise ValueError(f"unsupported entity_action_code {entity_action_code}")
+        allowed = ", ".join(sorted(ENTITY_ACTION_EFFECT_SPECS))
+        raise ValueError(
+            f"unsupported entity_action_code {entity_action_code}; allowed=[{allowed}]"
+        )
     expected_type, expected_status = spec
     prefix, separator, target = canonical_target.partition(":")
     if not separator or prefix != expected_type or not target:
