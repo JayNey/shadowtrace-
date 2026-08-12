@@ -5482,8 +5482,16 @@
           "gate_applicable_outstanding_count": {
             "type": "integer",
             "title": "Gate Applicable Outstanding Count",
-            "description": "Outstanding side effects on the current plan revision that block REQUIRED CLOSED when non-zero. -1 means degraded/unavailable.",
+            "description": "Outstanding side effects on the current plan revision that block REQUIRED CLOSED when non-zero. Reasons include in_flight_job, executing_action, effect_unverified, terminal_writeback_unconfirmed, outbox_not_confirmed, and outbox_undelivered. -1 means degraded/unavailable.",
             "default": 0
+          },
+          "outstanding_side_effects": {
+            "items": {
+              "$ref": "#/components/schemas/OutstandingSideEffectView"
+            },
+            "type": "array",
+            "title": "Outstanding Side Effects",
+            "description": "Outstanding side effects with blocking_reason and convergence_policy for operator diagnosis. Empty when none or when the projection degraded (counts == -1)."
           }
         },
         "type": "object",
@@ -5620,8 +5628,16 @@
           "gate_applicable_outstanding_count": {
             "type": "integer",
             "title": "Gate Applicable Outstanding Count",
-            "description": "Outstanding side effects on the current plan revision that block REQUIRED CLOSED when non-zero. -1 means degraded/unavailable.",
+            "description": "Outstanding side effects on the current plan revision that block REQUIRED CLOSED when non-zero. Reasons include in_flight_job, executing_action, effect_unverified, terminal_writeback_unconfirmed, outbox_not_confirmed, and outbox_undelivered. -1 means degraded/unavailable.",
             "default": 0
+          },
+          "outstanding_side_effects": {
+            "items": {
+              "$ref": "#/components/schemas/OutstandingSideEffectView"
+            },
+            "type": "array",
+            "title": "Outstanding Side Effects",
+            "description": "Outstanding side effects with blocking_reason and convergence_policy for operator diagnosis. Empty when none or when the projection degraded (counts == -1)."
           }
         },
         "type": "object",
@@ -6311,6 +6327,20 @@
           "status"
         ],
         "title": "ExecutionJobResponse"
+      },
+      "ExecutionJobStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "partial_success",
+          "success",
+          "failed",
+          "timed_out",
+          "cancelled",
+          "unknown"
+        ],
+        "title": "ExecutionJobStatus"
       },
       "ExecutionOwner": {
         "type": "string",
@@ -7382,6 +7412,110 @@
         "title": "NextRecommendedAction",
         "description": "Operator next step hint; never implies hidden auto-execution (ISSUE-103)."
       },
+      "OutboxDeliveryStatus": {
+        "type": "string",
+        "enum": [
+          "ready",
+          "leased",
+          "waiting_retry",
+          "delivered",
+          "paused",
+          "dead_letter"
+        ],
+        "title": "OutboxDeliveryStatus",
+        "description": "Local delivery queue state; never impersonates external fact."
+      },
+      "OutstandingSideEffectView": {
+        "properties": {
+          "action_id": {
+            "type": "string",
+            "title": "Action Id"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/SideEffectScope"
+          },
+          "action_status": {
+            "$ref": "#/components/schemas/ActionStatus"
+          },
+          "execution_phase": {
+            "$ref": "#/components/schemas/ActionExecutionPhase"
+          },
+          "writeback_applicable": {
+            "type": "boolean",
+            "title": "Writeback Applicable"
+          },
+          "convergence_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SideEffectConvergencePolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "job_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionJobStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outbox_delivery_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutboxDeliveryStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "outbox_writeback_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WritebackStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan_revision": {
+            "type": "integer",
+            "title": "Plan Revision"
+          },
+          "superseded": {
+            "type": "boolean",
+            "title": "Superseded",
+            "default": false
+          },
+          "blocking_reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SideEffectConvergenceReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "action_id",
+          "scope",
+          "action_status",
+          "execution_phase",
+          "writeback_applicable",
+          "plan_revision"
+        ],
+        "title": "OutstandingSideEffectView"
+      },
       "PlaybookActionTemplateSnapshot": {
         "properties": {
           "step_order": {
@@ -8362,6 +8496,38 @@
           "critical"
         ],
         "title": "Severity"
+      },
+      "SideEffectConvergencePolicy": {
+        "type": "string",
+        "enum": [
+          "terminal_writeback",
+          "independent_entity_effect",
+          "execution_job_only"
+        ],
+        "title": "SideEffectConvergencePolicy",
+        "description": "Structured convergence contract per side-effect kind (ISSUE-312)."
+      },
+      "SideEffectConvergenceReason": {
+        "type": "string",
+        "enum": [
+          "in_flight_job",
+          "executing_action",
+          "effect_unverified",
+          "terminal_writeback_unconfirmed",
+          "outbox_not_confirmed",
+          "outbox_undelivered"
+        ],
+        "title": "SideEffectConvergenceReason",
+        "description": "Outstanding side-effect blocking reasons exposed on API / state machine."
+      },
+      "SideEffectScope": {
+        "type": "string",
+        "enum": [
+          "gate_applicable",
+          "background_detached"
+        ],
+        "title": "SideEffectScope",
+        "description": "Whether an outstanding side effect participates in the CLOSED gate."
       },
       "SourceDisposition": {
         "type": "string",
