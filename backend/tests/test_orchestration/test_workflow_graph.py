@@ -2710,6 +2710,66 @@ async def test_wrap_node_soft_time_limit_does_not_mark_failed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_node_soft_limit_reraises() -> None:
+    """ISSUE-314: execute_plan SoftTimeLimit must not be swallowed as execution_ok=False."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.workflow_graph import NODE_EXECUTE, build_investigation_graph
+
+    event_id = "evt-soft-execute"
+    machine = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+
+    class _SoftExec:
+        async def execute_plan(self, *_a: Any, **_k: Any) -> Any:
+            raise SoftTimeLimitExceeded()
+
+    services = _services(machine)
+    services["action_execution"] = _SoftExec()
+    graph = build_investigation_graph(_agents(), services)
+    with pytest.raises(SoftTimeLimitExceeded):
+        await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+            _base_state(
+                event_id=event_id,
+                event_status=EventStatus.EXECUTING_RESPONSE.value,
+            )
+        )
+    # Soft-limit must not advance event into VERIFYING.
+    assert all(target is not EventStatus.VERIFYING for (_, target, _) in machine.transitions)
+
+
+@pytest.mark.asyncio
+async def test_verify_node_soft_limit_reraises() -> None:
+    """ISSUE-314: verify_agent SoftTimeLimit must not degrade and continue."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.workflow_graph import NODE_VERIFY, build_investigation_graph
+
+    event_id = "evt-soft-verify"
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+
+    class _SoftVerify:
+        async def execute(self, *_a: Any, **_k: Any) -> Any:
+            raise SoftTimeLimitExceeded()
+
+    agents = _agents_with_verify(_SoftVerify())
+    services = _services(machine)
+    graph = build_investigation_graph(agents, services)
+    with pytest.raises(SoftTimeLimitExceeded):
+        await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+            _base_state(
+                event_id=event_id,
+                event_status=EventStatus.VERIFYING.value,
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_mark_graph_failed_skips_failed_self_loop() -> None:
     from app.orchestration.workflow_graph import _mark_graph_failed
 

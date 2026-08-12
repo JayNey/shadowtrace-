@@ -6,6 +6,8 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.base import BaseAgent
 from app.agents.confidence_calibration import DEFAULT_TEMPERATURE, calibrate_confidence
 from app.agents.prompts.risk_prompt import (
@@ -134,6 +136,9 @@ class RiskAgent(BaseAgent[RiskAgentInput, RiskAssessment]):
                 else:
                     llm_scores = None
                     scoring_mode = ScoringMode.RULE_ONLY
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: soft-limit must not fall back to rule_only "success".
+                raise
             except Exception as exc:
                 logger.warning(
                     "RiskAgent LLM path failed; falling back to rule_only event=%s err=%s",

@@ -442,7 +442,18 @@ async def apply_soft_time_limit_outcome(
                         intent_error = intent_row.last_error
                 elif decision is SoftTimeLimitDecision.RECOVERED and intent_row is not None:
                     current = InvestigationIntentStatus(intent_row.status)
+                    orchestration_mode = str(
+                        getattr(intent_row, "orchestration_mode", "") or ""
+                    )
                     if current in TERMINAL_INTENT_STATUSES:
+                        decision = SoftTimeLimitDecision.TERMINAL
+                    elif orchestration_mode == "analysis_only":
+                        # Analysis-only has no graph checkpoint resume path; cold
+                        # restart would skip/fail. Force atomic terminal instead.
+                        logger.info(
+                            "soft time limit analysis_only cannot recover intent=%s",
+                            intent_id,
+                        )
                         decision = SoftTimeLimitDecision.TERMINAL
                     else:
                         validate_intent_transition(current, InvestigationIntentStatus.RETRY)

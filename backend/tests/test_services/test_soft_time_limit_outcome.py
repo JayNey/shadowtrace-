@@ -35,6 +35,7 @@ async def _seed_event_and_intent(
     intent_status: InvestigationIntentStatus = InvestigationIntentStatus.STARTED,
     attempt: int = 0,
     broker_task_id: str | None = None,
+    orchestration_mode: str = "graph",
 ) -> tuple[str, str, str]:
     event_id = f"evt-soft-{uuid4().hex[:8]}"
     intent_id = f"iin-soft-{uuid4().hex[:8]}"
@@ -71,6 +72,7 @@ async def _seed_event_and_intent(
                     broker_task_id=resolved_broker,
                     include_response_execution=False,
                     generate_report=True,
+                    orchestration_mode=orchestration_mode,
                 )
             )
     return event_id, intent_id, resolved_broker
@@ -715,3 +717,48 @@ async def test_apply_soft_limit_missing_broker_is_fail_closed_noop(
         assert intent is not None
         assert event.status == EventStatus.ANALYZING.value
         assert intent.status == InvestigationIntentStatus.STARTED.value
+
+
+@pytest.mark.asyncio
+async def test_apply_analysis_only_soft_limit_never_recovers(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_id, intent_id, broker_task_id = await _seed_event_and_intent(
+        session_factory,
+        event_status=EventStatus.ANALYZING,
+        orchestration_mode="analysis_only",
+    )
+    monkeypatch.setattr(
+        "app.services.soft_time_limit_outcome.probe_soft_time_limit_context",
+        AsyncMock(
+            return_value=SoftTimeLimitProbe(
+                has_checkpoint=True,
+                checkpoint_recoverable=True,
+                last_checkpoint_node="triage",
+                side_effect_signals=(),
+                unknown_outbox_count=0,
+            )
+        ),
+    )
+    intent_service = MagicMock()
+    intent_service.schedule_dispatch = MagicMock()
+
+    result = await apply_soft_time_limit_outcome(
+        event_id,
+        session_factory=session_factory,
+        intent_id=intent_id,
+        broker_task_id=broker_task_id,
+        settings=Settings(auto_investigate_max_attempts=5),
+        intent_service=intent_service,
+    )
+    assert result.decision is SoftTimeLimitDecision.TERMINAL
+    intent_service.schedule_dispatch.assert_not_called()
+
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, event_id)
+        intent = await session.get(orm.InvestigationIntent, intent_id)
+        assert event is not None
+        assert intent is not None
+        assert event.status == EventStatus.FAILED.value
+        assert intent.status == InvestigationIntentStatus.DEAD.value

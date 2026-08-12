@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.agents.base import BaseAgent
@@ -259,6 +260,9 @@ class ReportAgent(BaseAgent[ReportAgentInput, InvestigationReport]):
                 summary = llm_summary or summary
                 draft_sections = self._merge_sections(draft_sections, llm_sections)
                 generated_by = GENERATED_BY_LLM
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: soft-limit must not fall back to template "success".
+                raise
             except Exception as exc:
                 llm_fallback = llm_failure_metadata(exc)
                 error_code = str(llm_fallback["error_code"])

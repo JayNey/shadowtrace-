@@ -14,6 +14,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -185,6 +186,8 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
                     await self._upsert_nodes(session, event_id, nodes)
                     await self._upsert_edges(session, event_id, edges)
             self.last_persist_ok = True
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             self.last_persist_error = str(exc)
             logger.exception("GraphAgent persist failed for event=%s", event_id)
@@ -259,6 +262,8 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
                 "graph_output",
                 output.model_dump(mode="json"),
             )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.warning("GraphAgent WM write failed event=%s", event_id, exc_info=True)
 
@@ -272,6 +277,8 @@ class GraphAgent(BaseAgent[GraphAgentInput, GraphOutput]):
             return None
         try:
             raw = await self.working_memory.read(event_id, "graph_output")
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.debug("GraphAgent cache read failed event=%s", event_id, exc_info=True)
             return None

@@ -1831,6 +1831,9 @@ def build_investigation_graph(
             )
             # Track whether any IMMEDIATE actions were executed.
             execution_ok = summary is not None
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: side-effect phase soft-limit must reach task owner.
+            raise
         except Exception:
             logger.exception(
                 "execute_plan failed for event=%s revision=%d",
@@ -1952,6 +1955,9 @@ def build_investigation_graph(
                         "verify_agent returned non-VerificationResult for event=%s",
                         state["event_id"],
                     )
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: soft-limit must not look like verify degradation.
+                raise
             except Exception:
                 degraded = True
                 logger.exception("verify_agent failed for event=%s", state["event_id"])
@@ -1977,6 +1983,8 @@ def build_investigation_graph(
                         plan_revision,
                         principal_or_system="verify_node:disposition_activation",
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     logger.exception(
                         "verify_node: EventDispositionService activation failed for event=%s",
@@ -1995,6 +2003,8 @@ def build_investigation_graph(
                         state["event_id"],
                         operator="verify_node:disposition_activation",
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     logger.exception(
                         "verify_node: disposition activation failed for event=%s",

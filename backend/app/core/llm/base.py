@@ -869,6 +869,9 @@ class BaseLLMClient(ABC):
     async def _record_audit(self, entry: LLMCallAudit) -> None:
         try:
             await self.audit_recorder.record(entry)
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: do not wrap soft-limit as LLMAuditError.
+            raise
         except Exception as exc:
             raise LLMAuditError(
                 "failed to persist LLM call audit",
