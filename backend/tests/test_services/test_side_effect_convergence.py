@@ -1945,6 +1945,7 @@ async def test_required_entity_verified_and_terminal_confirmed_allows_close(
     # Side-effect gate is clear; full CLOSED still needs writeback receipt views
     # (covered by test_state_machine / production full-loop).
 
+
 @pytest.mark.asyncio
 @pytest.mark.integration
 @pytest.mark.usefixtures("clean_state")
@@ -2137,9 +2138,7 @@ async def test_corrupt_journal_verification_does_not_fall_back_to_snapshot(
                     source_type="mock_xdr",
                     occurred_at=now,
                     row_version=1,
-                    event_context_snapshot={
-                        "verification_result": good.model_dump(mode="json")
-                    },
+                    event_context_snapshot={"verification_result": good.model_dump(mode="json")},
                 )
             )
             await session.flush()
@@ -2221,4 +2220,3 @@ async def test_corrupt_journal_verification_does_not_fall_back_to_snapshot(
     violation = check_gate_applicable_side_effect_convergence(summary)
     assert violation is not None
     assert violation.reason is SideEffectConvergenceReason.EFFECT_UNVERIFIED
-

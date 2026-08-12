@@ -95,9 +95,7 @@ class AdversarialAuditChecks:
             1 for key, value in checks.items() if key in scored_keys and value is True
         )
         analysis_passed = sum(
-            1
-            for key, value in checks.items()
-            if key in _ANALYSIS_SCORED_CHECKS and value is True
+            1 for key, value in checks.items() if key in _ANALYSIS_SCORED_CHECKS and value is True
         )
         return {
             "generated_at": datetime.now(UTC).isoformat(),
@@ -144,8 +142,7 @@ def _human_verdict(
         if checks.get("reached_reporting") and checks.get("risk_score_at_least_minimum"):
             # Keep the token "PASS" out of FAIL text so greps / `"PASS" in verdict` stay clean.
             return (
-                "FAIL — analysis criteria met but full loop did not reach CLOSED; "
-                "not release-grade"
+                "FAIL — analysis criteria met but full loop did not reach CLOSED; not release-grade"
             )
         return "FAIL — full loop did not reach CLOSED"
     if not checks.get("reached_reporting"):

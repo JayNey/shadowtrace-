@@ -1213,7 +1213,9 @@ def test_response_policy_filter_freezes_l1_ticket_tools_as_direct() -> None:
         source_locator=None,
     )
     assert owner_filter.resolve_execution_owner("create_ticket") is ExecutionOwner.DIRECT_TOOL
-    assert owner_filter.resolve_execution_owner("notify_security_team") is ExecutionOwner.DIRECT_TOOL
+    assert (
+        owner_filter.resolve_execution_owner("notify_security_team") is ExecutionOwner.DIRECT_TOOL
+    )
     assert owner_filter.resolve_execution_owner("disable_account") is ExecutionOwner.XDR_MANAGED
 
 

@@ -628,8 +628,7 @@ class _MockInvestigationIntentService:
             current = EventStatus(event.status)
         if current is not EventStatus.NEW:
             raise InvalidStateTransitionError(
-                "event must be in NEW status to start investigation, "
-                f"current: {current.value}",
+                f"event must be in NEW status to start investigation, current: {current.value}",
                 current=current,
                 target=EventStatus.TRIAGING,
                 details={"event_id": event_id},

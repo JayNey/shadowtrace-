@@ -309,7 +309,6 @@ async def _seed_connector_and_source(
     concurrency_token = "tok-1"
     if mock_xdr_client is not None and object_id == SCENARIO_INCIDENT_ID:
         concurrency_token = await fetch_mock_concurrency_token(mock_xdr_client, object_id=object_id)
-    reused = False
     async with session_factory() as session:
         async with session.begin():
             existing = await session.get(orm.SourceConnector, connector_id)
@@ -345,7 +344,6 @@ async def _seed_connector_and_source(
                     )
                 )
             else:
-                reused = True
                 source_record_id = existing_source.source_record_id
                 existing_source.current_concurrency_token = concurrency_token
     return source_record_id
@@ -1396,6 +1394,7 @@ async def test_direct_tool_replan_execution_result_enqueues_with_snapshot(
         assert outboxes[0].closure_cycle == 2
         assert outboxes[0].action_id == action.action_id
     assert summary.writeback_ids
+
 
 @pytest.mark.asyncio
 async def test_execute_plan_soft_limit_reraises_and_skips_outbox() -> None:
