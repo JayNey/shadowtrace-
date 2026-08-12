@@ -235,6 +235,8 @@ async def cleanup(
                 orm.ActionExecutionJob,
                 orm.DispositionReceipt,
                 orm.DispositionOutbox,
+                # ApprovalRecord FK → action; delete before Action (ISSUE-315 fixture isolation).
+                orm.ApprovalRecordORM,
                 orm.Action,
                 orm.Evidence,
                 orm.Report,
@@ -243,6 +245,28 @@ async def cleanup(
                 orm.SecurityEvent,
             ):
                 await session.execute(delete(table))
+    # #region agent log
+    try:
+        import json
+        from pathlib import Path
+
+        Path("/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log").open("a").write(
+            json.dumps(
+                {
+                    "sessionId": "0da307",
+                    "runId": "post-fix",
+                    "hypothesisId": "H1",
+                    "location": "test_action_execution.py:cleanup",
+                    "message": "cleanup deleted approval+action+source",
+                    "data": {"tables": ["ApprovalRecordORM", "Action", "SourceObject"]},
+                    "timestamp": int(__import__("time").time() * 1000),
+                }
+            )
+            + "\n"
+        )
+    except Exception:
+        pass
+    # #endregion
 
 
 def _sfx() -> str:
@@ -307,6 +331,7 @@ async def _seed_connector_and_source(
     concurrency_token = "tok-1"
     if mock_xdr_client is not None and object_id == SCENARIO_INCIDENT_ID:
         concurrency_token = await fetch_mock_concurrency_token(mock_xdr_client, object_id=object_id)
+    reused = False
     async with session_factory() as session:
         async with session.begin():
             existing = await session.get(orm.SourceConnector, connector_id)
@@ -318,18 +343,59 @@ async def _seed_connector_and_source(
                         display_name="Mock XDR",
                     )
                 )
-            session.add(
-                orm.SourceObject(
-                    source_record_id=source_record_id,
-                    source_product="mock_xdr",
-                    source_tenant_id="tenant-demo",
-                    connector_id=connector_id,
-                    source_kind=SourceObjectKind.INCIDENT.value,
-                    source_object_id=object_id,
-                    current_concurrency_token=concurrency_token,
-                    next_outbox_sequence=0,
+            # Idempotent on uq_source_object_identity so shared Docker DB / re-runs stay green.
+            existing_source = await session.scalar(
+                select(orm.SourceObject).where(
+                    orm.SourceObject.source_product == "mock_xdr",
+                    orm.SourceObject.source_tenant_id == "tenant-demo",
+                    orm.SourceObject.connector_id == connector_id,
+                    orm.SourceObject.source_kind == SourceObjectKind.INCIDENT.value,
+                    orm.SourceObject.source_object_id == object_id,
                 )
             )
+            if existing_source is None:
+                session.add(
+                    orm.SourceObject(
+                        source_record_id=source_record_id,
+                        source_product="mock_xdr",
+                        source_tenant_id="tenant-demo",
+                        connector_id=connector_id,
+                        source_kind=SourceObjectKind.INCIDENT.value,
+                        source_object_id=object_id,
+                        current_concurrency_token=concurrency_token,
+                        next_outbox_sequence=0,
+                    )
+                )
+            else:
+                reused = True
+                source_record_id = existing_source.source_record_id
+                existing_source.current_concurrency_token = concurrency_token
+    # #region agent log
+    try:
+        import json
+        from pathlib import Path
+
+        Path("/Users/apple/Desktop/shadowtrace副本/.cursor/debug-0da307.log").open("a").write(
+            json.dumps(
+                {
+                    "sessionId": "0da307",
+                    "runId": "post-fix",
+                    "hypothesisId": "H2",
+                    "location": "test_action_execution.py:_seed_connector_and_source",
+                    "message": "seed source object",
+                    "data": {
+                        "object_id": object_id,
+                        "source_record_id": source_record_id,
+                        "reused_existing": reused,
+                    },
+                    "timestamp": int(__import__("time").time() * 1000),
+                }
+            )
+            + "\n"
+        )
+    except Exception:
+        pass
+    # #endregion
     return source_record_id
 
 

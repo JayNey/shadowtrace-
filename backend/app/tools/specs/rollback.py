@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from app.models.enums import ActionCategory, ActionLevel, ExecutionOwner, ToolCategory
+from app.models.enums import (
+    ActionCategory,
+    ActionLevel,
+    DispositionIntentKind,
+    ExecutionOwner,
+    ToolCategory,
+)
 from app.models.tool_meta import (
     RoutingKind,
     SideEffectLevel,
@@ -45,14 +51,42 @@ _ROLLBACK_SPECS: tuple[tuple[str, str, ActionLevel, SideEffectLevel, list[str]],
         SideEffectLevel.HIGH,
         ["account"],
     ),
-    (
-        "close_false_positive_ticket",
-        "Close a false-positive ticket created earlier.",
-        ActionLevel.L1,
-        SideEffectLevel.LOW,
-        ["ticket"],
-    ),
 )
+
+
+def _l1_direct_rollback_meta(
+    name: str,
+    *,
+    description: str,
+    side_effect_level: SideEffectLevel,
+    target_types: list[str],
+) -> ToolMeta:
+    """L1 ticket rollback is DIRECT_TOOL-only (ISSUE-315).
+
+    Mirrors ``create_ticket``: must not advertise ``XDR_MANAGED`` entity submit.
+    """
+    input_model = TOOL_INPUT_MODELS[name]
+    return ToolMeta(
+        tool_name=name,
+        tool_category=ToolCategory.ROLLBACK,
+        description=description,
+        action_category=ActionCategory.ROLLBACK,
+        routing_kind=RoutingKind.OWNER_ROUTED,
+        supported_execution_owners=[ExecutionOwner.DIRECT_TOOL],
+        required_disposition_intent_by_owner={
+            ExecutionOwner.DIRECT_TOOL: DispositionIntentKind.EXECUTION_RESULT_RECORD,
+        },
+        required_capabilities=["entity_response"],
+        side_effect_level=side_effect_level,
+        action_level=ActionLevel.L1,
+        idempotency=True,
+        async_mode=True,
+        rollback_supported=False,
+        executable=True,
+        target_types=target_types,
+        input_schema=input_model.model_json_schema(),
+        output_schema={"$ref": "ActionExecutionJob"},
+    )
 
 
 def _rollback_meta(
@@ -88,6 +122,14 @@ def _rollback_meta(
 
 
 ROLLBACK_TOOL_METAS: list[ToolMeta] = [
-    _rollback_meta(name, desc, level, se, targets)
-    for name, desc, level, se, targets in _ROLLBACK_SPECS
+    *[
+        _rollback_meta(name, desc, level, se, targets)
+        for name, desc, level, se, targets in _ROLLBACK_SPECS
+    ],
+    _l1_direct_rollback_meta(
+        "close_false_positive_ticket",
+        description="Close a false-positive ticket created earlier.",
+        side_effect_level=SideEffectLevel.LOW,
+        target_types=["ticket"],
+    ),
 ]
