@@ -271,7 +271,10 @@ def output_guard(working_memory: WorkingMemory) -> OutputGuard:
     )
 
 
-class FlakyToolExecutor:
+from app.tools.executor import ToolExecutorStoreForwarding
+
+
+class FlakyToolExecutor(ToolExecutorStoreForwarding):
     """Force selected query tools to fail while delegating others."""
 
     def __init__(self, inner: Any, fail_tools: set[str]) -> None:
@@ -297,7 +300,7 @@ class FlakyToolExecutor:
         return await self._inner.call(tool_name, params, event_id, **kwargs)
 
 
-class RecordingToolExecutor:
+class RecordingToolExecutor(ToolExecutorStoreForwarding):
     """Delegate tool calls and record (tool_name, params) for integration tests."""
 
     def __init__(self, inner: Any) -> None:

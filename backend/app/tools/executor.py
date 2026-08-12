@@ -125,6 +125,46 @@ class InMemoryExecutionJobStore:
         return True
 
 
+def resolve_job_store_attach_target(executor: Any) -> Any:
+    """Return the object that owns ``job_store`` for AES attach and side-effect assert."""
+    return getattr(executor, "_inner", executor)
+
+
+def ensure_executor_job_store(executor: Any, job_store: ExecutionJobStorePort) -> None:
+    """Attach ``job_store`` on the inner executor when a wrapper delegates ``call``."""
+    resolve_job_store_attach_target(executor).job_store = job_store
+
+
+class ToolExecutorStoreForwarding:
+    """Forward mutable DI attrs to ``_inner`` for wrappers that delegate ``call`` (ISSUE-322)."""
+
+    _inner: Any
+
+    @property
+    def job_store(self) -> ExecutionJobStorePort | None:
+        return self._inner.job_store
+
+    @job_store.setter
+    def job_store(self, value: ExecutionJobStorePort | None) -> None:
+        self._inner.job_store = value
+
+    @property
+    def budget_service(self) -> BudgetServicePort | None:
+        return self._inner.budget_service
+
+    @budget_service.setter
+    def budget_service(self, value: BudgetServicePort | None) -> None:
+        self._inner.budget_service = value
+
+    @property
+    def audit_service(self) -> ToolCallLogService | NullAuditService:
+        return self._inner.audit_service
+
+    @audit_service.setter
+    def audit_service(self, value: ToolCallLogService | NullAuditService) -> None:
+        self._inner.audit_service = value
+
+
 class NoopConvergenceGuard:
     async def record_step(
         self,
@@ -818,7 +858,10 @@ __all__ = [
     "NullAuditService",
     "NullEventBus",
     "ToolExecutor",
+    "ToolExecutorStoreForwarding",
     "derive_call_nature",
+    "ensure_executor_job_store",
     "get_tool_executor",
+    "resolve_job_store_attach_target",
     "tool_executor",
 ]

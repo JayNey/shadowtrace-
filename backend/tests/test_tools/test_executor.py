@@ -6,6 +6,7 @@ import asyncio
 import os
 import uuid
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -36,7 +37,14 @@ from app.models.workflow import MAX_DUPLICATE_TOOL_CALLS
 from app.providers.tools.mock_provider import MockToolProvider, bind_mock_tool_provider
 from app.services.tool_call_log_service import ToolCallLogService
 from app.tools.circuit_breaker import CircuitBreakerRegistry
-from app.tools.executor import InMemoryExecutionJobStore, ToolExecutor, derive_call_nature
+from app.tools.executor import (
+    InMemoryExecutionJobStore,
+    ToolExecutor,
+    ToolExecutorStoreForwarding,
+    derive_call_nature,
+    ensure_executor_job_store,
+    resolve_job_store_attach_target,
+)
 from app.tools.mock_state import MockEnvironmentState
 from app.tools.registry import ToolRegistry, ToolValidationError
 from app.tools.retry import RetryPolicy
@@ -517,3 +525,23 @@ async def test_tool_call_log_service_integration(
 def test_derive_call_nature_from_registry_meta() -> None:
     query = _query_meta("q")
     assert derive_call_nature(query).value == "query"
+
+
+def test_resolve_job_store_attach_target_prefers_inner() -> None:
+    inner = object()
+    wrapper = SimpleNamespace(_inner=inner)
+    assert resolve_job_store_attach_target(wrapper) is inner
+    assert resolve_job_store_attach_target(inner) is inner
+
+
+def test_ensure_executor_job_store_replaces_pre_mounted_in_memory() -> None:
+    class _Wrapper(ToolExecutorStoreForwarding):
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
+
+    inner = SimpleNamespace(job_store=InMemoryExecutionJobStore())
+    wrapped = _Wrapper(inner)
+    db_store = object()
+    ensure_executor_job_store(wrapped, db_store)  # type: ignore[arg-type]
+    assert inner.job_store is db_store
+    assert wrapped.job_store is db_store

@@ -56,8 +56,9 @@ from app.services.degraded_flag_service import DegradedFlagService
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_audit_log_service import EventAuditLogService
 from app.services.state_machine_service import StateMachineService
-from app.tools.executor import ToolExecutor
+from app.tools.executor import InMemoryExecutionJobStore, ToolExecutor
 from app.tools.registry import ToolRegistry
+from tests.adversarial.xdr_verify_observation import XdrManagedVerifyToolExecutor
 from tests.test_services._mock_xdr_test_helpers import (
     SCENARIO_INCIDENT_ID,
     fetch_mock_concurrency_token,
@@ -1394,6 +1395,91 @@ async def test_direct_tool_replan_execution_result_enqueues_with_snapshot(
         assert outboxes[0].closure_cycle == 2
         assert outboxes[0].action_id == action.action_id
     assert summary.writeback_ids
+
+
+@pytest.mark.asyncio
+async def test_direct_tool_create_ticket_plain_executor_success(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    """Plain ToolExecutor (no wrapper) + AES: create_ticket DIRECT_TOOL reaches SUCCESS."""
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            tool_name="create_ticket",
+            action_name="create ticket",
+            action_level=ActionLevel.L1,
+            target_type="ticket",
+            target="ticket",
+            parameters={"title": "security ticket", "description": "investigation follow-up"},
+            writeback_applicable=False,
+            writeback_required=True,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+            disposition_source_ref=None,
+        ),
+    )
+    executed = await execution_service.execute_action(action.action_id)
+    assert executed.status is ActionStatus.SUCCESS
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action.action_id)
+        assert row is not None
+        assert row.status == ActionStatus.SUCCESS.value
+        assert row.execution_job_id is not None
+        job = await session.get(orm.ActionExecutionJob, row.execution_job_id)
+        assert job is not None
+        assert job.status == ExecutionJobStatus.SUCCESS.value
+
+
+@pytest.mark.asyncio
+async def test_wrapped_executor_job_store_aligned_with_aes(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    disposition_sync: DispositionSyncService,
+    state_machine: StateMachineService,
+    cleanup: None,
+) -> None:
+    """Wrapper + pre-mounted InMemory: AES Db store is shared with assert path (ISSUE-322)."""
+    registry = ToolRegistry()
+    await registry.auto_discover_for_mode(tool_mode="mock")
+    inner = ToolExecutor(registry=registry, job_store=InMemoryExecutionJobStore())
+    wrapped = XdrManagedVerifyToolExecutor(inner, session_factory)
+    execution_service = ActionExecutionService(
+        session_factory,
+        disposition_sync=disposition_sync,
+        tool_executor=wrapped,
+        state_machine=state_machine,
+        context_store=store,
+    )
+    assert inner.job_store is execution_service._job_store
+    assert wrapped.job_store is execution_service._job_store
+
+    event_id = await _create_event(session_factory, store)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            tool_name="create_ticket",
+            action_name="create ticket",
+            action_level=ActionLevel.L1,
+            target_type="ticket",
+            target="ticket",
+            parameters={"title": "wrapped path", "description": "harness alignment"},
+            writeback_applicable=False,
+            writeback_required=True,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+            disposition_source_ref=None,
+        ),
+    )
+    executed = await execution_service.execute_action(action.action_id)
+    assert executed.status is ActionStatus.SUCCESS
 
 
 @pytest.mark.asyncio

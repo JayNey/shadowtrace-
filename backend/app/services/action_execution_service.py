@@ -53,7 +53,7 @@ from app.services.writeback_side_effect_fence import (
     assert_live_side_effects_allowed,
     assert_writeback_side_effects_allowed,
 )
-from app.tools.executor import ToolExecutor
+from app.tools.executor import ToolExecutor, ensure_executor_job_store
 
 logger = logging.getLogger(__name__)
 
@@ -209,8 +209,9 @@ class ActionExecutionService:
         self._workflow_runtime = workflow_runtime
         self._manual_resolution = manual_resolution
         self._job_store = DbExecutionJobStore(session_factory)
-        if self._executor.job_store is None:
-            self._executor.job_store = self._job_store
+        # ISSUE-322: attach on inner executor when wrapped so DIRECT_TOOL pre-create
+        # and _assert_precreated_job share the same store as AES Db persistence.
+        ensure_executor_job_store(self._executor, self._job_store)
 
     async def get_actions_by_event(self, event_id: str) -> list[Action]:
         async with self._session_factory() as session:
