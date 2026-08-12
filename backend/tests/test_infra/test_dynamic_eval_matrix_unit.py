@@ -121,9 +121,7 @@ def test_parse_args_defaults_compat_profile(matrix_mod) -> None:
 
 
 def test_parse_args_profile_by_scenario(matrix_mod) -> None:
-    args = matrix_mod.parse_args(
-        ["--scenarios", "account_anomaly_fp", "--profile-by-scenario"]
-    )
+    args = matrix_mod.parse_args(["--scenarios", "account_anomaly_fp", "--profile-by-scenario"])
     assert args.profile_by_scenario is True
 
 
@@ -525,7 +523,6 @@ def test_run_scenario_records_cleanup_error_on_failure_path(
     assert manifest["cleanup_error"]["message"]
 
 
-
 def test_run_scenario_profile_by_scenario_reseeds_distinct_pressure_event(
     matrix_mod, tmp_path: Path
 ) -> None:
@@ -621,7 +618,6 @@ def test_run_scenario_profile_by_scenario_domain_pressure_failure_blocks(
     )
     assert manifest["status"] == "failed"
     assert manifest["pressure_error"]["message"]
-
 
 
 def test_matrix_main_summary_status_reflects_non_blocking_pressure_error(

@@ -41,9 +41,7 @@ async def _seed_event_and_intent(
     event_id = f"evt-soft-{uuid4().hex[:8]}"
     intent_id = f"iin-soft-{uuid4().hex[:8]}"
     resolved_broker = (
-        None
-        if omit_durable_broker
-        else (broker_task_id or f"task-soft-{uuid4().hex[:10]}")
+        None if omit_durable_broker else (broker_task_id or f"task-soft-{uuid4().hex[:10]}")
     )
     async with session_factory() as session:
         async with session.begin():

@@ -402,8 +402,7 @@ class PlannerAgent(BaseAgent[PlannerAgentInput, ExecutionPlan]):
                 )
                 return revalidated
             logger.warning(
-                "PlannerAgent: cached revised plan failed revalidation for event=%s, "
-                "regenerating",
+                "PlannerAgent: cached revised plan failed revalidation for event=%s, regenerating",
                 event_id,
             )
 

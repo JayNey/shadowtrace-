@@ -515,9 +515,10 @@ class InvestigationIntentService:
         if existing is not None:
             return None
         intent_id = new_intent_id()
-        orchestration_mode = str(
-            getattr(self._settings, "orchestration_mode", None) or "graph"
-        ).strip().lower() or "graph"
+        orchestration_mode = (
+            str(getattr(self._settings, "orchestration_mode", None) or "graph").strip().lower()
+            or "graph"
+        )
         row = orm.InvestigationIntent(
             intent_id=intent_id,
             event_id=event.event_id,

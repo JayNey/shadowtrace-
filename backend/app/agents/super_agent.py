@@ -508,12 +508,10 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     await self.audit_service.log_transition(
                         event_id,
                         str(event_context.event.status.value)
-                        if event_context is not None
-                        and event_context.event is not None
+                        if event_context is not None and event_context.event is not None
                         else EventStatus.NEW.value,
                         str(event_context.event.status.value)
-                        if event_context is not None
-                        and event_context.event is not None
+                        if event_context is not None and event_context.event is not None
                         else EventStatus.NEW.value,
                         _SUPER_AGENT_OPERATOR,
                         f"soft_time_limit_exceeded:{type(exc).__name__}",

@@ -175,9 +175,7 @@ def probe_change_window_baseline(settings: Any | None = None) -> dict[str, Any]:
     if invalid_window_entries:
         reasons.append(f"invalid_window_entries:{invalid_window_entries}")
 
-    status_blocking = (
-        bool(missing_required) or bool(status_empty_tenants) or not tenant_ids
-    )
+    status_blocking = bool(missing_required) or bool(status_empty_tenants) or not tenant_ids
     required_flag = bool(getattr(settings, "change_window_baseline_required", False))
     if missing_required and required_flag:
         status = "unavailable"

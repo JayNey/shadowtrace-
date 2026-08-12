@@ -50,16 +50,13 @@ class DispositionCommandFactory:
         if spec is None:
             allowed = ", ".join(sorted(ENTITY_ACTION_EFFECT_SPECS))
             raise ValueError(
-                f"unsupported XDR_MANAGED entity action {entity_action_code}; "
-                f"allowed=[{allowed}]"
+                f"unsupported XDR_MANAGED entity action {entity_action_code}; allowed=[{allowed}]"
             )
         expected_target_type, _ = spec
         if not action.target:
             raise ValueError("XDR_MANAGED entity action requires a non-empty target")
         if action.target_type and action.target_type != expected_target_type:
-            raise ValueError(
-                f"{entity_action_code} requires target_type={expected_target_type}"
-            )
+            raise ValueError(f"{entity_action_code} requires target_type={expected_target_type}")
         canonical_target = f"{expected_target_type}:{action.target}"
         return DispositionCommand(
             disposition_id=disposition_id,

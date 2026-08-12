@@ -77,6 +77,7 @@ def _admin_principal(subject: str = "admin1") -> Principal:
 def _analyst_principal(subject: str = "analyst1") -> Principal:
     return Principal(subject=subject, roles=[ROLE_ANALYST])
 
+
 # --------------------------------------------------------------------------- #
 # Module-level fixtures
 # --------------------------------------------------------------------------- #

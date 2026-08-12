@@ -504,9 +504,7 @@ async def apply_soft_time_limit_outcome(
                 decision = decide_soft_time_limit_outcome(
                     event_status=event_status,
                     probe=probe,
-                    intent_attempt=int(intent_row.attempt or 0)
-                    if intent_row is not None
-                    else None,
+                    intent_attempt=int(intent_row.attempt or 0) if intent_row is not None else None,
                     max_attempts=max_attempts,
                     has_intent=intent_row is not None
                     and InvestigationIntentStatus(intent_row.status)
@@ -516,20 +514,13 @@ async def apply_soft_time_limit_outcome(
                 if decision is SoftTimeLimitDecision.IGNORED:
                     ignore_reason = f"{_SOFT_LIMIT_REASON}:already_terminal"
                     # CLOSED: never FAILED-rewrite; heal dangling intent.
-                    if (
-                        event_status in _EVENT_SUCCESS_TERMINAL_STATUSES
-                        and intent_row is not None
-                    ):
-                        _mark_intent_dead_in_session(
-                            intent_row, reason=_SOFT_LIMIT_REASON
-                        )
+                    if event_status in _EVENT_SUCCESS_TERMINAL_STATUSES and intent_row is not None:
+                        _mark_intent_dead_in_session(intent_row, reason=_SOFT_LIMIT_REASON)
                         intent_status = intent_row.status
                         intent_error = intent_row.last_error
                 elif decision is SoftTimeLimitDecision.RECOVERED and intent_row is not None:
                     current = InvestigationIntentStatus(intent_row.status)
-                    orchestration_mode = str(
-                        getattr(intent_row, "orchestration_mode", "") or ""
-                    )
+                    orchestration_mode = str(getattr(intent_row, "orchestration_mode", "") or "")
                     if current in TERMINAL_INTENT_STATUSES:
                         decision = SoftTimeLimitDecision.TERMINAL
                     elif orchestration_mode == "analysis_only":
@@ -586,9 +577,7 @@ async def apply_soft_time_limit_outcome(
                     event_status = EventStatus.FAILED.value
 
                 if intent_row is not None:
-                    _mark_intent_dead_in_session(
-                        intent_row, reason=terminal_reason
-                    )
+                    _mark_intent_dead_in_session(intent_row, reason=terminal_reason)
                     intent_status = intent_row.status
                     intent_error = intent_row.last_error
 

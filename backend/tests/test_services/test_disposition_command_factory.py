@@ -218,7 +218,9 @@ def test_build_entity_action_submit_rejects_stale_contain_device_alias() -> None
         target="host-1",
         target_type="host",
     )
-    with pytest.raises(ValueError, match="unsupported XDR_MANAGED entity action contain_device") as exc:
+    with pytest.raises(
+        ValueError, match="unsupported XDR_MANAGED entity action contain_device"
+    ) as exc:
         DispositionCommandFactory().build_entity_action_submit(
             action,
             source_locator=_locator(),
