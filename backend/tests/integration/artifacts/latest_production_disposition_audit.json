@@ -1,0 +1,117 @@
+{
+  "event_id": "evt-vfy-eds-2b1a6c23",
+  "result": "passed",
+  "verification_result": {
+    "results": [
+      {
+        "detail": "effect_verified",
+        "action_id": "act-prod-b9d07a90",
+        "effect_status": "verified",
+        "writeback_ids": [],
+        "writeback_status": null,
+        "verification_phase": "effect",
+        "writeback_required": false,
+        "writeback_readiness": "not_required",
+        "confirmation_evidence": null,
+        "verification_action_id": "act-2ada346f",
+        "verification_action_dirty": false
+      },
+      {
+        "detail": "deferred_pending_activation",
+        "action_id": "act-term-d2e94e3a",
+        "effect_status": "skipped",
+        "writeback_ids": [],
+        "writeback_status": null,
+        "verification_phase": "effect",
+        "writeback_required": true,
+        "writeback_readiness": "not_required",
+        "confirmation_evidence": null,
+        "verification_action_id": null,
+        "verification_action_dirty": false
+      },
+      {
+        "detail": "writeback_not_applicable",
+        "action_id": "act-prod-b9d07a90",
+        "effect_status": "skipped",
+        "writeback_ids": [
+          "wbk-e3448d13"
+        ],
+        "writeback_status": null,
+        "verification_phase": "disposition",
+        "writeback_required": true,
+        "writeback_readiness": "not_required",
+        "confirmation_evidence": null,
+        "verification_action_id": null,
+        "verification_action_dirty": false
+      }
+    ],
+    "wm_persisted": false,
+    "failed_actions": [],
+    "overall_status": "success",
+    "publish_failures": [],
+    "failed_writebacks": [],
+    "blocked_writebacks": [],
+    "need_action_replan": false,
+    "verification_phase": "effect",
+    "need_manual_resolution": false,
+    "need_writeback_recovery": false,
+    "recoverable_writeback_ids": [],
+    "pending_writeback_action_ids": []
+  },
+  "event_status": "closed",
+  "outboxes": [
+    {
+      "writeback_id": "wbk-e3448d13",
+      "action_id": "act-prod-b9d07a90",
+      "intent_kind": "entity_action_submit",
+      "delivery_status": "delivered",
+      "latest_writeback_status": "accepted",
+      "last_error_code": null
+    },
+    {
+      "writeback_id": "wbk-31062560",
+      "action_id": "act-term-d2e94e3a",
+      "intent_kind": "event_status_update",
+      "delivery_status": "delivered",
+      "latest_writeback_status": "confirmed",
+      "last_error_code": null
+    }
+  ],
+  "receipts": [
+    {
+      "writeback_id": "wbk-31062560",
+      "sequence": 1,
+      "status": "accepted",
+      "confirmation_evidence": null,
+      "provider_code": null
+    },
+    {
+      "writeback_id": "wbk-31062560",
+      "sequence": 2,
+      "status": "confirmed",
+      "confirmation_evidence": "readback_verified",
+      "provider_code": null
+    },
+    {
+      "writeback_id": "wbk-e3448d13",
+      "sequence": 1,
+      "status": "accepted",
+      "confirmation_evidence": null,
+      "provider_code": null
+    }
+  ],
+  "checkpoint": {
+    "event_status": "closed",
+    "execution_substate": null,
+    "halted": false,
+    "verify_overall_status": "success",
+    "verify_need_action_replan": false,
+    "verify_need_writeback_recovery": false,
+    "verify_need_manual_resolution": false,
+    "node_trace": [
+      "verify_node",
+      "report_node",
+      "close_node"
+    ]
+  }
+}
