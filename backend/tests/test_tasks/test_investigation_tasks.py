@@ -1177,15 +1177,18 @@ def test_run_investigation_soft_time_limit_releases_with_resolved_owner(
     from app.core.celery_delivery import celery_task_owner_id
 
     released: list[tuple[str, str]] = []
+    order: list[str] = []
 
     class _TrackingLease:
         async def release(self, event_id: str, owner_id: str) -> bool:
+            order.append("release")
             released.append((event_id, owner_id))
             return True
 
     monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _TrackingLease())
 
     async def _noop_apply(*_args: object, **_kwargs: object) -> None:
+        order.append("apply")
         return None
 
     monkeypatch.setattr(
@@ -1212,6 +1215,8 @@ def test_run_investigation_soft_time_limit_releases_with_resolved_owner(
 
     expected_owner = celery_task_owner_id("task-soft-limit-001")
     assert released == [("evt-soft-limit", expected_owner)]
+    # ISSUE-314: durable outcome must commit before lease release.
+    assert order == ["apply", "release"]
 
 
 def test_run_investigation_soft_timeout_invalidates_checkpoint_and_marks_intent_dead(

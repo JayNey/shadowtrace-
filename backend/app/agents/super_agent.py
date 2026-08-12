@@ -394,6 +394,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         lifecycle_input = SuperAgentInput(event_id=event_id)
         started_at = datetime.now(UTC)
         lifecycle_started = False
+        # ISSUE-314: defer lease release on soft-limit so task/intent apply runs
+        # while still holding the lease (mirrors analysis_only soft_limited).
+        soft_limited = False
 
         try:
             # 1. Acquire lease
@@ -497,7 +500,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         except SoftTimeLimitExceeded as exc:
             # ISSUE-314: task/intent layer owns terminal vs bounded recovery.
             # Do not publish agent_failed — outcome may still be RECOVERED.
+            # Defer lease release to `_handle_soft_time_limit_exceeded`.
             guard_reset_needed = False
+            soft_limited = True
             if self.audit_service is not None:
                 try:
                     await self.audit_service.log_transition(
@@ -513,6 +518,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                         _SUPER_AGENT_OPERATOR,
                         f"soft_time_limit_exceeded:{type(exc).__name__}",
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     logger.warning(
                         "SuperAgent: failed to audit soft time limit event=%s",
@@ -539,9 +546,12 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             # memory growth in the ConvergenceGuard in-process store.
             if guard_reset_needed:
                 self._reset_convergence_guard(event_id)
-            if acquired and self.lease is not None:
+            if acquired and self.lease is not None and not soft_limited:
                 try:
                     await self.lease.release(event_id, resolved_owner)
+                except SoftTimeLimitExceeded:
+                    # ISSUE-314: do not swallow soft-limit into investigate success.
+                    raise
                 except Exception:
                     logger.warning(
                         "SuperAgent: best-effort lease release failed event=%s owner=%s",

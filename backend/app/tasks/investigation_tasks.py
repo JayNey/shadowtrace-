@@ -596,9 +596,12 @@ async def _handle_soft_time_limit_exceeded(
     finally:
         # Release only after durable outcome commit so a concurrent delivery cannot
         # rotate broker ownership and force this soft-limit into a stale no-op.
+        # Full-loop SuperAgent and analysis_only both defer release until here.
         try:
             lease = get_event_lease()
             await lease.release(event_id, resolved_owner)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.warning(
                 "run_investigation: best-effort lease release failed after soft limit "
@@ -908,6 +911,8 @@ async def execute_analysis_only_investigation(
         if owns_lease and not soft_limited:
             try:
                 await lease.release(event_id, owner_id)
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 logger.warning(
                     "analysis_only best-effort lease release failed event=%s owner=%s",

@@ -907,11 +907,35 @@ class TestSoftTimeLimit:
             async def execute(self, input: Any) -> TriageResult:
                 raise SoftTimeLimitExceeded()
 
+        lease = _InMemoryEventLease()
         agent = _build_super_agent(
-            lease=_InMemoryEventLease(),
+            lease=lease,
             event_service=_MockEventService(events),
         )
         agent.triage_agent = _SoftLimitTriageAgent()  # type: ignore[assignment]
+
+        with pytest.raises(SoftTimeLimitExceeded):
+            await agent.investigate(_EVENT_ID)
+
+        assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
+        # ISSUE-314: soft-limit must keep lease until task-layer outcome apply.
+        assert await lease.get_owner(_EVENT_ID) is not None
+
+    async def test_soft_time_limit_during_lease_release_is_not_swallowed(self) -> None:
+        """ISSUE-314: SoftTimeLimitExceeded from lease.release must propagate."""
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        class _ReleaseSoftLimitLease(_InMemoryEventLease):
+            async def release(self, event_id: str, owner_id: str) -> bool:
+                raise SoftTimeLimitExceeded()
+
+        events: dict[str, dict[str, object]] = {
+            _EVENT_ID: {"status": EventStatus.NEW},
+        }
+        agent = _build_super_agent(
+            lease=_ReleaseSoftLimitLease(),
+            event_service=_MockEventService(events),
+        )
 
         with pytest.raises(SoftTimeLimitExceeded):
             await agent.investigate(_EVENT_ID)

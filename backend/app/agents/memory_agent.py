@@ -15,6 +15,7 @@ import logging
 import uuid
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.agents.base import BaseAgent
@@ -388,6 +389,9 @@ class MemoryAgent(BaseAgent[MemoryAgentInput, MemoryOutput]):
                 )
                 if isinstance(response.parsed, _FpRuleDraft):
                     draft = response.parsed
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: do not degrade soft-limit into FP template success.
+                raise
             except Exception:
                 logger.warning(
                     "MemoryAgent LLM unavailable; using FP rule template event=%s",
