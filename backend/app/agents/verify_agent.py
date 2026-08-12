@@ -3,7 +3,9 @@
 Phase 1 (effect): independently observe every IMMEDIATE response/rollback
 Action that entered an execution state. POST_VERIFY deferred Actions are
 skipped with ``detail=deferred_pending_activation`` and must never appear
-in ``failed_actions``.
+in ``failed_actions``. Non-verifiable actions (no verify tool) stay SKIPPED
+on SUCCESS; execution-layer FAILED surfaces as ``execution_failed_non_verifiable``
+in ``failed_actions`` (ISSUE-320).
 
 Phase 2 (disposition): when phase 1 produces no ``need_action_replan`` or
 ``need_manual_resolution`` and ``disposition_policy=required``, activate
@@ -646,12 +648,23 @@ class VerifyAgent(BaseAgent[VerifyAgentInput, VerificationResult]):
                 provider_manifest_overrides=self._provider_manifest_overrides,
             )
 
-            # No verification tool registered → treat as non-verifiable (skipped).
+            # No verification tool registered → non-verifiable actions are normally
+            # SKIPPED, except when execution already FAILED (ISSUE-320 / ID-BYP-006).
             if verify_tool is None:
                 # Determine skip reason via _derive_skip_verification_tools
                 # so the inline logic stays in sync with the derived set
                 # that the test suite independently validates.
                 is_non_verifiable = action.tool_name in _derive_skip_verification_tools()
+                if action.status == ActionStatus.FAILED:
+                    results.append(
+                        _make_execution_failed_non_verifiable_result(
+                            action,
+                            is_non_verifiable=is_non_verifiable,
+                        )
+                    )
+                    failed_action_ids.add(action.action_id)
+                    need_replan = True
+                    continue
                 detail = (
                     "non_verifiable_action"
                     if is_non_verifiable
@@ -2138,6 +2151,30 @@ def _plan_actions(response_plan: Any) -> list[Action]:
         raw = response_plan.get("actions", [])
         return [Action.model_validate(a) if isinstance(a, dict) else a for a in raw]
     return []
+
+
+def _make_execution_failed_non_verifiable_result(
+    action: Action,
+    *,
+    is_non_verifiable: bool,
+) -> VerificationActionResult:
+    """Execution-layer FAILED action with no verify tool — surfaces in failed_actions."""
+    detail = (
+        "execution_failed_non_verifiable"
+        if is_non_verifiable
+        else "execution_failed_no_verification_tool"
+    )
+    wb_required = action.writeback_required and action.writeback_applicable
+    return VerificationActionResult(
+        action_id=action.action_id,
+        effect_status=EffectStatus.FAILED,
+        writeback_required=wb_required,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+        writeback_status=None,
+        writeback_ids=[],
+        detail=detail,
+        verification_phase=VerificationPhase.EFFECT,
+    )
 
 
 def _make_skipped_result(

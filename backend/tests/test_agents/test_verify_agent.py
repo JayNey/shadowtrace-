@@ -741,6 +741,115 @@ class TestHappyPath:
         assert r.detail == "non_verifiable_action"
         # Verification action should have writeback_required=false (checked via model validation)
 
+    async def test_create_ticket_execution_failed_surfaces_in_failed_actions(self):
+        """ISSUE-320: FAILED create_ticket must appear in failed_actions and trigger replan."""
+        action = _action(
+            tool_name="create_ticket",
+            action_name="ticket_action",
+            target_type="ticket",
+            target="ticket-1",
+            status=ActionStatus.FAILED,
+            action_level=ActionLevel.L1,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        ed_svc = MagicMock()
+        ed_svc.after_effect_resolution_ready = AsyncMock()
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        r = result.results[0]
+        assert r.effect_status == EffectStatus.FAILED
+        assert r.detail == "execution_failed_non_verifiable"
+        assert action.action_id in result.failed_actions
+        assert result.need_action_replan is True
+        ed_svc.after_effect_resolution_ready.assert_not_called()
+
+    async def test_notify_security_team_execution_failed_triggers_replan(self):
+        """ISSUE-320: FAILED notify_security_team surfaces failure without verify tool."""
+        action = _action(
+            tool_name="notify_security_team",
+            action_name="notify_action",
+            target_type="channel",
+            target="soc-alerts",
+            status=ActionStatus.FAILED,
+            action_level=ActionLevel.L1,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        assert result.results[0].effect_status == EffectStatus.FAILED
+        assert result.results[0].detail == "execution_failed_non_verifiable"
+        assert action.action_id in result.failed_actions
+        assert result.need_action_replan is True
+
+    async def test_success_non_verifiable_not_in_failed_actions_when_mixed(self):
+        """SUCCESS non-verifiable stays skipped; only FAILED enters failed_actions."""
+        success_ticket = _action(
+            action_id="act-ticket-ok",
+            tool_name="create_ticket",
+            target_type="ticket",
+            target="ticket-1",
+            status=ActionStatus.SUCCESS,
+            action_level=ActionLevel.L1,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        failed_notify = _action(
+            action_id="act-notify-fail",
+            tool_name="notify_security_team",
+            target_type="channel",
+            target="soc-alerts",
+            status=ActionStatus.FAILED,
+            action_level=ActionLevel.L1,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([success_ticket, failed_notify], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(
+            _input(
+                event_id=success_ticket.event_id,
+                actions=[success_ticket, failed_notify],
+            )
+        )
+
+        by_id = {r.action_id: r for r in result.results}
+        assert by_id["act-ticket-ok"].effect_status == EffectStatus.SKIPPED
+        assert by_id["act-ticket-ok"].detail == "non_verifiable_action"
+        assert by_id["act-notify-fail"].effect_status == EffectStatus.FAILED
+        assert "act-ticket-ok" not in result.failed_actions
+        assert "act-notify-fail" in result.failed_actions
+        assert result.need_action_replan is True
+
 
 # --------------------------------------------------------------------------- #
 # 2. LLM/降级 (Degradation)
@@ -1323,6 +1432,38 @@ class TestAcceptanceCriteria:
         result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
         assert result.results[0].effect_status == EffectStatus.SKIPPED
         assert "non_verifiable" in (result.results[0].detail or "")
+
+    async def test_a320_failed_non_verifiable_in_failed_actions(self):
+        """ISSUE-320: FAILED non-verifiable must trigger replan and skip phase-2 activation."""
+        action = _action(
+            tool_name="create_ticket",
+            action_level=ActionLevel.L1,
+            target_type="ticket",
+            target="ticket-1",
+            status=ActionStatus.FAILED,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        ed_svc = MagicMock()
+        ed_svc.after_effect_resolution_ready = AsyncMock()
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+            event_disposition_service=ed_svc,
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        assert result.results[0].effect_status == EffectStatus.FAILED
+        assert result.results[0].detail == "execution_failed_non_verifiable"
+        assert action.action_id in result.failed_actions
+        assert result.need_action_replan is True
+        ed_svc.after_effect_resolution_ready.assert_not_called()
 
     async def test_a4_deferred_not_in_failed(self):
         """A4: Deferred action → skipped, not in failed_actions."""
