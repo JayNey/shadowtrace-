@@ -23,11 +23,10 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select, update
 from sqlalchemy.exc import InternalError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from celery.exceptions import SoftTimeLimitExceeded
 
 from app.agents.base import BaseAgent
 from app.agents.rules.verification_mapping import (

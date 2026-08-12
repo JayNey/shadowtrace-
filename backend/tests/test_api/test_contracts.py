@@ -22,7 +22,7 @@ from app.api.v1.deps import get_execution_job_query_service as _real_get_executi
 from app.api.v1.deps import get_knowledge_query_service as _real_get_knowledge_query_service
 from app.api.v1.deps import get_state_machine as _real_get_state_machine
 from app.api.v1.errors import register_exception_handlers
-from app.core.auth import Principal, ROLE_ADMIN, AuthorizationError
+from app.core.auth import ROLE_ADMIN, AuthorizationError, Principal
 from app.core.config import get_settings
 from app.core.errors import (
     DispositionPermissionDenied,

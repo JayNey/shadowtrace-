@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -26,8 +27,6 @@ from app.agents.rules.response_plan_quality_gate import (
     evidence_blocks_high_impact_actions,
     requires_threat_aligned_containment,
 )
-from celery.exceptions import SoftTimeLimitExceeded
-
 from app.core.errors import LLMError
 from app.core.errors import ValidationError as ShadowValidationError
 from app.core.llm.prompt_quality import resolve_structured_prompt_timeout
