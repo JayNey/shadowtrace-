@@ -37,6 +37,7 @@ from app.models.agent_io import (
     VerificationResult,
 )
 from app.models.context import EventContext
+from app.models.security_event import EventSummary
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -2659,6 +2660,117 @@ async def test_mark_graph_failed_is_noop_for_terminal_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mark_graph_failed_skips_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.workflow_graph import _mark_graph_failed
+
+    noop_calls: list[str] = []
+    monkeypatch.setattr(
+        "app.orchestration.workflow_graph.record_graph_failed_transition_noop",
+        lambda *, reason: noop_calls.append(reason),
+    )
+
+    event_id = "evt-soft-limit-noop"
+    machine = FakeStateMachine(
+        status=EventStatus.ANALYZING,
+        statuses={event_id: EventStatus.ANALYZING},
+    )
+    services = {"state_machine": machine}
+    state = _base_state(event_id=event_id, event_status=EventStatus.ANALYZING.value)
+
+    await _mark_graph_failed(services, state, SoftTimeLimitExceeded())
+
+    assert machine.transitions == []
+    assert noop_calls == ["soft_time_limit"]
+
+
+@pytest.mark.asyncio
+async def test_wrap_node_soft_time_limit_does_not_mark_failed() -> None:
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.workflow_graph import _wrap_node
+
+    event_id = "evt-soft-wrap"
+    machine = FakeStateMachine(
+        status=EventStatus.ANALYZING,
+        statuses={event_id: EventStatus.ANALYZING},
+    )
+    services = {"state_machine": machine}
+
+    async def _boom(_state: dict[str, Any]) -> dict[str, Any]:
+        raise SoftTimeLimitExceeded()
+
+    wrapped = _wrap_node(services, _boom)
+    with pytest.raises(SoftTimeLimitExceeded):
+        await wrapped(_base_state(event_id=event_id, event_status=EventStatus.ANALYZING.value))
+
+    assert machine.transitions == []
+
+
+@pytest.mark.asyncio
+async def test_execute_node_soft_limit_reraises() -> None:
+    """ISSUE-314: execute_plan SoftTimeLimit must not be swallowed as execution_ok=False."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.workflow_graph import NODE_EXECUTE, build_investigation_graph
+
+    event_id = "evt-soft-execute"
+    machine = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+
+    class _SoftExec:
+        async def execute_plan(self, *_a: Any, **_k: Any) -> Any:
+            raise SoftTimeLimitExceeded()
+
+    services = _services(machine)
+    services["action_execution"] = _SoftExec()
+    graph = build_investigation_graph(_agents(), services)
+    with pytest.raises(SoftTimeLimitExceeded):
+        await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+            _base_state(
+                event_id=event_id,
+                event_status=EventStatus.EXECUTING_RESPONSE.value,
+            )
+        )
+    # Soft-limit must not advance event into VERIFYING.
+    assert all(target is not EventStatus.VERIFYING for (_, target, _) in machine.transitions)
+
+
+@pytest.mark.asyncio
+async def test_verify_node_soft_limit_reraises() -> None:
+    """ISSUE-314: verify_agent SoftTimeLimit must not degrade and continue."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.orchestration.workflow_graph import NODE_VERIFY, build_investigation_graph
+
+    event_id = "evt-soft-verify"
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+
+    class _SoftVerify:
+        async def execute(self, *_a: Any, **_k: Any) -> Any:
+            raise SoftTimeLimitExceeded()
+
+    agents = _agents_with_verify(_SoftVerify())
+    services = _services(machine)
+    graph = build_investigation_graph(agents, services)
+    with pytest.raises(SoftTimeLimitExceeded):
+        await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+            _base_state(
+                event_id=event_id,
+                event_status=EventStatus.VERIFYING.value,
+            )
+        )
+
+
+@pytest.mark.asyncio
 async def test_mark_graph_failed_skips_failed_self_loop() -> None:
     from app.orchestration.workflow_graph import _mark_graph_failed
 
@@ -2764,3 +2876,61 @@ async def test_mark_graph_failed_skips_on_state_mismatch_validation_error(
 
     assert machine.transitions == []
     assert noop_calls == ["state_mismatch"]
+
+
+@pytest.mark.asyncio
+async def test_planner_revise_soft_limit_not_fresh_plan() -> None:
+    """ISSUE-314: SoftTimeLimit in planner.revise must not fall back to fresh plan."""
+    from celery.exceptions import SoftTimeLimitExceeded
+    from app.orchestration.workflow_graph import planner_node
+
+    class SoftPlanner:
+        async def revise(self, *_a: Any, **_k: Any) -> Any:
+            raise SoftTimeLimitExceeded()
+
+        async def execute(self, *_a: Any, **_k: Any) -> Any:
+            raise AssertionError("fresh plan must not run after soft-limit")
+
+        async def plan_disposition_only(self, *_a: Any, **_k: Any) -> Any:
+            raise AssertionError("disposition-only must not run")
+
+    triage = TriageResult(
+        event_type=EventType.MALICIOUS_PROCESS,
+        severity=Severity.MEDIUM,
+        need_investigation=True,
+        decision_summary="soft-limit replan",
+    )
+    plan = ExecutionPlan(
+        plan_id="pln-soft-replan",
+        event_id="evt-soft-replan",
+        steps=[
+            PlanStep(
+                step_order=1,
+                step_goal="risk",
+                assigned_agent="risk_agent",
+                required_tools=[],
+                success_criteria="ok",
+            )
+        ],
+        budget=PlanBudget(max_tool_calls=10),
+        revision=0,
+    )
+    event_context = EventContext(
+        event=EventSummary(
+            event_id="evt-soft-replan",
+            event_type=EventType.MALICIOUS_PROCESS,
+            title="soft replan",
+            status=EventStatus.ANALYZING,
+            severity=Severity.MEDIUM,
+            risk_score=0,
+            final_verdict=FinalVerdict.NONE,
+            writeback_required=False,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            disposition_policy=DispositionPolicy.NOT_REQUIRED,
+        ),
+        triage_result=triage.model_dump(mode="json"),
+        execution_plan=plan.model_dump(mode="json"),
+        replan_count=1,
+    )
+    with pytest.raises(SoftTimeLimitExceeded):
+        await planner_node(event_context, SoftPlanner())  # type: ignore[arg-type]

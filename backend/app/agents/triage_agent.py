@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.base import BaseAgent
 from app.agents.prompts.triage_prompt import TriageLLMResponse, build_triage_messages
 from app.agents.rules.entity_extraction_rules import (
@@ -739,6 +741,9 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 rejection_summary=regex_result.rejection_summary,
             )
 
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: do not regex-fallback past Celery soft-limit ownership.
+            raise
         except ShadowTraceError as exc:
             if isinstance(exc, LLMError):
                 logger.warning(

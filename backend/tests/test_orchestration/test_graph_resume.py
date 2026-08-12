@@ -525,6 +525,50 @@ async def test_resume_fallback_execute_investigation_when_graph_never_started() 
 
 
 @pytest.mark.asyncio
+async def test_resume_report_only_reraises_soft_time_limit() -> None:
+    """ISSUE-314: report-only path must not rewrite SoftTimeLimitExceeded."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.models.agent_io import CollectionStatus, EvidenceOutput, RiskAssessment, ScoringMode
+    from app.models.enums import Severity
+    from app.orchestration.graph_resume import _resume_report_only_from_analysis
+
+    report_agent = MagicMock()
+    report_agent.execute = AsyncMock(side_effect=SoftTimeLimitExceeded())
+    context_store = MagicMock()
+    context_store.get = AsyncMock(
+        side_effect=lambda _eid, field: {
+            "evidence_output": EvidenceOutput(collection_status=CollectionStatus.COMPLETED),
+            "risk_assessment": RiskAssessment(
+                risk_score=70,
+                severity=Severity.HIGH,
+                confidence=0.8,
+                scoring_mode=ScoringMode.RULE_ONLY,
+            ),
+        }.get(field)
+    )
+    context_store.set = AsyncMock()
+    event_service = MagicMock()
+    event_service.get_report = AsyncMock(return_value=None)
+    agent = MagicMock()
+    agent.report_agent = report_agent
+    agent.context_store = context_store
+    agent.event_service = event_service
+
+    with (
+        patch(
+            "app.services.report_input_builder.build_report_agent_input",
+            new=AsyncMock(return_value=object()),
+        ),
+        pytest.raises(SoftTimeLimitExceeded),
+    ):
+        await _resume_report_only_from_analysis(
+            MagicMock(),
+            "evt-314-report-only-soft",
+            agent,
+        )
+
+
 async def test_resume_reporting_without_graph_uses_report_only_not_full_restart() -> None:
     """ISSUE-247: REPORTING + graph=None must not call execute_investigation()."""
     from app.models.agent_io import CollectionStatus, EvidenceOutput, RiskAssessment, ScoringMode

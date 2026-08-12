@@ -10,6 +10,8 @@ import inspect
 import logging
 from typing import Any, Protocol
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.core.errors import DependencyUnavailableError
 from app.models.enums import EventStatus
 
@@ -84,6 +86,8 @@ async def persist_analysis_only_complete_authoritative(
             result = await atomic_set(event_id, True)
             durable_ok = True
             redis_ok = bool(getattr(result, "redis_ok", True))
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.warning(
                 "failed to atomically persist analysis_only_complete event=%s",
@@ -95,6 +99,8 @@ async def persist_analysis_only_complete_authoritative(
         try:
             current = await context_store.get(event_id, "analysis_only_complete")
             already_true = current is True
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.debug(
                 "analysis_only_complete read failed event=%s",
@@ -112,6 +118,8 @@ async def persist_analysis_only_complete_authoritative(
                 )
                 durable_ok = True
                 redis_ok = bool(getattr(result, "redis_ok", True))
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 logger.warning(
                     "failed to persist analysis_only_complete journal event=%s",

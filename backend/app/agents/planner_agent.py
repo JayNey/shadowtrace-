@@ -22,6 +22,8 @@ import hashlib
 import logging
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.base import BaseAgent
 from app.agents.evidence_agent import EVIDENCE_QUERY_ORDER
 from app.agents.prompts.planner_prompt import (
@@ -352,6 +354,9 @@ class PlannerAgent(BaseAgent[PlannerAgentInput, ExecutionPlan]):
                             degraded=True,
                         )
                 return plan
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: soft-limit must reach task-layer ownership, not DEFAULT_PLANS.
+                raise
             except Exception:
                 logger.warning(
                     "PlannerAgent: LLM plan generation failed for event=%s, "
@@ -422,6 +427,8 @@ class PlannerAgent(BaseAgent[PlannerAgentInput, ExecutionPlan]):
                             degraded=True,
                         )
                 return plan
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 logger.warning(
                     "PlannerAgent: LLM plan revision failed for event=%s, "

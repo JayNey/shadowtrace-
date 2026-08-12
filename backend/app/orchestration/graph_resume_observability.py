@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -214,6 +215,9 @@ async def execute_graph_resume_with_retry(
             )
             await clear_graph_resume_failure(degraded_flags, event_id)
             return
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: task/intent layer owns soft-limit; never wrap as resume failure.
+            raise
         except GraphResumeFailedError as exc:
             last_exc = exc
             break

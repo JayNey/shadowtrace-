@@ -346,3 +346,36 @@ async def test_execute_graph_resume_transient_exhaustion_records_single_failure(
 
     assert agent._investigation_graph.aget_state.await_count == 3
     degraded.set_flag.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_execute_graph_resume_with_retry_preserves_soft_time_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-314: SoftTimeLimit must not be wrapped as GraphResumeFailedError."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    degraded = MagicMock()
+    degraded.has_flag = AsyncMock(return_value=False)
+    degraded.set_flag = AsyncMock(return_value=[])
+    record = AsyncMock()
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.record_graph_resume_failure",
+        record,
+    )
+    monkeypatch.setattr(
+        "app.orchestration.graph_resume_observability.resume_investigation_from_checkpoint",
+        AsyncMock(side_effect=SoftTimeLimitExceeded()),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        await execute_graph_resume_with_retry(
+            "evt-soft-resume",
+            session_factory=_SessionFactory(),
+            get_super_agent=AsyncMock(return_value=MagicMock()),
+            get_workflow_runtime=AsyncMock(return_value=MagicMock()),
+            degraded_flags=degraded,
+        )
+
+    record.assert_not_awaited()
+    degraded.set_flag.assert_not_awaited()

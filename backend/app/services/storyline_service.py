@@ -12,6 +12,8 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.prompts.storyline_prompt import (
     StorylineLLMResponse,
     build_storyline_messages,
@@ -157,6 +159,9 @@ class StorylineService:
                     finalized = self._finalize_storyline(storyline)
                     await self._write(event_id, finalized)
                     return finalized
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: soft-limit must reach Celery task ownership, not rule fallback.
+                raise
             except Exception as exc:
                 logger.warning(
                     "StorylineService LLM path failed for event=%s: %s",

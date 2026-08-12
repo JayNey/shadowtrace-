@@ -7,6 +7,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from functools import partial
 from typing import Any, Protocol, cast
 
+from celery.exceptions import SoftTimeLimitExceeded
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -419,6 +420,14 @@ async def _mark_graph_failed(
     event_id = str(state.get("event_id") or "")
     if not event_id:
         return
+    # ISSUE-314: SoftTimeLimit terminal ownership belongs to task/intent apply.
+    if isinstance(error, SoftTimeLimitExceeded):
+        logger.info(
+            "skip graph FAILED transition for SoftTimeLimitExceeded event=%s",
+            event_id,
+        )
+        record_graph_failed_transition_noop(reason="soft_time_limit")
+        return
     if _is_state_mismatch_validation(error):
         logger.warning(
             "skip graph FAILED transition for state mismatch event=%s",
@@ -483,6 +492,9 @@ def _wrap_node(
     async def wrapped(state: InvestigationState) -> InvestigationState:
         try:
             return await fn(state)
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: do not write EventStatus.FAILED; re-raise for task owner.
+            raise
         except Exception as exc:
             await _mark_graph_failed(services, state, exc)
             raise
@@ -1819,6 +1831,9 @@ def build_investigation_graph(
             )
             # Track whether any IMMEDIATE actions were executed.
             execution_ok = summary is not None
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: side-effect phase soft-limit must reach task owner.
+            raise
         except Exception:
             logger.exception(
                 "execute_plan failed for event=%s revision=%d",
@@ -1940,6 +1955,9 @@ def build_investigation_graph(
                         "verify_agent returned non-VerificationResult for event=%s",
                         state["event_id"],
                     )
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: soft-limit must not look like verify degradation.
+                raise
             except Exception:
                 degraded = True
                 logger.exception("verify_agent failed for event=%s", state["event_id"])
@@ -1965,6 +1983,8 @@ def build_investigation_graph(
                         plan_revision,
                         principal_or_system="verify_node:disposition_activation",
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     logger.exception(
                         "verify_node: EventDispositionService activation failed for event=%s",
@@ -1983,6 +2003,8 @@ def build_investigation_graph(
                         state["event_id"],
                         operator="verify_node:disposition_activation",
                     )
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception:
                     logger.exception(
                         "verify_node: disposition activation failed for event=%s",
@@ -2226,6 +2248,9 @@ def build_investigation_graph(
                     error_code="report_generation_failed",
                     details={"event_id": event_id},
                 )
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: soft-limit must not look like report_generation_failed.
+            raise
         except Exception:
             # ISSUE-242: never leave REPORTING with a silent missing row —
             # persist explicit failure markers before _wrap_node marks FAILED.
@@ -2523,6 +2548,8 @@ async def planner_node(
                     failure_reason=(f"replan triggered (count={event_context.replan_count})"),
                     previous_plan=previous_plan,
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception:
                 logger.warning(
                     "planner_node: failed to parse existing plan for revision, "

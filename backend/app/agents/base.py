@@ -18,6 +18,7 @@ from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from typing import Any, Generic, TypeVar, cast
 
+from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.errors import GuardrailViolationError
@@ -121,6 +122,11 @@ class BaseAgent(ABC, Generic[TIn, TOut]):
             duration_ms = int((datetime.now(UTC) - started_at).total_seconds() * 1000)
             await self._publish_agent_completed(input, duration_ms=duration_ms)
             return output
+        except SoftTimeLimitExceeded as exc:
+            # ISSUE-314: task/intent owns outcome; keep trace, skip agent_failed.
+            status = "failed"
+            error_detail = f"soft_time_limit_exceeded:{type(exc).__name__}"
+            raise
         except Exception as exc:
             status = "failed"
             error_detail = str(exc)

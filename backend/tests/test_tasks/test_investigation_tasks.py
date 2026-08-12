@@ -1177,13 +1177,24 @@ def test_run_investigation_soft_time_limit_releases_with_resolved_owner(
     from app.core.celery_delivery import celery_task_owner_id
 
     released: list[tuple[str, str]] = []
+    order: list[str] = []
 
     class _TrackingLease:
         async def release(self, event_id: str, owner_id: str) -> bool:
+            order.append("release")
             released.append((event_id, owner_id))
             return True
 
     monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _TrackingLease())
+
+    async def _noop_apply(*_args: object, **_kwargs: object) -> None:
+        order.append("apply")
+        return None
+
+    monkeypatch.setattr(
+        "app.services.soft_time_limit_outcome.apply_soft_time_limit_outcome",
+        _noop_apply,
+    )
 
     async def _boom(*_args: object, **_kwargs: object) -> dict[str, str]:
         raise SoftTimeLimitExceeded()
@@ -1204,50 +1215,35 @@ def test_run_investigation_soft_time_limit_releases_with_resolved_owner(
 
     expected_owner = celery_task_owner_id("task-soft-limit-001")
     assert released == [("evt-soft-limit", expected_owner)]
+    # ISSUE-314: durable outcome must commit before lease release.
+    assert order == ["apply", "release"]
 
 
 def test_run_investigation_soft_timeout_invalidates_checkpoint_and_marks_intent_dead(
     celery_eager: None,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ISSUE-296: soft time limit must fence checkpoint and mark intent dead."""
+    """ISSUE-314: soft time limit delegates to centralized task handler."""
     from celery.app.task import Context
     from celery.exceptions import SoftTimeLimitExceeded
 
-    invalidated: list[str] = []
-    marked_dead: list[tuple[str, str, str]] = []
+    handled: list[tuple[str, str | None, str]] = []
 
-    class _TrackingLease:
-        async def release(self, event_id: str, owner_id: str) -> bool:
-            return True
-
-    async def _invalidate(event_id: str) -> None:
-        invalidated.append(event_id)
-
-    class _IntentService:
-        async def mark_dead(
-            self,
-            intent_id: str,
-            *,
-            error: str,
-            broker_task_id: str,
-        ) -> None:
-            marked_dead.append((intent_id, error, broker_task_id))
+    async def _handle(
+        event_id: str,
+        *,
+        resolved_owner: str,
+        intent_id: str | None,
+        broker_task_id: str,
+    ) -> None:
+        handled.append((event_id, intent_id, broker_task_id))
 
     from app.models.investigation_intent import IntentDeliveryAdmission
 
-    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _TrackingLease())
-    monkeypatch.setattr(
-        "app.orchestration.checkpointer.invalidate_event_checkpoint",
-        _invalidate,
-    )
+    monkeypatch.setattr(tasks, "_handle_soft_time_limit_exceeded", _handle)
     monkeypatch.setattr(
         "app.tasks.investigation_tasks._admit_intent_delivery",
         AsyncMock(return_value=IntentDeliveryAdmission.ACCEPTED),
-    )
-    monkeypatch.setattr(
-        "app.services.investigation_intent_service.InvestigationIntentService",
-        lambda _factory: _IntentService(),
     )
 
     async def _boom(*_args: object, **_kwargs: object) -> dict[str, str]:
@@ -1268,9 +1264,8 @@ def test_run_investigation_soft_timeout_invalidates_checkpoint_and_marks_intent_
     finally:
         tasks.run_investigation.request_stack.pop()
 
-    assert invalidated == ["evt-soft-checkpoint"]
-    assert marked_dead == [
-        ("intent-soft-296", "soft_time_limit_exceeded", "task-soft-checkpoint-001"),
+    assert handled == [
+        ("evt-soft-checkpoint", "intent-soft-296", "task-soft-checkpoint-001"),
     ]
 
 
@@ -1607,6 +1602,10 @@ def test_run_analysis_only_eager_executes_task(
     "status",
     [
         EventStatus.WAITING_APPROVAL,
+        EventStatus.TRIAGING,
+        EventStatus.COLLECTING_EVIDENCE,
+        EventStatus.ANALYZING,
+        EventStatus.SCORING,
         EventStatus.EXECUTING_RESPONSE,
         EventStatus.VERIFYING,
         EventStatus.REPLANNING,
@@ -1647,6 +1646,58 @@ async def test_execute_redelivery_resume_calls_checkpoint_resume_with_public_di(
     assert call_kwargs["get_super_agent"] is deps.get_super_agent
     assert call_kwargs["get_workflow_runtime"] is deps.get_workflow_runtime
     assert call_kwargs["degraded_flags"] is degraded_flags
+
+
+@pytest.mark.asyncio
+async def test_analysis_only_soft_limit_does_not_mark_failed_before_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-314: analysis-only SoftTimeLimit must not write FAILED before task owner."""
+    import contextlib
+
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.api.v1 import deps
+
+    transitions: list[EventStatus] = []
+
+    class _SM:
+        async def transition(self, event_id: str, target: EventStatus, **kwargs: object) -> None:
+            transitions.append(target)
+
+    class _Lease:
+        async def start_renewal(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        async def release(self, event_id: str, owner_id: str) -> bool:
+            return True
+
+    class _Pipeline:
+        async def run(self, event_id: str, **kwargs: object) -> object:
+            raise SoftTimeLimitExceeded()
+
+    monkeypatch.setattr(deps, "get_state_machine", AsyncMock(return_value=_SM()))
+    monkeypatch.setattr(deps, "get_event_lease", lambda: _Lease())
+    monkeypatch.setattr(deps, "get_pipeline", AsyncMock(return_value=_Pipeline()))
+    monkeypatch.setattr(deps, "_get_session_factory", lambda: object())
+    monkeypatch.setattr(
+        "app.services.evidence_projection.EvidenceProjection",
+        lambda *_a, **_k: object(),
+    )
+    monkeypatch.setattr(
+        "app.services.evidence_projection.bind_evidence_projection",
+        lambda *_a, **_k: contextlib.nullcontext(),
+    )
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        await tasks.execute_analysis_only_investigation(
+            "evt-ao-soft",
+            generate_report=True,
+            owner_id="owner-ao",
+            lease_acquired=True,
+        )
+
+    assert transitions == []
 
 
 @pytest.mark.asyncio
@@ -1764,3 +1815,49 @@ async def test_schedule_investigation_analysis_only_celery_routes_to_dispatch(
     )
     assert task_id == "task-analysis-only-schedule"
     assert captured == {"scheduled": True}
+
+
+@pytest.mark.asyncio
+async def test_soft_limit_handler_applies_before_lease_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-314: durable soft-limit outcome must commit before lease.release."""
+    order: list[str] = []
+
+    class _Lease:
+        async def release(self, event_id: str, owner_id: str) -> bool:
+            order.append(f"release:{event_id}:{owner_id}")
+            return True
+
+    async def _apply(*_a, **_k):
+        order.append("apply")
+
+    monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
+    monkeypatch.setattr(
+        "app.api.v1.deps._get_session_factory",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "app.api.v1.deps._get_degraded_flags",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "app.db.session.get_session_factory",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        "app.services.investigation_intent_service.InvestigationIntentService",
+        lambda *_a, **_k: object(),
+    )
+    monkeypatch.setattr(
+        "app.services.soft_time_limit_outcome.apply_soft_time_limit_outcome",
+        _apply,
+    )
+
+    await tasks._handle_soft_time_limit_exceeded(
+        "evt-order",
+        resolved_owner="owner-1",
+        intent_id="iin-1",
+        broker_task_id="task-1",
+    )
+    assert order == ["apply", "release:evt-order:owner-1"]

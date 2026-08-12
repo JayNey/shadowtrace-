@@ -981,6 +981,25 @@ class TestRAGAgentDegraded:
         assert output.citations == []
 
     @pytest.mark.asyncio
+    async def test_soft_time_limit_is_not_swallowed_as_empty_retrieval(self):
+        """ISSUE-314: SoftTimeLimitExceeded must not degrade into empty RAG success."""
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        wm = _MockBoundWorkingMemory()
+        full = _make_full_results()
+        results = {
+            "attack_kb": SoftTimeLimitExceeded(),
+            "fp_case_kb": full["fp_case_kb"],
+            "history_case_kb": full["history_case_kb"],
+            "playbook_kb": full["playbook_kb"],
+        }
+        pipeline = _MockPipeline(results=results)
+        agent = RAGAgent(working_memory=wm, pipeline=pipeline)
+
+        with pytest.raises(SoftTimeLimitExceeded):
+            await agent._run(_make_input())
+
+    @pytest.mark.asyncio
     async def test_no_pipeline_returns_degraded(self):
         """When no pipeline is provided, return degraded empty output."""
         wm = _MockBoundWorkingMemory()

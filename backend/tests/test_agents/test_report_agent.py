@@ -190,6 +190,13 @@ class _FailingLLM:
         raise RuntimeError("llm unavailable")
 
 
+class _SoftTimeLimitLLM:
+    async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        raise SoftTimeLimitExceeded()
+
+
 class _TimeoutCapturingLLM:
     last_timeout: float | None = None
 
@@ -484,6 +491,35 @@ async def test_llm_failure_falls_back_to_template(
     assert NOT_EXECUTED_VERIFICATION in blob
     assert PLACEHOLDER_NO_ACTIONS not in blob
     assert PLACEHOLDER_NO_VERIFICATION not in blob
+
+
+@pytest.mark.asyncio
+async def test_report_agent_soft_limit_not_template_fallback(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+    event_bus: _FakeEventBus,
+) -> None:
+    """ISSUE-314: SoftTimeLimit must not be treated as LLM failure template success."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    event_id = f"evt-report-soft-{uuid4().hex[:8]}"
+    await wm.write(event_id, "triage_result", _main_triage().model_dump(mode="json"))
+    event_service.final_verdicts[event_id] = FinalVerdict.CONFIRMED_THREAT
+
+    agent = ReportAgent(
+        llm_client=_SoftTimeLimitLLM(),
+        working_memory=wm,
+        event_service=event_service,
+        event_bus=event_bus,
+    )
+    with pytest.raises(SoftTimeLimitExceeded):
+        await agent.execute(
+            ReportAgentInput(
+                event_id=event_id,
+                evidence_output=_main_evidence(event_id),
+                risk_assessment=_high_risk(),
+            )
+        )
 
 
 @pytest.mark.asyncio

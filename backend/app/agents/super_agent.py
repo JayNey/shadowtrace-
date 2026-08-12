@@ -27,6 +27,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any, Protocol, TypeVar, runtime_checkable
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.base import AgentOutput, BaseAgent
 from app.agents.planner_agent import PlannerAgent
 from app.agents.rag_agent import RAGAgent
@@ -392,6 +394,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         lifecycle_input = SuperAgentInput(event_id=event_id)
         started_at = datetime.now(UTC)
         lifecycle_started = False
+        # ISSUE-314: defer lease release on soft-limit so task/intent apply runs
+        # while still holding the lease (mirrors analysis_only soft_limited).
+        soft_limited = False
 
         try:
             # 1. Acquire lease
@@ -492,6 +497,36 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             if lifecycle_started:
                 await self._publish_agent_failed(lifecycle_input, str(exc))
             raise
+        except SoftTimeLimitExceeded as exc:
+            # ISSUE-314: task/intent layer owns terminal vs bounded recovery.
+            # Do not publish agent_failed — outcome may still be RECOVERED.
+            # Defer lease release to `_handle_soft_time_limit_exceeded`.
+            guard_reset_needed = False
+            soft_limited = True
+            if self.audit_service is not None:
+                try:
+                    await self.audit_service.log_transition(
+                        event_id,
+                        str(event_context.event.status.value)
+                        if event_context is not None
+                        and event_context.event is not None
+                        else EventStatus.NEW.value,
+                        str(event_context.event.status.value)
+                        if event_context is not None
+                        and event_context.event is not None
+                        else EventStatus.NEW.value,
+                        _SUPER_AGENT_OPERATOR,
+                        f"soft_time_limit_exceeded:{type(exc).__name__}",
+                    )
+                except SoftTimeLimitExceeded:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "SuperAgent: failed to audit soft time limit event=%s",
+                        event_id,
+                        exc_info=True,
+                    )
+            raise
         except Exception as exc:
             if lifecycle_started:
                 await self._publish_agent_failed(lifecycle_input, str(exc))
@@ -511,8 +546,19 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             # memory growth in the ConvergenceGuard in-process store.
             if guard_reset_needed:
                 self._reset_convergence_guard(event_id)
-            if acquired and self.lease is not None:
-                await self.lease.release(event_id, resolved_owner)
+            if acquired and self.lease is not None and not soft_limited:
+                try:
+                    await self.lease.release(event_id, resolved_owner)
+                except SoftTimeLimitExceeded:
+                    # ISSUE-314: do not swallow soft-limit into investigate success.
+                    raise
+                except Exception:
+                    logger.warning(
+                        "SuperAgent: best-effort lease release failed event=%s owner=%s",
+                        event_id,
+                        resolved_owner,
+                        exc_info=True,
+                    )
 
     # ------------------------------------------------------------------ #
     # _run — BaseAgent template integration
@@ -891,6 +937,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         for attempt in range(max_attempts):
             try:
                 return await factory()
+            except SoftTimeLimitExceeded:
+                # ISSUE-314: never retry after Celery soft-limit (do not rely on classify).
+                raise
             except Exception as exc:
                 last_error = exc
                 if not is_retryable(exc) or attempt >= MAX_AGENT_RETRIES:
@@ -1053,6 +1102,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
             )
             if rag_out is not None:
                 ec.rag_output = rag_out.model_dump(mode="json")
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: must bubble to task/intent owner; never swallow.
+            raise
         except Exception:
             logger.warning(
                 "SuperAgent: RAG failed for event=%s — continuing without RAG",
@@ -1142,6 +1194,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     if hasattr(graph_output, "model_dump")
                     else graph_output
                 )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.warning(
                 "SuperAgent: GraphAgent failed for event=%s — continuing",
@@ -1189,6 +1243,9 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         event_id = _event_id_from_context(ec)
         try:
             await evaluate_investigation_quality_scores(self._output_quality_evaluator, ec)
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: soft-limit ownership stays at the Celery task layer.
+            raise
         except OutputQualityEvaluationBlockedError:
             raise
         except Exception:
@@ -1225,6 +1282,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
                     if hasattr(storyline, "model_dump")
                     else storyline
                 )
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.warning(
                 "SuperAgent: StorylineService failed for event=%s — continuing",
@@ -1285,6 +1344,8 @@ class SuperAgent(BaseAgent[SuperAgentInput, AgentOutput]):
         )
         try:
             result = await engine.run(goal, context, react_exec)
+        except SoftTimeLimitExceeded:
+            raise
         except Exception:
             logger.exception("SuperAgent: ReAct run failed for event=%s", event_id)
             return

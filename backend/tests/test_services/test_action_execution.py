@@ -1330,3 +1330,28 @@ async def test_direct_tool_replan_execution_result_enqueues_with_snapshot(
         assert outboxes[0].closure_cycle == 2
         assert outboxes[0].action_id == action.action_id
     assert summary.writeback_ids
+
+@pytest.mark.asyncio
+async def test_execute_plan_soft_limit_reraises_and_skips_outbox() -> None:
+    """ISSUE-314: SoftTimeLimit must leave execute_plan without outbox writeback."""
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.services.action_execution_service import ActionExecutionService
+
+    svc = ActionExecutionService.__new__(ActionExecutionService)
+    action = SimpleNamespace(action_id="act-soft-1")
+    svc.reconcile_stale_executions = AsyncMock()
+    svc._current_revision = AsyncMock(return_value=1)
+    svc._load_claimable_actions = AsyncMock(return_value=[action])
+    svc.execute_action = AsyncMock(side_effect=SoftTimeLimitExceeded())
+    svc._sync = SimpleNamespace(process_ready_outboxes=AsyncMock())
+    svc._build_summary = AsyncMock(return_value={"ok": True})
+    svc._state_machine = SimpleNamespace(transition=AsyncMock())
+
+    with pytest.raises(SoftTimeLimitExceeded):
+        await svc.execute_plan("evt-soft-exec")
+
+    svc._sync.process_ready_outboxes.assert_not_awaited()
+    svc._build_summary.assert_not_awaited()

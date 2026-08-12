@@ -174,6 +174,13 @@ class _FailingLLM:
         raise RuntimeError("llm unavailable")
 
 
+class _SoftTimeLimitLLM:
+    async def chat(self, *args: Any, **kwargs: Any) -> LLMResponse:
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        raise SoftTimeLimitExceeded()
+
+
 class _DegradedLLM:
     """Returns structurally valid but degraded LLM scores (must not merge)."""
 
@@ -651,6 +658,30 @@ async def test_llm_failure_falls_back_to_rule_only(
     assert output.scoring_mode is ScoringMode.RULE_ONLY
     assert output.risk_score >= 70
     assert agent.last_verdict is FinalVerdict.CONFIRMED_THREAT
+
+
+@pytest.mark.asyncio
+async def test_risk_agent_soft_limit_not_rule_fallback(
+    wm: _FakeWorkingMemory,
+    event_service: _FakeEventService,
+) -> None:
+    """ISSUE-314: SoftTimeLimit must not fall back to rule_only success."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    event_id = f"evt-risk-soft-{uuid4().hex[:8]}"
+    agent = RiskAgent(
+        llm_client=_SoftTimeLimitLLM(),
+        working_memory=wm,
+        event_service=event_service,
+    )
+    with pytest.raises(SoftTimeLimitExceeded):
+        await agent.execute(
+            RiskAgentInput(
+                event_id=event_id,
+                triage_result=_main_triage(),
+                evidence_output=_main_evidence(event_id),
+            )
+        )
 
 
 @pytest.mark.asyncio

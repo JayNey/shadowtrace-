@@ -26,6 +26,8 @@ from app.agents.rules.response_plan_quality_gate import (
     evidence_blocks_high_impact_actions,
     requires_threat_aligned_containment,
 )
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.core.errors import LLMError
 from app.core.errors import ValidationError as ShadowValidationError
 from app.core.llm.prompt_quality import resolve_structured_prompt_timeout
@@ -956,6 +958,8 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                         ResponsePlanGeneratedBy.LLM,
                         summary[:500],
                     )
+            except SoftTimeLimitExceeded:
+                raise
             except Exception as exc:
                 logger.warning(
                     "ResponseAgent LLM path failed event=%s err=%s",

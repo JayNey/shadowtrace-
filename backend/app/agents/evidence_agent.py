@@ -15,6 +15,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol, cast
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -900,6 +901,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
                     continue
                 try:
                     outcome = completed_task.result()
+                except SoftTimeLimitExceeded:
+                    raise
                 except Exception as exc:
                     source = TOOL_SOURCE_MAP[tool_name]
                     outcome = {
@@ -1310,6 +1313,8 @@ class EvidenceAgent(BaseAgent[EvidenceAgentInput, EvidenceOutput]):
             reported = int(tool_result.execution_time_ms or 0)
             timing = reported if reported > 0 else wall_ms
             return tool_result, timing, None
+        except SoftTimeLimitExceeded:
+            raise
         except Exception as exc:
             wall_ms = max(0, int((time.perf_counter() - started) * 1000))
             logger.info(

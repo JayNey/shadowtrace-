@@ -44,6 +44,8 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.core.config import get_settings
 from app.core.errors import LLMError, ToolCallGrantDeniedError, ToolCallGrantUnavailableError
 from app.core.llm.base import BaseLLMClient, LLMMessage, LLMProviderError
@@ -474,6 +476,8 @@ class ReActEngine:
                 think = await self._think(
                     goal, context, executor, observation, round_index, event_id
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except LLMError as exc:
                 # Degradation contract: LLM unavailable → immediate error stop;
                 # caller (SuperAgent) falls back to the fixed plan sequence.
@@ -540,6 +544,8 @@ class ReActEngine:
                 if action.action_type is ReActActionType.CALL_TOOL:
                     tool_calls += 1
                 round_failed = self._is_failure(action_result)
+            except SoftTimeLimitExceeded:
+                raise
             except ReActActionDenied as exc:
                 logger.warning(
                     "react_action_denied event=%s target=%s: %s",
@@ -580,6 +586,8 @@ class ReActEngine:
                 reflect = await self._reflect(
                     goal, observation, action, action_result, context, round_index, event_id
                 )
+            except SoftTimeLimitExceeded:
+                raise
             except LLMError as exc:
                 logger.warning("ReAct reflect failed event=%s: %s", event_id, exc)
                 round_ = ReActRound(

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -970,6 +970,26 @@ class TestEvaluateInvestigationQualityScores:
         with pytest.raises(OutputQualityEvaluationBlockedError):
             await evaluate_investigation_quality_scores(_BrokenBlockingEvaluator(), ec)  # type: ignore[arg-type]
 
+    async def test_soft_time_limit_from_evaluate_all_is_not_swallowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ISSUE-314: SoftTimeLimitExceeded must propagate out of quality eval."""
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        evaluator = OutputQualityEvaluator(
+            degraded_flags=_MockDegradedFlags(),
+            blocking_enabled=False,
+            judge_enabled=False,
+        )
+
+        async def _soft_limit(_ctx: dict[str, Any]) -> dict[str, OutputQualityScore]:
+            raise SoftTimeLimitExceeded()
+
+        monkeypatch.setattr(evaluator, "evaluate_all", _soft_limit)
+        ec = _event_context_for_quality("evt-314-quality-soft")
+        with pytest.raises(SoftTimeLimitExceeded):
+            await evaluate_investigation_quality_scores(evaluator, ec)
+
 
 @pytest.mark.asyncio
 class TestAnalysisOnlyPipelineQualityWiring:
@@ -1088,3 +1108,34 @@ class TestAnalysisOnlyPipelineQualityWiring:
                 "writer": "OutputQualityEvaluator",
             }
         ]
+
+    async def test_evaluate_quality_scores_reraises_soft_time_limit(self) -> None:
+        """ISSUE-314: AnalysisOnlyPipeline quality step must not swallow soft-limit."""
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
+
+        event_id = "evt-314-ao-quality-soft"
+        context_store = MagicMock()
+        context_store.get_full_context = AsyncMock(
+            return_value=_event_context_for_quality(event_id)
+        )
+        pipeline = AnalysisOnlyPipeline(
+            triage_agent=MagicMock(),
+            evidence_agent=MagicMock(),
+            rag_agent=MagicMock(),
+            risk_agent=MagicMock(),
+            report_agent=MagicMock(),
+            context_store=context_store,
+            output_quality_evaluator=object(),
+        )
+
+        async def _boom(*_a: Any, **_k: Any) -> dict[str, OutputQualityScore]:
+            raise SoftTimeLimitExceeded()
+
+        with patch(
+            "app.services.output_quality_evaluator.evaluate_investigation_quality_scores",
+            new=_boom,
+        ):
+            with pytest.raises(SoftTimeLimitExceeded):
+                await pipeline._evaluate_quality_scores(event_id)
