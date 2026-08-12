@@ -48,7 +48,11 @@ class DispositionCommandFactory:
     ) -> DispositionCommand:
         spec = ENTITY_ACTION_EFFECT_SPECS.get(entity_action_code)
         if spec is None:
-            raise ValueError(f"unsupported XDR_MANAGED entity action {entity_action_code}")
+            allowed = ", ".join(sorted(ENTITY_ACTION_EFFECT_SPECS))
+            raise ValueError(
+                f"unsupported XDR_MANAGED entity action {entity_action_code}; "
+                f"allowed=[{allowed}]"
+            )
         expected_target_type, _ = spec
         if not action.target:
             raise ValueError("XDR_MANAGED entity action requires a non-empty target")

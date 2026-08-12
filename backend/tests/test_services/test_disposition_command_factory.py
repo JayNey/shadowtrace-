@@ -14,7 +14,12 @@ import pytest
 from app.core.errors import ValidationError
 from app.core.guardrails import OutboundDispositionGuard
 from app.models.action import Action
-from app.models.disposition import SourceObjectLocator, TargetDispositionResult
+from app.models.disposition import (
+    ENTITY_ACTION_EFFECT_SPECS,
+    SourceObjectLocator,
+    TargetDispositionResult,
+    parse_entity_effect_target,
+)
 from app.models.enums import (
     ActionCategory,
     ActionLevel,
@@ -191,6 +196,105 @@ def test_entity_action_code_rejects_non_specs_l1_ticket_tools() -> None:
             entity_action_code_for(action)
         assert exc_info.value.error_code == "unsupported"
         assert exc_info.value.details.get("tool_name") == tool_name
+
+
+def test_build_entity_action_submit_rejects_stale_contain_device_alias() -> None:
+    """ISSUE-316: no silent SPECS alias for legacy contain_device helper name."""
+    assert "contain_device" not in ENTITY_ACTION_EFFECT_SPECS
+    assert "isolate_host" in ENTITY_ACTION_EFFECT_SPECS
+    action = Action(
+        action_id="act-host-1",
+        event_id="evt-1",
+        plan_revision=1,
+        action_fingerprint="fp-host",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Isolate Host",
+        tool_name="isolate_host",
+        action_level=ActionLevel.L3,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+        target="host-1",
+        target_type="host",
+    )
+    with pytest.raises(ValueError, match="unsupported XDR_MANAGED entity action contain_device") as exc:
+        DispositionCommandFactory().build_entity_action_submit(
+            action,
+            source_locator=_locator(),
+            source_concurrency_token=None,
+            operator_id="system",
+            disposition_id="disp-1",
+            writeback_id="wbk-1",
+            closure_cycle=1,
+            entity_action_code="contain_device",
+        )
+    message = str(exc.value)
+    assert "allowed=[" in message
+    assert "isolate_host" in message
+
+
+def test_entity_action_code_for_rejects_contain_device_tool_name() -> None:
+    """ISSUE-316: production path rejects legacy tool_name via ValidationError."""
+    action = Action(
+        action_id="act-host-legacy",
+        event_id="evt-1",
+        plan_revision=1,
+        action_fingerprint="fp-host-legacy",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Contain Device",
+        tool_name="contain_device",
+        action_level=ActionLevel.L3,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+        target="host-1",
+        target_type="host",
+    )
+    with pytest.raises(ValidationError, match="entity submit") as exc_info:
+        entity_action_code_for(action)
+    assert exc_info.value.error_code == "unsupported"
+    assert exc_info.value.details.get("tool_name") == "contain_device"
+    assert exc_info.value.details.get("reason") == "not_in_entity_action_effect_specs"
+
+
+def test_parse_entity_effect_target_lists_allowed_specs_keys() -> None:
+    with pytest.raises(ValueError, match="unsupported entity_action_code contain_device") as exc:
+        parse_entity_effect_target("contain_device", "host:host-1")
+    message = str(exc.value)
+    assert "allowed=[" in message
+    assert "isolate_host" in message
+
+
+def test_build_entity_action_submit_accepts_isolate_host_specs_name() -> None:
+    command = DispositionCommandFactory().build_entity_action_submit(
+        Action(
+            action_id="act-host-2",
+            event_id="evt-1",
+            plan_revision=1,
+            action_fingerprint="fp-host-2",
+            action_category=ActionCategory.RESPONSE,
+            action_name="Isolate Host",
+            tool_name="isolate_host",
+            action_level=ActionLevel.L3,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            writeback_required=True,
+            writeback_applicable=False,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            target="host-1",
+            target_type="host",
+        ),
+        source_locator=_locator(),
+        source_concurrency_token=None,
+        operator_id="system",
+        disposition_id="disp-2",
+        writeback_id="wbk-2",
+        closure_cycle=1,
+        entity_action_code="isolate_host",
+    )
+    assert command.operation_params.entity_action_code == "isolate_host"
+    assert command.operation_params.canonical_target == "host:host-1"
 
 
 @pytest.mark.asyncio

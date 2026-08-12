@@ -46,7 +46,10 @@ from app.models.source import SourceReference
 from app.models.workflow import validate_action_status_transition
 from app.services.approval_engine import ApprovalEngine
 from app.services.context_service import EventContextStore, append_context_journal_in_session
-from app.services.disposition_command_factory import DispositionCommandFactory
+from app.services.disposition_command_factory import (
+    DispositionCommandFactory,
+    entity_action_code_for,
+)
 from app.services.disposition_sync_service import DispositionSyncService
 from app.services.event_disposition_service import EventDispositionService, _action_from_row
 from app.services.event_service import EventService
@@ -357,7 +360,7 @@ async def submit_entity_action_once(
                 disposition_id=disposition_id,
                 writeback_id="pending",
                 closure_cycle=int(action.plan_revision),
-                entity_action_code="contain_device",
+                entity_action_code=entity_action_code_for(action),
             )
             outbox_record = await disposition_sync_service.enqueue_command(
                 session,
