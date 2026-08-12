@@ -3,12 +3,14 @@
 import type { Action } from "../types/action";
 import type { EventDetailResponse, EventEvidenceResponse } from "../types/event";
 import type { EventWriteback } from "../hooks/useEventDetail";
+import { isSideEffectProjectionDegraded } from "./sideEffectLabels";
 
 export type EventTodoKind =
   | "approval_pending"
   | "report_pending"
   | "memory_review"
   | "writeback_resolve"
+  | "side_effects_pending"
   | "close_blocked"
   | "close_ready"
   | "decision_basis"
@@ -85,7 +87,23 @@ export function canCloseEvent(detail: EventDetailResponse): boolean {
   if (detail.event.status === "closed") {
     return false;
   }
-  return detail.next_recommended_action === "close";
+  if (detail.next_recommended_action !== "close") {
+    return false;
+  }
+  // Mirror backend CLOSED side-effect gate: do not advertise close_ready while
+  // gate-applicable outstanding remains or projection counts are degraded (-1).
+  if (
+    isSideEffectProjectionDegraded(
+      detail.gate_applicable_outstanding_count,
+      detail.outstanding_side_effect_count,
+    )
+  ) {
+    return false;
+  }
+  if ((detail.gate_applicable_outstanding_count ?? 0) > 0) {
+    return false;
+  }
+  return true;
 }
 
 export interface BuildEventTodosInput {
@@ -145,6 +163,32 @@ export function buildEventTodos(input: BuildEventTodosInput): EventTodoItem[] {
       description: "存在 UNKNOWN 写回或需人工裁决的处置状态。",
       tabKey: "writeback",
       priority: 40,
+    });
+  }
+
+  const gateOutstanding = detail.gate_applicable_outstanding_count ?? 0;
+  const sideEffectDegraded = isSideEffectProjectionDegraded(
+    detail.gate_applicable_outstanding_count,
+    detail.outstanding_side_effect_count,
+  );
+  if (
+    detail.event.status !== "closed" &&
+    (gateOutstanding > 0 || sideEffectDegraded)
+  ) {
+    const outstandingCount = detail.outstanding_side_effects?.length ?? gateOutstanding;
+    todos.push({
+      id: "side-effects-pending",
+      kind: "side_effects_pending",
+      label: sideEffectDegraded
+        ? "关单受阻：副作用投影不可用"
+        : `关单受阻：${gateOutstanding} 项门禁副作用待收敛`,
+      description: sideEffectDegraded
+        ? "副作用计数降级（-1），请刷新事件详情或查看运营要素中的收敛明细。"
+        : outstandingCount > 0
+          ? `结构化 outstanding 列表已展示在运营要素区（${outstandingCount} 条）。`
+          : "存在未收敛的门禁副作用，请查看运营要素中的 outstanding 列表。",
+      // Panel lives in 运营要素 (above tabs); no Actions-tab jump.
+      priority: 45,
     });
   }
 

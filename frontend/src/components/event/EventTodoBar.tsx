@@ -45,6 +45,7 @@ function todoColor(kind: EventTodoItem["kind"]): "success" | "warning" | "info" 
     case "approval_pending":
     case "writeback_resolve":
     case "close_blocked":
+    case "side_effects_pending":
       return "warning";
     case "close_ready":
       return "success";
@@ -120,7 +121,19 @@ export default function EventTodoBar({
       await onRefresh();
     } catch (err: unknown) {
       if (err instanceof ApiError) {
-        message.error(err.message || err.error_code || "结案失败");
+        if (err.error_code === "closed_side_effects_pending") {
+          // Projection may have changed since last load; refresh before toast.
+          await onRefresh();
+          const detailHint =
+            typeof err.details?.gate_applicable_outstanding_count === "number"
+              ? `（仍有 ${err.details.gate_applicable_outstanding_count} 项未完成投递）`
+              : "";
+          message.error(
+            `${err.message || "结案被副作用收敛门禁阻断，请查看运营要素中的 outstanding 列表。"}${detailHint}`,
+          );
+        } else {
+          message.error(err.message || err.error_code || "结案失败");
+        }
       } else {
         message.error("结案失败");
       }

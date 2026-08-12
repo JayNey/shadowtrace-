@@ -110,6 +110,65 @@ export type ResponsePlanGeneratedBy = "llm" | "template";
 
 export type EffectStatus = "verified" | "failed" | "skipped" | "unverifiable";
 
+export type ActionExecutionPhase = "immediate" | "post_verify";
+
+export type ExecutionJobStatus =
+  | "queued"
+  | "running"
+  | "partial_success"
+  | "success"
+  | "failed"
+  | "timed_out"
+  | "cancelled"
+  | "unknown";
+
+export type OutboxDeliveryStatus =
+  | "ready"
+  | "leased"
+  | "waiting_retry"
+  | "delivered"
+  | "paused"
+  | "dead_letter";
+
+export type SideEffectScope = "gate_applicable" | "background_detached";
+
+export type SideEffectConvergencePolicy =
+  | "terminal_writeback"
+  | "independent_entity_effect"
+  | "execution_job_only";
+
+export type SideEffectConvergenceReason =
+  | "in_flight_job"
+  | "executing_action"
+  | "effect_unverified"
+  | "terminal_writeback_unconfirmed"
+  | "outbox_not_confirmed"
+  | "outbox_undelivered";
+
+/** Outstanding side effect row — aligned with OpenAPI OutstandingSideEffectView. */
+export interface OutstandingSideEffectView {
+  action_id: string;
+  scope: SideEffectScope;
+  action_status: ActionStatus;
+  execution_phase: ActionExecutionPhase;
+  writeback_applicable: boolean;
+  convergence_policy?: SideEffectConvergencePolicy | null;
+  job_status?: ExecutionJobStatus | null;
+  outbox_delivery_status?: OutboxDeliveryStatus | null;
+  outbox_writeback_status?: WritebackStatus | null;
+  plan_revision: number;
+  superseded?: boolean;
+  blocking_reason?: SideEffectConvergenceReason | null;
+}
+
+/** Side-effect convergence projection shared by EventDetailResponse / EventCloseResponse. */
+export interface SideEffectConvergenceProjection {
+  background_side_effects_pending?: boolean;
+  outstanding_side_effect_count?: number;
+  gate_applicable_outstanding_count?: number;
+  outstanding_side_effects?: OutstandingSideEffectView[];
+}
+
 /* ------------------------------------------------------------------ */
 /*  Entity models (aligned with backend app/models/entities.py)       */
 /* ------------------------------------------------------------------ */
@@ -644,7 +703,7 @@ export interface EventCloseRequest {
   force_local_close?: boolean;
 }
 
-export interface EventDetailResponse {
+export interface EventDetailResponse extends SideEffectConvergenceProjection {
   event: SecurityEvent;
   writeback_required: boolean;
   writeback_readiness: WritebackReadiness;
@@ -658,6 +717,14 @@ export interface EventDetailResponse {
   next_recommended_action?: NextRecommendedAction;
   full_loop_available?: boolean;
   phase_message?: string | null;
+}
+
+/** POST /events/{event_id}/close — aligned with OpenAPI EventCloseResponse. */
+export interface EventCloseResponse extends SideEffectConvergenceProjection {
+  event_id: string;
+  status: EventStatus;
+  final_verdict: FinalVerdict;
+  external_unsynced?: boolean;
 }
 
 export interface InvestigationHealthConfig {

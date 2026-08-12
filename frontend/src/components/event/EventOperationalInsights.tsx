@@ -3,6 +3,7 @@
 import { Alert, Card, Descriptions, Space, Tag, Typography } from "antd";
 import type { EventDetailResponse } from "../../types/event";
 import type { EventWriteback } from "../../hooks/useEventDetail";
+import OutstandingSideEffectsPanel from "./OutstandingSideEffectsPanel";
 
 const NEXT_ACTION_LABELS: Record<string, string> = {
   none: "无",
@@ -23,9 +24,14 @@ const PHASE_LABELS: Record<string, string> = {
 interface Props {
   detail: EventDetailResponse;
   writebacks: EventWriteback[];
+  onNavigateTab?: (tabKey: string) => void;
 }
 
-export default function EventOperationalInsights({ detail, writebacks }: Props) {
+export default function EventOperationalInsights({
+  detail,
+  writebacks,
+  onNavigateTab,
+}: Props) {
   const flags = detail.event.degraded_flags ?? [];
   const summary = detail.event.event_context_snapshot?.writeback_summary;
   const unknownCount = writebacks.filter((item) => item.status === "unknown").length;
@@ -93,6 +99,13 @@ export default function EventOperationalInsights({ detail, writebacks }: Props) 
             description="结案或报告可能已完成，但源系统写回仍未确认。"
           />
         )}
+
+        <OutstandingSideEffectsPanel
+          projection={detail}
+          onNavigateActionsTab={
+            onNavigateTab ? () => onNavigateTab("actions") : undefined
+          }
+        />
       </Space>
     </Card>
   );
