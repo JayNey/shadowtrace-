@@ -266,6 +266,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
             evidence_ctx.get("collection_status") or evidence_ctx.get("status") or ""
         ),
         status_sequence=status_sequence,
+        audit_mode="full_loop",
     )
     report = checks.to_dict()
     obs = loop_result.observability

@@ -7,6 +7,41 @@ from tests.adversarial.full_loop_runner import resolve_full_loop_timeout_s
 from tests.adversarial.helpers import missing_response_targets, response_plan_targets
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
 
+_CLOSED_SEQUENCE = [
+    "new",
+    "investigating",
+    "planning_response",
+    "waiting_approval",
+    "executing_response",
+    "verifying",
+    "reporting",
+    "closed",
+]
+_REPORTING_ONLY_SEQUENCE = [
+    "new",
+    "investigating",
+    "verifying",
+    "reporting",
+]
+
+
+def _analysis_pass_checks(**overrides: object) -> AdversarialAuditChecks:
+    defaults = {
+        "ground_truth": GROUND_TRUTH,
+        "event_type": "account_anomaly",
+        "severity": "high",
+        "risk_score": 80,
+        "final_verdict": "confirmed_threat",
+        "entities_found": list(GROUND_TRUTH["must_identify_entities"]),
+        "indicators_found": list(GROUND_TRUTH["must_identify_indicators"]),
+        "report_excerpt": "Confirmed threat summary",
+        "triage_summary": "",
+        "evidence_collection_status": "completed",
+        "status_sequence": _REPORTING_ONLY_SEQUENCE,
+    }
+    defaults.update(overrides)
+    return AdversarialAuditChecks(**defaults)  # type: ignore[arg-type]
+
 
 def test_response_plan_targets_normalizes_case() -> None:
     actions = [{"target": "WKS-DATA-031"}, {"target": "198.51.100.44"}]
@@ -36,6 +71,38 @@ def test_human_verdict_requires_reporting_for_pass() -> None:
     )
     report = checks.to_dict()
     assert report["verdict_for_human"].startswith("FAIL")
+
+
+def test_analysis_only_pass_does_not_require_closed() -> None:
+    report = _analysis_pass_checks().to_dict()
+    assert report["audit_mode"] == "analysis_only"
+    assert report["checks"]["reached_reporting"] is True
+    assert "closed_reached" not in report["checks"]
+    assert report["score"]["total_dimensions"] == 5
+    assert report["verdict_for_human"].startswith("PASS")
+
+
+def test_full_loop_pass_requires_closed() -> None:
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_REPORTING_ONLY_SEQUENCE,
+    ).to_dict()
+    assert report["checks"]["closed_reached"] is False
+    assert report["score"]["total_dimensions"] == 6
+    assert report["score"]["passed"] < report["score"]["total_dimensions"]
+    assert report["verdict_for_human"].startswith("FAIL")
+    assert "not release-grade PASS" in report["verdict_for_human"]
+
+
+def test_full_loop_pass_when_closed_and_analysis_met() -> None:
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_CLOSED_SEQUENCE,
+    ).to_dict()
+    assert report["checks"]["closed_reached"] is True
+    assert report["score"]["passed"] == report["score"]["total_dimensions"] == 6
+    assert report["verdict_for_human"].startswith("PASS")
+    assert "CLOSED" in report["verdict_for_human"]
 
 
 def test_resolve_full_loop_timeout_defaults(monkeypatch) -> None:
