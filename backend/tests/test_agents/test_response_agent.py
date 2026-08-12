@@ -1218,14 +1218,18 @@ def test_response_policy_filter_freezes_l1_ticket_tools_as_direct() -> None:
 
 
 def test_enforce_execution_owner_consistency_allows_l1_direct_with_xdr_entity() -> None:
-    """XDR entity actions may coexist with L1 DIRECT ticket/notify (ISSUE-315)."""
+    """XDR entity actions may coexist with L1 DIRECT ticket/notify/close (ISSUE-315)."""
     manifest = build_mock_capability_manifest()
 
     class _OwnerFilter(ResponsePolicyFilter):
         def resolve_execution_owner(self, tool_name: str) -> ExecutionOwner | None:
             if tool_name == "disable_account":
                 return ExecutionOwner.XDR_MANAGED
-            if tool_name in {"create_ticket", "notify_security_team"}:
+            if tool_name in {
+                "create_ticket",
+                "notify_security_team",
+                "close_false_positive_ticket",
+            }:
                 return ExecutionOwner.DIRECT_TOOL
             return super().resolve_execution_owner(tool_name)
 
@@ -1257,12 +1261,20 @@ def test_enforce_execution_owner_consistency_allows_l1_direct_with_xdr_entity() 
             parameters={"message": "n", "channels": ["email"]},
             reason="direct-notify",
         ),
+        ActionCandidate(
+            tool_name="close_false_positive_ticket",
+            target_type="ticket",
+            target="ticket",
+            parameters={"ticket_id": "tkt-1"},
+            reason="direct-close",
+        ),
     ]
     filtered = _enforce_execution_owner_consistency(candidates, owner_filter)
     assert {item.tool_name for item in filtered} == {
         "disable_account",
         "create_ticket",
         "notify_security_team",
+        "close_false_positive_ticket",
     }
 
 
