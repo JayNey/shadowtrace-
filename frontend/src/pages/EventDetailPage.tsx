@@ -963,7 +963,11 @@ export default function EventDetailPage() {
           />
         </Col>
         <Col xs={24} xl={10}>
-          <EventOperationalInsights detail={event} writebacks={writebacks} />
+          <EventOperationalInsights
+            detail={event}
+            writebacks={writebacks}
+            onNavigateTab={navigateTab}
+          />
         </Col>
       </Row>
       <AgentStatusPanel
