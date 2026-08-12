@@ -661,6 +661,21 @@ class TestTriageAgentLLM:
         assert len(llm_client.chat_calls) == 1
 
     @pytest.mark.asyncio
+    async def test_llm_soft_time_limit_propagates_not_regex_fallback(self) -> None:
+        """ISSUE-314: SoftTimeLimitExceeded must not become regex-degraded success."""
+        from celery.exceptions import SoftTimeLimitExceeded
+
+        llm_client = _MockLLMClient(raise_error=SoftTimeLimitExceeded())
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(llm_client=llm_client, working_memory=wm)
+        input_ = _make_input(
+            raw_event_summary="User admin connected to 10.0.0.1",
+        )
+        with pytest.raises(SoftTimeLimitExceeded):
+            await agent._run(input_)
+        assert len(llm_client.chat_calls) == 1
+
+    @pytest.mark.asyncio
     async def test_source_other_upgrades_via_heuristic_with_audit(self):
         """ISSUE-197: source alert_type=other + export keywords → data_exfiltration."""
         wm = _MockBoundWorkingMemory(writer_name="TriageAgent")

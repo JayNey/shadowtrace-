@@ -182,7 +182,8 @@ def test_decide_closed_is_ignored() -> None:
     assert decision is SoftTimeLimitDecision.IGNORED
 
 
-def test_decide_contained_is_reconcile_required() -> None:
+def test_decide_contained_is_terminal_not_reconcile() -> None:
+    """CONTAINED still has outbound edges; soft-limit must TERMINAL (FAILED+DEAD)."""
     probe = SoftTimeLimitProbe(
         has_checkpoint=False,
         checkpoint_recoverable=False,
@@ -197,7 +198,7 @@ def test_decide_contained_is_reconcile_required() -> None:
         max_attempts=5,
         has_intent=True,
     )
-    assert decision is SoftTimeLimitDecision.RECONCILE_REQUIRED
+    assert decision is SoftTimeLimitDecision.TERMINAL
 
 
 def test_decide_terminal_when_attempts_exhausted() -> None:
@@ -617,7 +618,7 @@ async def test_apply_soft_limit_attempts_exhausted_dead_and_failed(
 
 
 @pytest.mark.asyncio
-async def test_apply_soft_limit_contained_reconciles_without_failed_rewrite(
+async def test_apply_soft_limit_contained_marks_failed_and_dead_atomically(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -651,16 +652,16 @@ async def test_apply_soft_limit_contained_reconciles_without_failed_rewrite(
         intent_service=intent_service,
         degraded_flags=degraded_flags,
     )
-    assert result.decision is SoftTimeLimitDecision.RECONCILE_REQUIRED
+    assert result.decision is SoftTimeLimitDecision.TERMINAL
     intent_service.schedule_dispatch.assert_not_called()
-    degraded_flags.set_flag.assert_awaited()
+    degraded_flags.set_flag.assert_not_awaited()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
         intent = await session.get(orm.InvestigationIntent, intent_id)
         assert event is not None
         assert intent is not None
-        assert event.status == EventStatus.CONTAINED.value
+        assert event.status == EventStatus.FAILED.value
         assert intent.status == InvestigationIntentStatus.DEAD.value
 
 

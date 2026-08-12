@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from pydantic import BaseModel
 
 from app.core.errors import LLMError, ShadowTraceError
@@ -74,6 +75,9 @@ class MockLLMClient(BaseLLMClient):
             if response.total_tokens == 0:
                 response.total_tokens = response.prompt_tokens + response.completion_tokens
             await self._charge_budget(response, event_id=event_id, agent_name=agent_name)
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: preserve Celery soft-limit type for task-layer ownership.
+            raise
         except LLMError as exc:
             status = exc.error_code
             error = exc

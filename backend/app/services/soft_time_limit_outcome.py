@@ -53,16 +53,17 @@ _PURE_INVESTIGATION_STATUSES = frozenset(
     }
 )
 
+# Statuses that soft-limit must not rewrite. CONTAINED is intentionally
+# excluded: it still has outbound edges (e.g. REPORTING), so late soft-limit
+# must atomically move to FAILED + intent DEAD (ISSUE-314).
 _EVENT_TERMINAL_STATUSES = frozenset(
     {
         EventStatus.FAILED.value,
         EventStatus.CLOSED.value,
-        EventStatus.CONTAINED.value,
     }
 )
 
 # True success terminal only — CLOSED has no outbound edges.
-# CONTAINED may still transition to REPORTING, so late soft-limit must reconcile.
 _EVENT_SUCCESS_TERMINAL_STATUSES = frozenset(
     {
         EventStatus.CLOSED.value,
@@ -208,9 +209,10 @@ def decide_soft_time_limit_outcome(
     if event_status == EventStatus.FAILED.value:
         return SoftTimeLimitDecision.TERMINAL
 
-    # CONTAINED still allows REPORTING; force explicit reconciliation.
+    # CONTAINED is not a success terminal (still may → REPORTING). Soft-limit
+    # must TERMINAL (FAILED+DEAD) so we never leave non-terminal event + DEAD intent.
     if event_status == EventStatus.CONTAINED.value:
-        return SoftTimeLimitDecision.RECONCILE_REQUIRED
+        return SoftTimeLimitDecision.TERMINAL
 
     if probe.unknown_outbox_count > 0 or any(
         signal.startswith("unknown_") for signal in probe.side_effect_signals
@@ -484,7 +486,8 @@ async def apply_soft_time_limit_outcome(
                         if decision is SoftTimeLimitDecision.TERMINAL
                         else f"{_SOFT_LIMIT_REASON}:reconcile_required"
                     )
-                    # Never rewrite CLOSED/CONTAINED; FAILED is already terminal.
+                    # Never rewrite CLOSED; FAILED is already terminal.
+                    # CONTAINED is rewritten to FAILED for atomic ownership.
                     if event_status not in _EVENT_TERMINAL_STATUSES:
                         await _transition_event_failed_in_session(
                             session,

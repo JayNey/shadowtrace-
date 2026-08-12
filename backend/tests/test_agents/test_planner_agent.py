@@ -341,6 +341,45 @@ async def test_llm_failure_falls_back_to_default_plans(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_llm_plan_soft_time_limit_propagates() -> None:
+    """ISSUE-314: SoftTimeLimitExceeded must not fall back to DEFAULT_PLANS."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    class _SoftLLM:
+        async def chat(self, *args: object, **kwargs: object) -> object:
+            raise SoftTimeLimitExceeded()
+
+    agent = PlannerAgent(llm_client=_SoftLLM())
+    with pytest.raises(SoftTimeLimitExceeded):
+        await agent._plan_impl("evt-314-plan-soft", _make_triage())
+
+
+@pytest.mark.asyncio
+async def test_llm_revise_soft_time_limit_propagates() -> None:
+    """ISSUE-314: SoftTimeLimitExceeded must not fall back to rule revision."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    from app.agents.rules.default_plans import get_default_plan
+
+    class _SoftLLM:
+        async def chat(self, *args: object, **kwargs: object) -> object:
+            raise SoftTimeLimitExceeded()
+
+    previous = get_default_plan(
+        "evt-314-revise-soft",
+        EventType.DATA_EXFILTRATION,
+        _generate_plan_id("evt-314-revise-soft", 0),
+    )
+    agent = PlannerAgent(llm_client=_SoftLLM())
+    with pytest.raises(SoftTimeLimitExceeded):
+        await agent._revise_impl(
+            "evt-314-revise-soft",
+            "evidence incomplete",
+            previous,
+        )
+
+
+@pytest.mark.asyncio
 async def test_llm_none_uses_default_plans() -> None:
     """When no LLM client is set, use DEFAULT_PLANS directly."""
     agent = PlannerAgent(llm_client=None)

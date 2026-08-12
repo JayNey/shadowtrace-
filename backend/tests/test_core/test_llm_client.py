@@ -925,3 +925,25 @@ async def test_llm_chat_reraises_soft_time_limit_without_wrapping_or_fallback() 
     # Soft-limit must not enter fallback model retry.
     assert client.request_calls == 1
     assert audit.entries == []
+
+
+@pytest.mark.asyncio
+async def test_mock_llm_chat_reraises_soft_time_limit() -> None:
+    """ISSUE-314: MockLLMClient must not wrap SoftTimeLimitExceeded."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    audit = InMemoryLLMCallAuditRecorder()
+    client = MockLLMClient(golden_root=Path("/tmp/no-golden"), audit_recorder=audit)
+
+    async def _raise_soft(*_a: Any, **_k: Any) -> None:
+        raise SoftTimeLimitExceeded()
+
+    client._check_budget = _raise_soft  # type: ignore[method-assign]
+    with pytest.raises(SoftTimeLimitExceeded):
+        await client.chat(
+            MESSAGES,
+            event_id="evt-314-mock-soft",
+            agent_name="TriageAgent",
+            prompt_key="triage_extract",
+        )
+    assert audit.entries == []
