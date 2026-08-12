@@ -1630,12 +1630,6 @@ class TestNonExecutablePlanAgents:
 
         assert recorded == []
 
-        from unittest.mock import MagicMock
-
-        from app.models.context import EventContext
-        from app.models.enums import FinalVerdict, WritebackReadiness
-        from app.models.security_event import EventSummary
-
         degraded = MagicMock()
         degraded.set_flag = AsyncMock(return_value=["plan_step_not_executable=true"])
         agent = SuperAgent(degraded_flags=degraded)
