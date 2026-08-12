@@ -742,6 +742,79 @@ describe("EventDetailPage", () => {
     expect(screen.getByTestId("location-hash")).toHaveTextContent("#audit");
   });
 
+  it("renders outstanding side-effects panel and todo without actions-tab nav", async () => {
+    const detail = makeDetail({ status: "reporting" });
+    detail.event.event_context_snapshot = {
+      ...detail.event.event_context_snapshot!,
+      report: { report_id: "evt-70", summary: "ready" },
+    };
+    mockGetEvent.mockResolvedValue({
+      data: {
+        ...detail,
+        analysis_only_complete: true,
+        next_recommended_action: "close",
+        gate_applicable_outstanding_count: 1,
+        outstanding_side_effect_count: 1,
+        outstanding_side_effects: [
+          {
+            action_id: "act-gate-1",
+            scope: "gate_applicable",
+            action_status: "executing",
+            execution_phase: "post_verify",
+            writeback_applicable: true,
+            convergence_policy: "terminal_writeback",
+            job_status: "running",
+            outbox_delivery_status: "ready",
+            plan_revision: 1,
+            blocking_reason: "executing_action",
+          },
+        ],
+      },
+    });
+
+    renderPage("/events/evt-70");
+    expect(await screen.findByTestId("outstanding-side-effects-panel")).toBeInTheDocument();
+    expect(screen.getByTestId("outstanding-side-effects-table")).toBeInTheDocument();
+    expect(screen.getByText(/关单受阻：1 项门禁副作用待收敛/)).toBeInTheDocument();
+    expect(screen.queryByTestId("todo-nav-side-effects-pending")).not.toBeInTheDocument();
+    const closeButton = await screen.findByTestId("event-close-button");
+    expect(closeButton).toBeDisabled();
+  });
+
+  it("refreshes detail when close is blocked by closed_side_effects_pending", async () => {
+    vi.stubEnv("VITE_AUTH_ROLES", "analyst");
+    const user = userEvent.setup();
+    const detail = {
+      ...makeDetail({ status: "reporting" }),
+      next_recommended_action: "close" as const,
+      gate_applicable_outstanding_count: 0,
+      outstanding_side_effect_count: 0,
+    };
+    detail.event.event_context_snapshot = {
+      ...detail.event.event_context_snapshot!,
+      report: { report_id: "evt-70", summary: "ready" },
+    };
+    mockGetEvent.mockResolvedValue({ data: detail });
+    mockCloseEvent.mockRejectedValueOnce(
+      new ApiError({
+        error_code: "closed_side_effects_pending",
+        error_message: "closed side effects pending",
+        details: { gate_applicable_outstanding_count: 2 },
+      }),
+    );
+
+    renderPage("/events/evt-70");
+    const closeButton = await screen.findByTestId("event-close-button");
+    await waitFor(() => expect(closeButton).not.toBeDisabled());
+    const callsBeforeClose = mockGetEvent.mock.calls.length;
+    await user.click(closeButton);
+    await user.click(screen.getByRole("button", { name: "确认结案" }));
+    await waitFor(() => expect(mockCloseEvent).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(mockGetEvent.mock.calls.length).toBeGreaterThan(callsBeforeClose),
+    );
+  });
+
   it("closes event with reason via todo bar", async () => {
     vi.stubEnv("VITE_AUTH_ROLES", "analyst");
     const user = userEvent.setup();

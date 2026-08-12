@@ -17,7 +17,7 @@ const sampleOutstanding: OutstandingSideEffectView = {
   writeback_applicable: true,
   convergence_policy: "terminal_writeback",
   job_status: "running",
-  outbox_delivery_status: "pending",
+  outbox_delivery_status: "ready",
   outbox_writeback_status: "pending",
   plan_revision: 2,
   blocking_reason: "outbox_not_confirmed",

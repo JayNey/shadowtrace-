@@ -1,7 +1,7 @@
 /** eventTodos side-effect convergence todo tests (ISSUE-323). */
 
 import { describe, expect, it } from "vitest";
-import { buildEventTodos } from "../../src/utils/eventTodos";
+import { buildEventTodos, canCloseEvent } from "../../src/utils/eventTodos";
 import type { EventDetailResponse } from "../../src/types/event";
 
 function baseDetail(overrides: Partial<EventDetailResponse> = {}): EventDetailResponse {
@@ -88,7 +88,36 @@ describe("buildEventTodos side effects", () => {
     const sideEffectTodo = todos.find((item) => item.kind === "side_effects_pending");
     expect(sideEffectTodo).toBeDefined();
     expect(sideEffectTodo?.label).toContain("2");
-    expect(sideEffectTodo?.tabKey).toBe("actions");
+    expect(sideEffectTodo?.tabKey).toBeUndefined();
+  });
+
+  it("blocks canCloseEvent / close_ready while gate outstanding remains", () => {
+    const detail = baseDetail({
+      next_recommended_action: "close",
+      gate_applicable_outstanding_count: 1,
+      outstanding_side_effect_count: 1,
+    });
+    expect(canCloseEvent(detail)).toBe(false);
+    const todos = buildEventTodos({
+      detail,
+      actions: [],
+      writebacks: [],
+      evidenceDetail: null,
+    });
+    expect(todos.some((item) => item.kind === "close_ready")).toBe(false);
+    expect(todos.some((item) => item.kind === "side_effects_pending")).toBe(true);
+  });
+
+  it("blocks canCloseEvent when side-effect projection is degraded", () => {
+    expect(
+      canCloseEvent(
+        baseDetail({
+          next_recommended_action: "close",
+          gate_applicable_outstanding_count: -1,
+          outstanding_side_effect_count: -1,
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("does not add side_effects_pending when event is closed", () => {

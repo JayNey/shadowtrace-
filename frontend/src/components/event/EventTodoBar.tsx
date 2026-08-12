@@ -122,9 +122,14 @@ export default function EventTodoBar({
     } catch (err: unknown) {
       if (err instanceof ApiError) {
         if (err.error_code === "closed_side_effects_pending") {
+          // Projection may have changed since last load; refresh before toast.
+          await onRefresh();
+          const detailHint =
+            typeof err.details?.gate_applicable_outstanding_count === "number"
+              ? `（仍有 ${err.details.gate_applicable_outstanding_count} 项未完成投递）`
+              : "";
           message.error(
-            err.message ||
-              "结案被副作用收敛门禁阻断，请查看运营要素中的 outstanding 列表。",
+            `${err.message || "结案被副作用收敛门禁阻断，请查看运营要素中的 outstanding 列表。"}${detailHint}`,
           );
         } else {
           message.error(err.message || err.error_code || "结案失败");

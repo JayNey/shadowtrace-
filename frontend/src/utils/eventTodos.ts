@@ -87,7 +87,23 @@ export function canCloseEvent(detail: EventDetailResponse): boolean {
   if (detail.event.status === "closed") {
     return false;
   }
-  return detail.next_recommended_action === "close";
+  if (detail.next_recommended_action !== "close") {
+    return false;
+  }
+  // Mirror backend CLOSED side-effect gate: do not advertise close_ready while
+  // gate-applicable outstanding remains or projection counts are degraded (-1).
+  if (
+    isSideEffectProjectionDegraded(
+      detail.gate_applicable_outstanding_count,
+      detail.outstanding_side_effect_count,
+    )
+  ) {
+    return false;
+  }
+  if ((detail.gate_applicable_outstanding_count ?? 0) > 0) {
+    return false;
+  }
+  return true;
 }
 
 export interface BuildEventTodosInput {
@@ -171,7 +187,7 @@ export function buildEventTodos(input: BuildEventTodosInput): EventTodoItem[] {
         : outstandingCount > 0
           ? `结构化 outstanding 列表已展示在运营要素区（${outstandingCount} 条）。`
           : "存在未收敛的门禁副作用，请查看运营要素中的 outstanding 列表。",
-      tabKey: "actions",
+      // Panel lives in 运营要素 (above tabs); no Actions-tab jump.
       priority: 45,
     });
   }

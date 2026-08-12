@@ -123,7 +123,8 @@ export type ExecutionJobStatus =
   | "unknown";
 
 export type OutboxDeliveryStatus =
-  | "pending"
+  | "ready"
+  | "leased"
   | "waiting_retry"
   | "delivered"
   | "paused"

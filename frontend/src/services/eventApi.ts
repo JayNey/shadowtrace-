@@ -109,7 +109,10 @@ export function getHealth() {
 }
 
 export function closeEvent(eventId: string, body: EventCloseRequest) {
-  return apiClient.post<EventCloseResponse>(`/events/${eventId}/close`, body);
+  return apiClient.post<EventCloseResponse>(`/events/${eventId}/close`, body, {
+    // Callers (EventTodoBar) surface close-gate errors locally.
+    skipGlobalErrorToast: true,
+  });
 }
 
 // ------------------------------------------------------------------ //
