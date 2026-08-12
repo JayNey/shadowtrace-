@@ -7,11 +7,10 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from celery.exceptions import SoftTimeLimitExceeded
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-from celery.exceptions import SoftTimeLimitExceeded
 
 from app.core.config import get_settings
 from app.core.errors import EventNotFoundError, InvalidStateTransitionError, ValidationError

@@ -37,7 +37,6 @@ from app.models.agent_io import (
     VerificationResult,
 )
 from app.models.context import EventContext
-from app.models.security_event import EventSummary
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -54,6 +53,7 @@ from app.models.enums import (
     WritebackReadiness,
     WritebackStatus,
 )
+from app.models.security_event import EventSummary
 from app.models.workflow import TransitionContext, validate_transition
 from app.orchestration.checkpointer import (
     CHECKPOINT_TTL_SECONDS,
@@ -2882,6 +2882,7 @@ async def test_mark_graph_failed_skips_on_state_mismatch_validation_error(
 async def test_planner_revise_soft_limit_not_fresh_plan() -> None:
     """ISSUE-314: SoftTimeLimit in planner.revise must not fall back to fresh plan."""
     from celery.exceptions import SoftTimeLimitExceeded
+
     from app.orchestration.workflow_graph import planner_node
 
     class SoftPlanner:

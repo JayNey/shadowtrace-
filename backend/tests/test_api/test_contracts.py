@@ -19,14 +19,18 @@ from app.api.v1.deps import get_disposition_source_service as _real_get_disposit
 from app.api.v1.deps import get_disposition_sync as _real_get_disposition_sync
 from app.api.v1.deps import get_event_service as _real_get_event_service
 from app.api.v1.deps import get_execution_job_query_service as _real_get_execution_job_query
+from app.api.v1.deps import (
+    get_investigation_intent_service as _real_get_investigation_intent_service,
+)
 from app.api.v1.deps import get_knowledge_query_service as _real_get_knowledge_query_service
 from app.api.v1.deps import get_state_machine as _real_get_state_machine
 from app.api.v1.errors import register_exception_handlers
-from app.core.auth import Principal, ROLE_ADMIN, AuthorizationError
+from app.core.auth import ROLE_ADMIN, AuthorizationError, Principal
 from app.core.config import get_settings
 from app.core.errors import (
     DispositionPermissionDenied,
     EventNotFoundError,
+    InvalidStateTransitionError,
     WritebackConflictError,
 )
 from app.core.errors import (
@@ -38,11 +42,13 @@ from app.models.disposition import DispositionCommand, SourceObjectLocator
 from app.models.enums import (
     DispositionPolicy,
     EventStatus,
+    InvestigationIntentStatus,
     NextRecommendedAction,
     ResponsePhaseState,
     WritebackReadiness,
     WritebackStatus,
 )
+from app.services.investigation_intent_service import HttpInvestigationIntentResult
 
 # (method, path) pairs for every core endpoint in intro §4.2.2.
 CORE_ENDPOINTS = {
@@ -135,6 +141,11 @@ def client() -> TestClient:
     app.dependency_overrides[_real_get_context_store] = lambda: _MockContextStore()
     # Source-record GET must not hit real Postgres in contract tests.
     app.dependency_overrides[_real_get_session_factory] = lambda: _empty_session_factory
+    # HTTP investigate now goes through durable intent intake (ISSUE-276); keep
+    # contracts DB-free and preserve CLOSED → invalid_state_transition shape.
+    app.dependency_overrides[_real_get_investigation_intent_service] = lambda: (
+        _MockInvestigationIntentService(mock_es)
+    )
 
     mock_disposition_sync = _MockDispositionSyncService()
 
@@ -578,6 +589,59 @@ class _MockStateMachine:
         evt.status = EventStatus.CLOSED
         evt.external_unsynced = True
         return evt
+
+
+class _MockInvestigationIntentService:
+    """DB-free durable intake double for HTTP investigate contracts."""
+
+    def __init__(self, event_service: _MockEventService) -> None:
+        self._event_service = event_service
+
+    async def create_or_replay_http_intent(
+        self,
+        event_id: str,
+        *,
+        requested_by: str,
+        request_idempotency_key: str,
+        request_payload_sha256: str,
+        orchestration_mode: str,
+        include_response_execution: bool,
+        generate_report: bool,
+    ) -> HttpInvestigationIntentResult:
+        _ = (
+            requested_by,
+            request_idempotency_key,
+            request_payload_sha256,
+            orchestration_mode,
+            include_response_execution,
+            generate_report,
+        )
+        event = await self._event_service.get_event(event_id)
+        if event is None:
+            raise EventNotFoundError(
+                f"event {event_id} not found",
+                details={"event_id": event_id},
+            )
+        if isinstance(event.status, EventStatus):
+            current = event.status
+        else:
+            current = EventStatus(event.status)
+        if current is not EventStatus.NEW:
+            raise InvalidStateTransitionError(
+                "event must be in NEW status to start investigation, "
+                f"current: {current.value}",
+                current=current,
+                target=EventStatus.TRIAGING,
+                details={"event_id": event_id},
+            )
+        return HttpInvestigationIntentResult(
+            intent_id="iin-contract-001",
+            event_id=event_id,
+            task_id="task-contract-001",
+            revision=1,
+            status=InvestigationIntentStatus.ENQUEUED,
+            created=False,
+        )
 
 
 # --------------------------------------------------------------------------- #

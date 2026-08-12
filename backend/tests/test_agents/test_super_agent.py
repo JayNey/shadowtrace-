@@ -943,8 +943,9 @@ class TestSoftTimeLimit:
         assert events[_EVENT_ID]["status"] is not EventStatus.FAILED
 
     async def test_quality_evaluation_step_reraises_soft_time_limit(self) -> None:
-        from celery.exceptions import SoftTimeLimitExceeded
         from types import SimpleNamespace
+
+        from celery.exceptions import SoftTimeLimitExceeded
 
         agent = _build_super_agent(
             lease=_InMemoryEventLease(),
@@ -1628,12 +1629,6 @@ class TestNonExecutablePlanAgents:
             await agent._execute_single_step(ec, step)
 
         assert recorded == []
-
-        from unittest.mock import AsyncMock, MagicMock
-
-        from app.models.context import EventContext
-        from app.models.enums import FinalVerdict, WritebackReadiness
-        from app.models.security_event import EventSummary
 
         degraded = MagicMock()
         degraded.set_flag = AsyncMock(return_value=["plan_step_not_executable=true"])

@@ -1336,6 +1336,7 @@ async def test_execute_plan_soft_limit_reraises_and_skips_outbox() -> None:
     """ISSUE-314: SoftTimeLimit must leave execute_plan without outbox writeback."""
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
+
     from celery.exceptions import SoftTimeLimitExceeded
 
     from app.services.action_execution_service import ActionExecutionService
