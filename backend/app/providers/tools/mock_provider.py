@@ -323,7 +323,11 @@ class MockToolProvider:
         bindings: list[ProviderToolBinding] = []
         enabled = set(self.capability_manifest().allowed_operations)
         for tool_name in sorted(self._metas):
-            if tool_name in enabled:
+            meta = self._metas[tool_name]
+            if (
+                tool_name in enabled
+                and ExecutionOwner.DIRECT_TOOL in meta.supported_execution_owners
+            ):
                 bindings.append(
                     ProviderToolBinding(
                         tool_name=tool_name,
@@ -333,15 +337,16 @@ class MockToolProvider:
                         capabilities=["entity_response"],
                     )
                 )
-            bindings.append(
-                ProviderToolBinding(
-                    tool_name=tool_name,
-                    provider_name=XDR_PROVIDER_NAME,
-                    execution_owner=ExecutionOwner.XDR_MANAGED,
-                    execution_channel=ExecutionChannel.DISPOSITION_ADAPTER,
-                    capabilities=["entity_response"],
+            if ExecutionOwner.XDR_MANAGED in meta.supported_execution_owners:
+                bindings.append(
+                    ProviderToolBinding(
+                        tool_name=tool_name,
+                        provider_name=XDR_PROVIDER_NAME,
+                        execution_owner=ExecutionOwner.XDR_MANAGED,
+                        execution_channel=ExecutionChannel.DISPOSITION_ADAPTER,
+                        capabilities=["entity_response"],
+                    )
                 )
-            )
         bindings.append(
             ProviderToolBinding(
                 tool_name=TERMINAL_DISPOSITION_TOOL,

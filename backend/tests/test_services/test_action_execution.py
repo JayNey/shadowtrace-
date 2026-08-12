@@ -506,6 +506,54 @@ async def test_post_verify_action_rejected_by_execute_action(
 
 
 @pytest.mark.asyncio
+async def test_xdr_managed_rejects_non_specs_tool_without_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    """Misrouted L1 ticket on XDR_MANAGED fails structurally without entity outbox."""
+    oid = SCENARIO_INCIDENT_ID
+    await _seed_connector_and_source(
+        session_factory, object_id=oid, mock_xdr_client=mock_xdr_client
+    )
+    event_id = await _create_event(session_factory, store, object_id=oid)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            tool_name="create_ticket",
+            action_name="create ticket",
+            action_level=ActionLevel.L1,
+            target_type="ticket",
+            target="ticket",
+            parameters={"title": "t", "description": "d"},
+            writeback_applicable=False,
+            writeback_required=True,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            disposition_source_ref=_locator(object_id=oid),
+        ),
+    )
+    with pytest.raises(ValidationError, match="entity submit") as exc_info:
+        await execution_service.execute_action(action.action_id)
+    assert exc_info.value.error_code == "unsupported"
+    assert exc_info.value.details.get("tool_name") == "create_ticket"
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action.action_id)
+        assert row is not None
+        assert row.status == ActionStatus.FAILED.value
+        outboxes = (
+            await session.scalars(
+                select(orm.DispositionOutbox).where(orm.DispositionOutbox.event_id == event_id)
+            )
+        ).all()
+        assert outboxes == []
+
+
+@pytest.mark.asyncio
 async def test_resolve_unknown_action(
     session_factory: async_sessionmaker[AsyncSession],
     store: EventContextStore,

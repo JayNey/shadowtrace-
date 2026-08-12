@@ -1204,7 +1204,8 @@ async def test_playbook_expands_all_entity_targets() -> None:
     assert "10.0.0.5" in targets
 
 
-def test_enforce_execution_owner_consistency_drops_direct_tool() -> None:
+def test_enforce_execution_owner_consistency_allows_l1_direct_with_xdr_entity() -> None:
+    """XDR entity actions may coexist with L1 DIRECT ticket/notify (ISSUE-315)."""
     manifest = build_mock_capability_manifest()
 
     class _OwnerFilter(ResponsePolicyFilter):
@@ -1234,6 +1235,44 @@ def test_enforce_execution_owner_consistency_drops_direct_tool() -> None:
             target_type="ticket",
             target="ticket",
             parameters={"title": "t", "description": "d"},
+            reason="direct",
+        ),
+    ]
+    filtered = _enforce_execution_owner_consistency(candidates, owner_filter)
+    assert {item.tool_name for item in filtered} == {"disable_account", "create_ticket"}
+
+
+def test_enforce_execution_owner_consistency_drops_competing_entity_direct_tool() -> None:
+    """Entity-class DIRECT_TOOL still dropped when XDR_MANAGED is planned."""
+    manifest = build_mock_capability_manifest()
+
+    class _OwnerFilter(ResponsePolicyFilter):
+        def resolve_execution_owner(self, tool_name: str) -> ExecutionOwner | None:
+            if tool_name == "disable_account":
+                return ExecutionOwner.XDR_MANAGED
+            if tool_name == "block_ip":
+                return ExecutionOwner.DIRECT_TOOL
+            return super().resolve_execution_owner(tool_name)
+
+    owner_filter = _OwnerFilter(
+        manifest=manifest,
+        entities=_entities(),
+        disposition_policy=DispositionPolicy.REQUIRED,
+        source_locator=None,
+    )
+    candidates = [
+        ActionCandidate(
+            tool_name="disable_account",
+            target_type="account",
+            target="svc-backup",
+            parameters={},
+            reason="managed",
+        ),
+        ActionCandidate(
+            tool_name="block_ip",
+            target_type="ip",
+            target="203.0.113.1",
+            parameters={},
             reason="direct",
         ),
     ]

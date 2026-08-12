@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from app.agents.response_agent import compute_source_locator_hash
+from app.core.errors import ValidationError
 from app.core.guardrails import allowlisted_message_code
 from app.models.action import Action
 from app.models.disposition import (
@@ -193,7 +194,16 @@ def _execution_summary_code(job: ActionExecutionJob) -> str:
 def entity_action_code_for(action: Action) -> str:
     """Map approved tool metadata to a stable Mock operation code."""
     if action.tool_name not in ENTITY_ACTION_EFFECT_SPECS:
-        raise ValueError(f"unsupported XDR_MANAGED entity action {action.tool_name}")
+        raise ValidationError(
+            "tool cannot be executed via XDR_MANAGED entity submit",
+            error_code="unsupported",
+            details={
+                "action_id": action.action_id,
+                "tool_name": action.tool_name,
+                "execution_owner": ExecutionOwner.XDR_MANAGED.value,
+                "reason": "not_in_entity_action_effect_specs",
+            },
+        )
     return action.tool_name
 
 

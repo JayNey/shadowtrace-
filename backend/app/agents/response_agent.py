@@ -634,7 +634,11 @@ def _enforce_execution_owner_consistency(
     candidates: list[ActionCandidate],
     policy_filter: ResponsePolicyFilter,
 ) -> list[ActionCandidate]:
-    """Drop DIRECT_TOOL candidates when XDR_MANAGED actions are also planned."""
+    """Drop competing entity-class DIRECT_TOOL when XDR_MANAGED actions are also planned.
+
+    L1 direct-only tools (``create_ticket`` / ``notify_security_team``) may coexist
+    with XDR-managed entity actions (ISSUE-315 / FIX-RISK-001).
+    """
     owners = {
         policy_filter.resolve_execution_owner(candidate.tool_name)
         for candidate in candidates
@@ -649,6 +653,7 @@ def _enforce_execution_owner_consistency(
         if candidate.tool_name == VIRTUAL_DISPOSITION_TOOL
         or policy_filter.resolve_execution_owner(candidate.tool_name)
         is not ExecutionOwner.DIRECT_TOOL
+        or candidate.tool_name in _NON_TARGET_TOOLS
     ]
 
 

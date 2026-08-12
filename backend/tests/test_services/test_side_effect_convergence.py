@@ -235,10 +235,11 @@ def test_entity_missing_job_with_success_action_and_verified_effect_blocks_gate(
 
 
 def test_entity_xdr_heuristic_without_entity_outbox_blocks_gate() -> None:
-    """XDR_MANAGED + writeback_required with no entity outbox must fail closed."""
+    """SPECS XDR_MANAGED + writeback_required with no entity outbox must fail closed."""
     action_id = "act-entity-no-outbox"
     action = orm.Action(
         action_id=action_id,
+        tool_name="disable_account",
         status=ActionStatus.SUCCESS.value,
         writeback_applicable=False,
         writeback_required=True,
@@ -257,6 +258,32 @@ def test_entity_xdr_heuristic_without_entity_outbox_blocks_gate() -> None:
     )
     assert reason is SideEffectConvergenceReason.OUTBOX_UNDELIVERED
     assert policy is SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
+
+
+def test_non_specs_xdr_without_entity_outbox_uses_execution_job_only() -> None:
+    """Non-SPECS XDR+writeback (e.g. misrouted ticket) must not block CLOSED."""
+    action_id = "act-ticket-misrouted"
+    action = orm.Action(
+        action_id=action_id,
+        tool_name="create_ticket",
+        status=ActionStatus.SUCCESS.value,
+        writeback_applicable=False,
+        writeback_required=True,
+        execution_owner="xdr_managed",
+    )
+    job = orm.ActionExecutionJob(
+        action_id=action_id,
+        status=ExecutionJobStatus.SUCCESS.value,
+    )
+
+    reason, policy = _action_side_effect_blocks_convergence(
+        action,
+        jobs_by_action={action_id: job},
+        active_outboxes=[],
+        verification=None,
+    )
+    assert reason is None
+    assert policy is SideEffectConvergencePolicy.EXECUTION_JOB_ONLY
 
 
 def test_entity_unknown_delivery_status_blocks_gate() -> None:
