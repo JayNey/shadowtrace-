@@ -741,40 +741,6 @@ class TestHappyPath:
         assert r.detail == "non_verifiable_action"
         # Verification action should have writeback_required=false (checked via model validation)
 
-    async def test_create_ticket_execution_failed_surfaces_in_failed_actions(self):
-        """ISSUE-320: FAILED create_ticket must appear in failed_actions and trigger replan."""
-        action = _action(
-            tool_name="create_ticket",
-            action_name="ticket_action",
-            target_type="ticket",
-            target="ticket-1",
-            status=ActionStatus.FAILED,
-            action_level=ActionLevel.L1,
-            execution_owner=ExecutionOwner.DIRECT_TOOL,
-        )
-        ed_svc = MagicMock()
-        ed_svc.after_effect_resolution_ready = AsyncMock()
-        agent = VerifyAgent(
-            working_memory=FakeWorkingMemory(),
-            trace_service=FakeTraceService(),
-            event_disposition_service=ed_svc,
-        )
-        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
-            return_value=([action], {}, {})
-        )
-        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
-            return_value=DispositionPolicy.REQUIRED,
-        )
-
-        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
-
-        r = result.results[0]
-        assert r.effect_status == EffectStatus.FAILED
-        assert r.detail == "execution_failed_non_verifiable"
-        assert action.action_id in result.failed_actions
-        assert result.need_action_replan is True
-        ed_svc.after_effect_resolution_ready.assert_not_called()
-
     async def test_notify_security_team_execution_failed_triggers_replan(self):
         """ISSUE-320: FAILED notify_security_team surfaces failure without verify tool."""
         action = _action(
@@ -803,6 +769,37 @@ class TestHappyPath:
         assert result.results[0].detail == "execution_failed_non_verifiable"
         assert action.action_id in result.failed_actions
         assert result.need_action_replan is True
+        assert result.overall_status == VerificationOverallStatus.PARTIAL
+
+    async def test_execution_failed_no_verification_tool_surfaces_in_failed_actions(self):
+        """ISSUE-320: FAILED action with no verify mapping uses distinct detail."""
+        action = _action(
+            tool_name="unknown_response_tool",
+            action_name="unknown_action",
+            target_type="host",
+            target="host-1",
+            status=ActionStatus.FAILED,
+            action_level=ActionLevel.L2,
+            execution_owner=ExecutionOwner.DIRECT_TOOL,
+        )
+        agent = VerifyAgent(
+            working_memory=FakeWorkingMemory(),
+            trace_service=FakeTraceService(),
+        )
+        agent._load_execution_state = AsyncMock(  # type: ignore[method-assign]
+            return_value=([action], {}, {})
+        )
+        agent._load_disposition_policy = AsyncMock(  # type: ignore[method-assign]
+            return_value=DispositionPolicy.NOT_REQUIRED,
+        )
+
+        result = await agent.execute(_input(event_id=action.event_id, actions=[action]))
+
+        assert result.results[0].effect_status == EffectStatus.FAILED
+        assert result.results[0].detail == "execution_failed_no_verification_tool"
+        assert action.action_id in result.failed_actions
+        assert result.need_action_replan is True
+        assert result.overall_status == VerificationOverallStatus.PARTIAL
 
     async def test_success_non_verifiable_not_in_failed_actions_when_mixed(self):
         """SUCCESS non-verifiable stays skipped; only FAILED enters failed_actions."""
@@ -849,6 +846,7 @@ class TestHappyPath:
         assert "act-ticket-ok" not in result.failed_actions
         assert "act-notify-fail" in result.failed_actions
         assert result.need_action_replan is True
+        assert result.overall_status == VerificationOverallStatus.PARTIAL
 
 
 # --------------------------------------------------------------------------- #
@@ -1463,6 +1461,7 @@ class TestAcceptanceCriteria:
         assert result.results[0].detail == "execution_failed_non_verifiable"
         assert action.action_id in result.failed_actions
         assert result.need_action_replan is True
+        assert result.overall_status == VerificationOverallStatus.PARTIAL
         ed_svc.after_effect_resolution_ready.assert_not_called()
 
     async def test_a4_deferred_not_in_failed(self):
