@@ -496,6 +496,7 @@ async def get_manual_resolution_service() -> Any:
             _get_session_factory(),
             workflow_runtime=await _get_workflow_runtime(),
             resume_runner=_resume_investigation,
+            degraded_flags=_get_degraded_flags(),
         )
     return _manual_resolution
 

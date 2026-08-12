@@ -317,6 +317,7 @@ class ActionExecutionService:
         target = mapping[resolution]
         event_id: str
         should_dispatch = False
+        resume_intent_id: str | None = None
         already_resolved = False
         async with self._session_factory() as session:
             async with session.begin():
@@ -392,7 +393,7 @@ class ActionExecutionService:
             )
 
             try:
-                await self._manual_resolution.create_or_replay_resume_intent(
+                resume_intent = await self._manual_resolution.create_or_replay_resume_intent(
                     event_id,
                     resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
                     subject_kind=SUBJECT_KIND_ACTION,
@@ -404,13 +405,19 @@ class ActionExecutionService:
                     operation_id=operation_id,
                 )
                 should_dispatch = True
+                resume_intent_id = resume_intent.intent_id
             except IdempotencyKeyReuseError:
                 raise
             except ValidationError:
+                resume_intent_id = None
                 if await self._manual_resolution.has_schedulable_intent(event_id):
                     should_dispatch = True
         if should_dispatch and self._manual_resolution is not None:
-            self._manual_resolution.schedule_dispatch()
+            self._manual_resolution.schedule_dispatch(
+                event_id=event_id,
+                intent_id=resume_intent_id,
+                trigger="resolve_action_unknown",
+            )
         async with self._session_factory() as session:
             row = await session.get(orm.Action, action_id)
             assert row is not None

@@ -22,9 +22,9 @@ from app.core.errors import (
     InvestigationInProgressError,
     ValidationError,
 )
-from app.core.metrics import record_investigation_intent_enqueue
+from app.core.metrics import record_dispatch_schedule, record_investigation_intent_enqueue
 from app.db import models as orm
-from app.models.enums import EventStatus, InvestigationIntentStatus
+from app.models.enums import EventStatus, InvestigationIntentStatus, WritebackStatus
 from app.models.investigation_intent import (
     INTENT_KIND_AUTO_INVESTIGATE,
     INTENT_KIND_HTTP_INVESTIGATE,
@@ -47,6 +47,20 @@ from app.services.degraded_flag_service import DegradedFlagService
 logger = logging.getLogger(__name__)
 
 _DISPATCH_WORKER_ID = "intent-dispatcher-1"
+
+# ISSUE-324: one bounded in-process fallback when Celery enqueue fails after
+# SoftTimeLimit RECOVERED. Conditions: pure investigation phase, no response
+# execution, no UNKNOWN outbox. Other triggers rely on beat reconcile.
+_DISPATCH_IN_PROCESS_FALLBACK_TRIGGERS = frozenset({"soft_time_limit_recovered"})
+
+_PURE_INVESTIGATION_DISPATCH_STATUSES = frozenset(
+    {
+        EventStatus.TRIAGING.value,
+        EventStatus.COLLECTING_EVIDENCE.value,
+        EventStatus.ANALYZING.value,
+        EventStatus.SCORING.value,
+    }
+)
 
 # Event left NEW while intent is STARTED beyond this window → worker crash / retry.
 _STARTED_STALE_MIN_S = 660
@@ -566,26 +580,115 @@ class InvestigationIntentService:
             from app.tasks.investigation_intent_tasks import dispatch_pending_investigation_intents
 
             dispatch_pending_investigation_intents.delay()
-        except Exception:
+        except Exception as exc:
             record_investigation_intent_enqueue(result="failure")
             logger.error(
-                "failed to enqueue investigation intent dispatch "
-                "trigger=%s intent_id=%s event_id=%s",
+                "investigation intent dispatch enqueue failed trigger=%s intent_id=%s "
+                "event_id=%s error=%s",
                 trigger,
                 intent_id or "-",
                 event_id or "-",
+                exc,
                 exc_info=True,
             )
             if event_id is not None:
                 self._schedule_dispatch_degraded_flag(event_id)
+            self._maybe_schedule_in_process_fallback(
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger=trigger,
+            )
             return
         record_investigation_intent_enqueue(result="success")
         logger.debug(
-            "enqueued investigation intent dispatch trigger=%s intent_id=%s event_id=%s",
+            "investigation intent dispatch enqueued trigger=%s intent_id=%s event_id=%s",
             trigger,
             intent_id or "-",
             event_id or "-",
         )
+
+    def _maybe_schedule_in_process_fallback(
+        self,
+        *,
+        event_id: str | None,
+        intent_id: str | None,
+        trigger: str,
+    ) -> None:
+        if trigger not in _DISPATCH_IN_PROCESS_FALLBACK_TRIGGERS:
+            return
+        if event_id is None or intent_id is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _run() -> None:
+            try:
+                if not await self._is_safe_for_in_process_dispatch_fallback(
+                    event_id=event_id,
+                    intent_id=intent_id,
+                ):
+                    return
+                record_dispatch_schedule(
+                    domain="investigation_intent",
+                    outcome="dispatch_fallback_started",
+                )
+                published = await self.claim_and_publish_batch(limit=1)
+                logger.info(
+                    "investigation intent in-process dispatch fallback trigger=%s "
+                    "intent_id=%s event_id=%s published=%s",
+                    trigger,
+                    intent_id,
+                    event_id,
+                    published,
+                )
+            except Exception:
+                logger.warning(
+                    "investigation intent in-process dispatch fallback failed "
+                    "trigger=%s intent_id=%s event_id=%s",
+                    trigger,
+                    intent_id,
+                    event_id,
+                    exc_info=True,
+                )
+
+        loop.create_task(_run())
+
+    async def _is_safe_for_in_process_dispatch_fallback(
+        self,
+        *,
+        event_id: str,
+        intent_id: str,
+    ) -> bool:
+        async with self._session_factory() as session:
+            intent_row = await session.get(orm.InvestigationIntent, intent_id)
+            event_row = await session.get(orm.SecurityEvent, event_id)
+            if intent_row is None or event_row is None:
+                return False
+            if intent_row.event_id != event_id:
+                return False
+            status = InvestigationIntentStatus(intent_row.status)
+            if status not in {
+                InvestigationIntentStatus.PENDING,
+                InvestigationIntentStatus.RETRY,
+            }:
+                return False
+            if bool(intent_row.include_response_execution):
+                return False
+            if event_row.status not in _PURE_INVESTIGATION_DISPATCH_STATUSES:
+                return False
+            unknown_rows = (
+                await session.scalars(
+                    select(orm.DispositionOutbox.latest_writeback_status).where(
+                        orm.DispositionOutbox.event_id == event_id,
+                        orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                    )
+                )
+            ).all()
+            if any(status == WritebackStatus.UNKNOWN.value for status in unknown_rows):
+                return False
+        return True
 
     def _schedule_dispatch_degraded_flag(self, event_id: str) -> None:
         """Best-effort event degraded flag when the dispatch trigger cannot enqueue."""

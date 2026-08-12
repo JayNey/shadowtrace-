@@ -970,7 +970,7 @@ class DispositionSyncService:
                 )
 
                 try:
-                    await self._manual_resolution.create_or_replay_resume_intent(
+                    resume_intent = await self._manual_resolution.create_or_replay_resume_intent(
                         event_id,
                         resolution_source=RESOLUTION_SOURCE_WRITEBACK_MANUAL,
                         subject_kind=SUBJECT_KIND_WRITEBACK,
@@ -981,12 +981,19 @@ class DispositionSyncService:
                         evidence_ref=evidence_ref,
                         operation_id=operation_id,
                     )
-                    self._manual_resolution.schedule_dispatch()
+                    self._manual_resolution.schedule_dispatch(
+                        event_id=event_id,
+                        intent_id=resume_intent.intent_id,
+                        trigger="resolve_writeback",
+                    )
                 except IdempotencyKeyReuseError:
                     raise
                 except ValidationError:
                     if await self._manual_resolution.has_schedulable_intent(event_id):
-                        self._manual_resolution.schedule_dispatch()
+                        self._manual_resolution.schedule_dispatch(
+                            event_id=event_id,
+                            trigger="resolve_writeback_validation",
+                        )
             if self._bus is not None:
                 await self._bus.publish_event(
                     event_id,
@@ -997,7 +1004,10 @@ class DispositionSyncService:
         record_writeback(status=target.value, adapter=adapter_label)
         await self._sync_writeback_summary(event_id)
         if should_dispatch and self._manual_resolution is not None:
-            self._manual_resolution.schedule_dispatch()
+            self._manual_resolution.schedule_dispatch(
+                event_id=event_id,
+                trigger="resolve_writeback",
+            )
         elif fallthrough_resume:
             await self._maybe_resume(event_id)
         if self._bus is not None:
@@ -2364,7 +2374,7 @@ class DispositionSyncService:
             )
 
             try:
-                await self._manual_resolution.create_or_replay_resume_intent(
+                resume_intent = await self._manual_resolution.create_or_replay_resume_intent(
                     event_id,
                     resolution_source=RESOLUTION_SOURCE_WRITEBACK_AUTO,
                     subject_kind=SUBJECT_KIND_EVENT,
@@ -2372,7 +2382,11 @@ class DispositionSyncService:
                     resolution="writeback_progress",
                     principal="DispositionSyncService",
                 )
-                self._manual_resolution.schedule_dispatch()
+                self._manual_resolution.schedule_dispatch(
+                    event_id=event_id,
+                    intent_id=resume_intent.intent_id,
+                    trigger="writeback_progress",
+                )
             except Exception:
                 logger.warning(
                     "failed to enqueue durable graph resume intent event=%s",

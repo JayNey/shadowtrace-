@@ -2408,7 +2408,7 @@ async def test_schedule_dispatch_enqueue_failure_is_observable_and_non_fatal(
     assert snapshot["enqueue_failure"] == 1
     assert snapshot["enqueue_success"] == 0
     assert any(
-        "failed to enqueue investigation intent dispatch" in record.message
+        "investigation intent dispatch enqueue failed" in record.message
         for record in caplog.records
     )
 
@@ -2572,3 +2572,173 @@ async def test_pending_dispatch_stats_reports_oldest_age(
             float(before["oldest_pending_age_s"]),
             290.0,
         )
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_soft_time_limit_fallback_publishes_when_broker_down(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-324: one in-process fallback after SoftTimeLimit RECOVERED enqueue failure."""
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        TASK_MODE="celery",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=30,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-stl-fallback-{uuid4().hex[:8]}"
+    event_id = f"evt-stl-fallback-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="SoftTimeLimit fallback",
+                    description="",
+                    status=EventStatus.ANALYZING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.RETRY.value,
+                    revision=2,
+                    attempt=1,
+                    include_response_execution=False,
+                    generate_report=False,
+                )
+            )
+
+    def _broker_down() -> None:
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
+        _broker_down,
+    )
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    def _noop_publish(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _noop_publish,
+    )
+
+    service.schedule_dispatch(
+        event_id=event_id,
+        intent_id=intent_id,
+        trigger="soft_time_limit_recovered",
+    )
+    await asyncio.sleep(0.05)
+
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("investigation_intent:dispatch_enqueue_failed") == 1
+    assert snapshot.get("investigation_intent:dispatch_fallback_started") == 1
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.ENQUEUED.value
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_fallback_skipped_for_response_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    settings = Settings(TASK_MODE="celery")
+    service = InvestigationIntentService(session_factory, settings=settings)
+    intent_id = f"iin-no-fallback-{uuid4().hex[:8]}"
+    event_id = f"evt-no-fallback-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="No fallback",
+                    description="",
+                    status=EventStatus.ANALYZING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.RETRY.value,
+                    revision=2,
+                    attempt=1,
+                    include_response_execution=True,
+                    generate_report=False,
+                )
+            )
+
+    def _broker_down() -> None:
+        raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
+        _broker_down,
+    )
+    service.schedule_dispatch(
+        event_id=event_id,
+        intent_id=intent_id,
+        trigger="soft_time_limit_recovered",
+    )
+    await asyncio.sleep(0.05)
+
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("investigation_intent:dispatch_enqueue_failed") == 1
+    assert snapshot.get("investigation_intent:dispatch_fallback_started", 0) == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.RETRY.value

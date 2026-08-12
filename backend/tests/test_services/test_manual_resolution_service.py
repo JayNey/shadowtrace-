@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -807,4 +809,80 @@ def test_beat_schedule_includes_graph_resume_intent_tasks(
     schedule = _build_beat_schedule()
     assert "shadowtrace-dispatch-graph-resume-intents" in schedule
     assert "shadowtrace-reconcile-graph-resume-intents" in schedule
+    get_settings.cache_clear()
+
+
+def test_graph_resume_schedule_skipped_no_loop_is_observable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ISSUE-324: no running loop must not silently skip graph resume dispatch."""
+    from app.core.config import get_settings
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+
+    class _BoomDelay:
+        def delay(self) -> None:
+            raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.graph_resume_intent_tasks.dispatch_pending_graph_resume_intents",
+        _BoomDelay(),
+    )
+
+    session_factory = MagicMock()
+    service = ManualResolutionService(session_factory)
+
+    with caplog.at_level(logging.WARNING, logger="app.services.manual_resolution_service"):
+        service.schedule_dispatch(
+            event_id="evt-no-loop",
+            intent_id="gri-no-loop",
+            trigger="test_no_loop",
+        )
+
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("graph_resume:resume_enqueue_failed") == 1
+    assert snapshot.get("graph_resume:resume_schedule_skipped_no_loop") == 1
+    assert any(
+        "graph resume dispatch skipped: no running event loop" in record.message
+        for record in caplog.records
+    )
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_graph_resume_schedule_celery_success_records_metric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+    delay_calls: list[str] = []
+
+    class _DelayTask:
+        def delay(self) -> None:
+            delay_calls.append("delay")
+
+    monkeypatch.setattr(
+        "app.tasks.graph_resume_intent_tasks.dispatch_pending_graph_resume_intents",
+        _DelayTask(),
+    )
+
+    service = ManualResolutionService(MagicMock())
+    service.schedule_dispatch(event_id="evt-celery", trigger="test_celery")
+    assert delay_calls == ["delay"]
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("graph_resume:resume_scheduled") == 1
     get_settings.cache_clear()

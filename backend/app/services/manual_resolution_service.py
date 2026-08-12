@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import IdempotencyKeyReuseError, ValidationError
+from app.core.metrics import record_dispatch_schedule
 from app.db import models as orm
 from app.models.enums import EventStatus, ExecutionSubstate, GraphResumeIntentStatus
 from app.models.graph_resume_intent import (
@@ -39,6 +40,7 @@ from app.services.context_service import (
     append_context_journal_in_session,
     unwrap_journal_value,
 )
+from app.services.degraded_flag_service import DegradedFlagService
 
 logger = logging.getLogger(__name__)
 
@@ -83,12 +85,14 @@ class ManualResolutionService:
         *,
         workflow_runtime: Any | None = None,
         resume_runner: Any | None = None,
+        degraded_flags: DegradedFlagService | None = None,
         claim_lease_s: int = _CLAIM_LEASE_S,
         max_attempts: int = _MAX_ATTEMPTS,
     ) -> None:
         self._session_factory = session_factory
         self._runtime = workflow_runtime
         self._resume_runner = resume_runner
+        self._degraded = degraded_flags
         self._claim_lease_s = claim_lease_s
         self._max_attempts = max_attempts
         self._dispatch_scheduled = False
@@ -444,13 +448,21 @@ class ManualResolutionService:
                 )
             return self._record_from_row(active)
 
-    def schedule_dispatch(self) -> None:
+    def schedule_dispatch(
+        self,
+        *,
+        event_id: str | None = None,
+        intent_id: str | None = None,
+        trigger: str = "unspecified",
+    ) -> None:
         """Best-effort durable dispatch; never raises.
 
         Prefer Celery (survives process kill via beat reclaim). Fall back to an
         in-process task when Celery is unavailable so local/background mode still
-        progresses.
+        progresses. When no running event loop exists, emit structured signals
+        instead of silently returning (ISSUE-324).
         """
+        celery_enqueued = False
         try:
             from app.core.config import TaskMode, get_settings
 
@@ -460,22 +472,51 @@ class ManualResolutionService:
                 )
 
                 dispatch_pending_graph_resume_intents.delay()
+                celery_enqueued = True
+                record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
+                logger.debug(
+                    "graph resume dispatch enqueued trigger=%s event_id=%s intent_id=%s",
+                    trigger,
+                    event_id or "-",
+                    intent_id or "-",
+                )
                 return
-        except Exception:
+        except Exception as exc:
+            record_dispatch_schedule(domain="graph_resume", outcome="resume_enqueue_failed")
             logger.warning(
-                "failed to enqueue graph resume intent Celery dispatch",
+                "graph resume dispatch enqueue failed trigger=%s event_id=%s intent_id=%s "
+                "error=%s",
+                trigger,
+                event_id or "-",
+                intent_id or "-",
+                exc,
                 exc_info=True,
             )
 
+        if celery_enqueued:
+            return
         if self._dispatch_scheduled:
             return
         self._dispatch_scheduled = True
 
         async def _run() -> None:
             try:
-                await self.claim_and_run_batch(limit=20)
+                ran = await self.claim_and_run_batch(limit=20)
+                record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
+                logger.info(
+                    "graph resume in-process dispatch trigger=%s event_id=%s intent_id=%s ran=%s",
+                    trigger,
+                    event_id or "-",
+                    intent_id or "-",
+                    ran,
+                )
             except Exception:
-                logger.exception("graph resume intent in-process dispatch failed")
+                logger.exception(
+                    "graph resume in-process dispatch failed trigger=%s event_id=%s intent_id=%s",
+                    trigger,
+                    event_id or "-",
+                    intent_id or "-",
+                )
             finally:
                 self._dispatch_scheduled = False
 
@@ -483,8 +524,48 @@ class ManualResolutionService:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             self._dispatch_scheduled = False
+            record_dispatch_schedule(
+                domain="graph_resume",
+                outcome="resume_schedule_skipped_no_loop",
+            )
+            logger.warning(
+                "graph resume dispatch skipped: no running event loop trigger=%s "
+                "event_id=%s intent_id=%s",
+                trigger,
+                event_id or "-",
+                intent_id or "-",
+            )
+            if event_id is not None:
+                self._schedule_resume_dispatch_degraded_flag(event_id, trigger=trigger)
             return
         loop.create_task(_run())
+
+    def _schedule_resume_dispatch_degraded_flag(self, event_id: str, *, trigger: str) -> None:
+        degraded = self._degraded
+        if degraded is None:
+            return
+
+        async def _set_flag() -> None:
+            try:
+                await degraded.set_flag(
+                    event_id,
+                    "graph_resume_dispatch_unavailable",
+                    trigger,
+                    writer="ManualResolutionService",
+                )
+            except Exception:
+                logger.warning(
+                    "failed to set graph_resume_dispatch_unavailable event=%s trigger=%s",
+                    event_id,
+                    trigger,
+                    exc_info=True,
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(_set_flag())
 
     async def has_schedulable_intent(self, event_id: str) -> bool:
         """True when event has PENDING/RETRY/CLAIMED/STARTED resume intent."""
