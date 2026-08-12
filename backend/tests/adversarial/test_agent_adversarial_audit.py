@@ -164,6 +164,12 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     print("[adversarial-audit] checks:", json.dumps(report["checks"], ensure_ascii=False, indent=2))
     print(f"[adversarial-audit] full report → {ARTIFACT_PATH}")
 
+    # ISSUE-319: analysis-only audit must not require CLOSED / full-loop scoring.
+    assert report["audit_mode"] == "analysis_only"
+    assert "closed_reached" not in report["checks"]
+    assert report["score"]["total_dimensions"] == 5
+    assert not report["verdict_for_human"].startswith("PASS — full loop")
+
     # Soft assertion: pipeline must at least reach reporting for the audit to be meaningful.
     assert EventStatus.REPORTING.value in report["observed"]["status_sequence"], (
         "pipeline did not reach REPORTING — see artifact for details"

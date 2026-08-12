@@ -173,12 +173,21 @@ Console prints human verdict + check matrix for each run.
 
 ## Interpretation
 
-| Verdict | Meaning |
-|---------|---------|
-| **PASS** | Reached reporting + `confirmed_threat` + risk ≥ 65 |
+Scorecard mode is explicit via ``AdversarialAuditChecks.audit_mode`` (ISSUE-319).
+
+| Mode | PASS means | FAIL / notes |
+|------|------------|--------------|
+| ``analysis_only`` (default) | Reached **REPORTING** + expected verdict + risk ≥ ground-truth minimum (5 scored dims). **CLOSED not required.** | Did not reach reporting, or under-scored / wrong verdict (`PARTIAL` / `WEAK`) |
+| ``full_loop`` | Reached **CLOSED** + expected verdict + adequate risk (6 scored dims; `closed_reached` is scored). | Any full-loop path without CLOSED is **FAIL** (never release-grade), even if analysis dims / writeback look green |
+
+| Verdict token | Meaning |
+|---------------|---------|
+| **PASS** | Mode-specific gate above passed (use ``startswith("PASS")``; FAIL text never contains ``PASS``) |
 | **PARTIAL** | Reached reporting with high risk but type/verdict off |
 | **WEAK** | Reached reporting but under-scored |
-| **FAIL** | Did not reach reporting or missed critical signals |
+| **FAIL** | Mode gate failed (analysis: no reporting; full-loop: no CLOSED, or no reporting) |
+
+``disposition_writeback_ok`` and other ``production_checks`` are separate hard gates; they do **not** override ``verdict_for_human``.
 
 Analysis audit (`test_agent_adversarial_audit.py`) uses ``build_analysis_pipeline(scenario_id=None)``
 (no DI override). Full-loop quality gate uses production graph wiring with
