@@ -485,6 +485,24 @@ async def test_llm_path_falls_back_to_rule() -> None:
     assert len(storyline.phases) >= 4
 
 
+async def test_llm_path_soft_time_limit_does_not_fall_back_to_rule() -> None:
+    """ISSUE-314: SoftTimeLimitExceeded must not become rule-storyline success."""
+    from celery.exceptions import SoftTimeLimitExceeded
+
+    class _SoftLimitLLMClient:
+        async def chat(self, messages: list[LLMMessage], **kwargs: Any) -> LLMResponse:
+            raise SoftTimeLimitExceeded()
+
+    evidence_list = _main_scenario_evidence()
+    ctx = _make_event_context(evidence_list=evidence_list)
+    svc = StorylineService(
+        llm_client=_SoftLimitLLMClient(),
+        working_memory=_FakeWorkingMemory(),
+    )
+    with pytest.raises(SoftTimeLimitExceeded):
+        await svc.generate(ctx)
+
+
 async def test_llm_path_no_llm_client_uses_rule() -> None:
     """Without llm_client, service goes directly to rule path."""
     ctx = _make_event_context(evidence_list=_main_scenario_evidence())

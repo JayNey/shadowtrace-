@@ -11,6 +11,8 @@ import asyncio
 import logging
 from typing import Any, cast
 
+from celery.exceptions import SoftTimeLimitExceeded
+
 from app.agents.base import BaseAgent
 from app.agents.rag_query_builder import RAGQueryBuilder
 from app.core.config import Settings, get_settings
@@ -244,6 +246,9 @@ class RAGAgent(BaseAgent[RAGAgentInput, RAGOutput]):
                     context=context,
                 ),
             )
+        except SoftTimeLimitExceeded:
+            # ISSUE-314: do not degrade soft-limit into empty retrieval.
+            raise
         except Exception as exc:
             logger.warning(
                 "RAG retrieval failed for kb=%s query=%.100s: %s",

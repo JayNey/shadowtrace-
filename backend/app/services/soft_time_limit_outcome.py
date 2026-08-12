@@ -36,6 +36,17 @@ logger = logging.getLogger(__name__)
 
 _SOFT_LIMIT_REASON = "soft_time_limit_exceeded"
 _SOFT_LIMIT_OPERATOR = "InvestigationTask"
+_ORPHAN_TERMINAL_REASON = f"{_SOFT_LIMIT_REASON}:orphan_terminal_intent"
+
+# Live intents that imply a successor owner may still be driving the event.
+_ACTIVE_INTENT_STATUSES = frozenset(
+    {
+        InvestigationIntentStatus.CLAIMED.value,
+        InvestigationIntentStatus.ENQUEUED.value,
+        InvestigationIntentStatus.STARTED.value,
+        InvestigationIntentStatus.RETRY.value,
+    }
+)
 
 # Pure investigation phases — safe for one bounded checkpoint resume (no execute replay).
 # REPORTING is excluded: soft-limit there is TERMINAL/RECONCILE, not RECOVERED.
@@ -268,6 +279,39 @@ def _missing_broker_fence(
     return broker_task_id is None or not durable
 
 
+def _is_orphan_terminal_intent(
+    intent_row: orm.InvestigationIntent | None,
+    event_status: str,
+) -> bool:
+    """True when intent is terminal but event is still non-terminal (orphan)."""
+    if intent_row is None:
+        return False
+    if event_status in _EVENT_TERMINAL_STATUSES or event_status in _EVENT_SUCCESS_TERMINAL_STATUSES:
+        return False
+    try:
+        current = InvestigationIntentStatus(intent_row.status)
+    except ValueError:
+        return False
+    return current in TERMINAL_INTENT_STATUSES
+
+
+async def _has_active_sibling_intent(
+    session: AsyncSession,
+    *,
+    event_id: str,
+    exclude_intent_id: str | None,
+) -> bool:
+    """True when another live intent still owns investigation for *event_id*."""
+    stmt = select(orm.InvestigationIntent.intent_id).where(
+        orm.InvestigationIntent.event_id == event_id,
+        orm.InvestigationIntent.status.in_(_ACTIVE_INTENT_STATUSES),
+    )
+    if exclude_intent_id:
+        stmt = stmt.where(orm.InvestigationIntent.intent_id != exclude_intent_id)
+    row = (await session.execute(stmt.limit(1))).first()
+    return row is not None
+
+
 def _mark_intent_dead_in_session(
     intent_row: orm.InvestigationIntent,
     *,
@@ -335,6 +379,7 @@ async def apply_soft_time_limit_outcome(
     intent_error: str | None = None
     decision = SoftTimeLimitDecision.TERMINAL
     ignore_reason = f"{_SOFT_LIMIT_REASON}:stale_broker"
+    orphan_terminal_reason: str | None = None
 
     async with session_factory() as session:
         async with session.begin():
@@ -394,25 +439,46 @@ async def apply_soft_time_limit_outcome(
                     unknown_outbox_count=locked_unknown_count,
                 )
 
-            # ISSUE-314: stale/old broker owner must be a full no-op (no event
-            # FAILED, no intent DEAD, no checkpoint invalidation, no dispatch).
-            # Missing broker id against a live intent is also fail-closed no-op.
+            # ISSUE-314: stale/old broker owner against a *live* intent is a full
+            # no-op. Missing broker against a live intent is also fail-closed.
+            # Exception: terminal intent + non-terminal event with no active
+            # sibling → converge event FAILED (orphan heal), keep intent DEAD.
+            fence_reason: str | None = None
             if _missing_broker_fence(intent_row, broker_task_id):
-                logger.info(
-                    "soft time limit ignored missing broker fence intent=%s",
-                    intent_id,
-                )
-                decision = SoftTimeLimitDecision.IGNORED
-                ignore_reason = f"{_SOFT_LIMIT_REASON}:missing_broker"
+                fence_reason = f"{_SOFT_LIMIT_REASON}:missing_broker"
             elif _is_stale_broker_owner(intent_row, broker_task_id):
-                logger.info(
-                    "soft time limit ignored stale broker intent=%s expected=%s got=%s",
-                    intent_id,
-                    intent_row.broker_task_id if intent_row is not None else None,
-                    broker_task_id,
-                )
-                decision = SoftTimeLimitDecision.IGNORED
-                ignore_reason = f"{_SOFT_LIMIT_REASON}:stale_broker"
+                fence_reason = f"{_SOFT_LIMIT_REASON}:stale_broker"
+
+            recovered_applied = False
+            if fence_reason is not None:
+                orphan = _is_orphan_terminal_intent(intent_row, event_status)
+                has_sibling = False
+                if orphan:
+                    has_sibling = await _has_active_sibling_intent(
+                        session,
+                        event_id=event_id,
+                        exclude_intent_id=intent_id,
+                    )
+                if orphan and not has_sibling:
+                    logger.info(
+                        "soft time limit orphan terminal intent converges event "
+                        "intent=%s fence=%s",
+                        intent_id,
+                        fence_reason,
+                    )
+                    decision = SoftTimeLimitDecision.TERMINAL
+                    orphan_terminal_reason = _ORPHAN_TERMINAL_REASON
+                else:
+                    logger.info(
+                        "soft time limit ignored broker fence intent=%s reason=%s "
+                        "orphan=%s sibling=%s",
+                        intent_id,
+                        fence_reason,
+                        orphan,
+                        has_sibling,
+                    )
+                    decision = SoftTimeLimitDecision.IGNORED
+                    ignore_reason = fence_reason
             else:
                 decision = decide_soft_time_limit_outcome(
                     event_status=event_status,
@@ -426,7 +492,6 @@ async def apply_soft_time_limit_outcome(
                     not in TERMINAL_INTENT_STATUSES,
                 )
 
-                recovered_applied = False
                 if decision is SoftTimeLimitDecision.IGNORED:
                     ignore_reason = f"{_SOFT_LIMIT_REASON}:already_terminal"
                     # CLOSED: never FAILED-rewrite; heal dangling intent.
@@ -470,37 +535,41 @@ async def apply_soft_time_limit_outcome(
                         intent_error = intent_row.last_error
                         recovered_applied = True
 
-                if (
-                    decision
-                    in {
-                        SoftTimeLimitDecision.TERMINAL,
-                        SoftTimeLimitDecision.RECONCILE_REQUIRED,
-                    }
-                    and not recovered_applied
-                ):
-                    terminal_reason = (
+            if (
+                decision
+                in {
+                    SoftTimeLimitDecision.TERMINAL,
+                    SoftTimeLimitDecision.RECONCILE_REQUIRED,
+                }
+                and not recovered_applied
+            ):
+                terminal_reason = (
+                    orphan_terminal_reason
+                    if orphan_terminal_reason is not None
+                    else (
                         _SOFT_LIMIT_REASON
                         if decision is SoftTimeLimitDecision.TERMINAL
                         else f"{_SOFT_LIMIT_REASON}:reconcile_required"
                     )
-                    # Never rewrite CLOSED; FAILED is already terminal.
-                    # CONTAINED is rewritten to FAILED for atomic ownership.
-                    if event_status not in _EVENT_TERMINAL_STATUSES:
-                        await _transition_event_failed_in_session(
-                            session,
-                            event_id,
-                            event_row,
-                            reason=terminal_reason,
-                            audit_service=audit_service,
-                        )
-                        event_status = EventStatus.FAILED.value
+                )
+                # Never rewrite CLOSED; FAILED is already terminal.
+                # CONTAINED is rewritten to FAILED for atomic ownership.
+                if event_status not in _EVENT_TERMINAL_STATUSES:
+                    await _transition_event_failed_in_session(
+                        session,
+                        event_id,
+                        event_row,
+                        reason=terminal_reason,
+                        audit_service=audit_service,
+                    )
+                    event_status = EventStatus.FAILED.value
 
-                    if intent_row is not None:
-                        _mark_intent_dead_in_session(
-                            intent_row, reason=terminal_reason
-                        )
-                        intent_status = intent_row.status
-                        intent_error = intent_row.last_error
+                if intent_row is not None:
+                    _mark_intent_dead_in_session(
+                        intent_row, reason=terminal_reason
+                    )
+                    intent_status = intent_row.status
+                    intent_error = intent_row.last_error
 
     if decision in {SoftTimeLimitDecision.TERMINAL, SoftTimeLimitDecision.RECONCILE_REQUIRED}:
         try:
@@ -547,6 +616,15 @@ async def apply_soft_time_limit_outcome(
         probe.last_checkpoint_node,
         probe.side_effect_signals,
     )
+    if decision is SoftTimeLimitDecision.IGNORED:
+        result_reason = ignore_reason
+    elif orphan_terminal_reason is not None:
+        result_reason = orphan_terminal_reason
+    elif decision is SoftTimeLimitDecision.TERMINAL:
+        result_reason = _SOFT_LIMIT_REASON
+    else:
+        result_reason = f"{_SOFT_LIMIT_REASON}:{decision.value}"
+
     return SoftTimeLimitOutcomeResult(
         decision=decision,
         event_id=event_id,
@@ -555,13 +633,7 @@ async def apply_soft_time_limit_outcome(
         intent_status=intent_status,
         intent_error=intent_error,
         last_checkpoint_node=probe.last_checkpoint_node,
-        reason=(
-            ignore_reason
-            if decision is SoftTimeLimitDecision.IGNORED
-            else _SOFT_LIMIT_REASON
-            if decision is SoftTimeLimitDecision.TERMINAL
-            else f"{_SOFT_LIMIT_REASON}:{decision.value}"
-        ),
+        reason=result_reason,
     )
 
 

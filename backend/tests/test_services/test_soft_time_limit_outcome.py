@@ -836,10 +836,11 @@ async def test_apply_soft_limit_missing_durable_broker_is_fail_closed_noop(
 
 
 @pytest.mark.asyncio
-async def test_apply_soft_limit_terminal_intent_broker_mismatch_is_noop(
+async def test_apply_soft_limit_orphan_terminal_intent_stale_broker_converges(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """DEAD intent + non-terminal event + stale broker → FAILED (orphan heal)."""
     durable_id = f"task-owner-b-{uuid4().hex[:10]}"
     event_id, intent_id, durable = await _seed_event_and_intent(
         session_factory,
@@ -847,6 +848,134 @@ async def test_apply_soft_limit_terminal_intent_broker_mismatch_is_noop(
         intent_status=InvestigationIntentStatus.DEAD,
         broker_task_id=durable_id,
     )
+    monkeypatch.setattr(
+        "app.services.soft_time_limit_outcome.probe_soft_time_limit_context",
+        AsyncMock(
+            return_value=SoftTimeLimitProbe(
+                has_checkpoint=False,
+                checkpoint_recoverable=False,
+                last_checkpoint_node=None,
+                side_effect_signals=(),
+                unknown_outbox_count=0,
+            )
+        ),
+    )
+    intent_service = MagicMock()
+    intent_service.schedule_dispatch = MagicMock()
+    invalidated: list[str] = []
+
+    async def _invalidate(eid: str) -> None:
+        invalidated.append(eid)
+
+    monkeypatch.setattr(
+        "app.orchestration.checkpointer.invalidate_event_checkpoint",
+        _invalidate,
+    )
+
+    result = await apply_soft_time_limit_outcome(
+        event_id,
+        session_factory=session_factory,
+        intent_id=intent_id,
+        broker_task_id=f"task-owner-a-{uuid4().hex[:10]}",
+        settings=Settings(auto_investigate_max_attempts=5),
+        intent_service=intent_service,
+    )
+    assert result.decision is SoftTimeLimitDecision.TERMINAL
+    assert result.reason == "soft_time_limit_exceeded:orphan_terminal_intent"
+    intent_service.schedule_dispatch.assert_not_called()
+    assert invalidated == [event_id]
+
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, event_id)
+        intent = await session.get(orm.InvestigationIntent, intent_id)
+        assert event is not None
+        assert intent is not None
+        assert event.status == EventStatus.FAILED.value
+        assert intent.status == InvestigationIntentStatus.DEAD.value
+        assert intent.broker_task_id == durable
+
+
+@pytest.mark.asyncio
+async def test_apply_soft_limit_orphan_missing_durable_broker_converges(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEAD intent without durable broker + non-terminal event → FAILED orphan heal."""
+    event_id, intent_id, _ = await _seed_event_and_intent(
+        session_factory,
+        event_status=EventStatus.ANALYZING,
+        intent_status=InvestigationIntentStatus.DEAD,
+        omit_durable_broker=True,
+    )
+    monkeypatch.setattr(
+        "app.services.soft_time_limit_outcome.probe_soft_time_limit_context",
+        AsyncMock(
+            return_value=SoftTimeLimitProbe(
+                has_checkpoint=False,
+                checkpoint_recoverable=False,
+                last_checkpoint_node=None,
+                side_effect_signals=(),
+                unknown_outbox_count=0,
+            )
+        ),
+    )
+    intent_service = MagicMock()
+    intent_service.schedule_dispatch = MagicMock()
+
+    result = await apply_soft_time_limit_outcome(
+        event_id,
+        session_factory=session_factory,
+        intent_id=intent_id,
+        broker_task_id="task-caller-has-id",
+        settings=Settings(auto_investigate_max_attempts=5),
+        intent_service=intent_service,
+    )
+    assert result.decision is SoftTimeLimitDecision.TERMINAL
+    assert result.reason == "soft_time_limit_exceeded:orphan_terminal_intent"
+    intent_service.schedule_dispatch.assert_not_called()
+
+    async with session_factory() as session:
+        event = await session.get(orm.SecurityEvent, event_id)
+        intent = await session.get(orm.InvestigationIntent, intent_id)
+        assert event is not None
+        assert intent is not None
+        assert event.status == EventStatus.FAILED.value
+        assert intent.status == InvestigationIntentStatus.DEAD.value
+
+
+@pytest.mark.asyncio
+async def test_apply_soft_limit_orphan_with_active_sibling_is_noop(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Orphan fence stays no-op when a live sibling intent still owns the event."""
+    durable_id = f"task-owner-b-{uuid4().hex[:10]}"
+    event_id, intent_id, durable = await _seed_event_and_intent(
+        session_factory,
+        event_status=EventStatus.CONTAINED,
+        intent_status=InvestigationIntentStatus.DEAD,
+        broker_task_id=durable_id,
+    )
+    sibling_id = f"iin-soft-sib-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=sibling_id,
+                    event_id=event_id,
+                    # Distinct kind/version to satisfy uq_investigation_intent_event_kind_version.
+                    intent_kind="http_investigate",
+                    intent_version="issue314_sibling_v1",
+                    status=InvestigationIntentStatus.STARTED.value,
+                    revision=1,
+                    attempt=0,
+                    broker_task_id=f"task-sibling-{uuid4().hex[:10]}",
+                    include_response_execution=False,
+                    generate_report=True,
+                    orchestration_mode="graph",
+                )
+            )
+
     monkeypatch.setattr(
         "app.services.soft_time_limit_outcome.probe_soft_time_limit_context",
         AsyncMock(
@@ -877,8 +1006,11 @@ async def test_apply_soft_limit_terminal_intent_broker_mismatch_is_noop(
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
         intent = await session.get(orm.InvestigationIntent, intent_id)
+        sibling = await session.get(orm.InvestigationIntent, sibling_id)
         assert event is not None
         assert intent is not None
+        assert sibling is not None
         assert event.status == EventStatus.CONTAINED.value
         assert intent.status == InvestigationIntentStatus.DEAD.value
         assert intent.broker_task_id == durable
+        assert sibling.status == InvestigationIntentStatus.STARTED.value
