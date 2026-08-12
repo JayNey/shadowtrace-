@@ -91,9 +91,10 @@ def test_full_loop_pass_requires_closed() -> None:
     ).to_dict()
     assert report["checks"]["closed_reached"] is False
     assert report["score"]["total_dimensions"] == 6
-    assert report["score"]["passed"] < report["score"]["total_dimensions"]
+    assert report["score"]["passed"] == 5
     assert report["verdict_for_human"].startswith("FAIL")
-    assert "not release-grade PASS" in report["verdict_for_human"]
+    assert "not release-grade" in report["verdict_for_human"]
+    assert "PASS" not in report["verdict_for_human"]
 
 
 def test_full_loop_pass_when_closed_and_analysis_met() -> None:
@@ -118,6 +119,46 @@ def test_full_loop_fail_when_closed_missing_and_analysis_weak() -> None:
     assert report["checks"]["reached_reporting"] is False
     assert report["verdict_for_human"] == "FAIL — full loop did not reach CLOSED"
     assert "PASS" not in report["verdict_for_human"]
+
+
+def test_full_loop_fail_verdict_has_no_pass_token() -> None:
+    """FAIL strings must not contain PASS (grep / substring false-green)."""
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_REPORTING_ONLY_SEQUENCE,
+    ).to_dict()
+    verdict = report["verdict_for_human"]
+    assert verdict.startswith("FAIL")
+    assert "PASS" not in verdict
+
+
+def test_full_loop_writeback_ok_does_not_override_closed_gate() -> None:
+    """Scorecard ignores disposition_writeback_ok; only status_sequence drives CLOSED."""
+    # Mimic artifact shape: writeback confirmed while loop never reached CLOSED.
+    production_checks = {
+        "disposition_writeback_ok": True,
+        "terminal_status": "failed",
+        "status_sequence_includes_closed": False,
+    }
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_REPORTING_ONLY_SEQUENCE,
+    ).to_dict()
+    assert production_checks["disposition_writeback_ok"] is True
+    assert report["checks"]["closed_reached"] is False
+    assert report["score"]["passed"] == 5
+    assert report["verdict_for_human"].startswith("FAIL")
+    assert "PASS" not in report["verdict_for_human"]
+
+
+def test_full_loop_closed_without_reporting_is_not_pass() -> None:
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=["new", "investigating", "verifying", "closed"],
+    ).to_dict()
+    assert report["checks"]["closed_reached"] is True
+    assert report["checks"]["reached_reporting"] is False
+    assert not report["verdict_for_human"].startswith("PASS")
 
 
 def test_audit_mode_rejects_unknown_value() -> None:

@@ -142,19 +142,18 @@ def _human_verdict(
 ) -> str:
     if audit_mode == "full_loop" and not checks.get("closed_reached"):
         if checks.get("reached_reporting") and checks.get("risk_score_at_least_minimum"):
+            # Keep the token "PASS" out of FAIL text so greps / `"PASS" in verdict` stay clean.
             return (
                 "FAIL — analysis criteria met but full loop did not reach CLOSED; "
-                "not release-grade PASS"
+                "not release-grade"
             )
         return "FAIL — full loop did not reach CLOSED"
     if not checks.get("reached_reporting"):
         return "FAIL — investigation did not reach reporting or missed critical signals"
     if checks.get("verdict_matches_expected") and checks.get("risk_score_at_least_minimum"):
         if audit_mode == "full_loop":
-            return (
-                "PASS — full loop reached CLOSED with confirmed threat and adequate risk score"
-            )
-        return "PASS — agent flagged confirmed threat with adequate risk score"
+            return "PASS — full loop reached CLOSED with expected verdict and adequate risk score"
+        return "PASS — agent flagged expected verdict with adequate risk score"
     if checks.get("risk_score_at_least_minimum"):
         return "PARTIAL — high risk detected but verdict/type may differ; review report"
     return "WEAK — pipeline completed but under-scored or wrong verdict"
