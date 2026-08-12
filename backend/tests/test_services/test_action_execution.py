@@ -235,6 +235,8 @@ async def cleanup(
                 orm.ActionExecutionJob,
                 orm.DispositionReceipt,
                 orm.DispositionOutbox,
+                # ApprovalRecord FK → action; delete before Action (ISSUE-315 fixture isolation).
+                orm.ApprovalRecordORM,
                 orm.Action,
                 orm.Evidence,
                 orm.Report,
@@ -307,6 +309,7 @@ async def _seed_connector_and_source(
     concurrency_token = "tok-1"
     if mock_xdr_client is not None and object_id == SCENARIO_INCIDENT_ID:
         concurrency_token = await fetch_mock_concurrency_token(mock_xdr_client, object_id=object_id)
+    reused = False
     async with session_factory() as session:
         async with session.begin():
             existing = await session.get(orm.SourceConnector, connector_id)
@@ -318,18 +321,33 @@ async def _seed_connector_and_source(
                         display_name="Mock XDR",
                     )
                 )
-            session.add(
-                orm.SourceObject(
-                    source_record_id=source_record_id,
-                    source_product="mock_xdr",
-                    source_tenant_id="tenant-demo",
-                    connector_id=connector_id,
-                    source_kind=SourceObjectKind.INCIDENT.value,
-                    source_object_id=object_id,
-                    current_concurrency_token=concurrency_token,
-                    next_outbox_sequence=0,
+            # Idempotent on uq_source_object_identity so shared Docker DB / re-runs stay green.
+            existing_source = await session.scalar(
+                select(orm.SourceObject).where(
+                    orm.SourceObject.source_product == "mock_xdr",
+                    orm.SourceObject.source_tenant_id == "tenant-demo",
+                    orm.SourceObject.connector_id == connector_id,
+                    orm.SourceObject.source_kind == SourceObjectKind.INCIDENT.value,
+                    orm.SourceObject.source_object_id == object_id,
                 )
             )
+            if existing_source is None:
+                session.add(
+                    orm.SourceObject(
+                        source_record_id=source_record_id,
+                        source_product="mock_xdr",
+                        source_tenant_id="tenant-demo",
+                        connector_id=connector_id,
+                        source_kind=SourceObjectKind.INCIDENT.value,
+                        source_object_id=object_id,
+                        current_concurrency_token=concurrency_token,
+                        next_outbox_sequence=0,
+                    )
+                )
+            else:
+                reused = True
+                source_record_id = existing_source.source_record_id
+                existing_source.current_concurrency_token = concurrency_token
     return source_record_id
 
 
@@ -503,6 +521,54 @@ async def test_post_verify_action_rejected_by_execute_action(
     )
     with pytest.raises(ValidationError, match="POST_VERIFY"):
         await execution_service.execute_action(action.action_id)
+
+
+@pytest.mark.asyncio
+async def test_xdr_managed_rejects_non_specs_tool_without_outbox(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    mock_xdr_client: httpx.AsyncClient,
+    execution_service: ActionExecutionService,
+    cleanup: None,
+) -> None:
+    """Misrouted L1 ticket on XDR_MANAGED fails structurally without entity outbox."""
+    oid = SCENARIO_INCIDENT_ID
+    await _seed_connector_and_source(
+        session_factory, object_id=oid, mock_xdr_client=mock_xdr_client
+    )
+    event_id = await _create_event(session_factory, store, object_id=oid)
+    action = await _insert_action(
+        session_factory,
+        event_id,
+        _action_model(
+            event_id=event_id,
+            tool_name="create_ticket",
+            action_name="create ticket",
+            action_level=ActionLevel.L1,
+            target_type="ticket",
+            target="ticket",
+            parameters={"title": "t", "description": "d"},
+            writeback_applicable=False,
+            writeback_required=True,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            disposition_source_ref=_locator(object_id=oid),
+        ),
+    )
+    with pytest.raises(ValidationError, match="entity submit") as exc_info:
+        await execution_service.execute_action(action.action_id)
+    assert exc_info.value.error_code == "unsupported"
+    assert exc_info.value.details.get("tool_name") == "create_ticket"
+    async with session_factory() as session:
+        row = await session.get(orm.Action, action.action_id)
+        assert row is not None
+        assert row.status == ActionStatus.FAILED.value
+        outboxes = (
+            await session.scalars(
+                select(orm.DispositionOutbox).where(orm.DispositionOutbox.event_id == event_id)
+            )
+        ).all()
+        assert outboxes == []
 
 
 @pytest.mark.asyncio

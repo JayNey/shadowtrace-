@@ -81,6 +81,16 @@ logger = logging.getLogger(__name__)
 
 _QUERY_TOOL_PREFIX = "query_"
 _NON_TARGET_TOOLS = frozenset({"create_ticket", "notify_security_team"})
+# L1 DIRECT-only tools that may coexist with XDR entity actions (ISSUE-315).
+# Kept separate from `_NON_TARGET_TOOLS` so rollback close tools are not routed
+# through notify/ticket ResponseAgent param-generation branches.
+_L1_DIRECT_COEXIST_WITH_XDR = frozenset(
+    {
+        "create_ticket",
+        "notify_security_team",
+        "close_false_positive_ticket",
+    }
+)
 _TICKET_TARGET = "ticket"
 _CHANNEL_TARGET = "security_team"
 
@@ -634,7 +644,11 @@ def _enforce_execution_owner_consistency(
     candidates: list[ActionCandidate],
     policy_filter: ResponsePolicyFilter,
 ) -> list[ActionCandidate]:
-    """Drop DIRECT_TOOL candidates when XDR_MANAGED actions are also planned."""
+    """Drop competing entity-class DIRECT_TOOL when XDR_MANAGED actions are also planned.
+
+    L1 direct-only tools (ticket/notify/close_false_positive_ticket) may coexist
+    with XDR-managed entity actions (ISSUE-315 / FIX-RISK-001).
+    """
     owners = {
         policy_filter.resolve_execution_owner(candidate.tool_name)
         for candidate in candidates
@@ -649,6 +663,7 @@ def _enforce_execution_owner_consistency(
         if candidate.tool_name == VIRTUAL_DISPOSITION_TOOL
         or policy_filter.resolve_execution_owner(candidate.tool_name)
         is not ExecutionOwner.DIRECT_TOOL
+        or candidate.tool_name in _L1_DIRECT_COEXIST_WITH_XDR
     ]
 
 

@@ -1204,14 +1204,32 @@ async def test_playbook_expands_all_entity_targets() -> None:
     assert "10.0.0.5" in targets
 
 
-def test_enforce_execution_owner_consistency_drops_direct_tool() -> None:
+def test_response_policy_filter_freezes_l1_ticket_tools_as_direct() -> None:
+    """Real filter+meta freeze: ticket/notify resolve DIRECT; entity prefers XDR."""
+    owner_filter = ResponsePolicyFilter(
+        manifest=build_mock_capability_manifest(),
+        entities=_entities(),
+        disposition_policy=DispositionPolicy.REQUIRED,
+        source_locator=None,
+    )
+    assert owner_filter.resolve_execution_owner("create_ticket") is ExecutionOwner.DIRECT_TOOL
+    assert owner_filter.resolve_execution_owner("notify_security_team") is ExecutionOwner.DIRECT_TOOL
+    assert owner_filter.resolve_execution_owner("disable_account") is ExecutionOwner.XDR_MANAGED
+
+
+def test_enforce_execution_owner_consistency_allows_l1_direct_with_xdr_entity() -> None:
+    """XDR entity actions may coexist with L1 DIRECT ticket/notify/close (ISSUE-315)."""
     manifest = build_mock_capability_manifest()
 
     class _OwnerFilter(ResponsePolicyFilter):
         def resolve_execution_owner(self, tool_name: str) -> ExecutionOwner | None:
             if tool_name == "disable_account":
                 return ExecutionOwner.XDR_MANAGED
-            if tool_name == "create_ticket":
+            if tool_name in {
+                "create_ticket",
+                "notify_security_team",
+                "close_false_positive_ticket",
+            }:
                 return ExecutionOwner.DIRECT_TOOL
             return super().resolve_execution_owner(tool_name)
 
@@ -1234,6 +1252,63 @@ def test_enforce_execution_owner_consistency_drops_direct_tool() -> None:
             target_type="ticket",
             target="ticket",
             parameters={"title": "t", "description": "d"},
+            reason="direct",
+        ),
+        ActionCandidate(
+            tool_name="notify_security_team",
+            target_type="channel",
+            target="security_team",
+            parameters={"message": "n", "channels": ["email"]},
+            reason="direct-notify",
+        ),
+        ActionCandidate(
+            tool_name="close_false_positive_ticket",
+            target_type="ticket",
+            target="ticket",
+            parameters={"ticket_id": "tkt-1"},
+            reason="direct-close",
+        ),
+    ]
+    filtered = _enforce_execution_owner_consistency(candidates, owner_filter)
+    assert {item.tool_name for item in filtered} == {
+        "disable_account",
+        "create_ticket",
+        "notify_security_team",
+        "close_false_positive_ticket",
+    }
+
+
+def test_enforce_execution_owner_consistency_drops_competing_entity_direct_tool() -> None:
+    """Entity-class DIRECT_TOOL still dropped when XDR_MANAGED is planned."""
+    manifest = build_mock_capability_manifest()
+
+    class _OwnerFilter(ResponsePolicyFilter):
+        def resolve_execution_owner(self, tool_name: str) -> ExecutionOwner | None:
+            if tool_name == "disable_account":
+                return ExecutionOwner.XDR_MANAGED
+            if tool_name == "block_ip":
+                return ExecutionOwner.DIRECT_TOOL
+            return super().resolve_execution_owner(tool_name)
+
+    owner_filter = _OwnerFilter(
+        manifest=manifest,
+        entities=_entities(),
+        disposition_policy=DispositionPolicy.REQUIRED,
+        source_locator=None,
+    )
+    candidates = [
+        ActionCandidate(
+            tool_name="disable_account",
+            target_type="account",
+            target="svc-backup",
+            parameters={},
+            reason="managed",
+        ),
+        ActionCandidate(
+            tool_name="block_ip",
+            target_type="ip",
+            target="203.0.113.1",
+            parameters={},
             reason="direct",
         ),
     ]

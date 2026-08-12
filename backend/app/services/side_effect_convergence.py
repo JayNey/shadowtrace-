@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.core.errors import InvalidStateTransitionError
 from app.db import models as orm
 from app.models.agent_io import VerificationResult
+from app.models.disposition import ENTITY_ACTION_EFFECT_SPECS
 from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
@@ -132,6 +133,7 @@ def _resolve_convergence_policy(
     if (
         action_row.execution_owner == ExecutionOwner.XDR_MANAGED.value
         and action_row.writeback_required
+        and action_row.tool_name in ENTITY_ACTION_EFFECT_SPECS
     ):
         return SideEffectConvergencePolicy.INDEPENDENT_ENTITY_EFFECT
     return SideEffectConvergencePolicy.EXECUTION_JOB_ONLY

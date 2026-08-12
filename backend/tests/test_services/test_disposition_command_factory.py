@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.errors import ValidationError
 from app.core.guardrails import OutboundDispositionGuard
 from app.models.action import Action
 from app.models.disposition import SourceObjectLocator, TargetDispositionResult
@@ -24,7 +25,10 @@ from app.models.enums import (
     WritebackReadiness,
 )
 from app.models.execution import ActionExecutionJob, TargetExecutionResult
-from app.services.disposition_command_factory import DispositionCommandFactory
+from app.services.disposition_command_factory import (
+    DispositionCommandFactory,
+    entity_action_code_for,
+)
 
 # ISSUE-188 §目标: 出站 message_code 仅为短码/枚举.
 FALLBACK = "message_truncated"
@@ -158,6 +162,35 @@ def test_outbound_command_never_carries_narrative_verbatim() -> None:
 def test_mixed_target_results_sanitize_independently() -> None:
     results = _build(["isolate success", NARRATIVE, None])
     assert [item.message_code for item in results] == ["isolate success", FALLBACK, None]
+
+
+def test_entity_action_code_rejects_non_specs_l1_ticket_tools() -> None:
+    """Misrouted ticket/close must fail structurally (ISSUE-315)."""
+    for tool_name, level, category in (
+        ("create_ticket", ActionLevel.L1, ActionCategory.RESPONSE),
+        ("close_false_positive_ticket", ActionLevel.L1, ActionCategory.ROLLBACK),
+        ("notify_security_team", ActionLevel.L1, ActionCategory.RESPONSE),
+    ):
+        action = Action(
+            action_id=f"act-{tool_name}",
+            event_id="evt-1",
+            plan_revision=1,
+            action_fingerprint=f"fp-{tool_name}",
+            action_category=category,
+            action_name=tool_name,
+            tool_name=tool_name,
+            action_level=level,
+            execution_owner=ExecutionOwner.XDR_MANAGED,
+            writeback_required=True,
+            writeback_applicable=False,
+            writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+            target="ticket" if "ticket" in tool_name else "security_team",
+            target_type="ticket" if "ticket" in tool_name else "channel",
+        )
+        with pytest.raises(ValidationError, match="entity submit") as exc_info:
+            entity_action_code_for(action)
+        assert exc_info.value.error_code == "unsupported"
+        assert exc_info.value.details.get("tool_name") == tool_name
 
 
 @pytest.mark.asyncio

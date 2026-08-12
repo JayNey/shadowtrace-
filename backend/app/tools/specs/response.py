@@ -31,6 +31,48 @@ RESPONSE_ROLLBACK_MAP: dict[str, str] = {
 }
 
 
+def _l1_direct_tool_meta(
+    name: str,
+    *,
+    description: str,
+    side_effect_level: SideEffectLevel,
+    target_types: list[str],
+    async_mode: bool = False,
+    rollback_tool_name: str | None = None,
+) -> ToolMeta:
+    """L1 notify/ticket tools are DIRECT_TOOL-only (ISSUE-315).
+
+    They must not advertise ``XDR_MANAGED`` entity submit — ticket/notify are
+    independent L1 side effects, not ``ENTITY_ACTION_EFFECT_SPECS`` effects.
+    """
+    input_model = TOOL_INPUT_MODELS[name]
+    rollback = (
+        rollback_tool_name if rollback_tool_name is not None else RESPONSE_ROLLBACK_MAP.get(name)
+    )
+    return ToolMeta(
+        tool_name=name,
+        tool_category=ToolCategory.RESPONSE,
+        description=description,
+        action_category=ActionCategory.RESPONSE,
+        routing_kind=RoutingKind.OWNER_ROUTED,
+        supported_execution_owners=[ExecutionOwner.DIRECT_TOOL],
+        required_disposition_intent_by_owner={
+            ExecutionOwner.DIRECT_TOOL: DispositionIntentKind.EXECUTION_RESULT_RECORD,
+        },
+        required_capabilities=["entity_response"],
+        side_effect_level=side_effect_level,
+        action_level=ActionLevel.L1,
+        idempotency=True,
+        async_mode=async_mode,
+        rollback_supported=rollback is not None,
+        rollback_tool_name=rollback,
+        executable=True,
+        target_types=target_types,
+        input_schema=input_model.model_json_schema(),
+        output_schema={"$ref": "ActionExecutionJob"} if async_mode else {},
+    )
+
+
 def _response_meta(
     name: str,
     *,
@@ -102,23 +144,19 @@ def _virtual_disposition_meta() -> ToolMeta:
 
 
 RESPONSE_TOOL_METAS: list[ToolMeta] = [
-    # L1 — notify / ticket
-    _response_meta(
+    # L1 — notify / ticket (DIRECT_TOOL-only; ISSUE-315)
+    _l1_direct_tool_meta(
         "notify_security_team",
         description="Notify the security team (low blast radius).",
-        action_level=ActionLevel.L1,
         side_effect_level=SideEffectLevel.LOW,
         target_types=["channel"],
-        async_mode=False,
         rollback_tool_name=None,
     ),
-    _response_meta(
+    _l1_direct_tool_meta(
         "create_ticket",
         description="Create a security ticket / work order.",
-        action_level=ActionLevel.L1,
         side_effect_level=SideEffectLevel.LOW,
         target_types=["ticket"],
-        async_mode=False,
     ),
     # L2 — network blocks
     _response_meta(

@@ -193,6 +193,32 @@ def test_owner_routed_response_maps_intents_correctly() -> None:
     )
 
 
+def test_l1_ticket_notify_and_close_are_direct_tool_only() -> None:
+    """ISSUE-315: ticket/notify/close must not advertise XDR_MANAGED entity submit."""
+    idx = baseline_tool_index()
+    for name in ("create_ticket", "notify_security_team", "close_false_positive_ticket"):
+        meta = idx[name]
+        assert meta.supported_execution_owners == [ExecutionOwner.DIRECT_TOOL], name
+        assert (
+            meta.required_disposition_intent_by_owner[ExecutionOwner.DIRECT_TOOL]
+            is DispositionIntentKind.EXECUTION_RESULT_RECORD
+        )
+        assert meta.freeze_execution_owner(ExecutionOwner.DIRECT_TOOL) is ExecutionOwner.DIRECT_TOOL
+        with pytest.raises(ValueError, match="not supported"):
+            meta.freeze_execution_owner(ExecutionOwner.XDR_MANAGED)
+
+
+def test_mock_provider_bindings_are_direct_only_for_l1_ticket_tools() -> None:
+    """Mock bindings must not expose XDR_MANAGED for DIRECT-only L1 ticket tools."""
+    from app.providers.tools.mock_provider import MockToolProvider
+    from app.tools.mock_state import MockEnvironmentState
+
+    bindings = MockToolProvider(MockEnvironmentState()).provider_bindings()
+    for name in ("create_ticket", "notify_security_team", "close_false_positive_ticket"):
+        owners = {item.execution_owner for item in bindings if item.tool_name == name}
+        assert owners == {ExecutionOwner.DIRECT_TOOL}, name
+
+
 def test_action_freezes_exactly_one_execution_owner() -> None:
     """A single Action may not dispatch DIRECT_TOOL and XDR_MANAGED together."""
     meta = baseline_tool_index()["block_ip"]
