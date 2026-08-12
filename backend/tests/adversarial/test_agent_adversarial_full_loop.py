@@ -382,3 +382,10 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     )
     assert report["checks"]["verdict_matches_expected"]
     assert report["checks"]["risk_score_at_least_minimum"]
+    # ISSUE-319: lock full-loop scorecard assembly (not only helper unit tests).
+    assert report["audit_mode"] == "full_loop"
+    assert report["checks"]["closed_reached"] is True
+    assert report["score"]["total_dimensions"] == 6
+    assert report["score"]["passed"] == 6
+    assert report["verdict_for_human"].startswith("PASS")
+    assert "CLOSED" in report["verdict_for_human"]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from tests.adversarial.audit_report import AdversarialAuditChecks
 from tests.adversarial.full_loop_runner import resolve_full_loop_timeout_s
 from tests.adversarial.helpers import missing_response_targets, response_plan_targets
@@ -103,6 +105,24 @@ def test_full_loop_pass_when_closed_and_analysis_met() -> None:
     assert report["score"]["passed"] == report["score"]["total_dimensions"] == 6
     assert report["verdict_for_human"].startswith("PASS")
     assert "CLOSED" in report["verdict_for_human"]
+
+
+def test_full_loop_fail_when_closed_missing_and_analysis_weak() -> None:
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        risk_score=1,
+        final_verdict="false_positive",
+        status_sequence=["new", "investigating", "verifying"],
+    ).to_dict()
+    assert report["checks"]["closed_reached"] is False
+    assert report["checks"]["reached_reporting"] is False
+    assert report["verdict_for_human"] == "FAIL — full loop did not reach CLOSED"
+    assert "PASS" not in report["verdict_for_human"]
+
+
+def test_audit_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="audit_mode"):
+        _analysis_pass_checks(audit_mode="release")  # type: ignore[arg-type]
 
 
 def test_resolve_full_loop_timeout_defaults(monkeypatch) -> None:

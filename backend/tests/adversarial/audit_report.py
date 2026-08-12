@@ -49,6 +49,12 @@ class AdversarialAuditChecks:
     status_sequence: list[str]
     audit_mode: AdversarialAuditMode = "analysis_only"
 
+    def __post_init__(self) -> None:
+        if self.audit_mode not in {"analysis_only", "full_loop"}:
+            raise ValueError(
+                f"audit_mode must be 'analysis_only' or 'full_loop', got {self.audit_mode!r}"
+            )
+
     def to_dict(self) -> dict[str, Any]:
         gt = self.ground_truth
         acceptable_types = set(gt.get("acceptable_event_types") or [])
