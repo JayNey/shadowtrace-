@@ -38,9 +38,12 @@ _SOFT_LIMIT_REASON = "soft_time_limit_exceeded"
 _SOFT_LIMIT_OPERATOR = "InvestigationTask"
 _ORPHAN_TERMINAL_REASON = f"{_SOFT_LIMIT_REASON}:orphan_terminal_intent"
 
-# Live intents that imply a successor owner may still be driving the event.
+# Live / soon-to-run intents that imply a successor owner may still drive the event.
+# PENDING must be included: HTTP intake creates PENDING before claim/enqueue, and a
+# late soft-limit on a DEAD sibling must not FAILED-heal over that queue.
 _ACTIVE_INTENT_STATUSES = frozenset(
     {
+        InvestigationIntentStatus.PENDING.value,
         InvestigationIntentStatus.CLAIMED.value,
         InvestigationIntentStatus.ENQUEUED.value,
         InvestigationIntentStatus.STARTED.value,
@@ -442,7 +445,8 @@ async def apply_soft_time_limit_outcome(
             # ISSUE-314: stale/old broker owner against a *live* intent is a full
             # no-op. Missing broker against a live intent is also fail-closed.
             # Exception: terminal intent + non-terminal event with no active
-            # sibling → converge event FAILED (orphan heal), keep intent DEAD.
+            # sibling (incl. PENDING) → decide() for UNKNOWN/side-effect first;
+            # clean orphan converges event FAILED, keep intent DEAD.
             fence_reason: str | None = None
             if _missing_broker_fence(intent_row, broker_task_id):
                 fence_reason = f"{_SOFT_LIMIT_REASON}:missing_broker"
@@ -460,14 +464,31 @@ async def apply_soft_time_limit_outcome(
                         exclude_intent_id=intent_id,
                     )
                 if orphan and not has_sibling:
-                    logger.info(
-                        "soft time limit orphan terminal intent converges event "
-                        "intent=%s fence=%s",
-                        intent_id,
-                        fence_reason,
+                    # Still honor UNKNOWN / side-effect reconcile before FAILED heal.
+                    decision = decide_soft_time_limit_outcome(
+                        event_status=event_status,
+                        probe=probe,
+                        intent_attempt=None,
+                        max_attempts=max_attempts,
+                        has_intent=False,
                     )
-                    decision = SoftTimeLimitDecision.TERMINAL
-                    orphan_terminal_reason = _ORPHAN_TERMINAL_REASON
+                    if decision is SoftTimeLimitDecision.RECONCILE_REQUIRED:
+                        logger.info(
+                            "soft time limit orphan terminal intent requires reconcile "
+                            "intent=%s fence=%s",
+                            intent_id,
+                            fence_reason,
+                        )
+                    else:
+                        # Clean orphan: converge non-terminal event to FAILED.
+                        decision = SoftTimeLimitDecision.TERMINAL
+                        orphan_terminal_reason = _ORPHAN_TERMINAL_REASON
+                        logger.info(
+                            "soft time limit orphan terminal intent converges event "
+                            "intent=%s fence=%s",
+                            intent_id,
+                            fence_reason,
+                        )
                 else:
                     logger.info(
                         "soft time limit ignored broker fence intent=%s reason=%s "
