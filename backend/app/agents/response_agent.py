@@ -1420,9 +1420,10 @@ _HOST_WORKSTATION_MARKERS = re.compile(
     re.IGNORECASE,
 )
 _HOST_SERVER_MARKERS = re.compile(
-    r"(?:^|[-_])(?:srv|db|web|dc|sql|ad|fs|app|mail|vpn|node|server)(?:[-_]|$)",
+    r"(?:^|[-_])(?:srv|db|web|dc|sql|ad|fs|mail|server)(?:[-_]|$)",
     re.IGNORECASE,
 )
+_SOURCE_IP_FIELDS = frozenset({"src_ip", "source_ip"})
 _EXFIL_DESTINATION_REASON_MARKERS = (
     "exfiltration destination",
     "exfil dest",
@@ -1440,16 +1441,17 @@ def _infer_host_kind(host: HostEntity) -> str | None:
             return "workstation"
         if value == "server":
             return "server"
-        if "workstation" in value or "endpoint" in value or "laptop" in value:
-            return "workstation"
-        if "server" in value:
-            return "server"
     hostname = (host.hostname or "").strip()
     if hostname:
-        if _HOST_WORKSTATION_MARKERS.search(hostname):
+        is_workstation = bool(_HOST_WORKSTATION_MARKERS.search(hostname))
+        is_server = bool(_HOST_SERVER_MARKERS.search(hostname))
+        if is_workstation and is_server:
+            return None
+        if is_workstation:
             return "workstation"
-        if _HOST_SERVER_MARKERS.search(hostname):
+        if is_server:
             return "server"
+        return None
     return None
 
 
@@ -1464,7 +1466,7 @@ def _host_summary(host: HostEntity) -> dict[str, Any]:
         summary["host_kind"] = host_kind
     attrs = host.attributes or {}
     hints: dict[str, Any] = {}
-    for key in ("provenance", "source_kind", "asset_hostname"):
+    for key in ("provenance", "source_kind", "asset_hostname", "normalized_field"):
         value = attrs.get(key)
         if value:
             hints[key] = value
@@ -1545,13 +1547,14 @@ def _apply_block_ip_role_correction(
     if ip_entity is None:
         return candidate
     normalized = str((ip_entity.attributes or {}).get("normalized_field") or "").strip().lower()
-    if normalized != "src_ip":
+    if normalized not in _SOURCE_IP_FIELDS:
         return candidate
     if not _reason_mislabels_src_as_exfil_dest(candidate.reason):
         return candidate
     params = dict(candidate.parameters or {})
-    params.setdefault("role", "source")
-    corrected_reason = f"Block external source IP ({candidate.target})"
+    params["role"] = "source"
+    scope = str(ip_entity.scope or "unknown")
+    corrected_reason = f"Block {scope} source IP ({candidate.target})"
     return replace(candidate, parameters=params, reason=corrected_reason)
 
 
