@@ -27,6 +27,7 @@ from app.agents.report_section_builder import (
     UNAVAILABLE_ACTIONS,
     UNAVAILABLE_VERIFICATION,
     ReportSectionBuilder,
+    build_actions_status_summary,
 )
 from app.agents.response_agent import generate_response_plan_id
 from app.models.action import Action
@@ -58,7 +59,11 @@ from app.models.enums import (
     WritebackReadiness as WritebackReadinessEnum,
 )
 from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
-from app.services.report_input_builder import build_report_agent_input
+from app.services.report_input_builder import (
+    build_report_agent_input,
+    overlay_response_plan_from_orm,
+    refresh_response_plan_snapshot,
+)
 
 EVENT_ID = "evt-report-builder-205"
 
@@ -288,6 +293,298 @@ async def test_state_takes_precedence_over_event_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_state_snapshot_pending_overlaid_from_orm_terminal_status() -> None:
+    """ISSUE-329: stale PENDING snapshot must reflect Action table terminal status."""
+    pending_plan = ResponsePlan(
+        plan_id="plan-stale-pending",
+        actions=[
+            _response_action(action_id="act-orm-001", status=ActionStatus.PENDING),
+            _response_action(action_id="act-orm-002", status=ActionStatus.PENDING),
+        ],
+        strategy_summary="stale snapshot",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    session = _FakeSession(
+        [
+            _ActionsResult(
+                [
+                    _orm_action_row(
+                        action_id="act-orm-001",
+                        status=ActionStatus.SUCCESS.value,
+                        plan_revision=1,
+                    ),
+                    _orm_action_row(
+                        action_id="act-orm-002",
+                        status=ActionStatus.FAILED.value,
+                        plan_revision=1,
+                    ),
+                ]
+            ),
+        ]
+    )
+    result = await _build(
+        state={"response_plan": pending_plan.model_dump(mode="json")},
+        session=session,
+    )
+    plan = result.response_plan
+    assert plan is not None
+    assert plan.plan_id == "plan-stale-pending"
+    assert plan.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    assert plan.actions[0].status is ActionStatus.SUCCESS
+    assert plan.actions[1].status is ActionStatus.FAILED
+    assert result.response_phase_status is ReportPhaseStatus.EXECUTED
+
+    by_key = _sections(
+        response_plan=plan,
+        response_phase_status=result.response_phase_status,
+    )
+    executed = by_key["executed_actions"].content
+    assert "status=success" in executed
+    assert "status=failed" in executed
+    assert "pending=2" not in executed
+    summary = build_actions_status_summary(
+        response_actions=[a for a in plan.actions],
+        response_phase_status=result.response_phase_status,
+    )
+    assert "处置阶段状态=executed。" in summary
+    assert "success=1" in summary
+    assert "failed=1" in summary
+    assert "pending=2" not in summary
+
+
+def test_overlay_response_plan_from_orm_preserves_plan_and_never_fabricates() -> None:
+    plan = ResponsePlan(
+        plan_id="plan-overlay",
+        actions=[_response_action(action_id="act-missing", status=ActionStatus.PENDING)],
+        strategy_summary="keep me",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    unchanged = overlay_response_plan_from_orm(plan, [])
+    assert unchanged is plan
+    overlaid = overlay_response_plan_from_orm(
+        plan,
+        [_response_action(action_id="act-other", status=ActionStatus.SUCCESS)],
+    )
+    assert overlaid is plan
+    assert overlaid.actions[0].status is ActionStatus.PENDING
+
+
+def test_overlay_preserves_policy_fields_and_plan_structure() -> None:
+    """ISSUE-329: overlay copies execution fields only, never writeback policy."""
+    snapshot_action = _response_action(
+        action_id="act-keep",
+        status=ActionStatus.PENDING,
+    ).model_copy(
+        update={
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadinessEnum.READY,
+            "reason": "policy snapshot",
+        }
+    )
+    plan = ResponsePlan(
+        plan_id="plan-keep",
+        actions=[snapshot_action],
+        strategy_summary="keep me",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    orm_action = _response_action(
+        action_id="act-keep",
+        status=ActionStatus.SUCCESS,
+    ).model_copy(
+        update={
+            "execution_job_id": "job-1",
+            "writeback_required": False,
+            "writeback_applicable": False,
+            "writeback_readiness": WritebackReadinessEnum.NOT_REQUIRED,
+        }
+    )
+    overlaid = overlay_response_plan_from_orm(plan, [orm_action])
+    assert overlaid.plan_id == "plan-keep"
+    assert overlaid.strategy_summary == "keep me"
+    assert overlaid.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    action = overlaid.actions[0]
+    assert action.status is ActionStatus.SUCCESS
+    assert action.execution_job_id == "job-1"
+    assert action.writeback_required is True
+    assert action.writeback_applicable is True
+    assert action.writeback_readiness is WritebackReadinessEnum.READY
+    assert action.reason == "policy snapshot"
+
+
+def test_overlay_skips_recovered_plans() -> None:
+    """RECOVERED plans already came from Action rows; overlay must not rewrite them."""
+    plan = ResponsePlan(
+        plan_id="plan-recovered",
+        actions=[_response_action(action_id="act-rec", status=ActionStatus.PENDING)],
+        strategy_summary="from actions",
+        generated_by=ResponsePlanGeneratedBy.RECOVERED,
+    )
+    overlaid = overlay_response_plan_from_orm(
+        plan,
+        [_response_action(action_id="act-rec", status=ActionStatus.SUCCESS)],
+    )
+    assert overlaid is plan
+    assert overlaid.actions[0].status is ActionStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_state_pending_plan_empty_orm_keeps_pending_not_fabricated() -> None:
+    """ISSUE-205 first-wins: overlay with no ORM rows must not fabricate SUCCESS."""
+    pending_plan = ResponsePlan(
+        plan_id="plan-empty-orm",
+        actions=[_response_action(action_id="act-missing-orm", status=ActionStatus.PENDING)],
+        strategy_summary="stale snapshot",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    session = _FakeSession([_ActionsResult([])])
+    result = await _build(
+        state={"response_plan": pending_plan.model_dump(mode="json")},
+        session=session,
+    )
+    assert result.response_plan is not None
+    assert result.response_plan.plan_id == "plan-empty-orm"
+    assert all(action.status is ActionStatus.PENDING for action in result.response_plan.actions)
+    assert result.response_phase_status is ReportPhaseStatus.EXECUTED
+
+
+class _SessionFactory:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def __call__(self) -> Any:
+        return self
+
+    async def __aenter__(self) -> Any:
+        return self._session
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_overlay_action_read_failure_is_unavailable_not_stale_pending() -> None:
+    """ISSUE-329: overlay read failure must not claim executed + pending=all."""
+    pending_plan = ResponsePlan(
+        plan_id="plan-stale-pending",
+        actions=[
+            _response_action(action_id="act-orm-001", status=ActionStatus.PENDING),
+            _response_action(action_id="act-orm-002", status=ActionStatus.PENDING),
+        ],
+        strategy_summary="stale snapshot",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    session = _FakeSession([], error=RuntimeError("action overlay unavailable"))
+    result = await _build(
+        state={"response_plan": pending_plan.model_dump(mode="json")},
+        session=session,
+    )
+    assert result.response_plan is not None
+    assert result.response_plan.plan_id == "plan-stale-pending"
+    assert all(action.status is ActionStatus.PENDING for action in result.response_plan.actions)
+    assert result.response_phase_status is ReportPhaseStatus.UNAVAILABLE
+    summary = build_actions_status_summary(
+        response_actions=list(result.response_plan.actions),
+        response_phase_status=result.response_phase_status,
+    )
+    assert "处置阶段状态=unavailable。" in summary
+    assert "处置阶段状态=executed" not in summary
+    executed = _sections(
+        response_plan=result.response_plan,
+        response_phase_status=result.response_phase_status,
+    )["executed_actions"].content
+    assert "处置阶段状态=executed" not in executed
+    assert "unavailable" in executed
+
+
+@pytest.mark.asyncio
+async def test_refresh_response_plan_snapshot_returns_none_when_unchanged() -> None:
+    plan = _plan()
+    session = _FakeSession(
+        [
+            _ActionsResult(
+                [
+                    _orm_action_row(
+                        action_id=plan.actions[0].action_id,
+                        status=ActionStatus.SUCCESS.value,
+                    )
+                ]
+            )
+        ]
+    )
+    dumped = await refresh_response_plan_snapshot(
+        EVENT_ID,
+        plan_raw=plan.model_dump(mode="json"),
+        session_factory=_SessionFactory(session),
+    )
+    assert dumped is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_response_plan_snapshot_returns_updated_dump() -> None:
+    pending = ResponsePlan(
+        plan_id="plan-refresh",
+        actions=[_response_action(action_id="act-refresh-001", status=ActionStatus.PENDING)],
+        strategy_summary="stale",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    session = _FakeSession(
+        [
+            _ActionsResult(
+                [
+                    _orm_action_row(
+                        action_id="act-refresh-001",
+                        status=ActionStatus.SUCCESS.value,
+                    )
+                ]
+            )
+        ]
+    )
+    dumped = await refresh_response_plan_snapshot(
+        EVENT_ID,
+        plan_raw=pending.model_dump(mode="json"),
+        session_factory=_SessionFactory(session),
+    )
+    assert dumped is not None
+    assert dumped["plan_id"] == "plan-refresh"
+    assert dumped["actions"][0]["status"] == ActionStatus.SUCCESS.value
+
+
+@pytest.mark.asyncio
+async def test_refresh_response_plan_snapshot_returns_none_on_overlay_read_failure() -> None:
+    pending = ResponsePlan(
+        plan_id="plan-refresh-fail",
+        actions=[_response_action(status=ActionStatus.PENDING)],
+        strategy_summary="stale",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    dumped = await refresh_response_plan_snapshot(
+        EVENT_ID,
+        plan_raw=pending.model_dump(mode="json"),
+        session_factory=_SessionFactory(
+            _FakeSession([], error=RuntimeError("db timeout"))
+        ),
+    )
+    assert dumped is None
+
+
+def test_build_actions_status_summary_splits_phase_and_counts() -> None:
+    actions = [
+        _response_action(action_id="a1", status=ActionStatus.SUCCESS),
+        _response_action(action_id="a2", status=ActionStatus.PENDING),
+    ]
+    summary = build_actions_status_summary(
+        response_actions=actions,
+        response_phase_status=ReportPhaseStatus.EXECUTED,
+    )
+    assert summary.startswith("处置阶段状态=executed。")
+    assert "\nRESPONSE 动作共 2 个（" in summary
+    assert "pending=1" in summary
+    assert "success=1" in summary
+    assert "；RESPONSE" not in summary
+
+
+@pytest.mark.asyncio
 async def test_no_sources_defaults_to_not_executed() -> None:
     result = await _build()
     assert result.response_plan is None
@@ -331,6 +628,7 @@ async def test_session_journal_fallback_restores_plan_and_verification() -> None
     session = _FakeSession(
         [
             _JournalResult(_plan(plan_id="plan-journal").model_dump(mode="json")),
+            _ActionsResult([]),  # ISSUE-329: overlay refresh after journal plan
             _JournalResult(_verification().model_dump(mode="json")),
         ]
     )

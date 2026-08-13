@@ -88,7 +88,10 @@ from app.services.degraded_flag_service import DegradedFlagService, apply_flag_t
 from app.services.evidence_query_plan_service import extract_evidence_plan_inputs
 from app.services.false_positive_matcher import build_fp_close_reason
 from app.services.fp_adjudication_runner import run_post_evidence_fp_adjudication
-from app.services.report_input_builder import build_report_agent_input
+from app.services.report_input_builder import (
+    build_report_agent_input,
+    refresh_response_plan_snapshot,
+)
 from app.services.state_machine_service import StateMachineService
 from app.services.tenant_resolution import resolve_tenant_id
 from app.services.working_memory import WorkingMemory
@@ -891,6 +894,36 @@ async def _project_disposition_only_response_plan(
     if session_factory is None:
         return None
     return await _load_prebuilt_disposition_response_plan(session_factory, state["event_id"])
+
+
+async def _refresh_response_plan_from_orm(
+    state: InvestigationState,
+    services: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Align state response_plan action statuses with Action rows (ISSUE-329).
+
+    Best-effort: a read-path failure must not fail execute/verify after
+    ``execute_plan`` has already committed Action rows.
+    """
+    plan_raw = state.get("response_plan")
+    if plan_raw is None:
+        return None
+    session_factory = services.get("session_factory")
+    if session_factory is None:
+        return None
+    try:
+        return await refresh_response_plan_snapshot(
+            state["event_id"],
+            plan_raw=plan_raw,
+            session_factory=session_factory,
+        )
+    except Exception:
+        logger.warning(
+            "response_plan refresh failed event=%s",
+            state.get("event_id"),
+            exc_info=True,
+        )
+        return None
 
 
 def build_investigation_graph(
@@ -1852,18 +1885,16 @@ def build_investigation_graph(
         except InvalidStateTransitionError as exc:
             if not (exc.current is EventStatus.VERIFYING and exc.target is EventStatus.VERIFYING):
                 raise
-            fallback_status: InvestigationState = {
-                "event_status": EventStatus.VERIFYING.value,
-            }
-            return _patch_state(
-                _trace(NODE_EXECUTE),
-                fallback_status,
-                {"execution_ok": execution_ok},
-            )
+            status = cast(InvestigationState, {"event_status": EventStatus.VERIFYING.value})
+        patch: dict[str, Any] = {"execution_ok": execution_ok}
+        if execution_ok:
+            refreshed_plan = await _refresh_response_plan_from_orm(state, services)
+            if refreshed_plan is not None:
+                patch["response_plan"] = refreshed_plan
         return _patch_state(
             _trace(NODE_EXECUTE),
             status,
-            {"execution_ok": execution_ok},
+            patch,
         )
 
     async def verify_node(state: InvestigationState) -> InvestigationState:
@@ -1917,6 +1948,15 @@ def build_investigation_graph(
                     "verify_need_manual_resolution": True,
                 },
             )
+
+        # ISSUE-329: execute refresh is best-effort. Overlay again here so
+        # VerifyAgent does not consume a stale PENDING snapshot when Action
+        # rows already hold terminal status.
+        plan_patch: dict[str, Any] = {}
+        refreshed_plan = await _refresh_response_plan_from_orm(state, services)
+        if refreshed_plan is not None:
+            plan_patch["response_plan"] = refreshed_plan
+            state = _patch_state(state, plan_patch)
 
         # Build ResponsePlan from state for VerifyAgent input.
         # The fallback placeholder (plan_id="") is only reached for
@@ -2038,6 +2078,7 @@ def build_investigation_graph(
                 )
                 return _patch_state(
                     _trace(NODE_VERIFY),
+                    plan_patch,
                     {
                         "degraded_flags": flags,
                         "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
@@ -2075,6 +2116,7 @@ def build_investigation_graph(
             )
             return _patch_state(
                 _trace(NODE_VERIFY),
+                plan_patch,
                 {
                     "degraded_flags": flags,
                     "execution_substate": ExecutionSubstate.MANUAL_RESOLUTION.value,
@@ -2111,6 +2153,7 @@ def build_investigation_graph(
             )
             return _patch_state(
                 _trace(NODE_VERIFY),
+                plan_patch,
                 {
                     **update,
                     "degraded_flags": flags,
@@ -2144,7 +2187,7 @@ def build_investigation_graph(
             )
             update["execution_substate"] = ExecutionSubstate.MANUAL_RESOLUTION.value
 
-        return _patch_state(_trace(NODE_VERIFY), update)
+        return _patch_state(_trace(NODE_VERIFY), plan_patch, update)
 
     async def replan_node(state: InvestigationState) -> InvestigationState:
         patches = await replan_graph_node(

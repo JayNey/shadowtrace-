@@ -2741,6 +2741,297 @@ async def test_execute_node_soft_limit_reraises() -> None:
     assert all(target is not EventStatus.VERIFYING for (_, target, _) in machine.transitions)
 
 
+class _ExecuteOverlaySession:
+    """Scripted session for execute_node Action overlay (ISSUE-329)."""
+
+    def __init__(self, rows: list[Any], *, error: Exception | None = None) -> None:
+        self._rows = rows
+        self.error = error
+
+    async def execute(self, _statement: Any) -> Any:
+        if self.error is not None:
+            raise self.error
+        rows = self._rows
+
+        class _Scalars:
+            def all(self) -> list[Any]:
+                return rows
+
+        class _Result:
+            def scalars(self) -> _Scalars:
+                return _Scalars()
+
+        return _Result()
+
+
+class _ExecuteSessionFactory:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def __call__(self) -> Any:
+        return self
+
+    async def __aenter__(self) -> Any:
+        return self._session
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+def _execute_orm_action_row(
+    *,
+    event_id: str,
+    action_id: str,
+    status: str = ActionStatus.SUCCESS.value,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        action_id=action_id,
+        event_id=event_id,
+        plan_revision=1,
+        action_fingerprint=f"fp-{action_id}",
+        action_category=ActionCategory.RESPONSE.value,
+        action_name="Isolate host",
+        tool_name="isolate_host",
+        action_level=ActionLevel.L3.value,
+        execution_phase="immediate",
+        activation_condition=None,
+        approved_operation_template_hash=None,
+        approved_terminal_dispositions=[],
+        target_type="host",
+        target="WKS-DATA-031",
+        parameters={},
+        status=status,
+        auto_execute=False,
+        reason=None,
+        impact_assessment=None,
+        playbook_id=None,
+        playbook_ref=None,
+        action_template_snapshot=None,
+        provider_name=None,
+        execution_owner=ExecutionOwner.XDR_MANAGED.value,
+        execution_job_id=None,
+        tool_call_id=None,
+        idempotency_key=None,
+        writeback_required=False,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED.value,
+        writeback_block_reason=None,
+        writeback_status=None,
+        disposition_source_ref=None,
+        superseded_by_revision=None,
+        executed_at=None,
+        effect_verification_status=None,
+        rollback_status=None,
+        source_action_id=None,
+        updated_at=None,
+    )
+
+
+def _pending_execute_plan(event_id: str, action_id: str = "act-329-001") -> dict[str, Any]:
+    return ResponsePlan(
+        plan_id="plan-329",
+        actions=[
+            Action(
+                action_id=action_id,
+                event_id=event_id,
+                plan_revision=1,
+                action_fingerprint=f"fp-{action_id}",
+                action_category=ActionCategory.RESPONSE,
+                action_name="Isolate host",
+                tool_name="isolate_host",
+                action_level=ActionLevel.L3,
+                status=ActionStatus.PENDING,
+                execution_owner=ExecutionOwner.XDR_MANAGED,
+            )
+        ],
+        strategy_summary="stale snapshot",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    ).model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_execute_node_refreshes_pending_plan_from_action_rows() -> None:
+    """ISSUE-329: execute_node must rewrite state response_plan from Action rows."""
+    event_id = "evt-329-refresh"
+    action_id = "act-329-001"
+    machine = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+    session = _ExecuteOverlaySession(
+        [_execute_orm_action_row(event_id=event_id, action_id=action_id)]
+    )
+    services = _services(machine)
+    services["session_factory"] = _ExecuteSessionFactory(session)
+    graph = build_investigation_graph(_agents(), services)
+    result = await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.EXECUTING_RESPONSE.value,
+            response_plan=_pending_execute_plan(event_id, action_id),
+        )
+    )
+    assert result["execution_ok"] is True
+    assert result["event_status"] == EventStatus.VERIFYING.value
+    assert result["response_plan"]["actions"][0]["status"] == ActionStatus.SUCCESS.value
+    assert result["response_plan"]["plan_id"] == "plan-329"
+    assert EventStatus.FAILED not in [target for _, target, _ in machine.transitions]
+
+
+@pytest.mark.asyncio
+async def test_execute_node_refresh_on_verifying_self_loop_fallback() -> None:
+    event_id = "evt-329-fallback"
+    action_id = "act-329-fb"
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    session = _ExecuteOverlaySession(
+        [_execute_orm_action_row(event_id=event_id, action_id=action_id)]
+    )
+    services = _services(machine)
+    services["session_factory"] = _ExecuteSessionFactory(session)
+    graph = build_investigation_graph(_agents(), services)
+    result = await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            response_plan=_pending_execute_plan(event_id, action_id),
+        )
+    )
+    assert result["execution_ok"] is True
+    assert result["event_status"] == EventStatus.VERIFYING.value
+    assert result["response_plan"]["actions"][0]["status"] == ActionStatus.SUCCESS.value
+
+
+@pytest.mark.asyncio
+async def test_execute_node_refresh_failure_does_not_fail_event() -> None:
+    event_id = "evt-329-refresh-fail"
+
+    def _boom_factory() -> Any:
+        raise RuntimeError("session factory unavailable")
+
+    machine = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+    services = _services(machine)
+    services["session_factory"] = _boom_factory
+    graph = build_investigation_graph(_agents(), services)
+    result = await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.EXECUTING_RESPONSE.value,
+            response_plan=_pending_execute_plan(event_id),
+        )
+    )
+    assert result["execution_ok"] is True
+    assert result["event_status"] == EventStatus.VERIFYING.value
+    assert "response_plan" not in result
+    assert EventStatus.FAILED not in [target for _, target, _ in machine.transitions]
+
+
+@pytest.mark.asyncio
+async def test_verify_node_overlays_stale_pending_plan_from_action_rows() -> None:
+    """ISSUE-329: verify_node must overlay Action rows if execute refresh was skipped."""
+    event_id = "evt-329-verify-overlay"
+    action_id = "act-329-v1"
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    session = _ExecuteOverlaySession(
+        [_execute_orm_action_row(event_id=event_id, action_id=action_id)]
+    )
+    services = _services(machine)
+    services["session_factory"] = _ExecuteSessionFactory(session)
+    verify_agent = StubAgent(
+        VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+    )
+    graph = build_investigation_graph(_agents_with_verify(verify_agent), services)
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            response_plan=_pending_execute_plan(event_id, action_id),
+            execution_ok=True,
+        )
+    )
+    assert verify_agent.calls
+    plan = verify_agent.calls[0].response_plan
+    assert plan.actions[0].status is ActionStatus.SUCCESS
+    assert result["response_plan"]["actions"][0]["status"] == ActionStatus.SUCCESS.value
+
+
+@pytest.mark.asyncio
+async def test_verify_node_refresh_failure_does_not_fail_event() -> None:
+    event_id = "evt-329-verify-refresh-fail"
+    action_id = "act-329-v-fail"
+
+    def _boom_factory() -> Any:
+        raise RuntimeError("session factory unavailable")
+
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    services = _services(machine)
+    services["session_factory"] = _boom_factory
+    verify_agent = StubAgent(
+        VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+    )
+    graph = build_investigation_graph(_agents_with_verify(verify_agent), services)
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            response_plan=_pending_execute_plan(event_id, action_id),
+            execution_ok=True,
+        )
+    )
+    assert verify_agent.calls
+    assert verify_agent.calls[0].response_plan.actions[0].status is ActionStatus.PENDING
+    assert "response_plan" not in result
+    assert EventStatus.FAILED not in [target for _, target, _ in machine.transitions]
+
+
+@pytest.mark.asyncio
+async def test_execute_node_skips_plan_refresh_when_execution_ok_false() -> None:
+    event_id = "evt-329-skip-refresh"
+
+    class _FailingExec:
+        async def execute_plan(self, *_a: Any, **_k: Any) -> Any:
+            raise RuntimeError("execute_plan failed")
+
+    machine = FakeStateMachine(
+        status=EventStatus.EXECUTING_RESPONSE,
+        statuses={event_id: EventStatus.EXECUTING_RESPONSE},
+    )
+    session = _ExecuteOverlaySession(
+        [_execute_orm_action_row(event_id=event_id, action_id="act-329-001")]
+    )
+    services = _services(machine)
+    services["action_execution"] = _FailingExec()
+    services["session_factory"] = _ExecuteSessionFactory(session)
+    graph = build_investigation_graph(_agents(), services)
+    result = await graph.nodes[NODE_EXECUTE].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.EXECUTING_RESPONSE.value,
+            response_plan=_pending_execute_plan(event_id),
+        )
+    )
+    assert result["execution_ok"] is False
+    assert "response_plan" not in result
+    assert result["event_status"] == EventStatus.VERIFYING.value
+
+
 @pytest.mark.asyncio
 async def test_verify_node_soft_limit_reraises() -> None:
     """ISSUE-314: verify_agent SoftTimeLimit must not degrade and continue."""

@@ -12,6 +12,14 @@ plan). The builder never fabricates execution results: Action statuses are
 carried over verbatim, a phase that never ran stays ``NOT_EXECUTED``, and a
 read failure surfaces as ``UNAVAILABLE`` so the report chapter is marked
 degraded with an explicit 「数据不可用」 note instead of a silent placeholder.
+
+ISSUE-329: when a plan snapshot is found first-wins, execution fields are
+overlaid from the Action table (``execute_node`` and ``verify_node`` also
+refresh ``state["response_plan"]`` from Action rows) so reports and verify
+do not consume ``executed`` alongside all-``pending`` action counts.
+Empty ORM / unmatched ids keep the snapshot statuses (no fabricated SUCCESS).
+``generated_by=RECOVERED`` skips overlay because the plan already came from
+the Action table.
 """
 
 from __future__ import annotations
@@ -83,6 +91,78 @@ def _coerce_verification_result(raw: Any) -> VerificationResult | None:
     return None
 
 
+# ISSUE-329: copy only execution fields. Writeback required/applicable are a
+# policy snapshot and must not be reverse-driven; mixing status/readiness
+# without them can fail later coerce (ISSUE-205 plan loss).
+_PLAN_STATUS_OVERLAY_FIELDS = (
+    "status",
+    "executed_at",
+    "execution_job_id",
+    "tool_call_id",
+    "updated_at",
+)
+
+
+def overlay_response_plan_from_orm(plan: ResponsePlan, orm_actions: list[Action]) -> ResponsePlan:
+    """Refresh snapshot action statuses from persisted Action rows.
+
+    Preserves plan structure (ISSUE-205) while aligning execution fields with
+    the Action table. Never fabricates SUCCESS — only copies what ORM stores.
+    """
+    if plan.generated_by is ResponsePlanGeneratedBy.RECOVERED or not orm_actions:
+        return plan
+    by_id = {action.action_id: action for action in orm_actions}
+    refreshed_actions: list[Action] = []
+    changed = False
+    for action in plan.actions:
+        db_action = by_id.get(action.action_id)
+        if db_action is None:
+            refreshed_actions.append(action)
+            continue
+        updates = {
+            field: getattr(db_action, field)
+            for field in _PLAN_STATUS_OVERLAY_FIELDS
+            if getattr(db_action, field) != getattr(action, field)
+        }
+        if updates:
+            changed = True
+            refreshed_actions.append(action.model_copy(update=updates))
+        else:
+            refreshed_actions.append(action)
+    if not changed:
+        return plan
+    return plan.model_copy(update={"actions": refreshed_actions})
+
+
+async def _overlay_plan_from_orm(
+    plan: ResponsePlan,
+    event_id: str,
+    session: Any | None,
+) -> tuple[ResponsePlan, bool]:
+    """Return ``(plan, overlay_ok)``.
+
+    ``overlay_ok`` is False when the Action-table read/apply failed. Callers
+    must not claim ``ReportPhaseStatus.EXECUTED`` with an unrefreshed snapshot.
+    A missing session is not a failure — overlay is simply skipped.
+    """
+    if session is None:
+        return plan, True
+    try:
+        orm_actions = await _load_actions_from_orm(
+            session,
+            event_id,
+            action_ids={action.action_id for action in plan.actions},
+        )
+        return overlay_response_plan_from_orm(plan, orm_actions), True
+    except Exception:
+        logger.warning(
+            "report input builder: Action overlay read failed event=%s",
+            event_id,
+            exc_info=True,
+        )
+        return plan, False
+
+
 def _plan_from_actions(event_id: str, actions: list[Action]) -> ResponsePlan:
     """Re-derive a plan snapshot from persisted Action rows.
 
@@ -121,11 +201,19 @@ async def _load_journal_field(session: Any, event_id: str, field_name: str) -> A
     return unwrap_journal_value(row[0])
 
 
-async def _load_actions_from_orm(session: Any, event_id: str) -> list[Action]:
+async def _load_actions_from_orm(
+    session: Any,
+    event_id: str,
+    *,
+    action_ids: set[str] | None = None,
+) -> list[Action]:
+    if action_ids is not None and not action_ids:
+        return []
+    stmt = select(orm.Action).where(orm.Action.event_id == event_id)
+    if action_ids is not None:
+        stmt = stmt.where(orm.Action.action_id.in_(action_ids))
     result = await session.execute(
-        select(orm.Action)
-        .where(orm.Action.event_id == event_id)
-        .order_by(orm.Action.plan_revision, orm.Action.created_at, orm.Action.action_id)
+        stmt.order_by(orm.Action.plan_revision, orm.Action.created_at, orm.Action.action_id)
     )
     return [action_from_orm(row) for row in result.scalars().all()]
 
@@ -159,6 +247,9 @@ async def _resolve_response_plan(
             # Fail closed: data exists but is unusable — never swallow it
             # into a silent 「暂无」 placeholder.
             return None, ReportPhaseStatus.INCOMPLETE
+        plan, overlay_ok = await _overlay_plan_from_orm(plan, event_id, session)
+        if not overlay_ok:
+            return plan, ReportPhaseStatus.UNAVAILABLE
         return plan, ReportPhaseStatus.EXECUTED
 
     if session is not None:
@@ -175,6 +266,9 @@ async def _resolve_response_plan(
             plan = _coerce_response_plan(journal_raw)
             if plan is None:
                 return None, ReportPhaseStatus.INCOMPLETE
+            plan, overlay_ok = await _overlay_plan_from_orm(plan, event_id, session)
+            if not overlay_ok:
+                return plan, ReportPhaseStatus.UNAVAILABLE
             return plan, ReportPhaseStatus.EXECUTED
         try:
             actions = await _load_actions_from_orm(session, event_id)
@@ -241,6 +335,23 @@ async def _resolve_verification_result(
     return None, ReportPhaseStatus.NOT_EXECUTED
 
 
+async def refresh_response_plan_snapshot(
+    event_id: str,
+    *,
+    plan_raw: Any,
+    session_factory: _SessionFactoryLike,
+) -> dict[str, Any] | None:
+    """Rewrite a stale response_plan snapshot from Action rows (ISSUE-329)."""
+    plan = _coerce_response_plan(plan_raw)
+    if plan is None:
+        return None
+    async with session_factory() as session:
+        refreshed, overlay_ok = await _overlay_plan_from_orm(plan, event_id, session)
+    if not overlay_ok or refreshed is plan:
+        return None
+    return refreshed.model_dump(mode="json")
+
+
 async def build_report_agent_input(
     event_id: str,
     *,
@@ -301,4 +412,6 @@ __all__ = [
     "JOURNAL_FIELD_RESPONSE_PLAN",
     "JOURNAL_FIELD_VERIFICATION_RESULT",
     "build_report_agent_input",
+    "overlay_response_plan_from_orm",
+    "refresh_response_plan_snapshot",
 ]

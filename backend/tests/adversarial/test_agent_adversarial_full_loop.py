@@ -25,6 +25,7 @@ Artifact: ``tests/adversarial/artifacts/latest_full_loop_audit.json``
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,65 @@ def _report_excerpt(report_ctx: dict[str, Any]) -> str:
     title = str(report_ctx.get("title") or "")
     summary = str(report_ctx.get("summary") or "")
     return (title + "\n" + summary).strip()[:1200]
+
+
+def _parse_action_status_counts(blob: str) -> tuple[int, dict[str, int]] | None:
+    match = re.search(r"RESPONSE 动作共 (\d+) 个（([^）]+)）", blob)
+    if match is None:
+        return None
+    total = int(match.group(1))
+    counts: dict[str, int] = {}
+    for part in match.group(2).split(","):
+        bit = part.strip()
+        if "=" not in bit:
+            continue
+        name, raw = bit.split("=", 1)
+        counts[name.strip()] = int(raw)
+    return total, counts
+
+
+def _assert_executed_report_not_all_pending(sections: list[Any]) -> None:
+    """ISSUE-329: executed phase must not show pending=all RESPONSE counts.
+
+    Prefer builder ``data`` (survives LLM chapter rewrite). Content is a
+    fallback for the original Q-6 one-line / two-line summary.
+    """
+    blobs: list[str] = []
+    data_counts: dict[str, int] | None = None
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        content = str(section.get("content") or "")
+        data = section.get("data") if isinstance(section.get("data"), dict) else {}
+        blobs.append(content)
+        summary = data.get("actions_status_summary")
+        if isinstance(summary, str) and summary.strip():
+            blobs.append(summary)
+        raw_counts = data.get("action_status_counts")
+        if isinstance(raw_counts, dict) and raw_counts:
+            data_counts = {str(k): int(v) for k, v in raw_counts.items()}
+
+    blob = "\n".join(blobs)
+    if data_counts:
+        total = sum(data_counts.values())
+        pending = data_counts.get("pending", 0)
+        if total > 0:
+            assert pending < total, (
+                f"ISSUE-329: report data still pending=all ({data_counts})"
+            )
+        return
+
+    parsed = _parse_action_status_counts(blob)
+    if parsed is None:
+        return
+    total, counts = parsed
+    if "处置阶段状态=executed" not in blob:
+        return
+    pending = counts.get("pending", 0)
+    assert pending < total, (
+        f"ISSUE-329: report still shows executed + pending=all ({counts}); "
+        f"content={blob[:500]}"
+    )
 
 
 async def _closure_diagnostics(
@@ -251,6 +311,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         action_count = await session.scalar(
             select(func.count()).select_from(orm.Action).where(orm.Action.event_id == event_id)
         )
+        report_row = await session.scalar(select(orm.Report).where(orm.Report.event_id == event_id))
+    report_sections = list(report_row.sections or []) if report_row is not None else []
 
     checks = AdversarialAuditChecks(
         ground_truth=GROUND_TRUTH,
@@ -377,6 +439,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     assert _report_excerpt(report_ctx).strip(), (
         "ISSUE-196: full loop must reach REPORTING/CLOSED with non-empty report"
     )
+    assert report_sections, "ISSUE-329: persisted report must include sections"
+    _assert_executed_report_not_all_pending(report_sections)
     assert EventStatus.EXECUTING_RESPONSE.value in status_sequence, (
         "expected audited transition through executing_response"
     )
