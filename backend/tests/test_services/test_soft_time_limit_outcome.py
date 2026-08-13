@@ -334,7 +334,11 @@ async def test_apply_recovered_marks_intent_retry_without_event_failed(
     assert result.decision is SoftTimeLimitDecision.RECOVERED
     assert invalidated == []
     assert soft_time_limit_outcome_health_snapshot()["soft_limit_recovered"] == 1
-    intent_service.schedule_dispatch_async.assert_awaited_once()
+    intent_service.schedule_dispatch_async.assert_awaited_once_with(
+        event_id=event_id,
+        intent_id=intent_id,
+        trigger="soft_time_limit_recovered",
+    )
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)

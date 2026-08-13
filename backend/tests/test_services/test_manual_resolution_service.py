@@ -841,7 +841,7 @@ def test_graph_resume_schedule_skipped_no_loop_is_observable(
 
     class _BoomDelay:
         def delay(self) -> None:
-            raise ConnectionError("broker down")
+            raise ConnectionError("amqp://user:secret@broker:5672/vhost is down")
 
     monkeypatch.setattr(
         "app.tasks.graph_resume_intent_tasks.dispatch_pending_graph_resume_intents",
@@ -866,6 +866,61 @@ def test_graph_resume_schedule_skipped_no_loop_is_observable(
         "evt-no-loop",
         "graph_resume_dispatch_unavailable",
         "test_no_loop",
+        writer="ManualResolutionService",
+    )
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_graph_resume_in_process_dispatch_failure_sets_degraded_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-324: Celery fail + in-process fail must set graph_resume_dispatch_unavailable."""
+    import asyncio
+    from unittest.mock import AsyncMock
+
+    from app.core.config import get_settings
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+
+    class _BoomDelay:
+        def delay(self) -> None:
+            raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.graph_resume_intent_tasks.dispatch_pending_graph_resume_intents",
+        _BoomDelay(),
+    )
+
+    degraded = MagicMock()
+    degraded.set_flag = AsyncMock(return_value=["graph_resume_dispatch_unavailable=test_ip_fail"])
+    service = ManualResolutionService(MagicMock(), degraded_flags=degraded)
+
+    async def _boom_batch(*, limit: int = 20) -> int:
+        raise RuntimeError("in-process dispatch failed")
+
+    monkeypatch.setattr(service, "claim_and_run_batch", _boom_batch)
+
+    service.schedule_dispatch(
+        event_id="evt-ip-fail",
+        intent_id="gri-ip-fail",
+        trigger="test_ip_fail",
+    )
+    await asyncio.sleep(0)
+
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("graph_resume:resume_enqueue_failed") == 1
+    assert snapshot.get("graph_resume:resume_scheduled", 0) == 0
+    degraded.set_flag.assert_awaited_once_with(
+        "evt-ip-fail",
+        "graph_resume_dispatch_unavailable",
+        "test_ip_fail",
         writer="ManualResolutionService",
     )
     get_settings.cache_clear()

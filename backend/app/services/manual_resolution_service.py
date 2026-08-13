@@ -482,12 +482,11 @@ class ManualResolutionService:
         except Exception as exc:
             record_dispatch_schedule(domain="graph_resume", outcome="resume_enqueue_failed")
             logger.warning(
-                "graph resume dispatch enqueue failed trigger=%s event_id=%s intent_id=%s "
-                "error=%s",
+                "graph resume dispatch enqueue failed trigger=%s event_id=%s intent_id=%s error=%s",
                 trigger,
                 event_id or "-",
                 intent_id or "-",
-                exc,
+                type(exc).__name__,
                 exc_info=True,
             )
 
@@ -513,6 +512,8 @@ class ManualResolutionService:
                     event_id or "-",
                     intent_id or "-",
                 )
+                if event_id is not None:
+                    await self._set_resume_dispatch_degraded_flag(event_id, trigger=trigger)
             finally:
                 self._dispatch_scheduled = False
 
@@ -536,34 +537,34 @@ class ManualResolutionService:
             return
         loop.create_task(_run())
 
-    def _schedule_resume_dispatch_degraded_flag(self, event_id: str, *, trigger: str) -> None:
-        """Persist graph_resume_dispatch_unavailable even when called without a loop."""
+    async def _set_resume_dispatch_degraded_flag(self, event_id: str, *, trigger: str) -> None:
+        """Persist graph_resume_dispatch_unavailable for a failed/unavailable resume dispatch."""
         degraded = self._degraded
         if degraded is None:
             return
+        try:
+            await degraded.set_flag(
+                event_id,
+                "graph_resume_dispatch_unavailable",
+                trigger,
+                writer="ManualResolutionService",
+            )
+        except Exception:
+            logger.warning(
+                "failed to set graph_resume_dispatch_unavailable event=%s trigger=%s",
+                event_id,
+                trigger,
+                exc_info=True,
+            )
 
-        async def _set_flag() -> None:
-            try:
-                await degraded.set_flag(
-                    event_id,
-                    "graph_resume_dispatch_unavailable",
-                    trigger,
-                    writer="ManualResolutionService",
-                )
-            except Exception:
-                logger.warning(
-                    "failed to set graph_resume_dispatch_unavailable event=%s trigger=%s",
-                    event_id,
-                    trigger,
-                    exc_info=True,
-                )
-
+    def _schedule_resume_dispatch_degraded_flag(self, event_id: str, *, trigger: str) -> None:
+        """Persist graph_resume_dispatch_unavailable even when called without a loop."""
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             # This helper is primarily invoked from the no-loop schedule path.
             try:
-                asyncio.run(_set_flag())
+                asyncio.run(self._set_resume_dispatch_degraded_flag(event_id, trigger=trigger))
             except Exception:
                 logger.warning(
                     "failed to set graph_resume_dispatch_unavailable event=%s trigger=%s",
@@ -572,7 +573,7 @@ class ManualResolutionService:
                     exc_info=True,
                 )
             return
-        loop.create_task(_set_flag())
+        loop.create_task(self._set_resume_dispatch_degraded_flag(event_id, trigger=trigger))
 
     async def has_schedulable_intent(self, event_id: str) -> bool:
         """True when event has PENDING/RETRY/CLAIMED/STARTED resume intent."""
@@ -648,7 +649,7 @@ class ManualResolutionService:
                     row.updated_at = now
                     changed += 1
         if changed:
-            self.schedule_dispatch()
+            self.schedule_dispatch(trigger="reconcile_stale")
         return changed
 
     async def _claim_batch(self, *, limit: int) -> list[str]:

@@ -2372,19 +2372,27 @@ async def test_schedule_dispatch_enqueue_failure_is_observable_and_non_fatal(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from unittest.mock import AsyncMock
+
     from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
         investigation_intent_enqueue_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
         reset_investigation_intent_enqueue_metrics_for_tests,
     )
 
     reset_investigation_intent_enqueue_metrics_for_tests()
+    reset_dispatch_schedule_metrics_for_tests()
+    degraded = MagicMock()
+    degraded.set_flag = AsyncMock(return_value=["auto_investigate_dispatch_unavailable=true"])
     service = InvestigationIntentService(
         MagicMock(),
         settings=Settings(TASK_MODE="celery"),
+        degraded_flags=degraded,
     )
 
     def _broker_down() -> None:
-        raise ConnectionError("broker down")
+        raise ConnectionError("amqp://user:secret@broker:5672/vhost is down")
 
     monkeypatch.setattr(
         "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
@@ -2398,7 +2406,7 @@ async def test_schedule_dispatch_enqueue_failure_is_observable_and_non_fatal(
         logging.ERROR,
         logger="app.services.investigation_intent_service",
     ):
-        service.schedule_dispatch(
+        await service.schedule_dispatch_async(
             event_id="evt-enqueue-fail",
             intent_id="iin-enqueue-fail",
             trigger="test",
@@ -2407,10 +2415,24 @@ async def test_schedule_dispatch_enqueue_failure_is_observable_and_non_fatal(
     snapshot = investigation_intent_enqueue_health_snapshot()
     assert snapshot["enqueue_failure"] == 1
     assert snapshot["enqueue_success"] == 0
-    assert any(
-        "investigation intent dispatch enqueue failed" in record.message
-        for record in caplog.records
+    assert (
+        dispatch_schedule_health_snapshot().get("investigation_intent:dispatch_enqueue_failed") == 1
     )
+    degraded.set_flag.assert_awaited_once_with(
+        "evt-enqueue-fail",
+        "auto_investigate_dispatch_unavailable",
+        True,
+        writer="InvestigationIntentService",
+    )
+    failure_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "investigation intent dispatch enqueue failed" in record.getMessage()
+    ]
+    assert failure_messages
+    assert "ConnectionError" in failure_messages[0]
+    assert "secret" not in failure_messages[0]
+    assert "amqp://" not in failure_messages[0]
 
 
 @pytest.mark.asyncio

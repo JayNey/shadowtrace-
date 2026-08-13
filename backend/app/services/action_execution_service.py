@@ -365,19 +365,20 @@ class ActionExecutionService:
                         )
 
                         try:
-                            resume_intent = (
-                                await self._manual_resolution.create_or_replay_resume_intent_in_session(
-                                    session,
-                                    event_id,
-                                    resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
-                                    subject_kind=SUBJECT_KIND_ACTION,
-                                    subject_id=action_id,
-                                    resolution=resolution,
-                                    principal=principal,
-                                    comment=comment,
-                                    evidence_ref=evidence_ref,
-                                    operation_id=operation_id,
-                                )
+                            create_resume = (
+                                self._manual_resolution.create_or_replay_resume_intent_in_session
+                            )
+                            resume_intent = await create_resume(
+                                session,
+                                event_id,
+                                resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
+                                subject_kind=SUBJECT_KIND_ACTION,
+                                subject_id=action_id,
+                                resolution=resolution,
+                                principal=principal,
+                                comment=comment,
+                                evidence_ref=evidence_ref,
+                                operation_id=operation_id,
                             )
                             should_dispatch = True
                             resume_intent_id = resume_intent.intent_id

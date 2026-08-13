@@ -661,7 +661,7 @@ class InvestigationIntentService:
             trigger,
             intent_id or "-",
             event_id or "-",
-            exc,
+            type(exc).__name__,
             exc_info=True,
         )
 
@@ -724,12 +724,13 @@ class InvestigationIntentService:
                 intent_id=intent_id,
             ):
                 return 0
-            record_dispatch_schedule(
-                domain="investigation_intent",
-                outcome="dispatch_fallback_started",
-            )
             # Bind to the recovered intent — never steal an older global backlog row.
             published = await self.claim_and_publish_intent(intent_id)
+            if published:
+                record_dispatch_schedule(
+                    domain="investigation_intent",
+                    outcome="dispatch_fallback_started",
+                )
             logger.info(
                 "investigation intent in-process dispatch fallback trigger=%s "
                 "intent_id=%s event_id=%s published=%s",
