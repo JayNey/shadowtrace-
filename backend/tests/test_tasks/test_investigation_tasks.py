@@ -1829,8 +1829,13 @@ async def test_soft_limit_handler_applies_before_lease_release(
             order.append(f"release:{event_id}:{owner_id}")
             return True
 
-    async def _apply(*_a, **_k):
+    intent_service = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
+    captured: dict[str, object] = {}
+
+    async def _apply(*_a: object, **kwargs: object) -> None:
         order.append("apply")
+        captured.update(kwargs)
 
     monkeypatch.setattr("app.api.v1.deps.get_event_lease", lambda: _Lease())
     monkeypatch.setattr(
@@ -1847,7 +1852,7 @@ async def test_soft_limit_handler_applies_before_lease_release(
     )
     monkeypatch.setattr(
         "app.services.investigation_intent_service.InvestigationIntentService",
-        lambda *_a, **_k: object(),
+        lambda *_a, **_k: intent_service,
     )
     monkeypatch.setattr(
         "app.services.soft_time_limit_outcome.apply_soft_time_limit_outcome",
@@ -1861,3 +1866,5 @@ async def test_soft_limit_handler_applies_before_lease_release(
         broker_task_id="task-1",
     )
     assert order == ["apply", "release:evt-order:owner-1"]
+    assert captured.get("intent_service") is intent_service
+    assert captured.get("intent_id") == "iin-1"

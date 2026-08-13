@@ -433,6 +433,7 @@ _GRAPH_RESUME_DISPATCH_OUTCOMES = frozenset(
         "resume_scheduled",
         "resume_enqueue_failed",
         "resume_schedule_skipped_no_loop",
+        "resume_in_process_empty",
     }
 )
 

@@ -51,7 +51,15 @@ _DISPATCH_WORKER_ID = "intent-dispatcher-1"
 # ISSUE-324: one bounded in-process fallback when Celery enqueue fails after
 # SoftTimeLimit RECOVERED. Conditions: pure investigation phase, no response
 # execution, no UNKNOWN outbox. Other triggers rely on beat reconcile.
+# Fallback publish failure must return RETRY without burning attempt/DEAD —
+# SoftTimeLimit already counted this recovery.
 _DISPATCH_IN_PROCESS_FALLBACK_TRIGGERS = frozenset({"soft_time_limit_recovered"})
+
+
+def _safe_dispatch_error(exc: BaseException) -> str:
+    """Broker/AMQP exceptions often embed credentials; persist the type only."""
+    return type(exc).__name__
+
 
 _PURE_INVESTIGATION_DISPATCH_STATUSES = frozenset(
     {
@@ -725,7 +733,10 @@ class InvestigationIntentService:
             ):
                 return 0
             # Bind to the recovered intent — never steal an older global backlog row.
-            published = await self.claim_and_publish_intent(intent_id)
+            published = await self.claim_and_publish_intent(
+                intent_id,
+                conserve_retry_budget=True,
+            )
             if published:
                 record_dispatch_schedule(
                     domain="investigation_intent",
@@ -786,12 +797,20 @@ class InvestigationIntentService:
                 return False
         return True
 
-    async def claim_and_publish_intent(self, intent_id: str) -> bool:
+    async def claim_and_publish_intent(
+        self,
+        intent_id: str,
+        *,
+        conserve_retry_budget: bool = False,
+    ) -> bool:
         """Claim and publish one specific intent (ISSUE-324 SoftTimeLimit fallback)."""
         claimed = await self._claim_intent(intent_id)
         if claimed is None:
             return False
-        return await self._publish_claimed_intent(claimed)
+        return await self._publish_claimed_intent(
+            claimed,
+            conserve_retry_budget=conserve_retry_budget,
+        )
 
     async def _claim_intent(self, intent_id: str) -> str | None:
         """Claim a single PENDING/RETRY (or expired CLAIMED) intent by id."""
@@ -1279,18 +1298,28 @@ class InvestigationIntentService:
         self,
         row: orm.InvestigationIntent,
         exc: Exception,
+        *,
+        conserve_retry_budget: bool = False,
     ) -> None:
-        if int(row.attempt or 0) + 1 >= int(self._settings.auto_investigate_max_attempts):
+        safe_error = _safe_dispatch_error(exc)
+        if conserve_retry_budget:
+            await self._set_status_in_session(
+                row,
+                InvestigationIntentStatus.RETRY,
+                last_error=safe_error,
+            )
+            row.broker_task_id = None
+        elif int(row.attempt or 0) + 1 >= int(self._settings.auto_investigate_max_attempts):
             await self._set_status_in_session(
                 row,
                 InvestigationIntentStatus.DEAD,
-                last_error=str(exc),
+                last_error=safe_error,
             )
         else:
             await self._set_status_in_session(
                 row,
                 InvestigationIntentStatus.RETRY,
-                last_error=str(exc),
+                last_error=safe_error,
                 increment_attempt=True,
             )
         if self._degraded is not None:
@@ -1418,6 +1447,8 @@ class InvestigationIntentService:
         self,
         intent_id: str,
         exc: Exception,
+        *,
+        conserve_retry_budget: bool = False,
     ) -> None:
         async with self._session_factory() as session:
             async with session.begin():
@@ -1426,12 +1457,18 @@ class InvestigationIntentService:
                     return
                 if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.ENQUEUED:
                     return
-                await self._handle_publish_transient_failure(row, exc)
+                await self._handle_publish_transient_failure(
+                    row,
+                    exc,
+                    conserve_retry_budget=conserve_retry_budget,
+                )
 
     async def _revert_enqueued_after_unexpected_failure(
         self,
         intent_id: str,
         exc: Exception,
+        *,
+        conserve_retry_budget: bool = False,
     ) -> None:
         async with self._session_factory() as session:
             async with session.begin():
@@ -1440,14 +1477,27 @@ class InvestigationIntentService:
                     return
                 if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.ENQUEUED:
                     return
-                await self._set_status_in_session(
-                    row,
-                    InvestigationIntentStatus.DEAD,
-                    last_error=str(exc),
-                )
+                if conserve_retry_budget:
+                    await self._set_status_in_session(
+                        row,
+                        InvestigationIntentStatus.RETRY,
+                        last_error=_safe_dispatch_error(exc),
+                    )
+                else:
+                    await self._set_status_in_session(
+                        row,
+                        InvestigationIntentStatus.DEAD,
+                        last_error=_safe_dispatch_error(exc),
+                    )
                 row.broker_task_id = None
 
-    async def _publish_claimed_intent(self, intent_id: str, *, strict: bool = False) -> bool:
+    async def _publish_claimed_intent(
+        self,
+        intent_id: str,
+        *,
+        strict: bool = False,
+        conserve_retry_budget: bool = False,
+    ) -> bool:
         target = await self._commit_enqueued_publish_target(intent_id)
         if target is None:
             return False
@@ -1483,12 +1533,17 @@ class InvestigationIntentService:
         except DependencyUnavailableError as exc:
             await delete_task_metadata(target.task_id)
             logger.warning(
-                "task metadata store unavailable intent=%s event=%s",
+                "task metadata store unavailable intent=%s event=%s error=%s",
                 target.intent_id,
                 target.event_id,
+                _safe_dispatch_error(exc),
                 exc_info=True,
             )
-            await self._revert_enqueued_after_publish_failure(target.intent_id, exc)
+            await self._revert_enqueued_after_publish_failure(
+                target.intent_id,
+                exc,
+                conserve_retry_budget=conserve_retry_budget,
+            )
             if target.include_response_execution:
                 await self._set_auto_response_dispatch_degraded(target.event_id)
             if strict:
@@ -1500,10 +1555,14 @@ class InvestigationIntentService:
                 "broker publish failed intent=%s event=%s err=%s",
                 target.intent_id,
                 target.event_id,
-                exc,
+                _safe_dispatch_error(exc),
                 exc_info=True,
             )
-            await self._revert_enqueued_after_publish_failure(target.intent_id, exc)
+            await self._revert_enqueued_after_publish_failure(
+                target.intent_id,
+                exc,
+                conserve_retry_budget=conserve_retry_budget,
+            )
             if target.include_response_execution:
                 await self._set_auto_response_dispatch_degraded(target.event_id)
             if strict:
@@ -1520,12 +1579,17 @@ class InvestigationIntentService:
         except Exception as exc:
             await delete_task_metadata(target.task_id)
             logger.error(
-                "unexpected publish failure intent=%s event=%s",
+                "unexpected publish failure intent=%s event=%s error=%s",
                 target.intent_id,
                 target.event_id,
+                _safe_dispatch_error(exc),
                 exc_info=True,
             )
-            await self._revert_enqueued_after_unexpected_failure(target.intent_id, exc)
+            await self._revert_enqueued_after_unexpected_failure(
+                target.intent_id,
+                exc,
+                conserve_retry_budget=conserve_retry_budget,
+            )
             if target.include_response_execution:
                 await self._set_auto_response_dispatch_degraded(target.event_id)
             return False

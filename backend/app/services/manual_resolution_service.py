@@ -454,6 +454,7 @@ class ManualResolutionService:
         event_id: str | None = None,
         intent_id: str | None = None,
         trigger: str = "unspecified",
+        event_ids: list[str] | None = None,
     ) -> None:
         """Best-effort durable dispatch; never raises.
 
@@ -462,6 +463,14 @@ class ManualResolutionService:
         progresses. When no running event loop exists, emit structured signals
         instead of silently returning (ISSUE-324).
         """
+        flagged_event_ids: list[str] = []
+        if event_id:
+            flagged_event_ids.append(event_id)
+        if event_ids:
+            for eid in event_ids:
+                if eid and eid not in flagged_event_ids:
+                    flagged_event_ids.append(eid)
+
         try:
             from app.core.config import TaskMode, get_settings
 
@@ -496,8 +505,17 @@ class ManualResolutionService:
 
         async def _run() -> None:
             try:
-                ran = await self.claim_and_run_batch(limit=20)
-                record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
+                if intent_id is not None:
+                    ran = int(await self.claim_and_run_intent(intent_id))
+                else:
+                    ran = await self.claim_and_run_batch(limit=20)
+                if ran > 0:
+                    record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
+                else:
+                    record_dispatch_schedule(
+                        domain="graph_resume",
+                        outcome="resume_in_process_empty",
+                    )
                 logger.info(
                     "graph resume in-process dispatch trigger=%s event_id=%s intent_id=%s ran=%s",
                     trigger,
@@ -512,8 +530,8 @@ class ManualResolutionService:
                     event_id or "-",
                     intent_id or "-",
                 )
-                if event_id is not None:
-                    await self._set_resume_dispatch_degraded_flag(event_id, trigger=trigger)
+                for eid in flagged_event_ids:
+                    await self._set_resume_dispatch_degraded_flag(eid, trigger=trigger)
             finally:
                 self._dispatch_scheduled = False
 
@@ -532,8 +550,8 @@ class ManualResolutionService:
                 event_id or "-",
                 intent_id or "-",
             )
-            if event_id is not None:
-                self._schedule_resume_dispatch_degraded_flag(event_id, trigger=trigger)
+            for eid in flagged_event_ids:
+                self._schedule_resume_dispatch_degraded_flag(eid, trigger=trigger)
             return
         loop.create_task(_run())
 
@@ -593,15 +611,23 @@ class ManualResolutionService:
     async def claim_and_run_batch(self, *, limit: int = 20) -> int:
         claimed = await self._claim_batch(limit=limit)
         ran = 0
-        for intent_id in claimed:
-            if await self._run_claimed_intent(intent_id):
+        for claimed_id in claimed:
+            if await self._run_claimed_intent(claimed_id):
                 ran += 1
         return ran
+
+    async def claim_and_run_intent(self, intent_id: str) -> bool:
+        """Claim and run one specific resume intent (ISSUE-324 in-process fallback)."""
+        claimed = await self._claim_intent(intent_id)
+        if claimed is None:
+            return False
+        return await self._run_claimed_intent(claimed)
 
     async def reconcile_stale(self, *, limit: int = 100) -> int:
         now = datetime.now(UTC)
         stale_cutoff = now - timedelta(seconds=_STARTED_STALE_MIN_S)
         changed = 0
+        changed_event_ids: list[str] = []
         async with self._session_factory() as session:
             async with session.begin():
                 rows = (
@@ -648,8 +674,13 @@ class ManualResolutionService:
                     row.claim_expires_at = None
                     row.updated_at = now
                     changed += 1
+                    if row.event_id not in changed_event_ids:
+                        changed_event_ids.append(row.event_id)
         if changed:
-            self.schedule_dispatch(trigger="reconcile_stale")
+            self.schedule_dispatch(
+                event_ids=changed_event_ids,
+                trigger="reconcile_stale",
+            )
         return changed
 
     async def _claim_batch(self, *, limit: int) -> list[str]:
@@ -683,6 +714,32 @@ class ManualResolutionService:
                     row.updated_at = now
                     claimed.append(row.intent_id)
         return claimed
+
+    async def _claim_intent(self, intent_id: str) -> str | None:
+        """Claim a single PENDING/RETRY resume intent by id."""
+        now = datetime.now(UTC)
+        lease_until = now + timedelta(seconds=self._claim_lease_s)
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    orm.GraphResumeIntent,
+                    intent_id,
+                    with_for_update=True,
+                )
+                if row is None:
+                    return None
+                current = GraphResumeIntentStatus(row.status)
+                if current not in {
+                    GraphResumeIntentStatus.PENDING,
+                    GraphResumeIntentStatus.RETRY,
+                }:
+                    return None
+                validate_graph_resume_transition(current, GraphResumeIntentStatus.CLAIMED)
+                row.status = GraphResumeIntentStatus.CLAIMED.value
+                row.claim_owner = _DISPATCH_WORKER_ID
+                row.claim_expires_at = lease_until
+                row.updated_at = now
+                return row.intent_id
 
     async def _run_claimed_intent(self, intent_id: str) -> bool:
         async with self._session_factory() as session:

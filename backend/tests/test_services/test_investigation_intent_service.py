@@ -3019,3 +3019,121 @@ async def test_schedule_dispatch_fallback_skipped_for_response_execution(
         row = await session.get(orm.InvestigationIntent, intent_id)
         assert row is not None
         assert row.status == InvestigationIntentStatus.RETRY.value
+
+
+@pytest.mark.asyncio
+async def test_schedule_dispatch_stl_fallback_broker_still_down_keeps_retry_not_dead(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ISSUE-324: fallback publish failure must not DEAD a just-recovered intent."""
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    settings = Settings(
+        AUTO_INVESTIGATE_ENABLED=True,
+        SOURCE_MODE="mock_xdr",
+        TASK_MODE="celery",
+        AUTO_INVESTIGATE_CLAIM_LEASE_S=30,
+        AUTO_INVESTIGATE_MAX_ATTEMPTS=5,
+    )
+    service = InvestigationIntentService(
+        session_factory,
+        policy=AutoInvestigatePolicyService(settings),
+        settings=settings,
+    )
+    intent_id = f"iin-stl-keep-retry-{uuid4().hex[:8]}"
+    event_id = f"evt-stl-keep-retry-{uuid4().hex[:8]}"
+    async with session_factory() as session:
+        async with session.begin():
+            session.add(
+                orm.SecurityEvent(
+                    event_id=event_id,
+                    event_type="malicious_process",
+                    title="STL fallback keep retry",
+                    description="",
+                    status=EventStatus.ANALYZING.value,
+                    severity=Severity.HIGH.value,
+                    final_verdict="none",
+                    creation_source_ref={"source_product": "mock_xdr"},
+                    source_reference_snapshots=[],
+                    disposition_policy="not_required",
+                    raw_alert_ids=[],
+                    source_type="mock_xdr",
+                )
+            )
+            await session.flush()
+            session.add(
+                orm.InvestigationIntent(
+                    intent_id=intent_id,
+                    event_id=event_id,
+                    intent_kind="auto_investigate",
+                    intent_version="issue108_v1",
+                    status=InvestigationIntentStatus.RETRY.value,
+                    revision=2,
+                    attempt=4,
+                    include_response_execution=False,
+                    generate_report=False,
+                )
+            )
+
+    def _broker_down(*_args: object, **_kwargs: object) -> None:
+        raise ConnectionError("amqp://user:secret@broker:5672/vhost is down")
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_intent_tasks.dispatch_pending_investigation_intents.delay",
+        _broker_down,
+    )
+
+    async def _noop_register(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.register_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.delete_task_metadata",
+        _noop_register,
+    )
+    monkeypatch.setattr(
+        "app.tasks.investigation_tasks.run_investigation.apply_async",
+        _broker_down,
+    )
+
+    intent_logger = logging.getLogger("app.services.investigation_intent_service")
+    intent_logger.disabled = False
+    intent_logger.propagate = True
+    with caplog.at_level(logging.WARNING, logger="app.services.investigation_intent_service"):
+        await service.schedule_dispatch_async(
+            event_id=event_id,
+            intent_id=intent_id,
+            trigger="soft_time_limit_recovered",
+        )
+
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("investigation_intent:dispatch_enqueue_failed") == 1
+    assert snapshot.get("investigation_intent:dispatch_fallback_started", 0) == 0
+
+    async with session_factory() as session:
+        row = await session.get(orm.InvestigationIntent, intent_id)
+        assert row is not None
+        assert row.status == InvestigationIntentStatus.RETRY.value
+        assert row.attempt == 4
+        assert row.last_error == "ConnectionError"
+        assert "secret" not in (row.last_error or "")
+        assert "amqp://" not in (row.last_error or "")
+
+    publish_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if "broker publish failed" in record.getMessage()
+    ]
+    assert publish_messages
+    assert "ConnectionError" in publish_messages[0]
+    assert "secret" not in publish_messages[0]
+    assert "amqp://" not in publish_messages[0]

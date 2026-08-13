@@ -902,17 +902,28 @@ async def test_graph_resume_in_process_dispatch_failure_sets_degraded_flag(
     degraded.set_flag = AsyncMock(return_value=["graph_resume_dispatch_unavailable=test_ip_fail"])
     service = ManualResolutionService(MagicMock(), degraded_flags=degraded)
 
-    async def _boom_batch(*, limit: int = 20) -> int:
+    async def _boom_intent(_intent_id: str) -> bool:
         raise RuntimeError("in-process dispatch failed")
 
-    monkeypatch.setattr(service, "claim_and_run_batch", _boom_batch)
+    monkeypatch.setattr(service, "claim_and_run_intent", _boom_intent)
 
+    created: list[asyncio.Task[object]] = []
+    loop = asyncio.get_running_loop()
+    orig_create = loop.create_task
+
+    def _capture(coro: object, *args: object, **kwargs: object) -> asyncio.Task[object]:
+        task = orig_create(coro, *args, **kwargs)  # type: ignore[arg-type]
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(loop, "create_task", _capture)
     service.schedule_dispatch(
         event_id="evt-ip-fail",
         intent_id="gri-ip-fail",
         trigger="test_ip_fail",
     )
-    await asyncio.sleep(0)
+    assert created
+    await created[0]
 
     snapshot = dispatch_schedule_health_snapshot()
     assert snapshot.get("graph_resume:resume_enqueue_failed") == 1
@@ -955,4 +966,173 @@ async def test_graph_resume_schedule_celery_success_records_metric(
     assert delay_calls == ["delay"]
     snapshot = dispatch_schedule_health_snapshot()
     assert snapshot.get("graph_resume:resume_scheduled") == 1
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_graph_resume_in_process_fallback_binds_target_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-324: Celery fail + in-process must run the passed intent, not global backlog."""
+    from app.core.config import get_settings
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+
+    class _BoomDelay:
+        def delay(self) -> None:
+            raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.graph_resume_intent_tasks.dispatch_pending_graph_resume_intents",
+        _BoomDelay(),
+    )
+
+    service = ManualResolutionService(MagicMock())
+    called: list[str] = []
+
+    async def _run_intent(intent_id: str) -> bool:
+        called.append(intent_id)
+        return True
+
+    async def _run_batch(*, limit: int = 20) -> int:
+        called.append(f"batch:{limit}")
+        return 1
+
+    monkeypatch.setattr(service, "claim_and_run_intent", _run_intent)
+    monkeypatch.setattr(service, "claim_and_run_batch", _run_batch)
+
+    created: list[asyncio.Task[object]] = []
+    loop = asyncio.get_running_loop()
+    orig_create = loop.create_task
+
+    def _capture(coro: object, *args: object, **kwargs: object) -> asyncio.Task[object]:
+        task = orig_create(coro, *args, **kwargs)  # type: ignore[arg-type]
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(loop, "create_task", _capture)
+    service.schedule_dispatch(
+        event_id="evt-bind",
+        intent_id="gri-target",
+        trigger="test_bind",
+    )
+    assert created
+    await created[0]
+    assert called == ["gri-target"]
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("graph_resume:resume_enqueue_failed") == 1
+    assert snapshot.get("graph_resume:resume_scheduled") == 1
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_graph_resume_in_process_ran_zero_does_not_count_resume_scheduled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.config import get_settings
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+
+    class _BoomDelay:
+        def delay(self) -> None:
+            raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.graph_resume_intent_tasks.dispatch_pending_graph_resume_intents",
+        _BoomDelay(),
+    )
+
+    service = ManualResolutionService(MagicMock())
+
+    async def _empty_intent(_intent_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(service, "claim_and_run_intent", _empty_intent)
+
+    created: list[asyncio.Task[object]] = []
+    loop = asyncio.get_running_loop()
+    orig_create = loop.create_task
+
+    def _capture(coro: object, *args: object, **kwargs: object) -> asyncio.Task[object]:
+        task = orig_create(coro, *args, **kwargs)  # type: ignore[arg-type]
+        created.append(task)
+        return task
+
+    monkeypatch.setattr(loop, "create_task", _capture)
+    service.schedule_dispatch(
+        event_id="evt-empty",
+        intent_id="gri-empty",
+        trigger="test_empty",
+    )
+    assert created
+    await created[0]
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("graph_resume:resume_enqueue_failed") == 1
+    assert snapshot.get("graph_resume:resume_scheduled", 0) == 0
+    assert snapshot.get("graph_resume:resume_in_process_empty") == 1
+    get_settings.cache_clear()
+
+
+def test_graph_resume_schedule_dispatch_flags_all_reconcile_event_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-324: reconcile_stale enqueue failure must flag every recovered event."""
+    from unittest.mock import AsyncMock
+
+    from app.core.config import get_settings
+    from app.core.metrics import (
+        dispatch_schedule_health_snapshot,
+        reset_dispatch_schedule_metrics_for_tests,
+    )
+
+    reset_dispatch_schedule_metrics_for_tests()
+    monkeypatch.setenv("TASK_MODE", "celery")
+    get_settings.cache_clear()
+
+    class _BoomDelay:
+        def delay(self) -> None:
+            raise ConnectionError("broker down")
+
+    monkeypatch.setattr(
+        "app.tasks.graph_resume_intent_tasks.dispatch_pending_graph_resume_intents",
+        _BoomDelay(),
+    )
+
+    degraded = MagicMock()
+    degraded.set_flag = AsyncMock(
+        return_value=["graph_resume_dispatch_unavailable=reconcile_stale"]
+    )
+    service = ManualResolutionService(MagicMock(), degraded_flags=degraded)
+    service.schedule_dispatch(
+        event_ids=["evt-a", "evt-b"],
+        trigger="reconcile_stale",
+    )
+    snapshot = dispatch_schedule_health_snapshot()
+    assert snapshot.get("graph_resume:resume_enqueue_failed") == 1
+    assert snapshot.get("graph_resume:resume_schedule_skipped_no_loop") == 1
+    assert degraded.set_flag.await_count == 2
+    degraded.set_flag.assert_any_await(
+        "evt-a",
+        "graph_resume_dispatch_unavailable",
+        "reconcile_stale",
+        writer="ManualResolutionService",
+    )
+    degraded.set_flag.assert_any_await(
+        "evt-b",
+        "graph_resume_dispatch_unavailable",
+        "reconcile_stale",
+        writer="ManualResolutionService",
+    )
     get_settings.cache_clear()
