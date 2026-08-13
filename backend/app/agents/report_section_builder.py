@@ -220,10 +220,13 @@ def build_actions_status_summary(
     """Compact RESPONSE action status summary for template enrichment."""
     phase = response_phase_status.value
     if not response_actions:
-        return f"处置阶段状态={phase}；RESPONSE 动作 0 个。"
+        return f"处置阶段状态={phase}。\nRESPONSE 动作 0 个。"
     counts = _action_status_counts(response_actions)
     count_text = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
-    return f"处置阶段状态={phase}；RESPONSE 动作共 {len(response_actions)} 个（{count_text}）。"
+    return (
+        f"处置阶段状态={phase}。\n"
+        f"RESPONSE 动作共 {len(response_actions)} 个（{count_text}）。"
+    )
 
 
 class ReportSectionBuilder:
