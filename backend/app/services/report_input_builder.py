@@ -14,9 +14,12 @@ read failure surfaces as ``UNAVAILABLE`` so the report chapter is marked
 degraded with an explicit 「数据不可用」 note instead of a silent placeholder.
 
 ISSUE-329: when a plan snapshot is found first-wins, execution fields are
-overlaid from the Action table (and ``execute_node`` refreshes
-``state["response_plan"]`` after ``execute_plan``) so reports do not show
-``executed`` alongside all-``pending`` action counts.
+overlaid from the Action table (``execute_node`` and ``verify_node`` also
+refresh ``state["response_plan"]`` from Action rows) so reports and verify
+do not consume ``executed`` alongside all-``pending`` action counts.
+Empty ORM / unmatched ids keep the snapshot statuses (no fabricated SUCCESS).
+``generated_by=RECOVERED`` skips overlay because the plan already came from
+the Action table.
 """
 
 from __future__ import annotations

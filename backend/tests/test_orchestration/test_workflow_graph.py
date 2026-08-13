@@ -2932,6 +2932,76 @@ async def test_execute_node_refresh_failure_does_not_fail_event() -> None:
 
 
 @pytest.mark.asyncio
+async def test_verify_node_overlays_stale_pending_plan_from_action_rows() -> None:
+    """ISSUE-329: verify_node must overlay Action rows if execute refresh was skipped."""
+    event_id = "evt-329-verify-overlay"
+    action_id = "act-329-v1"
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    session = _ExecuteOverlaySession(
+        [_execute_orm_action_row(event_id=event_id, action_id=action_id)]
+    )
+    services = _services(machine)
+    services["session_factory"] = _ExecuteSessionFactory(session)
+    verify_agent = StubAgent(
+        VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+    )
+    graph = build_investigation_graph(_agents_with_verify(verify_agent), services)
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            response_plan=_pending_execute_plan(event_id, action_id),
+            execution_ok=True,
+        )
+    )
+    assert verify_agent.calls
+    plan = verify_agent.calls[0].response_plan
+    assert plan.actions[0].status is ActionStatus.SUCCESS
+    assert result["response_plan"]["actions"][0]["status"] == ActionStatus.SUCCESS.value
+
+
+@pytest.mark.asyncio
+async def test_verify_node_refresh_failure_does_not_fail_event() -> None:
+    event_id = "evt-329-verify-refresh-fail"
+    action_id = "act-329-v-fail"
+
+    def _boom_factory() -> Any:
+        raise RuntimeError("session factory unavailable")
+
+    machine = FakeStateMachine(
+        status=EventStatus.VERIFYING,
+        statuses={event_id: EventStatus.VERIFYING},
+    )
+    services = _services(machine)
+    services["session_factory"] = _boom_factory
+    verify_agent = StubAgent(
+        VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.EFFECT,
+        )
+    )
+    graph = build_investigation_graph(_agents_with_verify(verify_agent), services)
+    result = await graph.nodes[NODE_VERIFY].ainvoke(  # type: ignore[attr-defined]
+        _base_state(
+            event_id=event_id,
+            event_status=EventStatus.VERIFYING.value,
+            response_plan=_pending_execute_plan(event_id, action_id),
+            execution_ok=True,
+        )
+    )
+    assert verify_agent.calls
+    assert verify_agent.calls[0].response_plan.actions[0].status is ActionStatus.PENDING
+    assert "response_plan" not in result
+    assert EventStatus.FAILED not in [target for _, target, _ in machine.transitions]
+
+
+@pytest.mark.asyncio
 async def test_execute_node_skips_plan_refresh_when_execution_ok_false() -> None:
     event_id = "evt-329-skip-refresh"
 

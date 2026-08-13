@@ -369,6 +369,85 @@ def test_overlay_response_plan_from_orm_preserves_plan_and_never_fabricates() ->
     assert overlaid.actions[0].status is ActionStatus.PENDING
 
 
+def test_overlay_preserves_policy_fields_and_plan_structure() -> None:
+    """ISSUE-329: overlay copies execution fields only, never writeback policy."""
+    snapshot_action = _response_action(
+        action_id="act-keep",
+        status=ActionStatus.PENDING,
+    ).model_copy(
+        update={
+            "writeback_required": True,
+            "writeback_applicable": True,
+            "writeback_readiness": WritebackReadinessEnum.READY,
+            "reason": "policy snapshot",
+        }
+    )
+    plan = ResponsePlan(
+        plan_id="plan-keep",
+        actions=[snapshot_action],
+        strategy_summary="keep me",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    orm_action = _response_action(
+        action_id="act-keep",
+        status=ActionStatus.SUCCESS,
+    ).model_copy(
+        update={
+            "execution_job_id": "job-1",
+            "writeback_required": False,
+            "writeback_applicable": False,
+            "writeback_readiness": WritebackReadinessEnum.NOT_REQUIRED,
+        }
+    )
+    overlaid = overlay_response_plan_from_orm(plan, [orm_action])
+    assert overlaid.plan_id == "plan-keep"
+    assert overlaid.strategy_summary == "keep me"
+    assert overlaid.generated_by is ResponsePlanGeneratedBy.TEMPLATE
+    action = overlaid.actions[0]
+    assert action.status is ActionStatus.SUCCESS
+    assert action.execution_job_id == "job-1"
+    assert action.writeback_required is True
+    assert action.writeback_applicable is True
+    assert action.writeback_readiness is WritebackReadinessEnum.READY
+    assert action.reason == "policy snapshot"
+
+
+def test_overlay_skips_recovered_plans() -> None:
+    """RECOVERED plans already came from Action rows; overlay must not rewrite them."""
+    plan = ResponsePlan(
+        plan_id="plan-recovered",
+        actions=[_response_action(action_id="act-rec", status=ActionStatus.PENDING)],
+        strategy_summary="from actions",
+        generated_by=ResponsePlanGeneratedBy.RECOVERED,
+    )
+    overlaid = overlay_response_plan_from_orm(
+        plan,
+        [_response_action(action_id="act-rec", status=ActionStatus.SUCCESS)],
+    )
+    assert overlaid is plan
+    assert overlaid.actions[0].status is ActionStatus.PENDING
+
+
+@pytest.mark.asyncio
+async def test_state_pending_plan_empty_orm_keeps_pending_not_fabricated() -> None:
+    """ISSUE-205 first-wins: overlay with no ORM rows must not fabricate SUCCESS."""
+    pending_plan = ResponsePlan(
+        plan_id="plan-empty-orm",
+        actions=[_response_action(action_id="act-missing-orm", status=ActionStatus.PENDING)],
+        strategy_summary="stale snapshot",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    session = _FakeSession([_ActionsResult([])])
+    result = await _build(
+        state={"response_plan": pending_plan.model_dump(mode="json")},
+        session=session,
+    )
+    assert result.response_plan is not None
+    assert result.response_plan.plan_id == "plan-empty-orm"
+    assert all(action.status is ActionStatus.PENDING for action in result.response_plan.actions)
+    assert result.response_phase_status is ReportPhaseStatus.EXECUTED
+
+
 class _SessionFactory:
     def __init__(self, session: Any) -> None:
         self._session = session
