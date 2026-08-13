@@ -88,19 +88,14 @@ def _coerce_verification_result(raw: Any) -> VerificationResult | None:
     return None
 
 
-# Fields refreshed from authoritative Action rows when a plan snapshot is stale
-# (ISSUE-329: execute_node does not rewrite state["response_plan"] after
-# execute_plan, so first-wins backfill can freeze PENDING statuses).
+# ISSUE-329: copy only execution fields. Writeback required/applicable are a
+# policy snapshot and must not be reverse-driven; mixing status/readiness
+# without them can fail later coerce (ISSUE-205 plan loss).
 _PLAN_STATUS_OVERLAY_FIELDS = (
     "status",
     "executed_at",
     "execution_job_id",
     "tool_call_id",
-    "writeback_status",
-    "writeback_readiness",
-    "writeback_block_reason",
-    "effect_verification_status",
-    "rollback_status",
     "updated_at",
 )
 
@@ -114,8 +109,6 @@ def overlay_response_plan_from_orm(plan: ResponsePlan, orm_actions: list[Action]
     if plan.generated_by is ResponsePlanGeneratedBy.RECOVERED or not orm_actions:
         return plan
     by_id = {action.action_id: action for action in orm_actions}
-    if not by_id:
-        return plan
     refreshed_actions: list[Action] = []
     changed = False
     for action in plan.actions:
@@ -142,19 +135,29 @@ async def _overlay_plan_from_orm(
     plan: ResponsePlan,
     event_id: str,
     session: Any | None,
-) -> ResponsePlan:
+) -> tuple[ResponsePlan, bool]:
+    """Return ``(plan, overlay_ok)``.
+
+    ``overlay_ok`` is False when the Action-table read/apply failed. Callers
+    must not claim ``ReportPhaseStatus.EXECUTED`` with an unrefreshed snapshot.
+    A missing session is not a failure — overlay is simply skipped.
+    """
     if session is None:
-        return plan
+        return plan, True
     try:
-        orm_actions = await _load_actions_from_orm(session, event_id)
+        orm_actions = await _load_actions_from_orm(
+            session,
+            event_id,
+            action_ids={action.action_id for action in plan.actions},
+        )
+        return overlay_response_plan_from_orm(plan, orm_actions), True
     except Exception:
         logger.warning(
             "report input builder: Action overlay read failed event=%s",
             event_id,
             exc_info=True,
         )
-        return plan
-    return overlay_response_plan_from_orm(plan, orm_actions)
+        return plan, False
 
 
 def _plan_from_actions(event_id: str, actions: list[Action]) -> ResponsePlan:
@@ -195,11 +198,19 @@ async def _load_journal_field(session: Any, event_id: str, field_name: str) -> A
     return unwrap_journal_value(row[0])
 
 
-async def _load_actions_from_orm(session: Any, event_id: str) -> list[Action]:
+async def _load_actions_from_orm(
+    session: Any,
+    event_id: str,
+    *,
+    action_ids: set[str] | None = None,
+) -> list[Action]:
+    if action_ids is not None and not action_ids:
+        return []
+    stmt = select(orm.Action).where(orm.Action.event_id == event_id)
+    if action_ids is not None:
+        stmt = stmt.where(orm.Action.action_id.in_(action_ids))
     result = await session.execute(
-        select(orm.Action)
-        .where(orm.Action.event_id == event_id)
-        .order_by(orm.Action.plan_revision, orm.Action.created_at, orm.Action.action_id)
+        stmt.order_by(orm.Action.plan_revision, orm.Action.created_at, orm.Action.action_id)
     )
     return [action_from_orm(row) for row in result.scalars().all()]
 
@@ -233,7 +244,9 @@ async def _resolve_response_plan(
             # Fail closed: data exists but is unusable — never swallow it
             # into a silent 「暂无」 placeholder.
             return None, ReportPhaseStatus.INCOMPLETE
-        plan = await _overlay_plan_from_orm(plan, event_id, session)
+        plan, overlay_ok = await _overlay_plan_from_orm(plan, event_id, session)
+        if not overlay_ok:
+            return plan, ReportPhaseStatus.UNAVAILABLE
         return plan, ReportPhaseStatus.EXECUTED
 
     if session is not None:
@@ -250,7 +263,9 @@ async def _resolve_response_plan(
             plan = _coerce_response_plan(journal_raw)
             if plan is None:
                 return None, ReportPhaseStatus.INCOMPLETE
-            plan = await _overlay_plan_from_orm(plan, event_id, session)
+            plan, overlay_ok = await _overlay_plan_from_orm(plan, event_id, session)
+            if not overlay_ok:
+                return plan, ReportPhaseStatus.UNAVAILABLE
             return plan, ReportPhaseStatus.EXECUTED
         try:
             actions = await _load_actions_from_orm(session, event_id)
@@ -328,8 +343,8 @@ async def refresh_response_plan_snapshot(
     if plan is None:
         return None
     async with session_factory() as session:
-        refreshed = await _overlay_plan_from_orm(plan, event_id, session)
-    if refreshed is plan:
+        refreshed, overlay_ok = await _overlay_plan_from_orm(plan, event_id, session)
+    if not overlay_ok or refreshed is plan:
         return None
     return refreshed.model_dump(mode="json")
 

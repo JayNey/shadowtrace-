@@ -62,6 +62,7 @@ from app.services.analysis_only_pipeline import AnalysisOnlyPipeline
 from app.services.report_input_builder import (
     build_report_agent_input,
     overlay_response_plan_from_orm,
+    refresh_response_plan_snapshot,
 )
 
 EVENT_ID = "evt-report-builder-205"
@@ -366,6 +367,126 @@ def test_overlay_response_plan_from_orm_preserves_plan_and_never_fabricates() ->
     )
     assert overlaid is plan
     assert overlaid.actions[0].status is ActionStatus.PENDING
+
+
+class _SessionFactory:
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    def __call__(self) -> Any:
+        return self
+
+    async def __aenter__(self) -> Any:
+        return self._session
+
+    async def __aexit__(self, *_args: Any) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_overlay_action_read_failure_is_unavailable_not_stale_pending() -> None:
+    """ISSUE-329: overlay read failure must not claim executed + pending=all."""
+    pending_plan = ResponsePlan(
+        plan_id="plan-stale-pending",
+        actions=[
+            _response_action(action_id="act-orm-001", status=ActionStatus.PENDING),
+            _response_action(action_id="act-orm-002", status=ActionStatus.PENDING),
+        ],
+        strategy_summary="stale snapshot",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    session = _FakeSession([], error=RuntimeError("action overlay unavailable"))
+    result = await _build(
+        state={"response_plan": pending_plan.model_dump(mode="json")},
+        session=session,
+    )
+    assert result.response_plan is not None
+    assert result.response_plan.plan_id == "plan-stale-pending"
+    assert all(action.status is ActionStatus.PENDING for action in result.response_plan.actions)
+    assert result.response_phase_status is ReportPhaseStatus.UNAVAILABLE
+    summary = build_actions_status_summary(
+        response_actions=list(result.response_plan.actions),
+        response_phase_status=result.response_phase_status,
+    )
+    assert "处置阶段状态=unavailable。" in summary
+    assert "处置阶段状态=executed" not in summary
+    executed = _sections(
+        response_plan=result.response_plan,
+        response_phase_status=result.response_phase_status,
+    )["executed_actions"].content
+    assert "处置阶段状态=executed" not in executed
+    assert "unavailable" in executed
+
+
+@pytest.mark.asyncio
+async def test_refresh_response_plan_snapshot_returns_none_when_unchanged() -> None:
+    plan = _plan()
+    session = _FakeSession(
+        [
+            _ActionsResult(
+                [
+                    _orm_action_row(
+                        action_id=plan.actions[0].action_id,
+                        status=ActionStatus.SUCCESS.value,
+                    )
+                ]
+            )
+        ]
+    )
+    dumped = await refresh_response_plan_snapshot(
+        EVENT_ID,
+        plan_raw=plan.model_dump(mode="json"),
+        session_factory=_SessionFactory(session),
+    )
+    assert dumped is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_response_plan_snapshot_returns_updated_dump() -> None:
+    pending = ResponsePlan(
+        plan_id="plan-refresh",
+        actions=[_response_action(action_id="act-refresh-001", status=ActionStatus.PENDING)],
+        strategy_summary="stale",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    session = _FakeSession(
+        [
+            _ActionsResult(
+                [
+                    _orm_action_row(
+                        action_id="act-refresh-001",
+                        status=ActionStatus.SUCCESS.value,
+                    )
+                ]
+            )
+        ]
+    )
+    dumped = await refresh_response_plan_snapshot(
+        EVENT_ID,
+        plan_raw=pending.model_dump(mode="json"),
+        session_factory=_SessionFactory(session),
+    )
+    assert dumped is not None
+    assert dumped["plan_id"] == "plan-refresh"
+    assert dumped["actions"][0]["status"] == ActionStatus.SUCCESS.value
+
+
+@pytest.mark.asyncio
+async def test_refresh_response_plan_snapshot_returns_none_on_overlay_read_failure() -> None:
+    pending = ResponsePlan(
+        plan_id="plan-refresh-fail",
+        actions=[_response_action(status=ActionStatus.PENDING)],
+        strategy_summary="stale",
+        generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+    )
+    dumped = await refresh_response_plan_snapshot(
+        EVENT_ID,
+        plan_raw=pending.model_dump(mode="json"),
+        session_factory=_SessionFactory(
+            _FakeSession([], error=RuntimeError("db timeout"))
+        ),
+    )
+    assert dumped is None
 
 
 def test_build_actions_status_summary_splits_phase_and_counts() -> None:

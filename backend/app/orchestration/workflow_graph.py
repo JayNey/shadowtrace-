@@ -900,18 +900,34 @@ async def _refresh_response_plan_after_execute(
     state: InvestigationState,
     services: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    """Align state response_plan action statuses with Action rows after execute."""
+    """Align state response_plan action statuses with Action rows after execute.
+
+    Refresh is best-effort: a read-path failure must not fail the execute node
+    after ``execute_plan`` has already committed Action rows (ISSUE-329).
+    """
     plan_raw = state.get("response_plan")
     if plan_raw is None:
         return None
     session_factory = services.get("session_factory")
     if session_factory is None:
+        logger.warning(
+            "execute_node: session_factory missing, skip response_plan refresh event=%s",
+            state.get("event_id"),
+        )
         return None
-    return await refresh_response_plan_snapshot(
-        state["event_id"],
-        plan_raw=plan_raw,
-        session_factory=session_factory,
-    )
+    try:
+        return await refresh_response_plan_snapshot(
+            state["event_id"],
+            plan_raw=plan_raw,
+            session_factory=session_factory,
+        )
+    except Exception:
+        logger.warning(
+            "execute_node: response_plan refresh failed event=%s",
+            state.get("event_id"),
+            exc_info=True,
+        )
+        return None
 
 
 def build_investigation_graph(
@@ -1873,20 +1889,8 @@ def build_investigation_graph(
         except InvalidStateTransitionError as exc:
             if not (exc.current is EventStatus.VERIFYING and exc.target is EventStatus.VERIFYING):
                 raise
-            fallback_status: InvestigationState = {
-                "event_status": EventStatus.VERIFYING.value,
-            }
-            patch: dict[str, Any] = {"execution_ok": execution_ok}
-            if execution_ok:
-                refreshed_plan = await _refresh_response_plan_after_execute(state, services)
-                if refreshed_plan is not None:
-                    patch["response_plan"] = refreshed_plan
-            return _patch_state(
-                _trace(NODE_EXECUTE),
-                fallback_status,
-                patch,
-            )
-        patch = {"execution_ok": execution_ok}
+            status = cast(InvestigationState, {"event_status": EventStatus.VERIFYING.value})
+        patch: dict[str, Any] = {"execution_ok": execution_ok}
         if execution_ok:
             refreshed_plan = await _refresh_response_plan_after_execute(state, services)
             if refreshed_plan is not None:
