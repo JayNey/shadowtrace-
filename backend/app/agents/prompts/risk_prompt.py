@@ -7,6 +7,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.agents.prompts.prompt_blocks import (
+    bounded_decision_summary,
+    bounded_triage_reasoning,
+    evidence_prompt_block,
+)
 from app.core.llm.base import LLMMessage
 from app.models.agent_io import EvidenceOutput, TriageResult
 
@@ -143,27 +148,11 @@ def build_risk_messages(
             "event_type": triage_result.event_type.value,
             "severity": triage_result.severity.value,
             "ioc_list": list(triage_result.ioc_list),
-            "reasoning": triage_result.reasoning,
+            "decision_summary": bounded_decision_summary(triage_result),
+            "reasoning": bounded_triage_reasoning(triage_result),
         },
         "source_snapshot": source_context,
-        "evidence": {
-            "overall_confidence": evidence_output.overall_confidence,
-            "collection_status": evidence_output.collection_status.value,
-            "success_sources": list(evidence_output.success_sources),
-            "failed_sources": list(evidence_output.failed_sources),
-            "evidence_count": len(evidence_output.evidence_list),
-            "sample": [
-                {
-                    "source": item.source.value,
-                    "evidence_type": item.evidence_type,
-                    "description": item.description[:200],
-                    "confidence": item.confidence,
-                    "mitre_technique": item.mitre_technique,
-                    "is_conflicting": item.is_conflicting,
-                }
-                for item in evidence_output.evidence_list[:12]
-            ],
-        },
+        "evidence": evidence_prompt_block(evidence_output),
         "rag": rag_summary or {},
         "graph_summary": graph_summary or {},
         "required_factors": list(FACTOR_NAMES),

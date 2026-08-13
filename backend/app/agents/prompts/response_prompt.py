@@ -7,6 +7,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.agents.prompts.prompt_blocks import (
+    bounded_decision_summary,
+    bounded_triage_reasoning,
+    evidence_prompt_block,
+)
 from app.core.llm.base import LLMMessage
 from app.models.agent_io import EvidenceOutput, RiskAssessment, TriageResult
 
@@ -93,11 +98,7 @@ def build_response_plan_messages(
     )
     evidence_block: dict[str, Any] = {}
     if evidence_output is not None:
-        evidence_block = {
-            "overall_confidence": evidence_output.overall_confidence,
-            "collection_status": evidence_output.collection_status.value,
-            "evidence_count": len(evidence_output.evidence_list),
-        }
+        evidence_block = evidence_prompt_block(evidence_output)
     user_payload = {
         "event_type": triage_result.event_type.value,
         "severity": triage_result.severity.value,
@@ -106,7 +107,8 @@ def build_response_plan_messages(
         "entities": entities_summary,
         "available_tools": sorted(available_tools),
         "evidence": evidence_block,
-        "triage_reasoning": triage_result.reasoning[:500],
+        "decision_summary": bounded_decision_summary(triage_result),
+        "triage_reasoning": bounded_triage_reasoning(triage_result),
     }
     return [
         LLMMessage(role="system", content=system),
