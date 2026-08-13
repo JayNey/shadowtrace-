@@ -126,6 +126,30 @@ describe("EventOverviewCard", () => {
     expect(screen.queryByTestId("low-confidence-chip")).not.toBeInTheDocument();
   });
 
+  it("prefers risk_assessment severity and shows triage chip when divergent", () => {
+    renderCard(
+      makeDetail({
+        severity: "medium",
+        risk_score: 77,
+        event_context_snapshot: {
+          risk_assessment: {
+            risk_score: 77,
+            severity: "high",
+            confidence: 0.8,
+            risk_factors: [],
+            possible_false_positive: false,
+            scoring_mode: "rule_only",
+          },
+          triage_result: {
+            severity: "medium",
+          },
+        },
+      }),
+    );
+    expect(screen.getByText("高")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-triage-severity-tag")).toHaveTextContent("分诊 medium");
+  });
+
   it("submits trimmed reason and refreshes on success", async () => {
     const user = userEvent.setup();
     const onRefresh = vi.fn().mockResolvedValue(undefined);
