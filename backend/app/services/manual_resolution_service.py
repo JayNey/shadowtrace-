@@ -96,6 +96,7 @@ class ManualResolutionService:
         self._claim_lease_s = claim_lease_s
         self._max_attempts = max_attempts
         self._dispatch_scheduled = False
+        self._pending_in_process: list[tuple[str | None, str | None, str, tuple[str, ...]]] = []
 
     def bind_runtime(self, workflow_runtime: Any) -> None:
         self._runtime = workflow_runtime
@@ -496,17 +497,33 @@ class ManualResolutionService:
                 event_id or "-",
                 intent_id or "-",
                 type(exc).__name__,
-                exc_info=True,
             )
 
+        job = (intent_id, event_id, trigger, tuple(flagged_event_ids))
         if self._dispatch_scheduled:
+            self._pending_in_process.append(job)
+            record_dispatch_schedule(
+                domain="graph_resume",
+                outcome="resume_schedule_coalesced",
+            )
+            logger.info(
+                "graph resume in-process dispatch coalesced trigger=%s event_id=%s intent_id=%s",
+                trigger,
+                event_id or "-",
+                intent_id or "-",
+            )
             return
         self._dispatch_scheduled = True
 
-        async def _run() -> None:
+        async def _execute_one(
+            current_intent_id: str | None,
+            current_event_id: str | None,
+            current_trigger: str,
+            current_flags: tuple[str, ...],
+        ) -> None:
             try:
-                if intent_id is not None:
-                    ran = int(await self.claim_and_run_intent(intent_id))
+                if current_intent_id is not None:
+                    ran = int(await self.claim_and_run_intent(current_intent_id))
                 else:
                     ran = await self.claim_and_run_batch(limit=20)
                 if ran > 0:
@@ -518,22 +535,55 @@ class ManualResolutionService:
                     )
                 logger.info(
                     "graph resume in-process dispatch trigger=%s event_id=%s intent_id=%s ran=%s",
-                    trigger,
-                    event_id or "-",
-                    intent_id or "-",
+                    current_trigger,
+                    current_event_id or "-",
+                    current_intent_id or "-",
                     ran,
                 )
             except Exception:
                 logger.exception(
                     "graph resume in-process dispatch failed trigger=%s event_id=%s intent_id=%s",
-                    trigger,
-                    event_id or "-",
-                    intent_id or "-",
+                    current_trigger,
+                    current_event_id or "-",
+                    current_intent_id or "-",
                 )
-                for eid in flagged_event_ids:
-                    await self._set_resume_dispatch_degraded_flag(eid, trigger=trigger)
+                for eid in current_flags:
+                    await self._set_resume_dispatch_degraded_flag(eid, trigger=current_trigger)
+
+        async def _run() -> None:
+            pending = [job]
+            try:
+                while pending:
+                    (
+                        current_intent_id,
+                        current_event_id,
+                        current_trigger,
+                        current_flags,
+                    ) = pending.pop(0)
+                    await _execute_one(
+                        current_intent_id,
+                        current_event_id,
+                        current_trigger,
+                        current_flags,
+                    )
+                    pending.extend(self._pending_in_process)
+                    self._pending_in_process.clear()
             finally:
+                leftover = list(self._pending_in_process)
+                self._pending_in_process.clear()
                 self._dispatch_scheduled = False
+                for (
+                    leftover_intent_id,
+                    leftover_event_id,
+                    leftover_trigger,
+                    leftover_flags,
+                ) in leftover:
+                    self.schedule_dispatch(
+                        event_id=leftover_event_id,
+                        intent_id=leftover_intent_id,
+                        trigger=leftover_trigger,
+                        event_ids=list(leftover_flags),
+                    )
 
         try:
             loop = asyncio.get_running_loop()

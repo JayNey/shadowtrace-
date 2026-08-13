@@ -670,7 +670,6 @@ class InvestigationIntentService:
             intent_id or "-",
             event_id or "-",
             type(exc).__name__,
-            exc_info=True,
         )
 
     def _maybe_schedule_in_process_fallback(
@@ -697,14 +696,14 @@ class InvestigationIntentService:
                         trigger=trigger,
                     )
                 )
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "investigation intent in-process dispatch fallback failed "
-                    "trigger=%s intent_id=%s event_id=%s",
+                    "trigger=%s intent_id=%s event_id=%s error=%s",
                     trigger,
                     intent_id,
                     event_id,
-                    exc_info=True,
+                    _safe_dispatch_error(exc),
                 )
             return
         loop.create_task(
@@ -751,14 +750,14 @@ class InvestigationIntentService:
                 int(published),
             )
             return int(published)
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "investigation intent in-process dispatch fallback failed "
-                "trigger=%s intent_id=%s event_id=%s",
+                "trigger=%s intent_id=%s event_id=%s error=%s",
                 trigger,
                 intent_id,
                 event_id,
-                exc_info=True,
+                _safe_dispatch_error(exc),
             )
             return 0
 
@@ -1537,7 +1536,6 @@ class InvestigationIntentService:
                 target.intent_id,
                 target.event_id,
                 _safe_dispatch_error(exc),
-                exc_info=True,
             )
             await self._revert_enqueued_after_publish_failure(
                 target.intent_id,
@@ -1556,7 +1554,6 @@ class InvestigationIntentService:
                 target.intent_id,
                 target.event_id,
                 _safe_dispatch_error(exc),
-                exc_info=True,
             )
             await self._revert_enqueued_after_publish_failure(
                 target.intent_id,
@@ -1583,7 +1580,6 @@ class InvestigationIntentService:
                 target.intent_id,
                 target.event_id,
                 _safe_dispatch_error(exc),
-                exc_info=True,
             )
             await self._revert_enqueued_after_unexpected_failure(
                 target.intent_id,

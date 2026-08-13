@@ -434,6 +434,7 @@ _GRAPH_RESUME_DISPATCH_OUTCOMES = frozenset(
         "resume_enqueue_failed",
         "resume_schedule_skipped_no_loop",
         "resume_in_process_empty",
+        "resume_schedule_coalesced",
     }
 )
 
@@ -687,12 +688,14 @@ def reset_metrics_for_tests() -> None:
 
 
 def reset_investigation_intent_enqueue_metrics_for_tests() -> None:
-    """Reset only investigation intent enqueue process counters."""
+    """Reset enqueue counters and coupled dispatch-schedule keys."""
     global \
         _process_investigation_intent_enqueue_success, \
-        _process_investigation_intent_enqueue_failure
+        _process_investigation_intent_enqueue_failure, \
+        _process_dispatch_schedule
     _process_investigation_intent_enqueue_success = 0
     _process_investigation_intent_enqueue_failure = 0
+    _process_dispatch_schedule = {}
 
 
 def reset_dispatch_schedule_metrics_for_tests() -> None:
