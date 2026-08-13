@@ -1982,6 +1982,114 @@ class TestTriageSourceEntityMerge:
         assert "storage-sync-cdn.example" in {d.fqdn for d in result.entities.domains}
         assert result.degraded is False
 
+    @pytest.mark.asyncio
+    async def test_llm_non_high_conf_host_kept_when_appendix_grounds_corpus(self):
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+        from app.models.agent_io import TriageStructuredPromptContext
+
+        blurry = "Correlation: elevated session and volume signals on analytics segment"
+        llm_entities = EntitySet(
+            hosts=[HostEntity(entity_id="llm-host", hostname="fileserver")],
+        )
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.DATA_EXFILTRATION,
+                entities=llm_entities,
+                decision_summary="Copied fileserver from structured fields.",
+            ),
+            model_name="mock",
+        )
+
+        class _CapturingLLMClient:
+            async def chat(self, messages, **kwargs):
+                del messages, kwargs
+                return llm_response
+
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(llm_client=_CapturingLLMClient(), working_memory=wm)
+        input_ = _make_input(
+            raw_event_summary=blurry,
+            structured_prompt_context=TriageStructuredPromptContext(
+                normalized_fields={"hostname": "fileserver"},
+            ),
+        )
+        result = await agent._run(input_)
+        assert any(h.hostname == "fileserver" for h in result.entities.hosts)
+        assert result.degraded is False
+
+    @pytest.mark.asyncio
+    async def test_llm_non_high_conf_host_rejected_without_corpus(self):
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+
+        blurry = "Correlation: elevated session and volume signals on analytics segment"
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.DATA_EXFILTRATION,
+                entities=EntitySet(
+                    hosts=[HostEntity(entity_id="llm-host", hostname="fileserver")],
+                ),
+                decision_summary="Guessed fileserver from title.",
+            ),
+            model_name="mock",
+        )
+
+        class _CapturingLLMClient:
+            async def chat(self, messages, **kwargs):
+                del messages, kwargs
+                return llm_response
+
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(llm_client=_CapturingLLMClient(), working_memory=wm)
+        result = await agent._run(_make_input(raw_event_summary=blurry))
+        assert all(h.hostname != "fileserver" for h in result.entities.hosts)
+        assert int(result.entity_rejection_summary.get("total_rejected") or 0) >= 1
+
+    @pytest.mark.asyncio
+    async def test_llm_entity_absent_from_corpus_is_dropped_on_blurry_title(self):
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+        from app.models.agent_io import TriageStructuredPromptContext
+
+        blurry = "Correlation: elevated session and volume signals on analytics segment"
+        llm_entities = EntitySet(
+            hosts=[
+                HostEntity(entity_id="llm-host", hostname="fileserver"),
+                HostEntity(entity_id="llm-phantom", hostname="intranetbox"),
+            ],
+        )
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.DATA_EXFILTRATION,
+                entities=llm_entities,
+                decision_summary="Invented intranetbox.",
+            ),
+            model_name="mock",
+        )
+
+        class _CapturingLLMClient:
+            async def chat(self, messages, **kwargs):
+                del messages, kwargs
+                return llm_response
+
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(llm_client=_CapturingLLMClient(), working_memory=wm)
+        input_ = _make_input(
+            raw_event_summary=blurry,
+            structured_prompt_context=TriageStructuredPromptContext(
+                normalized_fields={"hostname": "fileserver"},
+            ),
+        )
+        result = await agent._run(input_)
+        hostnames = {h.hostname for h in result.entities.hosts}
+        assert "fileserver" in hostnames
+        assert "intranetbox" not in hostnames
+        assert int(result.entity_rejection_summary.get("total_rejected") or 0) >= 1
+
 
 class TestTriageDecisionBasisProjection:
     def test_decision_basis_includes_entity_audit_fields(self):

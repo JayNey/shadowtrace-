@@ -8,7 +8,11 @@ from typing import Any, Protocol
 from sqlalchemy import select
 
 from app.db import models as orm
-from app.models.agent_io import TriageAgentInput, TriageRelatedAlertHint, TriageStructuredPromptContext
+from app.models.agent_io import (
+    TriageAgentInput,
+    TriageRelatedAlertHint,
+    TriageStructuredPromptContext,
+)
 from app.models.context import EventContext
 from app.models.entities import EntitySet
 from app.models.enums import SourceObjectKind
@@ -78,7 +82,11 @@ def _normalized_hint_fields(normalized: dict[str, Any]) -> dict[str, str]:
     return fields
 
 
-def _related_alert_title(normalized: dict[str, Any], raw_payload: dict[str, Any], ref: SourceReference) -> str:
+def _related_alert_title(
+    normalized: dict[str, Any],
+    raw_payload: dict[str, Any],
+    ref: SourceReference,
+) -> str:
     for candidate in (
         normalized.get("title"),
         normalized.get("alert_type"),
@@ -148,12 +156,67 @@ async def _load_related_alert_hints(
     return hints[:_MAX_RELATED_ALERTS]
 
 
+async def _load_source_normalized(
+    event_service: _EventServiceLike,
+    event: SecurityEvent,
+) -> dict[str, Any]:
+    """Load full ticket normalized fields from SourceObject (not risk-baseline snapshot)."""
+    session_factory = getattr(event_service, "_session_factory", None)
+    if session_factory is None:
+        return {}
+
+    try:
+        async with session_factory() as session:
+            row = None
+            record_id = event.current_primary_source_record_id
+            if record_id:
+                row = await session.get(orm.SourceObject, record_id)
+            if row is None:
+                ref = event.creation_source_ref
+                row = await session.scalar(
+                    select(orm.SourceObject).where(
+                        orm.SourceObject.source_product == ref.source_product,
+                        orm.SourceObject.source_tenant_id == ref.source_tenant_id,
+                        orm.SourceObject.connector_id == ref.connector_id,
+                        orm.SourceObject.source_kind == ref.source_kind.value,
+                        orm.SourceObject.source_object_id == ref.source_object_id,
+                    )
+                )
+            if row is None:
+                return {}
+            return dict(row.normalized or {})
+    except Exception:
+        logger.debug(
+            "triage input: source normalized lookup failed for event=%s",
+            event.event_id,
+            exc_info=True,
+        )
+        return {}
+
+
+def _merge_normalized_dicts(*parts: dict[str, Any]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for part in parts:
+        for key, value in part.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                merged[key] = value
+    return merged
+
+
 def _build_structured_prompt_context(
-  event: Any,
-  *,
-  related_alerts: list[TriageRelatedAlertHint],
+    event: Any,
+    *,
+    related_alerts: list[TriageRelatedAlertHint],
+    source_normalized: dict[str, Any] | None = None,
 ) -> TriageStructuredPromptContext | None:
-    normalized_fields = _normalized_hint_fields(_normalized_dict_from_event(event))
+    merged = _merge_normalized_dicts(
+        _normalized_dict_from_event(event),
+        source_normalized or {},
+    )
+    normalized_fields = _normalized_hint_fields(merged)
     if not normalized_fields and not related_alerts:
         return None
     return TriageStructuredPromptContext(
@@ -203,11 +266,14 @@ async def build_triage_agent_input(
                     hint_entities = entities
 
             related_alerts: list[TriageRelatedAlertHint] = []
+            source_normalized: dict[str, Any] = {}
             if isinstance(loaded_event, SecurityEvent):
+                source_normalized = await _load_source_normalized(event_service, loaded_event)
                 related_alerts = await _load_related_alert_hints(event_service, loaded_event)
             structured_prompt_context = _build_structured_prompt_context(
                 loaded_event,
                 related_alerts=related_alerts,
+                source_normalized=source_normalized,
             )
 
     return TriageAgentInput(

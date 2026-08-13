@@ -335,6 +335,34 @@ def _format_hint_entity_lines(hint_entities: EntitySet | None) -> list[str]:
     return lines
 
 
+def _format_host_grounding_lines(
+    hint_entities: EntitySet | None,
+    structured_context: TriageStructuredPromptContext | None,
+) -> list[str]:
+    """Emit `host <name>` lines so LLM hostname validation can ground on the appendix."""
+    names: list[str] = []
+    if structured_context is not None:
+        for key in ("hostname", "secondary_host"):
+            value = structured_context.normalized_fields.get(key)
+            if value:
+                names.append(value)
+    if hint_entities is not None:
+        for host in hint_entities.hosts[:_MAX_HINT_ENTITIES_PER_CATEGORY]:
+            if host.hostname:
+                names.append(host.hostname)
+
+    seen: set[str] = set()
+    lines: list[str] = []
+    for raw in names:
+        name = str(raw).strip()
+        key = name.lower()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"host {_truncate(name, limit=_MAX_NORMALIZED_VALUE_CHARS)}")
+    return lines
+
+
 def format_triage_structured_appendix(
     *,
     hint_entities: EntitySet | None = None,
@@ -356,6 +384,7 @@ def format_triage_structured_appendix(
             )
 
     lines.extend(_format_hint_entity_lines(hint_entities))
+    lines.extend(_format_host_grounding_lines(hint_entities, structured_context))
 
     if structured_context is not None:
         for item in structured_context.related_alerts[:_MAX_RELATED_ALERTS]:

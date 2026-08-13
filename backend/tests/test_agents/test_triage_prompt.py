@@ -35,7 +35,10 @@ def test_format_structured_appendix_includes_normalized_and_hints() -> None:
     assert "Structured ticket fields" in appendix
     assert "normalized_src_ip: 198.51.100.44" in appendix
     assert "normalized_secondary_host: SRV-DB-STG-02" in appendix
+    assert "normalized_account: svc-analytics-47" in appendix
     assert "hint_domains: storage-sync-cdn.example" in appendix
+    assert "host WKS-DATA-031" in appendix
+    assert "host SRV-DB-STG-02" in appendix
     assert "related_alert: title=VPN session velocity; tag=session_geo_delta" in appendix
 
 
@@ -73,6 +76,8 @@ def test_validation_corpus_aligns_with_prompt_appendix() -> None:
     messages = build_triage_messages(alert, structured_context=context)
     assert "normalized_hostname: WKS-DATA-031" in corpus
     assert "normalized_hostname: WKS-DATA-031" in messages[1].content
+    assert "host WKS-DATA-031" in corpus
+    assert "host WKS-DATA-031" in messages[1].content
 
 
 def test_related_alerts_are_capped_at_five() -> None:
