@@ -36,7 +36,7 @@ def evidence_prompt_block(evidence_output: EvidenceOutput) -> dict[str, Any]:
             {
                 "source": item.source.value,
                 "evidence_type": item.evidence_type,
-                "description": item.description[:_EVIDENCE_DESCRIPTION_LIMIT],
+                "description": (item.description or "")[:_EVIDENCE_DESCRIPTION_LIMIT],
                 "confidence": item.confidence,
                 "mitre_technique": item.mitre_technique,
                 "is_conflicting": item.is_conflicting,
