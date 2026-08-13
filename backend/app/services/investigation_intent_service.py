@@ -22,9 +22,9 @@ from app.core.errors import (
     InvestigationInProgressError,
     ValidationError,
 )
-from app.core.metrics import record_investigation_intent_enqueue
+from app.core.metrics import record_dispatch_schedule, record_investigation_intent_enqueue
 from app.db import models as orm
-from app.models.enums import EventStatus, InvestigationIntentStatus
+from app.models.enums import EventStatus, InvestigationIntentStatus, WritebackStatus
 from app.models.investigation_intent import (
     INTENT_KIND_AUTO_INVESTIGATE,
     INTENT_KIND_HTTP_INVESTIGATE,
@@ -47,6 +47,28 @@ from app.services.degraded_flag_service import DegradedFlagService
 logger = logging.getLogger(__name__)
 
 _DISPATCH_WORKER_ID = "intent-dispatcher-1"
+
+# ISSUE-324: one bounded in-process fallback when Celery enqueue fails after
+# SoftTimeLimit RECOVERED. Conditions: pure investigation phase, no response
+# execution, no UNKNOWN outbox. Other triggers rely on beat reconcile.
+# Fallback publish failure must return RETRY without burning attempt/DEAD —
+# SoftTimeLimit already counted this recovery.
+_DISPATCH_IN_PROCESS_FALLBACK_TRIGGERS = frozenset({"soft_time_limit_recovered"})
+
+
+def _safe_dispatch_error(exc: BaseException) -> str:
+    """Broker/AMQP exceptions often embed credentials; persist the type only."""
+    return type(exc).__name__
+
+
+_PURE_INVESTIGATION_DISPATCH_STATUSES = frozenset(
+    {
+        EventStatus.TRIAGING.value,
+        EventStatus.COLLECTING_EVIDENCE.value,
+        EventStatus.ANALYZING.value,
+        EventStatus.SCORING.value,
+    }
+)
 
 # Event left NEW while intent is STARTED beyond this window → worker crash / retry.
 _STARTED_STALE_MIN_S = 660
@@ -559,33 +581,287 @@ class InvestigationIntentService:
         intent_id: str | None = None,
         trigger: str = "unspecified",
     ) -> None:
-        """Best-effort trigger for any committed pending intent; never raises."""
+        """Best-effort trigger for any committed pending intent; never raises.
+
+        SoftTimeLimit RECOVERED callers should prefer
+        :meth:`schedule_dispatch_async` so the bounded in-process fallback is
+        awaited before ``asyncio.run`` tears down the loop (ISSUE-324).
+        """
         if self._settings.task_mode is not TaskMode.CELERY:
             return
         try:
-            from app.tasks.investigation_intent_tasks import dispatch_pending_investigation_intents
-
-            dispatch_pending_investigation_intents.delay()
-        except Exception:
-            record_investigation_intent_enqueue(result="failure")
-            logger.error(
-                "failed to enqueue investigation intent dispatch "
-                "trigger=%s intent_id=%s event_id=%s",
-                trigger,
-                intent_id or "-",
-                event_id or "-",
-                exc_info=True,
+            self._enqueue_celery_dispatch()
+        except Exception as exc:
+            self._record_dispatch_enqueue_failure(
+                exc,
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger=trigger,
             )
             if event_id is not None:
                 self._schedule_dispatch_degraded_flag(event_id)
+            self._maybe_schedule_in_process_fallback(
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger=trigger,
+            )
             return
         record_investigation_intent_enqueue(result="success")
         logger.debug(
-            "enqueued investigation intent dispatch trigger=%s intent_id=%s event_id=%s",
+            "investigation intent dispatch enqueued trigger=%s intent_id=%s event_id=%s",
             trigger,
             intent_id or "-",
             event_id or "-",
         )
+
+    async def schedule_dispatch_async(
+        self,
+        *,
+        event_id: str | None = None,
+        intent_id: str | None = None,
+        trigger: str = "unspecified",
+    ) -> None:
+        """Async dispatch trigger that awaits the SoftTimeLimit in-process fallback."""
+        if self._settings.task_mode is not TaskMode.CELERY:
+            return
+        try:
+            self._enqueue_celery_dispatch()
+        except Exception as exc:
+            self._record_dispatch_enqueue_failure(
+                exc,
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger=trigger,
+            )
+            if event_id is not None:
+                await self._set_dispatch_degraded_flag(event_id)
+            await self._run_in_process_dispatch_fallback(
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger=trigger,
+            )
+            return
+        record_investigation_intent_enqueue(result="success")
+        logger.debug(
+            "investigation intent dispatch enqueued trigger=%s intent_id=%s event_id=%s",
+            trigger,
+            intent_id or "-",
+            event_id or "-",
+        )
+
+    def _enqueue_celery_dispatch(self) -> None:
+        from app.tasks.investigation_intent_tasks import dispatch_pending_investigation_intents
+
+        dispatch_pending_investigation_intents.delay()
+
+    def _record_dispatch_enqueue_failure(
+        self,
+        exc: Exception,
+        *,
+        event_id: str | None,
+        intent_id: str | None,
+        trigger: str,
+    ) -> None:
+        record_investigation_intent_enqueue(result="failure")
+        logger.error(
+            "investigation intent dispatch enqueue failed trigger=%s intent_id=%s "
+            "event_id=%s error=%s",
+            trigger,
+            intent_id or "-",
+            event_id or "-",
+            type(exc).__name__,
+        )
+
+    def _maybe_schedule_in_process_fallback(
+        self,
+        *,
+        event_id: str | None,
+        intent_id: str | None,
+        trigger: str,
+    ) -> None:
+        if trigger not in _DISPATCH_IN_PROCESS_FALLBACK_TRIGGERS:
+            return
+        if event_id is None or intent_id is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # Sync Celery/context without a loop: run the bounded fallback to
+            # completion so SoftTimeLimit recovery does not depend on beat.
+            try:
+                asyncio.run(
+                    self._run_in_process_dispatch_fallback(
+                        event_id=event_id,
+                        intent_id=intent_id,
+                        trigger=trigger,
+                    )
+                )
+            except Exception as exc:
+                logger.warning(
+                    "investigation intent in-process dispatch fallback failed "
+                    "trigger=%s intent_id=%s event_id=%s error=%s",
+                    trigger,
+                    intent_id,
+                    event_id,
+                    _safe_dispatch_error(exc),
+                )
+            return
+        loop.create_task(
+            self._run_in_process_dispatch_fallback(
+                event_id=event_id,
+                intent_id=intent_id,
+                trigger=trigger,
+            )
+        )
+
+    async def _run_in_process_dispatch_fallback(
+        self,
+        *,
+        event_id: str | None,
+        intent_id: str | None,
+        trigger: str,
+    ) -> int:
+        if trigger not in _DISPATCH_IN_PROCESS_FALLBACK_TRIGGERS:
+            return 0
+        if event_id is None or intent_id is None:
+            return 0
+        try:
+            if not await self._is_safe_for_in_process_dispatch_fallback(
+                event_id=event_id,
+                intent_id=intent_id,
+            ):
+                return 0
+            # Bind to the recovered intent — never steal an older global backlog row.
+            published = await self.claim_and_publish_intent(
+                intent_id,
+                conserve_retry_budget=True,
+            )
+            if published:
+                record_dispatch_schedule(
+                    domain="investigation_intent",
+                    outcome="dispatch_fallback_started",
+                )
+            logger.info(
+                "investigation intent in-process dispatch fallback trigger=%s "
+                "intent_id=%s event_id=%s published=%s",
+                trigger,
+                intent_id,
+                event_id,
+                int(published),
+            )
+            return int(published)
+        except Exception as exc:
+            logger.warning(
+                "investigation intent in-process dispatch fallback failed "
+                "trigger=%s intent_id=%s event_id=%s error=%s",
+                trigger,
+                intent_id,
+                event_id,
+                _safe_dispatch_error(exc),
+            )
+            return 0
+
+    async def _is_safe_for_in_process_dispatch_fallback(
+        self,
+        *,
+        event_id: str,
+        intent_id: str,
+    ) -> bool:
+        async with self._session_factory() as session:
+            intent_row = await session.get(orm.InvestigationIntent, intent_id)
+            event_row = await session.get(orm.SecurityEvent, event_id)
+            if intent_row is None or event_row is None:
+                return False
+            if intent_row.event_id != event_id:
+                return False
+            status = InvestigationIntentStatus(intent_row.status)
+            if status not in {
+                InvestigationIntentStatus.PENDING,
+                InvestigationIntentStatus.RETRY,
+            }:
+                return False
+            if bool(intent_row.include_response_execution):
+                return False
+            if event_row.status not in _PURE_INVESTIGATION_DISPATCH_STATUSES:
+                return False
+            unknown_rows = (
+                await session.scalars(
+                    select(orm.DispositionOutbox.latest_writeback_status).where(
+                        orm.DispositionOutbox.event_id == event_id,
+                        orm.DispositionOutbox.superseded_by_disposition_id.is_(None),
+                    )
+                )
+            ).all()
+            if any(status == WritebackStatus.UNKNOWN.value for status in unknown_rows):
+                return False
+        return True
+
+    async def claim_and_publish_intent(
+        self,
+        intent_id: str,
+        *,
+        conserve_retry_budget: bool = False,
+    ) -> bool:
+        """Claim and publish one specific intent (ISSUE-324 SoftTimeLimit fallback)."""
+        claimed = await self._claim_intent(intent_id)
+        if claimed is None:
+            return False
+        return await self._publish_claimed_intent(
+            claimed,
+            conserve_retry_budget=conserve_retry_budget,
+        )
+
+    async def _claim_intent(self, intent_id: str) -> str | None:
+        """Claim a single PENDING/RETRY (or expired CLAIMED) intent by id."""
+        now = datetime.now(UTC)
+        lease = timedelta(seconds=int(self._settings.auto_investigate_claim_lease_s))
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    orm.InvestigationIntent,
+                    intent_id,
+                    with_for_update=True,
+                )
+                if row is None:
+                    return None
+                current = InvestigationIntentStatus(row.status)
+                if (
+                    current is InvestigationIntentStatus.CLAIMED
+                    and row.claim_expires_at is not None
+                    and row.claim_expires_at < now
+                ):
+                    validate_intent_transition(current, InvestigationIntentStatus.RETRY)
+                    row.status = InvestigationIntentStatus.RETRY.value
+                    row.attempt = int(row.attempt or 0) + 1
+                    current = InvestigationIntentStatus.RETRY
+                if current not in {
+                    InvestigationIntentStatus.PENDING,
+                    InvestigationIntentStatus.RETRY,
+                }:
+                    return None
+                validate_intent_transition(current, InvestigationIntentStatus.CLAIMED)
+                row.status = InvestigationIntentStatus.CLAIMED.value
+                row.claim_owner = self._worker_id
+                row.claim_expires_at = now + lease
+                return row.intent_id
+
+    async def _set_dispatch_degraded_flag(self, event_id: str) -> None:
+        degraded = self._degraded
+        if degraded is None:
+            return
+        try:
+            await degraded.set_flag(
+                event_id,
+                "auto_investigate_dispatch_unavailable",
+                True,
+                writer="InvestigationIntentService",
+            )
+        except Exception:
+            logger.warning(
+                "failed to set auto_investigate_dispatch_unavailable event=%s",
+                event_id,
+                exc_info=True,
+            )
 
     def _schedule_dispatch_degraded_flag(self, event_id: str) -> None:
         """Best-effort event degraded flag when the dispatch trigger cannot enqueue."""
@@ -593,26 +869,19 @@ class InvestigationIntentService:
         if degraded is None:
             return
 
-        async def _set_flag() -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
             try:
-                await degraded.set_flag(
-                    event_id,
-                    "auto_investigate_dispatch_unavailable",
-                    True,
-                    writer="InvestigationIntentService",
-                )
+                asyncio.run(self._set_dispatch_degraded_flag(event_id))
             except Exception:
                 logger.warning(
                     "failed to set auto_investigate_dispatch_unavailable event=%s",
                     event_id,
                     exc_info=True,
                 )
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
             return
-        loop.create_task(_set_flag())
+        loop.create_task(self._set_dispatch_degraded_flag(event_id))
 
     async def pending_dispatch_stats(self) -> dict[str, int | float | None]:
         """Return pending/retry backlog count and oldest age for health probes."""
@@ -1028,18 +1297,28 @@ class InvestigationIntentService:
         self,
         row: orm.InvestigationIntent,
         exc: Exception,
+        *,
+        conserve_retry_budget: bool = False,
     ) -> None:
-        if int(row.attempt or 0) + 1 >= int(self._settings.auto_investigate_max_attempts):
+        safe_error = _safe_dispatch_error(exc)
+        if conserve_retry_budget:
+            await self._set_status_in_session(
+                row,
+                InvestigationIntentStatus.RETRY,
+                last_error=safe_error,
+            )
+            row.broker_task_id = None
+        elif int(row.attempt or 0) + 1 >= int(self._settings.auto_investigate_max_attempts):
             await self._set_status_in_session(
                 row,
                 InvestigationIntentStatus.DEAD,
-                last_error=str(exc),
+                last_error=safe_error,
             )
         else:
             await self._set_status_in_session(
                 row,
                 InvestigationIntentStatus.RETRY,
-                last_error=str(exc),
+                last_error=safe_error,
                 increment_attempt=True,
             )
         if self._degraded is not None:
@@ -1167,6 +1446,8 @@ class InvestigationIntentService:
         self,
         intent_id: str,
         exc: Exception,
+        *,
+        conserve_retry_budget: bool = False,
     ) -> None:
         async with self._session_factory() as session:
             async with session.begin():
@@ -1175,12 +1456,18 @@ class InvestigationIntentService:
                     return
                 if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.ENQUEUED:
                     return
-                await self._handle_publish_transient_failure(row, exc)
+                await self._handle_publish_transient_failure(
+                    row,
+                    exc,
+                    conserve_retry_budget=conserve_retry_budget,
+                )
 
     async def _revert_enqueued_after_unexpected_failure(
         self,
         intent_id: str,
         exc: Exception,
+        *,
+        conserve_retry_budget: bool = False,
     ) -> None:
         async with self._session_factory() as session:
             async with session.begin():
@@ -1189,14 +1476,27 @@ class InvestigationIntentService:
                     return
                 if InvestigationIntentStatus(row.status) is not InvestigationIntentStatus.ENQUEUED:
                     return
-                await self._set_status_in_session(
-                    row,
-                    InvestigationIntentStatus.DEAD,
-                    last_error=str(exc),
-                )
+                if conserve_retry_budget:
+                    await self._set_status_in_session(
+                        row,
+                        InvestigationIntentStatus.RETRY,
+                        last_error=_safe_dispatch_error(exc),
+                    )
+                else:
+                    await self._set_status_in_session(
+                        row,
+                        InvestigationIntentStatus.DEAD,
+                        last_error=_safe_dispatch_error(exc),
+                    )
                 row.broker_task_id = None
 
-    async def _publish_claimed_intent(self, intent_id: str, *, strict: bool = False) -> bool:
+    async def _publish_claimed_intent(
+        self,
+        intent_id: str,
+        *,
+        strict: bool = False,
+        conserve_retry_budget: bool = False,
+    ) -> bool:
         target = await self._commit_enqueued_publish_target(intent_id)
         if target is None:
             return False
@@ -1232,12 +1532,16 @@ class InvestigationIntentService:
         except DependencyUnavailableError as exc:
             await delete_task_metadata(target.task_id)
             logger.warning(
-                "task metadata store unavailable intent=%s event=%s",
+                "task metadata store unavailable intent=%s event=%s error=%s",
                 target.intent_id,
                 target.event_id,
-                exc_info=True,
+                _safe_dispatch_error(exc),
             )
-            await self._revert_enqueued_after_publish_failure(target.intent_id, exc)
+            await self._revert_enqueued_after_publish_failure(
+                target.intent_id,
+                exc,
+                conserve_retry_budget=conserve_retry_budget,
+            )
             if target.include_response_execution:
                 await self._set_auto_response_dispatch_degraded(target.event_id)
             if strict:
@@ -1249,10 +1553,13 @@ class InvestigationIntentService:
                 "broker publish failed intent=%s event=%s err=%s",
                 target.intent_id,
                 target.event_id,
-                exc,
-                exc_info=True,
+                _safe_dispatch_error(exc),
             )
-            await self._revert_enqueued_after_publish_failure(target.intent_id, exc)
+            await self._revert_enqueued_after_publish_failure(
+                target.intent_id,
+                exc,
+                conserve_retry_budget=conserve_retry_budget,
+            )
             if target.include_response_execution:
                 await self._set_auto_response_dispatch_degraded(target.event_id)
             if strict:
@@ -1269,12 +1576,16 @@ class InvestigationIntentService:
         except Exception as exc:
             await delete_task_metadata(target.task_id)
             logger.error(
-                "unexpected publish failure intent=%s event=%s",
+                "unexpected publish failure intent=%s event=%s error=%s",
                 target.intent_id,
                 target.event_id,
-                exc_info=True,
+                _safe_dispatch_error(exc),
             )
-            await self._revert_enqueued_after_unexpected_failure(target.intent_id, exc)
+            await self._revert_enqueued_after_unexpected_failure(
+                target.intent_id,
+                exc,
+                conserve_retry_budget=conserve_retry_budget,
+            )
             if target.include_response_execution:
                 await self._set_auto_response_dispatch_degraded(target.event_id)
             return False

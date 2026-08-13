@@ -34,6 +34,8 @@ DEGRADED_FLAG_ALLOWLIST: frozenset[str] = frozenset(
         "decision_audit_degraded",
         "auto_investigate_dispatch_unavailable",
         "auto_response_dispatch_unavailable",
+        # ISSUE-324 graph resume dispatch schedule failures without event loop
+        "graph_resume_dispatch_unavailable",
         # ISSUE-309 output quality evaluator outage observability
         "output_quality_evaluator_unavailable",
         # ISSUE-193 graph resume observability
@@ -77,6 +79,8 @@ DEGRADED_FLAG_TRUSTED_CALLERS: frozenset[str] = frozenset(
         "EventContextStore",
         # ISSUE-193 — graph resume failure observability
         "GraphResumeService",
+        # ISSUE-324 — graph resume dispatch schedule failures
+        "ManualResolutionService",
         # ISSUE-197 — auditable event_type heuristic / LLM fallback
         "TriageAgent",
         # ISSUE-200 — triage vs risk scoring inconsistency audit

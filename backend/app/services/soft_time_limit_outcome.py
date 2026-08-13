@@ -609,7 +609,9 @@ async def apply_soft_time_limit_outcome(
             )
 
     if decision is SoftTimeLimitDecision.RECOVERED and intent_service is not None and intent_id:
-        intent_service.schedule_dispatch(
+        # Await async dispatch so SoftTimeLimit's asyncio.run() does not cancel
+        # the bounded in-process fallback (ISSUE-324).
+        await intent_service.schedule_dispatch_async(
             event_id=event_id,
             intent_id=intent_id,
             trigger="soft_time_limit_recovered",

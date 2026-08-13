@@ -321,7 +321,7 @@ async def test_apply_recovered_marks_intent_retry_without_event_failed(
         _invalidate,
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -334,7 +334,11 @@ async def test_apply_recovered_marks_intent_retry_without_event_failed(
     assert result.decision is SoftTimeLimitDecision.RECOVERED
     assert invalidated == []
     assert soft_time_limit_outcome_health_snapshot()["soft_limit_recovered"] == 1
-    intent_service.schedule_dispatch.assert_called_once()
+    intent_service.schedule_dispatch_async.assert_awaited_once_with(
+        event_id=event_id,
+        intent_id=intent_id,
+        trigger="soft_time_limit_recovered",
+    )
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -380,7 +384,7 @@ async def test_apply_soft_limit_stale_broker_is_full_noop(
         _invalidate,
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -393,7 +397,7 @@ async def test_apply_soft_limit_stale_broker_is_full_noop(
     assert result.decision is SoftTimeLimitDecision.IGNORED
     assert result.reason == "soft_time_limit_exceeded:stale_broker"
     assert invalidated == []
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
     assert soft_time_limit_outcome_health_snapshot()["soft_limit_ignored"] == 1
 
     async with session_factory() as session:
@@ -428,7 +432,7 @@ async def test_apply_soft_limit_reconcile_does_not_schedule_dispatch(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
     degraded_flags = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
@@ -441,7 +445,7 @@ async def test_apply_soft_limit_reconcile_does_not_schedule_dispatch(
         degraded_flags=degraded_flags,
     )
     assert result.decision is SoftTimeLimitDecision.RECONCILE_REQUIRED
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
     degraded_flags.set_flag.assert_awaited()
     assert soft_time_limit_outcome_health_snapshot()["soft_limit_reconcile_required"] == 1
 
@@ -476,7 +480,7 @@ async def test_apply_reporting_marks_failed_dead_not_recovered(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -487,7 +491,7 @@ async def test_apply_reporting_marks_failed_dead_not_recovered(
         intent_service=intent_service,
     )
     assert result.decision is SoftTimeLimitDecision.TERMINAL
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -524,7 +528,7 @@ async def test_apply_stale_broker_ignored_when_intent_retry(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -536,7 +540,7 @@ async def test_apply_stale_broker_ignored_when_intent_retry(
     )
     assert result.decision is SoftTimeLimitDecision.IGNORED
     assert result.reason == "soft_time_limit_exceeded:stale_broker"
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -571,7 +575,7 @@ async def test_apply_closed_event_heals_intent_without_failed_rewrite(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -583,7 +587,7 @@ async def test_apply_closed_event_heals_intent_without_failed_rewrite(
     )
     assert result.decision is SoftTimeLimitDecision.IGNORED
     assert result.reason == "soft_time_limit_exceeded:already_terminal"
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -617,7 +621,7 @@ async def test_apply_soft_limit_attempts_exhausted_dead_and_failed(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -628,7 +632,7 @@ async def test_apply_soft_limit_attempts_exhausted_dead_and_failed(
         intent_service=intent_service,
     )
     assert result.decision is SoftTimeLimitDecision.TERMINAL
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -662,7 +666,7 @@ async def test_apply_soft_limit_contained_marks_failed_and_dead_atomically(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
     degraded_flags = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
@@ -675,7 +679,7 @@ async def test_apply_soft_limit_contained_marks_failed_and_dead_atomically(
         degraded_flags=degraded_flags,
     )
     assert result.decision is SoftTimeLimitDecision.TERMINAL
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
     degraded_flags.set_flag.assert_not_awaited()
 
     async with session_factory() as session:
@@ -709,7 +713,7 @@ async def test_apply_soft_limit_missing_broker_is_fail_closed_noop(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
     invalidated: list[str] = []
 
     async def _invalidate(eid: str) -> None:
@@ -731,7 +735,7 @@ async def test_apply_soft_limit_missing_broker_is_fail_closed_noop(
     assert result.decision is SoftTimeLimitDecision.IGNORED
     assert result.reason == "soft_time_limit_exceeded:missing_broker"
     assert invalidated == []
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -765,7 +769,7 @@ async def test_apply_analysis_only_soft_limit_never_recovers(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -776,7 +780,7 @@ async def test_apply_analysis_only_soft_limit_never_recovers(
         intent_service=intent_service,
     )
     assert result.decision is SoftTimeLimitDecision.TERMINAL
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -810,7 +814,7 @@ async def test_apply_soft_limit_missing_durable_broker_is_fail_closed_noop(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -822,7 +826,7 @@ async def test_apply_soft_limit_missing_durable_broker_is_fail_closed_noop(
     )
     assert result.decision is SoftTimeLimitDecision.IGNORED
     assert result.reason == "soft_time_limit_exceeded:missing_broker"
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -859,7 +863,7 @@ async def test_apply_soft_limit_orphan_terminal_intent_stale_broker_converges(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
     invalidated: list[str] = []
 
     async def _invalidate(eid: str) -> None:
@@ -880,7 +884,7 @@ async def test_apply_soft_limit_orphan_terminal_intent_stale_broker_converges(
     )
     assert result.decision is SoftTimeLimitDecision.TERMINAL
     assert result.reason == "soft_time_limit_exceeded:orphan_terminal_intent"
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
     assert invalidated == [event_id]
 
     async with session_factory() as session:
@@ -918,7 +922,7 @@ async def test_apply_soft_limit_orphan_missing_durable_broker_converges(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -930,7 +934,7 @@ async def test_apply_soft_limit_orphan_missing_durable_broker_converges(
     )
     assert result.decision is SoftTimeLimitDecision.TERMINAL
     assert result.reason == "soft_time_limit_exceeded:orphan_terminal_intent"
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -987,7 +991,7 @@ async def test_apply_soft_limit_orphan_with_active_sibling_is_noop(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -999,7 +1003,7 @@ async def test_apply_soft_limit_orphan_with_active_sibling_is_noop(
     )
     assert result.decision is SoftTimeLimitDecision.IGNORED
     assert result.reason == "soft_time_limit_exceeded:stale_broker"
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -1059,7 +1063,7 @@ async def test_apply_soft_limit_orphan_with_pending_sibling_is_noop(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
         event_id,
@@ -1071,7 +1075,7 @@ async def test_apply_soft_limit_orphan_with_pending_sibling_is_noop(
     )
     assert result.decision is SoftTimeLimitDecision.IGNORED
     assert result.reason == "soft_time_limit_exceeded:stale_broker"
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
 
     async with session_factory() as session:
         event = await session.get(orm.SecurityEvent, event_id)
@@ -1113,7 +1117,7 @@ async def test_apply_soft_limit_orphan_with_unknown_outbox_is_reconcile(
         ),
     )
     intent_service = MagicMock()
-    intent_service.schedule_dispatch = MagicMock()
+    intent_service.schedule_dispatch_async = AsyncMock()
     degraded_flags = AsyncMock()
 
     result = await apply_soft_time_limit_outcome(
@@ -1127,7 +1131,7 @@ async def test_apply_soft_limit_orphan_with_unknown_outbox_is_reconcile(
     )
     assert result.decision is SoftTimeLimitDecision.RECONCILE_REQUIRED
     assert result.reason == "soft_time_limit_exceeded:reconcile_required"
-    intent_service.schedule_dispatch.assert_not_called()
+    intent_service.schedule_dispatch_async.assert_not_called()
     degraded_flags.set_flag.assert_awaited()
 
     async with session_factory() as session:

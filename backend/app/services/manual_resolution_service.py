@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.errors import IdempotencyKeyReuseError, ValidationError
+from app.core.metrics import record_dispatch_schedule
 from app.db import models as orm
 from app.models.enums import EventStatus, ExecutionSubstate, GraphResumeIntentStatus
 from app.models.graph_resume_intent import (
@@ -39,6 +40,7 @@ from app.services.context_service import (
     append_context_journal_in_session,
     unwrap_journal_value,
 )
+from app.services.degraded_flag_service import DegradedFlagService
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +85,18 @@ class ManualResolutionService:
         *,
         workflow_runtime: Any | None = None,
         resume_runner: Any | None = None,
+        degraded_flags: DegradedFlagService | None = None,
         claim_lease_s: int = _CLAIM_LEASE_S,
         max_attempts: int = _MAX_ATTEMPTS,
     ) -> None:
         self._session_factory = session_factory
         self._runtime = workflow_runtime
         self._resume_runner = resume_runner
+        self._degraded = degraded_flags
         self._claim_lease_s = claim_lease_s
         self._max_attempts = max_attempts
         self._dispatch_scheduled = False
+        self._pending_in_process: list[tuple[str | None, str | None, str, tuple[str, ...]]] = []
 
     def bind_runtime(self, workflow_runtime: Any) -> None:
         self._runtime = workflow_runtime
@@ -444,13 +449,29 @@ class ManualResolutionService:
                 )
             return self._record_from_row(active)
 
-    def schedule_dispatch(self) -> None:
+    def schedule_dispatch(
+        self,
+        *,
+        event_id: str | None = None,
+        intent_id: str | None = None,
+        trigger: str = "unspecified",
+        event_ids: list[str] | None = None,
+    ) -> None:
         """Best-effort durable dispatch; never raises.
 
         Prefer Celery (survives process kill via beat reclaim). Fall back to an
         in-process task when Celery is unavailable so local/background mode still
-        progresses.
+        progresses. When no running event loop exists, emit structured signals
+        instead of silently returning (ISSUE-324).
         """
+        flagged_event_ids: list[str] = []
+        if event_id:
+            flagged_event_ids.append(event_id)
+        if event_ids:
+            for eid in event_ids:
+                if eid and eid not in flagged_event_ids:
+                    flagged_event_ids.append(eid)
+
         try:
             from app.core.config import TaskMode, get_settings
 
@@ -460,31 +481,167 @@ class ManualResolutionService:
                 )
 
                 dispatch_pending_graph_resume_intents.delay()
+                record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
+                logger.debug(
+                    "graph resume dispatch enqueued trigger=%s event_id=%s intent_id=%s",
+                    trigger,
+                    event_id or "-",
+                    intent_id or "-",
+                )
                 return
-        except Exception:
+        except Exception as exc:
+            record_dispatch_schedule(domain="graph_resume", outcome="resume_enqueue_failed")
             logger.warning(
-                "failed to enqueue graph resume intent Celery dispatch",
-                exc_info=True,
+                "graph resume dispatch enqueue failed trigger=%s event_id=%s intent_id=%s error=%s",
+                trigger,
+                event_id or "-",
+                intent_id or "-",
+                type(exc).__name__,
             )
 
+        job = (intent_id, event_id, trigger, tuple(flagged_event_ids))
         if self._dispatch_scheduled:
+            self._pending_in_process.append(job)
+            record_dispatch_schedule(
+                domain="graph_resume",
+                outcome="resume_schedule_coalesced",
+            )
+            logger.info(
+                "graph resume in-process dispatch coalesced trigger=%s event_id=%s intent_id=%s",
+                trigger,
+                event_id or "-",
+                intent_id or "-",
+            )
             return
         self._dispatch_scheduled = True
 
-        async def _run() -> None:
+        async def _execute_one(
+            current_intent_id: str | None,
+            current_event_id: str | None,
+            current_trigger: str,
+            current_flags: tuple[str, ...],
+        ) -> None:
             try:
-                await self.claim_and_run_batch(limit=20)
+                if current_intent_id is not None:
+                    ran = int(await self.claim_and_run_intent(current_intent_id))
+                else:
+                    ran = await self.claim_and_run_batch(limit=20)
+                if ran > 0:
+                    record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
+                else:
+                    record_dispatch_schedule(
+                        domain="graph_resume",
+                        outcome="resume_in_process_empty",
+                    )
+                logger.info(
+                    "graph resume in-process dispatch trigger=%s event_id=%s intent_id=%s ran=%s",
+                    current_trigger,
+                    current_event_id or "-",
+                    current_intent_id or "-",
+                    ran,
+                )
             except Exception:
-                logger.exception("graph resume intent in-process dispatch failed")
+                logger.exception(
+                    "graph resume in-process dispatch failed trigger=%s event_id=%s intent_id=%s",
+                    current_trigger,
+                    current_event_id or "-",
+                    current_intent_id or "-",
+                )
+                for eid in current_flags:
+                    await self._set_resume_dispatch_degraded_flag(eid, trigger=current_trigger)
+
+        async def _run() -> None:
+            pending = [job]
+            try:
+                while pending:
+                    (
+                        current_intent_id,
+                        current_event_id,
+                        current_trigger,
+                        current_flags,
+                    ) = pending.pop(0)
+                    await _execute_one(
+                        current_intent_id,
+                        current_event_id,
+                        current_trigger,
+                        current_flags,
+                    )
+                    pending.extend(self._pending_in_process)
+                    self._pending_in_process.clear()
             finally:
+                leftover = list(self._pending_in_process)
+                self._pending_in_process.clear()
                 self._dispatch_scheduled = False
+                for (
+                    leftover_intent_id,
+                    leftover_event_id,
+                    leftover_trigger,
+                    leftover_flags,
+                ) in leftover:
+                    self.schedule_dispatch(
+                        event_id=leftover_event_id,
+                        intent_id=leftover_intent_id,
+                        trigger=leftover_trigger,
+                        event_ids=list(leftover_flags),
+                    )
 
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             self._dispatch_scheduled = False
+            record_dispatch_schedule(
+                domain="graph_resume",
+                outcome="resume_schedule_skipped_no_loop",
+            )
+            logger.warning(
+                "graph resume dispatch skipped: no running event loop trigger=%s "
+                "event_id=%s intent_id=%s",
+                trigger,
+                event_id or "-",
+                intent_id or "-",
+            )
+            for eid in flagged_event_ids:
+                self._schedule_resume_dispatch_degraded_flag(eid, trigger=trigger)
             return
         loop.create_task(_run())
+
+    async def _set_resume_dispatch_degraded_flag(self, event_id: str, *, trigger: str) -> None:
+        """Persist graph_resume_dispatch_unavailable for a failed/unavailable resume dispatch."""
+        degraded = self._degraded
+        if degraded is None:
+            return
+        try:
+            await degraded.set_flag(
+                event_id,
+                "graph_resume_dispatch_unavailable",
+                trigger,
+                writer="ManualResolutionService",
+            )
+        except Exception:
+            logger.warning(
+                "failed to set graph_resume_dispatch_unavailable event=%s trigger=%s",
+                event_id,
+                trigger,
+                exc_info=True,
+            )
+
+    def _schedule_resume_dispatch_degraded_flag(self, event_id: str, *, trigger: str) -> None:
+        """Persist graph_resume_dispatch_unavailable even when called without a loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # This helper is primarily invoked from the no-loop schedule path.
+            try:
+                asyncio.run(self._set_resume_dispatch_degraded_flag(event_id, trigger=trigger))
+            except Exception:
+                logger.warning(
+                    "failed to set graph_resume_dispatch_unavailable event=%s trigger=%s",
+                    event_id,
+                    trigger,
+                    exc_info=True,
+                )
+            return
+        loop.create_task(self._set_resume_dispatch_degraded_flag(event_id, trigger=trigger))
 
     async def has_schedulable_intent(self, event_id: str) -> bool:
         """True when event has PENDING/RETRY/CLAIMED/STARTED resume intent."""
@@ -504,15 +661,23 @@ class ManualResolutionService:
     async def claim_and_run_batch(self, *, limit: int = 20) -> int:
         claimed = await self._claim_batch(limit=limit)
         ran = 0
-        for intent_id in claimed:
-            if await self._run_claimed_intent(intent_id):
+        for claimed_id in claimed:
+            if await self._run_claimed_intent(claimed_id):
                 ran += 1
         return ran
+
+    async def claim_and_run_intent(self, intent_id: str) -> bool:
+        """Claim and run one specific resume intent (ISSUE-324 in-process fallback)."""
+        claimed = await self._claim_intent(intent_id)
+        if claimed is None:
+            return False
+        return await self._run_claimed_intent(claimed)
 
     async def reconcile_stale(self, *, limit: int = 100) -> int:
         now = datetime.now(UTC)
         stale_cutoff = now - timedelta(seconds=_STARTED_STALE_MIN_S)
         changed = 0
+        changed_event_ids: list[str] = []
         async with self._session_factory() as session:
             async with session.begin():
                 rows = (
@@ -559,8 +724,13 @@ class ManualResolutionService:
                     row.claim_expires_at = None
                     row.updated_at = now
                     changed += 1
+                    if row.event_id not in changed_event_ids:
+                        changed_event_ids.append(row.event_id)
         if changed:
-            self.schedule_dispatch()
+            self.schedule_dispatch(
+                event_ids=changed_event_ids,
+                trigger="reconcile_stale",
+            )
         return changed
 
     async def _claim_batch(self, *, limit: int) -> list[str]:
@@ -594,6 +764,32 @@ class ManualResolutionService:
                     row.updated_at = now
                     claimed.append(row.intent_id)
         return claimed
+
+    async def _claim_intent(self, intent_id: str) -> str | None:
+        """Claim a single PENDING/RETRY resume intent by id."""
+        now = datetime.now(UTC)
+        lease_until = now + timedelta(seconds=self._claim_lease_s)
+        async with self._session_factory() as session:
+            async with session.begin():
+                row = await session.get(
+                    orm.GraphResumeIntent,
+                    intent_id,
+                    with_for_update=True,
+                )
+                if row is None:
+                    return None
+                current = GraphResumeIntentStatus(row.status)
+                if current not in {
+                    GraphResumeIntentStatus.PENDING,
+                    GraphResumeIntentStatus.RETRY,
+                }:
+                    return None
+                validate_graph_resume_transition(current, GraphResumeIntentStatus.CLAIMED)
+                row.status = GraphResumeIntentStatus.CLAIMED.value
+                row.claim_owner = _DISPATCH_WORKER_ID
+                row.claim_expires_at = lease_until
+                row.updated_at = now
+                return row.intent_id
 
     async def _run_claimed_intent(self, intent_id: str) -> bool:
         async with self._session_factory() as session:

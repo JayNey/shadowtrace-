@@ -29,6 +29,7 @@ _budget_redis_degraded_gauge: Any | None = None
 _state_projection_failure_total: Any | None = None
 _state_projection_repair_total: Any | None = None
 _investigation_intent_enqueue_total: Any | None = None
+_dispatch_schedule_total: Any | None = None
 _graph_failed_transition_noop_total: Any | None = None
 _soft_time_limit_outcome_total: Any | None = None
 _socketio_subscriber_failure_total: Any | None = None
@@ -44,6 +45,7 @@ _process_state_projection_failures = 0
 _process_state_projection_repairs = 0
 _process_investigation_intent_enqueue_success = 0
 _process_investigation_intent_enqueue_failure = 0
+_process_dispatch_schedule: dict[str, int] = {}
 _process_soft_time_limit_terminal = 0
 _process_soft_time_limit_recovered = 0
 _process_soft_time_limit_reconcile_required = 0
@@ -59,7 +61,8 @@ def _ensure_metrics() -> None:
     global _budget_redis_fallback_total
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _state_projection_failure_total, _state_projection_repair_total
-    global _investigation_intent_enqueue_total, _graph_failed_transition_noop_total
+    global _investigation_intent_enqueue_total, _dispatch_schedule_total
+    global _graph_failed_transition_noop_total
     global _soft_time_limit_outcome_total
     global _socketio_subscriber_failure_total, _socketio_subscriber_recovery_total
     global _force_close_total
@@ -139,6 +142,13 @@ def _ensure_metrics() -> None:
         _investigation_intent_enqueue_total = _meter.create_counter(
             name="shadowtrace_investigation_intent_enqueue_total",
             description="Best-effort Celery dispatch trigger outcomes for pending intents",
+            unit="1",
+        )
+        _dispatch_schedule_total = _meter.create_counter(
+            name="shadowtrace_dispatch_schedule_total",
+            description=(
+                "Investigation intent and graph resume dispatch schedule outcomes (ISSUE-324)"
+            ),
             unit="1",
         )
         _graph_failed_transition_noop_total = _meter.create_counter(
@@ -411,6 +421,51 @@ def record_force_close(*, result: str) -> None:
         logger.debug("force_close metric export failed", exc_info=True)
 
 
+_INVESTIGATION_DISPATCH_OUTCOMES = frozenset(
+    {
+        "dispatch_enqueued",
+        "dispatch_enqueue_failed",
+        "dispatch_fallback_started",
+    }
+)
+_GRAPH_RESUME_DISPATCH_OUTCOMES = frozenset(
+    {
+        "resume_scheduled",
+        "resume_enqueue_failed",
+        "resume_schedule_skipped_no_loop",
+        "resume_in_process_empty",
+        "resume_schedule_coalesced",
+    }
+)
+
+
+def record_dispatch_schedule(*, domain: str, outcome: str) -> None:
+    """Increment ``shadowtrace_dispatch_schedule_total{domain,outcome}`` (ISSUE-324)."""
+    global _process_dispatch_schedule
+    normalized_domain = domain.strip().lower()
+    normalized_outcome = outcome.strip().lower()
+    if normalized_domain == "investigation_intent":
+        if normalized_outcome not in _INVESTIGATION_DISPATCH_OUTCOMES:
+            return
+    elif normalized_domain == "graph_resume":
+        if normalized_outcome not in _GRAPH_RESUME_DISPATCH_OUTCOMES:
+            return
+    else:
+        return
+    key = f"{normalized_domain}:{normalized_outcome}"
+    _process_dispatch_schedule[key] = _process_dispatch_schedule.get(key, 0) + 1
+    _ensure_metrics()
+    if _dispatch_schedule_total is None:
+        return
+    try:
+        _dispatch_schedule_total.add(
+            1,
+            {"domain": normalized_domain, "outcome": normalized_outcome},
+        )
+    except Exception:
+        logger.debug("dispatch schedule metric export failed", exc_info=True)
+
+
 def record_investigation_intent_enqueue(*, result: str) -> None:
     """Increment ``shadowtrace_investigation_intent_enqueue_total{result=...}``."""
     global \
@@ -419,8 +474,13 @@ def record_investigation_intent_enqueue(*, result: str) -> None:
     normalized = result.strip().lower()
     if normalized == "success":
         _process_investigation_intent_enqueue_success += 1
+        record_dispatch_schedule(domain="investigation_intent", outcome="dispatch_enqueued")
     elif normalized == "failure":
         _process_investigation_intent_enqueue_failure += 1
+        record_dispatch_schedule(
+            domain="investigation_intent",
+            outcome="dispatch_enqueue_failed",
+        )
     else:
         return
     _ensure_metrics()
@@ -492,6 +552,14 @@ def record_graph_failed_transition_noop(*, reason: str) -> None:
         logger.debug("graph failed transition noop metric export failed", exc_info=True)
 
 
+def dispatch_schedule_health_snapshot() -> dict[str, int]:
+    """Process-local dispatch schedule counters for health probes and tests."""
+    snapshot = dict(_process_dispatch_schedule)
+    snapshot["enqueue_success"] = _process_investigation_intent_enqueue_success
+    snapshot["enqueue_failure"] = _process_investigation_intent_enqueue_failure
+    return snapshot
+
+
 def investigation_intent_enqueue_health_snapshot() -> dict[str, int]:
     """Process-local enqueue counters for health probes and deterministic tests."""
     return {
@@ -560,7 +628,8 @@ def reset_metrics_for_tests() -> None:
     global _budget_redis_fallback_total
     global _budget_redis_recovery_total, _budget_redis_degraded_gauge, _initialized
     global _state_projection_failure_total, _state_projection_repair_total
-    global _investigation_intent_enqueue_total, _graph_failed_transition_noop_total
+    global _investigation_intent_enqueue_total, _dispatch_schedule_total
+    global _graph_failed_transition_noop_total
     global _soft_time_limit_outcome_total
     global _socketio_subscriber_failure_total, _socketio_subscriber_recovery_total
     global _force_close_total
@@ -571,6 +640,7 @@ def reset_metrics_for_tests() -> None:
     global \
         _process_investigation_intent_enqueue_success, \
         _process_investigation_intent_enqueue_failure
+    global _process_dispatch_schedule
     global \
         _process_soft_time_limit_terminal, \
         _process_soft_time_limit_recovered, \
@@ -592,6 +662,7 @@ def reset_metrics_for_tests() -> None:
     _state_projection_failure_total = None
     _state_projection_repair_total = None
     _investigation_intent_enqueue_total = None
+    _dispatch_schedule_total = None
     _graph_failed_transition_noop_total = None
     _soft_time_limit_outcome_total = None
     _socketio_subscriber_failure_total = None
@@ -607,6 +678,7 @@ def reset_metrics_for_tests() -> None:
     _process_state_projection_repairs = 0
     _process_investigation_intent_enqueue_success = 0
     _process_investigation_intent_enqueue_failure = 0
+    _process_dispatch_schedule = {}
     _process_soft_time_limit_terminal = 0
     _process_soft_time_limit_recovered = 0
     _process_soft_time_limit_reconcile_required = 0
@@ -616,12 +688,25 @@ def reset_metrics_for_tests() -> None:
 
 
 def reset_investigation_intent_enqueue_metrics_for_tests() -> None:
-    """Reset only investigation intent enqueue process counters."""
+    """Reset enqueue counters and coupled dispatch-schedule keys."""
     global \
         _process_investigation_intent_enqueue_success, \
-        _process_investigation_intent_enqueue_failure
+        _process_investigation_intent_enqueue_failure, \
+        _process_dispatch_schedule
     _process_investigation_intent_enqueue_success = 0
     _process_investigation_intent_enqueue_failure = 0
+    _process_dispatch_schedule = {}
+
+
+def reset_dispatch_schedule_metrics_for_tests() -> None:
+    """Reset dispatch schedule process counters (ISSUE-324 tests)."""
+    global \
+        _process_investigation_intent_enqueue_success, \
+        _process_investigation_intent_enqueue_failure, \
+        _process_dispatch_schedule
+    _process_investigation_intent_enqueue_success = 0
+    _process_investigation_intent_enqueue_failure = 0
+    _process_dispatch_schedule = {}
 
 
 def reset_checkpoint_metrics_for_tests() -> None:
@@ -646,6 +731,7 @@ __all__ = [
     "get_budget_redis_health",
     "get_investigation_intent_enqueue_health",
     "get_state_projection_health",
+    "dispatch_schedule_health_snapshot",
     "investigation_intent_enqueue_health_snapshot",
     "observe_writeback_queue_age",
     "record_action_unknown",
@@ -655,6 +741,7 @@ __all__ = [
     "record_checkpoint_loop_rebind",
     "record_force_close",
     "record_graph_failed_transition_noop",
+    "record_dispatch_schedule",
     "record_investigation_intent_enqueue",
     "record_soft_time_limit_outcome",
     "reset_soft_time_limit_metrics_for_tests",
@@ -666,6 +753,7 @@ __all__ = [
     "record_writeback_dead_letter",
     "reset_budget_redis_metrics_for_tests",
     "reset_checkpoint_metrics_for_tests",
+    "reset_dispatch_schedule_metrics_for_tests",
     "reset_investigation_intent_enqueue_metrics_for_tests",
     "reset_metrics_for_tests",
     "set_budget_redis_degraded",

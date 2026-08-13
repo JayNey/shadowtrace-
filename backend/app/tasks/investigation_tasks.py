@@ -583,7 +583,11 @@ async def _handle_soft_time_limit_exceeded(
     from app.services.soft_time_limit_outcome import apply_soft_time_limit_outcome
 
     session_factory = _get_session_factory()
-    intent_service = InvestigationIntentService(get_session_factory())
+    degraded_flags = _get_degraded_flags()
+    intent_service = InvestigationIntentService(
+        get_session_factory(),
+        degraded_flags=degraded_flags,
+    )
     try:
         await apply_soft_time_limit_outcome(
             event_id,
@@ -591,7 +595,7 @@ async def _handle_soft_time_limit_exceeded(
             intent_id=intent_id,
             broker_task_id=broker_task_id,
             intent_service=intent_service,
-            degraded_flags=_get_degraded_flags(),
+            degraded_flags=degraded_flags,
         )
     finally:
         # Release only after durable outcome commit so a concurrent delivery cannot
