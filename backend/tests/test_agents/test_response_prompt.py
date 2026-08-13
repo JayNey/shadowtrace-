@@ -62,7 +62,11 @@ def test_response_user_payload_includes_decision_summary_when_reasoning_empty() 
     assert payload["triage_reasoning"] == ""
     assert payload["evidence"]["success_sources"] == ["network_flow"]
     assert payload["evidence"]["failed_sources"] == ["endpoint_telemetry"]
-    assert payload["evidence"]["sample"][0]["description"] == "Large HTTPS upload to 203.0.113.88"
+    sample = payload["evidence"]["sample"][0]
+    assert sample["description"] == "Large HTTPS upload to 203.0.113.88"
+    assert sample["source"] == EvidenceSource.NETWORK_FLOW.value
+    assert sample["evidence_type"] == "flow"
+    assert sample["confidence"] == 0.92
 
 
 def test_response_decision_summary_truncated_to_512_chars() -> None:
@@ -108,6 +112,35 @@ def test_response_empty_decision_summary_and_reasoning() -> None:
     assert payload["evidence"] == {}
 
 
+def test_response_empty_evidence_output_still_has_source_keys() -> None:
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=False,
+        reasoning="",
+        decision_summary="kept",
+    )
+    evidence = EvidenceOutput(
+        evidence_list=[],
+        collection_status=CollectionStatus.PARTIAL_DONE,
+        overall_confidence=0.1,
+        success_sources=[],
+        failed_sources=["endpoint_telemetry"],
+    )
+    messages = build_response_plan_messages(
+        triage_result=triage,
+        risk_assessment=_risk(),
+        evidence_output=evidence,
+        available_tools=["create_ticket"],
+        entities_summary={},
+    )
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    assert payload["evidence"] != {}
+    assert payload["evidence"]["success_sources"] == []
+    assert payload["evidence"]["failed_sources"] == ["endpoint_telemetry"]
+    assert payload["evidence"]["sample"] == []
+
+
 def test_response_triage_reasoning_truncated_to_500_chars() -> None:
     long_reasoning = "z" * 600
     triage = TriageResult.model_construct(
@@ -150,11 +183,14 @@ def test_response_reasoning_none_coerced_to_empty_string() -> None:
     assert payload["triage_reasoning"] == ""
 
 
-def test_response_prompt_does_not_import_risk_private_helpers() -> None:
+def test_response_and_risk_share_prompt_blocks() -> None:
     from pathlib import Path
 
-    from app.agents.prompts import response_prompt
+    from app.agents.prompts import response_prompt, risk_prompt
 
-    source = Path(response_prompt.__file__).read_text(encoding="utf-8")
-    assert "from app.agents.prompts.risk_prompt" not in source
-    assert "_evidence_prompt_block" not in source
+    shared = "from app.agents.prompts.prompt_blocks import"
+    response_source = Path(response_prompt.__file__).read_text(encoding="utf-8")
+    risk_source = Path(risk_prompt.__file__).read_text(encoding="utf-8")
+    assert shared in response_source
+    assert shared in risk_source
+    assert "from app.agents.prompts.risk_prompt" not in response_source

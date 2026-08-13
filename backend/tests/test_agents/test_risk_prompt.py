@@ -44,7 +44,11 @@ def test_risk_payload_includes_decision_summary_when_reasoning_empty() -> None:
     assert triage_block["reasoning"] == ""
     assert payload["evidence"]["success_sources"] == ["network_flow"]
     assert payload["evidence"]["failed_sources"] == ["endpoint_telemetry"]
-    assert payload["evidence"]["sample"][0]["description"] == "Large HTTPS upload to 203.0.113.88"
+    sample = payload["evidence"]["sample"][0]
+    assert sample["description"] == "Large HTTPS upload to 203.0.113.88"
+    assert sample["source"] == EvidenceSource.NETWORK_FLOW.value
+    assert sample["evidence_type"] == "flow"
+    assert sample["confidence"] == 0.92
 
 
 def test_risk_decision_summary_truncated_to_512_chars() -> None:
