@@ -47,6 +47,7 @@ class AdversarialAuditChecks:
     triage_summary: str
     evidence_collection_status: str | None
     status_sequence: list[str]
+    triage_severity: str | None = None
     audit_mode: AdversarialAuditMode = "analysis_only"
 
     def __post_init__(self) -> None:
@@ -104,6 +105,7 @@ class AdversarialAuditChecks:
             "observed": {
                 "event_type": self.event_type,
                 "severity": self.severity,
+                "triage_severity": self.triage_severity,
                 "risk_score": self.risk_score,
                 "final_verdict": self.final_verdict,
                 "status_sequence": self.status_sequence,
@@ -182,3 +184,28 @@ def normalize_enum(value: Any) -> str | None:
     if isinstance(value, (EventType, FinalVerdict, Severity)):
         return value.value
     return str(value)
+
+
+def resolve_observed_severity(
+    *,
+    risk_ctx: dict[str, Any] | None,
+    event_severity: Any,
+    triage_ctx: dict[str, Any] | None = None,
+) -> tuple[str | None, str | None]:
+    """Outward severity for audit scorecards (ISSUE-330).
+
+  Returns ``(outward_severity, triage_severity)``.  Outward severity prefers
+  ``risk_assessment.severity``, then the event row.  Triage severity is returned
+  separately for transparency and must never be used as a silent fallback.
+    """
+    outward: str | None = None
+    if isinstance(risk_ctx, dict):
+        outward = normalize_enum(risk_ctx.get("severity"))
+    if outward is None:
+        outward = normalize_enum(event_severity)
+    triage_severity = (
+        normalize_enum(triage_ctx.get("severity"))
+        if isinstance(triage_ctx, dict)
+        else None
+    )
+    return outward, triage_severity

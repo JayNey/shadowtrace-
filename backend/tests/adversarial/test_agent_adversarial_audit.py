@@ -33,6 +33,7 @@ from tests.adversarial.audit_report import (
     AdversarialAuditChecks,
     collect_entity_tokens,
     normalize_enum,
+    resolve_observed_severity,
 )
 from tests.adversarial.helpers import ingest_true_positive_event
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
@@ -128,6 +129,7 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     triage_ctx = await context_store.get(event_id, "triage_result") or {}
     evidence_ctx = await context_store.get(event_id, "evidence_output") or {}
     report_ctx = await context_store.get(event_id, "report") or {}
+    risk_ctx = await context_store.get(event_id, "risk_assessment") or {}
 
     token_sources: list[Any] = [
         triage_ctx,
@@ -142,10 +144,17 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     entities_found = [e for e in GROUND_TRUTH["must_identify_entities"] if e.lower() in joined]
     indicators_found = [i for i in GROUND_TRUTH["must_identify_indicators"] if i.lower() in joined]
 
+    outward_severity, triage_severity = resolve_observed_severity(
+        risk_ctx=risk_ctx if isinstance(risk_ctx, dict) else None,
+        event_severity=event_after.severity,
+        triage_ctx=triage_ctx if isinstance(triage_ctx, dict) else None,
+    )
+
     checks = AdversarialAuditChecks(
         ground_truth=GROUND_TRUTH,
         event_type=normalize_enum(triage_ctx.get("event_type") or event_after.event_type),
-        severity=normalize_enum(triage_ctx.get("severity") or event_after.severity),
+        severity=outward_severity,
+        triage_severity=triage_severity,
         risk_score=int(event_after.risk_score or 0),
         final_verdict=normalize_enum(result.final_verdict or event_after.final_verdict),
         entities_found=entities_found,

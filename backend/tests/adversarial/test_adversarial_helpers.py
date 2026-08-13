@@ -183,3 +183,15 @@ def test_resolve_full_loop_timeout_env_override(monkeypatch) -> None:
     assert resolve_full_loop_timeout_s() == 90.0
     monkeypatch.setenv("ADVERSARIAL_FULL_LOOP_TIMEOUT_S", "10")
     assert resolve_full_loop_timeout_s() == 30.0
+
+
+def test_resolve_observed_severity_prefers_risk_over_triage() -> None:
+    from tests.adversarial.audit_report import resolve_observed_severity
+
+    outward, triage = resolve_observed_severity(
+        risk_ctx={"severity": "high"},
+        event_severity="high",
+        triage_ctx={"severity": "medium"},
+    )
+    assert outward == "high"
+    assert triage == "medium"

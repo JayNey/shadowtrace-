@@ -7,6 +7,7 @@ from typing import Any
 
 from app.agents.triage_risk_consistency import (
     INCONSISTENCY_DISCLOSURE_HEADER,
+    format_triage_decision_excerpt,
     should_flag_triage_risk_inconsistency,
 )
 from app.models.action import Action, ImpactAssessment
@@ -150,21 +151,23 @@ def build_decision_brief(
     """Bounded decision brief for template enrichment (no CoT / prompt text)."""
     event_type = triage_result.event_type.value if triage_result else "unknown"
     need_investigation = triage_result.need_investigation if triage_result is not None else None
+    outward_severity = risk_assessment.severity
     parts = [
         f"事件类型 {event_type}",
-        f"严重级别 {risk_assessment.severity.value}",
+        f"严重级别 {outward_severity.value}",
         f"风险分 {risk_assessment.risk_score}",
         f"终态判定 {final_verdict.value}",
     ]
     if need_investigation is not None:
         parts.append(f"需深入调查={'是' if need_investigation else '否'}")
     brief = "；".join(parts) + "。"
-    decision_summary = ""
-    if triage_result is not None:
-        decision_summary = (triage_result.decision_summary or "").strip()
-    if decision_summary:
-        # Prefer auditable decision_summary; never fall back to deprecated reasoning/CoT.
-        brief = f"{brief} 分诊结论：{_truncate_field(decision_summary, max_chars=320)}"
+    triage_excerpt = format_triage_decision_excerpt(
+        triage_result,
+        outward_severity=outward_severity,
+        max_chars=320,
+    )
+    if triage_excerpt:
+        brief = f"{brief} {triage_excerpt}"
     return brief
 
 
@@ -296,7 +299,13 @@ class ReportSectionBuilder:
         severity_level = (
             f"{DECISION_BRIEF_LABEL}: {decision_brief}\n"
             f"severity={risk_assessment.severity.value}\n"
-            f"risk_score={risk_assessment.risk_score}\n"
+            + (
+                f"triage_severity={triage_result.severity.value}\n"
+                if triage_result is not None
+                and triage_result.severity is not risk_assessment.severity
+                else ""
+            )
+            + f"risk_score={risk_assessment.risk_score}\n"
             f"confidence={risk_assessment.confidence:.4f}\n"
             f"possible_false_positive={risk_assessment.possible_false_positive}\n"
             f"scoring_mode={risk_assessment.scoring_mode.value}\n"
