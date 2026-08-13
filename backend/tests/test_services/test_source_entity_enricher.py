@@ -78,6 +78,24 @@ def test_enrich_secondary_host_and_domain() -> None:
     assert "198.51.100.44" in {ip.address for ip in enrichment.entity_set.ips}
 
 
+def test_enrich_fqdn_only_key() -> None:
+    """ISSUE-325: domain seed must accept fqdn when domain key is absent."""
+    incident_ref = _ref(SourceObjectKind.INCIDENT, "INC-325-fqdn")
+    enrichment = SourceEntityEnricher.enrich_from_sources(
+        [
+            (
+                incident_ref,
+                {
+                    "hostname": "WKS-DATA-031",
+                    "fqdn": "storage-sync-cdn.example",
+                },
+            ),
+        ]
+    )
+    domains = {domain.fqdn for domain in enrichment.entity_set.domains if domain.fqdn}
+    assert domains == {"storage-sync-cdn.example"}
+
+
 def test_enrich_does_not_duplicate_ip_on_host_and_ips() -> None:
     asset_ref = _ref(SourceObjectKind.ASSET, "asset-dedupe")
     enrichment = SourceEntityEnricher.enrich_from_sources(

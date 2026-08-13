@@ -48,6 +48,7 @@ from app.models.agent_io import (
     EntityProvenanceRecord,
     TriageAgentInput,
     TriageResult,
+    TriageStructuredPromptContext,
 )
 from app.models.entities import (
     AccountEntity,
@@ -635,7 +636,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         *,
         source_snapshot: dict[str, Any] | None = None,
         hint_entities: EntitySet | None = None,
-        structured_context: Any | None = None,
+        structured_context: TriageStructuredPromptContext | None = None,
     ) -> TextExtractionResult:
         """Extract entities via LLM (JSON mode) with optional regex fallback."""
         empty = EntitySet()

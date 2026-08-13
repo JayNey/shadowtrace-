@@ -89,3 +89,58 @@ def test_related_alerts_are_capped_at_five() -> None:
         structured_context=TriageStructuredPromptContext(related_alerts=alerts),
     )
     assert appendix.count("related_alert:") == 5
+
+
+def test_format_structured_appendix_respects_max_total_chars() -> None:
+    """ISSUE-325: total appendix hard-cap keeps prompt/corpus aligned without growing timeout."""
+    long_value = "x" * 200
+    alerts = [
+        TriageRelatedAlertHint(title=f"related-title-{index}-{long_value}", tag=f"tag-{index}")
+        for index in range(8)
+    ]
+    hint_entities = EntitySet(
+        accounts=[
+            AccountEntity(entity_id=f"a{i}", username=f"user-{i}-{long_value}") for i in range(6)
+        ],
+        hosts=[
+            HostEntity(entity_id=f"h{i}", hostname=f"HOST-{i}-{long_value}") for i in range(6)
+        ],
+        ips=[
+            IPEntity(entity_id=f"i{i}", address=f"198.51.100.{i}", scope="external")
+            for i in range(6)
+        ],
+        domains=[
+            DomainEntity(entity_id=f"d{i}", fqdn=f"cdn-{i}-{long_value}.example") for i in range(6)
+        ],
+    )
+    context = TriageStructuredPromptContext(
+        normalized_fields={
+            "hostname": f"WKS-{long_value}",
+            "secondary_host": f"SRV-{long_value}",
+            "src_ip": "198.51.100.44",
+            "dst_ip": "10.0.0.8",
+            "domain": f"exfil-{long_value}.example",
+            "account": f"svc-{long_value}",
+        },
+        related_alerts=alerts,
+    )
+    appendix = format_triage_structured_appendix(
+        hint_entities=hint_entities,
+        structured_context=context,
+    )
+    assert appendix
+    assert len(appendix) <= 2400
+
+    alert = "Correlation: elevated session and volume signals"
+    corpus = build_triage_validation_corpus(
+        alert,
+        hint_entities=hint_entities,
+        structured_context=context,
+    )
+    user = build_triage_messages(
+        alert,
+        hint_entities=hint_entities,
+        structured_context=context,
+    )[1].content
+    assert appendix in corpus
+    assert appendix in user
