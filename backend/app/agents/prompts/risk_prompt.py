@@ -106,6 +106,32 @@ class RiskScoreLLMResponse(BaseModel):
         return self
 
 
+def _bounded_decision_summary(triage_result: TriageResult) -> str:
+    return (triage_result.decision_summary or "")[:512]
+
+
+def _evidence_prompt_block(evidence_output: EvidenceOutput) -> dict[str, Any]:
+    """Serialize evidence for downstream agent prompts (aligned with risk/response)."""
+    return {
+        "overall_confidence": evidence_output.overall_confidence,
+        "collection_status": evidence_output.collection_status.value,
+        "success_sources": list(evidence_output.success_sources),
+        "failed_sources": list(evidence_output.failed_sources),
+        "evidence_count": len(evidence_output.evidence_list),
+        "sample": [
+            {
+                "source": item.source.value,
+                "evidence_type": item.evidence_type,
+                "description": item.description[:200],
+                "confidence": item.confidence,
+                "mitre_technique": item.mitre_technique,
+                "is_conflicting": item.is_conflicting,
+            }
+            for item in evidence_output.evidence_list[:12]
+        ],
+    }
+
+
 def build_risk_messages(
     *,
     triage_result: TriageResult,
@@ -143,27 +169,11 @@ def build_risk_messages(
             "event_type": triage_result.event_type.value,
             "severity": triage_result.severity.value,
             "ioc_list": list(triage_result.ioc_list),
-            "reasoning": triage_result.reasoning,
+            "decision_summary": _bounded_decision_summary(triage_result),
+            "reasoning": triage_result.reasoning[:500],
         },
         "source_snapshot": source_context,
-        "evidence": {
-            "overall_confidence": evidence_output.overall_confidence,
-            "collection_status": evidence_output.collection_status.value,
-            "success_sources": list(evidence_output.success_sources),
-            "failed_sources": list(evidence_output.failed_sources),
-            "evidence_count": len(evidence_output.evidence_list),
-            "sample": [
-                {
-                    "source": item.source.value,
-                    "evidence_type": item.evidence_type,
-                    "description": item.description[:200],
-                    "confidence": item.confidence,
-                    "mitre_technique": item.mitre_technique,
-                    "is_conflicting": item.is_conflicting,
-                }
-                for item in evidence_output.evidence_list[:12]
-            ],
-        },
+        "evidence": _evidence_prompt_block(evidence_output),
         "rag": rag_summary or {},
         "graph_summary": graph_summary or {},
         "required_factors": list(FACTOR_NAMES),
