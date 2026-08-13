@@ -1,4 +1,4 @@
-"""TriageAgent LLM prompt templates (ISSUE-032 / ISSUE-251).
+"""TriageAgent LLM prompt templates (ISSUE-032 / ISSUE-251 / ISSUE-325).
 
 Provides a compact JSON-only system prompt plus a helper to build the message
 list. ``TriageLLMResponse`` accepts a tolerant wire shape (optional
@@ -15,12 +15,33 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.llm.base import LLMMessage
+from app.models.agent_io import TriageStructuredPromptContext
 from app.models.entities import EntitySet
 from app.models.enums import EventType
 
 _MAX_TRIAGE_SUMMARY_CHARS = 512
 _ENTITY_ID_RE = re.compile(r"[^a-z0-9]+")
 _IP_SCOPES = frozenset({"external", "internal", "unknown"})
+
+_MAX_RELATED_ALERTS = 5
+_MAX_RELATED_TITLE_CHARS = 80
+_MAX_RELATED_TAG_CHARS = 48
+_MAX_NORMALIZED_VALUE_CHARS = 128
+_MAX_HINT_ENTITIES_PER_CATEGORY = 4
+_MAX_STRUCTURED_APPENDIX_CHARS = 2400
+_NORMALIZED_HINT_KEYS = (
+    "hostname",
+    "secondary_host",
+    "src_ip",
+    "dst_ip",
+    "domain",
+    "account",
+)
+
+_STRUCTURED_APPENDIX_HEADER = (
+    "Structured ticket fields (entities must be traceable to the alert text "
+    "above or to these fields only — do not invent values):"
+)
 
 
 def _slug_entity_id(prefix: str, value: str) -> str:
@@ -30,6 +51,13 @@ def _slug_entity_id(prefix: str, value: str) -> str:
     cleaned = _ENTITY_ID_RE.sub("", raw)[:24] or "unknown"
     digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:8]
     return f"{prefix}-{cleaned}-{digest}"
+
+
+def _truncate(value: str, *, limit: int) -> str:
+    text = (value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 1)].rstrip() + "…"
 
 
 _ENTITY_ALLOWED_FIELDS: dict[str, frozenset[str]] = {
@@ -241,6 +269,8 @@ TRIAGE_SYSTEM_PROMPT: str = (
     '- files: {"name":"..."}\n'
     "Use empty lists for absent categories. decision_summary max 512 chars; "
     "never include chain-of-thought.\n\n"
+    "When structured ticket fields are provided in the user message, only "
+    "extract entities that appear in the alert text or those structured fields.\n\n"
     "Minimal example:\n"
     '{"event_type":"account_anomaly","entities":{"accounts":[{"username":'
     '"svc-backup"}],"hosts":[{"hostname":"PC-OPS-01"}],"ips":[{"address":'
@@ -249,13 +279,134 @@ TRIAGE_SYSTEM_PROMPT: str = (
 )
 
 
-def build_triage_messages(alert_text: str) -> list[LLMMessage]:
+def _format_hint_entity_lines(hint_entities: EntitySet | None) -> list[str]:
+    if hint_entities is None or hint_entities == EntitySet():
+        return []
+
+    lines: list[str] = []
+    accounts = [
+        _truncate(account.username or "", limit=64)
+        for account in hint_entities.accounts[:_MAX_HINT_ENTITIES_PER_CATEGORY]
+        if account.username
+    ]
+    if accounts:
+        lines.append(f"hint_accounts: {', '.join(accounts)}")
+
+    hosts: list[str] = []
+    for host in hint_entities.hosts[:_MAX_HINT_ENTITIES_PER_CATEGORY]:
+        label = host.hostname or host.ip
+        if label:
+            hosts.append(_truncate(label, limit=64))
+    if hosts:
+        lines.append(f"hint_hosts: {', '.join(hosts)}")
+
+    ips = [
+        _truncate(ip.address or "", limit=64)
+        for ip in hint_entities.ips[:_MAX_HINT_ENTITIES_PER_CATEGORY]
+        if ip.address
+    ]
+    if ips:
+        lines.append(f"hint_ips: {', '.join(ips)}")
+
+    domains = [
+        _truncate(domain.fqdn or "", limit=96)
+        for domain in hint_entities.domains[:_MAX_HINT_ENTITIES_PER_CATEGORY]
+        if domain.fqdn
+    ]
+    if domains:
+        lines.append(f"hint_domains: {', '.join(domains)}")
+
+    processes = [
+        _truncate(process.name or "", limit=64)
+        for process in hint_entities.processes[:_MAX_HINT_ENTITIES_PER_CATEGORY]
+        if process.name
+    ]
+    if processes:
+        lines.append(f"hint_processes: {', '.join(processes)}")
+
+    files = [
+        _truncate(file.name or file.path or "", limit=96)
+        for file in hint_entities.files[:_MAX_HINT_ENTITIES_PER_CATEGORY]
+        if file.name or file.path
+    ]
+    if files:
+        lines.append(f"hint_files: {', '.join(files)}")
+
+    return lines
+
+
+def format_triage_structured_appendix(
+    *,
+    hint_entities: EntitySet | None = None,
+    structured_context: TriageStructuredPromptContext | None = None,
+) -> str:
+    """Render bounded structured ticket appendix for triage LLM prompt."""
+    if structured_context is None and (hint_entities is None or hint_entities == EntitySet()):
+        return ""
+
+    lines: list[str] = [_STRUCTURED_APPENDIX_HEADER]
+
+    for key in _NORMALIZED_HINT_KEYS:
+        if structured_context is None:
+            continue
+        value = structured_context.normalized_fields.get(key)
+        if value:
+            lines.append(
+                f"normalized_{key}: {_truncate(str(value), limit=_MAX_NORMALIZED_VALUE_CHARS)}"
+            )
+
+    lines.extend(_format_hint_entity_lines(hint_entities))
+
+    if structured_context is not None:
+        for item in structured_context.related_alerts[:_MAX_RELATED_ALERTS]:
+            title = _truncate(item.title, limit=_MAX_RELATED_TITLE_CHARS)
+            tag = _truncate(item.tag, limit=_MAX_RELATED_TAG_CHARS)
+            if not title and not tag:
+                continue
+            if title and tag:
+                lines.append(f"related_alert: title={title}; tag={tag}")
+            elif title:
+                lines.append(f"related_alert: title={title}")
+            else:
+                lines.append(f"related_alert: tag={tag}")
+
+    if len(lines) <= 1:
+        return ""
+
+    appendix = "\n".join(lines)
+    return appendix[:_MAX_STRUCTURED_APPENDIX_CHARS]
+
+
+def build_triage_validation_corpus(
+    alert_text: str,
+    *,
+    hint_entities: EntitySet | None = None,
+    structured_context: TriageStructuredPromptContext | None = None,
+) -> str:
+    """Validation text corpus aligned with triage LLM prompt grounding."""
+    appendix = format_triage_structured_appendix(
+        hint_entities=hint_entities,
+        structured_context=structured_context,
+    )
+    if not appendix:
+        return alert_text
+    return f"{alert_text}\n\n{appendix}"
+
+
+def build_triage_messages(
+    alert_text: str,
+    *,
+    hint_entities: EntitySet | None = None,
+    structured_context: TriageStructuredPromptContext | None = None,
+) -> list[LLMMessage]:
     """Return ``[system, user]`` messages for the LLM entity-extraction call.
 
     Args:
         alert_text: The raw alert text / summary to parse.  Must be a non-empty
             string.  Callers are responsible for truncating excessively long
             inputs before calling this function.
+        hint_entities: Structured source entity seeds for prompt grounding.
+        structured_context: Incident normalized fields and related alert hints.
 
     Returns:
         A two-element message list ready for ``BaseLLMClient.chat``.
@@ -267,12 +418,18 @@ def build_triage_messages(alert_text: str) -> list[LLMMessage]:
         raise ValueError(
             f"alert_text must be a non-empty string, got {type(alert_text).__name__!r}"
         )
+
+    user_body = f"Parse this alert and respond with JSON only:\n{alert_text}"
+    appendix = format_triage_structured_appendix(
+        hint_entities=hint_entities,
+        structured_context=structured_context,
+    )
+    if appendix:
+        user_body = f"{user_body}\n\n{appendix}"
+
     return [
         LLMMessage(role="system", content=TRIAGE_SYSTEM_PROMPT),
-        LLMMessage(
-            role="user",
-            content=f"Parse this alert and respond with JSON only:\n{alert_text}",
-        ),
+        LLMMessage(role="user", content=user_body),
     ]
 
 
@@ -280,5 +437,7 @@ __all__ = [
     "TriageLLMResponse",
     "TRIAGE_SYSTEM_PROMPT",
     "build_triage_messages",
+    "build_triage_validation_corpus",
     "coerce_entities_payload",
+    "format_triage_structured_appendix",
 ]

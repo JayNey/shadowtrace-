@@ -26,6 +26,7 @@ from app.core.errors import (
 from app.models.agent_io import TriageAgentInput, TriageResult
 from app.models.entities import (
     AccountEntity,
+    DomainEntity,
     EntitySet,
     HostEntity,
     IPEntity,
@@ -184,11 +185,13 @@ def _make_input(
     event_id: str = "evt-001",
     raw_event_summary: str = "User admin logged in from 192.168.1.1",
     hint_entities: EntitySet | None = None,
+    structured_prompt_context=None,
 ) -> TriageAgentInput:
     return TriageAgentInput(
         event_id=event_id,
         raw_event_summary=raw_event_summary,
         hint_entities=hint_entities or EntitySet(),
+        structured_prompt_context=structured_prompt_context,
     )
 
 
@@ -1535,12 +1538,21 @@ class TestBuildTriageMessages:
     def test_build_triage_messages_valid_input(self):
         """Valid input returns two messages (system + user)."""
         from app.agents.prompts.triage_prompt import build_triage_messages
+        from app.models.agent_io import TriageStructuredPromptContext
 
         messages = build_triage_messages("Test alert text")
         assert len(messages) == 2
         assert messages[0].role == "system"
         assert messages[1].role == "user"
         assert "Test alert text" in messages[1].content
+
+        grounded = build_triage_messages(
+            "Test alert text",
+            structured_context=TriageStructuredPromptContext(
+                normalized_fields={"src_ip": "10.0.0.1"},
+            ),
+        )
+        assert "normalized_src_ip: 10.0.0.1" in grounded[1].content
 
 
 # --------------------------------------------------------------------------- #
@@ -1913,6 +1925,62 @@ class TestTriageSourceEntityMerge:
         assert result.event_type == EventType.ACCOUNT_ANOMALY
         assert result.degraded is True
         assert not result.entity_provenance_summary
+
+    @pytest.mark.asyncio
+    async def test_llm_entities_from_structured_context_pass_validation_on_blurry_title(self):
+        from app.agents.prompts.triage_prompt import TriageLLMResponse
+        from app.core.llm.base import LLMResponse
+        from app.models.agent_io import TriageStructuredPromptContext
+
+        blurry = "Correlation: elevated session and volume signals on analytics segment"
+        llm_entities = EntitySet(
+            hosts=[HostEntity(entity_id="llm-host", hostname="SRV-DB-STG-02")],
+            ips=[IPEntity(entity_id="llm-ip", address="198.51.100.44", scope="external")],
+            accounts=[AccountEntity(entity_id="llm-acct", username="svc-analytics-47")],
+            domains=[DomainEntity(entity_id="llm-dom", fqdn="storage-sync-cdn.example")],
+        )
+        llm_response = LLMResponse(
+            content="",
+            parsed=TriageLLMResponse(
+                event_type=EventType.DATA_EXFILTRATION,
+                entities=llm_entities,
+                decision_summary="Structured fields used.",
+            ),
+            model_name="mock",
+        )
+
+        captured_messages: list[object] = []
+
+        class _CapturingLLMClient:
+            async def chat(self, messages, **kwargs):
+                captured_messages.extend(messages)
+                return llm_response
+
+        wm = _MockBoundWorkingMemory(writer_name="TriageAgent")
+        agent = TriageAgent(llm_client=_CapturingLLMClient(), working_memory=wm)
+        structured = TriageStructuredPromptContext(
+            normalized_fields={
+                "account": "svc-analytics-47",
+                "hostname": "WKS-DATA-031",
+                "secondary_host": "SRV-DB-STG-02",
+                "src_ip": "198.51.100.44",
+                "domain": "storage-sync-cdn.example",
+            }
+        )
+        input_ = _make_input(
+            raw_event_summary=blurry,
+            structured_prompt_context=structured,
+        )
+        result = await agent._run(input_)
+
+        user_content = captured_messages[1].content
+        assert "normalized_src_ip: 198.51.100.44" in user_content
+        assert "normalized_secondary_host: SRV-DB-STG-02" in user_content
+        assert any(h.hostname == "SRV-DB-STG-02" for h in result.entities.hosts)
+        assert "198.51.100.44" in {ip.address for ip in result.entities.ips}
+        assert "svc-analytics-47" in {a.username for a in result.entities.accounts}
+        assert "storage-sync-cdn.example" in {d.fqdn for d in result.entities.domains}
+        assert result.degraded is False
 
 
 class TestTriageDecisionBasisProjection:

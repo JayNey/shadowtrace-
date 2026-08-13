@@ -22,7 +22,11 @@ from typing import Any
 from celery.exceptions import SoftTimeLimitExceeded
 
 from app.agents.base import BaseAgent
-from app.agents.prompts.triage_prompt import TriageLLMResponse, build_triage_messages
+from app.agents.prompts.triage_prompt import (
+    TriageLLMResponse,
+    build_triage_messages,
+    build_triage_validation_corpus,
+)
 from app.agents.rules.entity_extraction_rules import (
     IP_PATTERN,
     extract_entities_regex,
@@ -512,6 +516,8 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             input.raw_event_summary,
             input.event_id,
             source_snapshot=snapshot,
+            hint_entities=input.hint_entities,
+            structured_context=input.structured_prompt_context,
         )
         source_validated = validate_entity_set(
             input.hint_entities,
@@ -628,6 +634,8 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
         event_id: str,
         *,
         source_snapshot: dict[str, Any] | None = None,
+        hint_entities: EntitySet | None = None,
+        structured_context: Any | None = None,
     ) -> TextExtractionResult:
         """Extract entities via LLM (JSON mode) with optional regex fallback."""
         empty = EntitySet()
@@ -652,7 +660,16 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
             )
 
         try:
-            messages = build_triage_messages(alert_text)
+            validation_corpus = build_triage_validation_corpus(
+                alert_text,
+                hint_entities=hint_entities,
+                structured_context=structured_context,
+            )
+            messages = build_triage_messages(
+                alert_text,
+                hint_entities=hint_entities,
+                structured_context=structured_context,
+            )
             response: LLMResponse = await self.llm_client.chat(
                 messages,
                 event_id=event_id,
@@ -676,7 +693,7 @@ class TriageAgent(BaseAgent[TriageAgentInput, TriageResult]):
                 llm_validated = validate_entity_set(
                     parsed.entities,
                     provenance="llm",
-                    alert_text=alert_text,
+                    alert_text=validation_corpus,
                 )
                 if any(
                     (
