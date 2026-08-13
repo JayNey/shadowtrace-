@@ -9,12 +9,15 @@ from uuid import uuid4
 
 import pytest
 
+from app.agents.prompts.response_prompt import build_response_plan_messages
 from app.agents.response_agent import (
     ActionCandidate,
     ResponseAgent,
     ResponsePolicyFilter,
+    _apply_block_ip_role_correction,
     _cap_low_severity_candidates,
     _enforce_execution_owner_consistency,
+    _entities_summary,
     approval_confidence_for_disposition_only,
     build_mock_capability_manifest,
     compute_action_fingerprint,
@@ -1329,3 +1332,287 @@ def test_cap_low_severity_candidates_limits_to_ticket() -> None:
         disposition_only=False,
     )
     assert [item.tool_name for item in capped] == ["create_ticket"]
+
+
+def test_entities_summary_includes_ip_scope_and_normalized_field() -> None:
+    """ISSUE-327: response prompt entities must expose src/dst role hints."""
+    entities = EntitySet(
+        ips=[
+            IPEntity(
+                entity_id="ip-vpn",
+                address="198.51.100.44",
+                scope="external",
+                attributes={"normalized_field": "src_ip", "provenance": "source"},
+            ),
+            IPEntity(
+                entity_id="ip-upload",
+                address="198.51.100.77",
+                scope="external",
+                attributes={"normalized_field": "dst_ip", "provenance": "source"},
+            ),
+        ],
+        hosts=[
+            HostEntity(
+                entity_id="host-wks",
+                hostname="WKS-DATA-031",
+                attributes={"provenance": "source", "source_kind": "asset"},
+            ),
+            HostEntity(
+                entity_id="host-srv",
+                hostname="SRV-DB-STG-02",
+                attributes={
+                    "provenance": "source",
+                    "source_kind": "asset",
+                    "normalized_field": "secondary_host",
+                },
+            ),
+        ],
+    )
+    summary = _entities_summary(entities)
+    vpn = next(item for item in summary["ips"] if item["address"] == "198.51.100.44")
+    upload = next(item for item in summary["ips"] if item["address"] == "198.51.100.77")
+    assert vpn["scope"] == "external"
+    assert vpn["attributes"]["normalized_field"] == "src_ip"
+    assert upload["attributes"]["normalized_field"] == "dst_ip"
+    wks = next(item for item in summary["hosts"] if item["hostname"] == "WKS-DATA-031")
+    srv = next(item for item in summary["hosts"] if item["hostname"] == "SRV-DB-STG-02")
+    assert wks["host_kind"] == "workstation"
+    assert srv["host_kind"] == "server"
+    assert wks["source_hints"]["source_kind"] == "asset"
+    assert srv["source_hints"]["source_kind"] == "asset"
+    assert srv["source_hints"]["normalized_field"] == "secondary_host"
+
+
+def test_apply_block_ip_role_correction_keeps_action_and_fixes_reason() -> None:
+    """ISSUE-327: src_ip block_ip stays grounded; exfil-destination wording is corrected."""
+    entities = EntitySet(
+        ips=[
+            IPEntity(
+                entity_id="ip-vpn",
+                address="198.51.100.44",
+                scope="external",
+                attributes={"normalized_field": "src_ip"},
+            )
+        ]
+    )
+    candidate = ActionCandidate(
+        tool_name="block_ip",
+        target_type="ip",
+        target="198.51.100.44",
+        parameters={},
+        reason="Block the external exfiltration destination IP",
+    )
+    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
+    assert corrected.tool_name == "block_ip"
+    assert corrected.target == "198.51.100.44"
+    assert corrected.parameters["role"] == "source"
+    assert "exfiltration destination" not in corrected.reason.lower()
+    assert "source ip" in corrected.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_block_ip_src_ip_reason_corrected_in_plan() -> None:
+    """End-to-end: mislabeled src_ip block_ip reason is corrected before persistence."""
+    vpn_ip = "198.51.100.44"
+    event_id = f"evt-{uuid4().hex[:8]}"
+    entities = EntitySet(
+        ips=[
+            IPEntity(
+                entity_id="ip-vpn",
+                address=vpn_ip,
+                scope="external",
+                attributes={"normalized_field": "src_ip"},
+            )
+        ]
+    )
+    wm = _FakeWorkingMemory()
+    _seed_wm(wm, event_id, triage=_triage(entities=entities))
+
+    class _MislabeledLLM:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            from app.core.llm.base import LLMResponse
+
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": vpn_ip,
+                        "parameters": {},
+                        "reason": "Block the external exfiltration destination IP",
+                    },
+                    {
+                        "tool_name": "create_ticket",
+                        "target_type": "ticket",
+                        "target": "ticket",
+                        "parameters": {"title": "track", "description": "track"},
+                        "reason": "track response",
+                    },
+                ],
+                "strategy_summary": "LLM containment",
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_MislabeledLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    block_actions = [action for action in plan.actions if action.tool_name == "block_ip"]
+    assert len(block_actions) == 1
+    block = block_actions[0]
+    assert block.target == vpn_ip
+    assert block.parameters.get("role") == "source"
+    assert "exfiltration destination" not in (block.reason or "").lower()
+
+
+def _mislabeled_block_ip(
+    *,
+    address: str,
+    normalized_field: str | None,
+    role: str | None = None,
+    scope: str = "external",
+    target_type: str | None = "ip",
+) -> tuple[EntitySet, ActionCandidate]:
+    attrs: dict[str, str] = {}
+    if normalized_field:
+        attrs["normalized_field"] = normalized_field
+    entities = EntitySet(
+        ips=[
+            IPEntity(
+                entity_id="ip-1",
+                address=address,
+                scope=scope,  # type: ignore[arg-type]
+                attributes=attrs,
+            )
+        ]
+    )
+    parameters: dict[str, str] = {}
+    if role is not None:
+        parameters["role"] = role
+    candidate = ActionCandidate(
+        tool_name="block_ip",
+        target_type=target_type,
+        target=address,
+        parameters=parameters,
+        reason="Block the external exfiltration destination IP",
+    )
+    return entities, candidate
+
+
+def test_response_prompt_entities_json_includes_ip_scope_and_src_dst() -> None:
+    import json
+
+    entities = EntitySet(
+        ips=[
+            IPEntity(
+                entity_id="ip-vpn",
+                address="198.51.100.44",
+                scope="external",
+                attributes={"normalized_field": "src_ip"},
+            ),
+            IPEntity(
+                entity_id="ip-upload",
+                address="198.51.100.77",
+                scope="external",
+                attributes={"normalized_field": "dst_ip"},
+            ),
+        ]
+    )
+    messages = build_response_plan_messages(
+        triage_result=_triage(entities=entities),
+        risk_assessment=_risk(),
+        evidence_output=None,
+        available_tools=["create_ticket"],
+        entities_summary=_entities_summary(entities),
+    )
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    vpn = next(item for item in payload["entities"]["ips"] if item["address"] == "198.51.100.44")
+    upload = next(item for item in payload["entities"]["ips"] if item["address"] == "198.51.100.77")
+    assert vpn["scope"] == "external"
+    assert vpn["attributes"]["normalized_field"] == "src_ip"
+    assert upload["attributes"]["normalized_field"] == "dst_ip"
+
+
+def test_apply_block_ip_role_correction_overwrites_destination_role() -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="198.51.100.44",
+        normalized_field="src_ip",
+        role="destination",
+    )
+    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
+    assert corrected.parameters["role"] == "source"
+    assert "exfiltration destination" not in corrected.reason.lower()
+
+
+def test_apply_block_ip_role_correction_does_not_rewrite_dst_ip() -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="198.51.100.77",
+        normalized_field="dst_ip",
+    )
+    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
+    assert corrected.tool_name == "block_ip"
+    assert corrected.target == "198.51.100.77"
+    assert "exfiltration destination" in corrected.reason.lower()
+    assert "role" not in (corrected.parameters or {})
+
+
+def test_apply_block_ip_role_correction_accepts_source_ip_alias() -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="198.51.100.44",
+        normalized_field="source_ip",
+    )
+    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
+    assert corrected.parameters["role"] == "source"
+    assert "exfiltration destination" not in corrected.reason.lower()
+
+
+def test_apply_block_ip_role_correction_keeps_action_without_normalized_field() -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="198.51.100.44",
+        normalized_field=None,
+    )
+    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
+    assert corrected.tool_name == "block_ip"
+    assert corrected.target == "198.51.100.44"
+    assert "exfiltration destination" in corrected.reason.lower()
+
+
+def test_apply_block_ip_role_correction_uses_internal_scope_in_reason() -> None:
+    entities, candidate = _mislabeled_block_ip(
+        address="10.60.1.10",
+        normalized_field="src_ip",
+        scope="internal",
+    )
+    corrected = _apply_block_ip_role_correction(candidate, entities=entities)
+    assert "internal" in corrected.reason.lower()
+    assert "external" not in corrected.reason.lower()
+
+
+def test_infer_host_kind_skips_ambiguous_and_overbroad_names() -> None:
+    from app.agents.response_agent import _infer_host_kind
+
+    assert _infer_host_kind(HostEntity(entity_id="h1", hostname="WKS-DATA-031")) == "workstation"
+    assert _infer_host_kind(HostEntity(entity_id="h2", hostname="SRV-DB-STG-02")) == "server"
+    assert _infer_host_kind(HostEntity(entity_id="h3", hostname="SRV-PC-01")) is None
+    assert _infer_host_kind(HostEntity(entity_id="h4", hostname="APP-CLIENT-01")) is None
+    assert (
+        _infer_host_kind(
+            HostEntity(
+                entity_id="h5",
+                hostname="FILESHARE-01",
+                attributes={"asset_type": "application_server_endpoint"},
+            )
+        )
+        is None
+    )

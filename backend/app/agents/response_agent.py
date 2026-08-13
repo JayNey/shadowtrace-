@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -40,7 +41,7 @@ from app.models.agent_io import (
     TriageResult,
 )
 from app.models.disposition import SourceObjectLocator
-from app.models.entities import EntitySet
+from app.models.entities import EntitySet, HostEntity, IPEntity
 from app.models.enums import (
     TERMINAL_SOURCE_DISPOSITIONS,
     ActionCategory,
@@ -825,6 +826,11 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
         if disposition_only:
             candidates = [c for c in candidates if c.tool_name == VIRTUAL_DISPOSITION_TOOL]
 
+        candidates = [
+            _apply_block_ip_role_correction(candidate, entities=entities)
+            for candidate in candidates
+        ]
+
         actions = self._materialize_actions(
             event_id=input.event_id,
             plan_revision=plan_revision,
@@ -1409,15 +1415,147 @@ def _severity_rank(severity: Severity) -> int:
     return order.get(severity, 0)
 
 
+_HOST_WORKSTATION_MARKERS = re.compile(
+    r"(?:^|[-_])(?:wks|pc|lap|workstation|laptop)(?:[-_]|$)",
+    re.IGNORECASE,
+)
+_HOST_SERVER_MARKERS = re.compile(
+    r"(?:^|[-_])(?:srv|db|web|dc|sql|ad|fs|mail|server)(?:[-_]|$)",
+    re.IGNORECASE,
+)
+_SOURCE_IP_FIELDS = frozenset({"src_ip", "source_ip"})
+_EXFIL_DESTINATION_REASON_MARKERS = (
+    "exfiltration destination",
+    "exfil dest",
+    "exfil destination",
+)
+
+
+def _infer_host_kind(host: HostEntity) -> str | None:
+    attrs = host.attributes or {}
+    for key in ("host_kind", "host_role", "business_role", "asset_type"):
+        value = str(attrs.get(key) or "").strip().lower()
+        if not value:
+            continue
+        if value in {"workstation", "endpoint", "laptop"}:
+            return "workstation"
+        if value == "server":
+            return "server"
+    hostname = (host.hostname or "").strip()
+    if hostname:
+        is_workstation = bool(_HOST_WORKSTATION_MARKERS.search(hostname))
+        is_server = bool(_HOST_SERVER_MARKERS.search(hostname))
+        if is_workstation and is_server:
+            return None
+        if is_workstation:
+            return "workstation"
+        if is_server:
+            return "server"
+        return None
+    return None
+
+
+def _host_summary(host: HostEntity) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    if host.hostname:
+        summary["hostname"] = host.hostname
+    if host.ip:
+        summary["ip"] = host.ip
+    host_kind = _infer_host_kind(host)
+    if host_kind:
+        summary["host_kind"] = host_kind
+    attrs = host.attributes or {}
+    hints: dict[str, Any] = {}
+    for key in ("provenance", "source_kind", "asset_hostname", "normalized_field"):
+        value = attrs.get(key)
+        if value:
+            hints[key] = value
+    if hints:
+        summary["source_hints"] = hints
+    if not summary:
+        summary["entity_id"] = host.entity_id
+    return summary
+
+
+def _ip_summary(ip: IPEntity) -> dict[str, Any]:
+    summary: dict[str, Any] = {"scope": ip.scope}
+    if ip.address:
+        summary["address"] = ip.address
+    else:
+        summary["entity_id"] = ip.entity_id
+    attrs = ip.attributes or {}
+    filtered_attrs: dict[str, Any] = {}
+    normalized = attrs.get("normalized_field")
+    if normalized:
+        filtered_attrs["normalized_field"] = normalized
+    for key in ("provenance", "source_kind"):
+        value = attrs.get(key)
+        if value:
+            filtered_attrs[key] = value
+    if filtered_attrs:
+        summary["attributes"] = filtered_attrs
+    return summary
+
+
 def _entities_summary(entities: EntitySet) -> dict[str, Any]:
     return {
-        "accounts": [entity.username or entity.entity_id for entity in entities.accounts],
-        "hosts": [entity.hostname or entity.ip or entity.entity_id for entity in entities.hosts],
-        "ips": [entity.address or entity.entity_id for entity in entities.ips],
-        "domains": [entity.fqdn or entity.entity_id for entity in entities.domains],
-        "processes": [entity.name or entity.entity_id for entity in entities.processes],
-        "files": [entity.path or entity.name or entity.entity_id for entity in entities.files],
+        "accounts": [
+            {"username": entity.username or entity.entity_id}
+            for entity in entities.accounts
+        ],
+        "hosts": [_host_summary(entity) for entity in entities.hosts],
+        "ips": [_ip_summary(entity) for entity in entities.ips],
+        "domains": [{"fqdn": entity.fqdn or entity.entity_id} for entity in entities.domains],
+        "processes": [{"name": entity.name or entity.entity_id} for entity in entities.processes],
+        "files": [
+            {"path": entity.path or entity.name or entity.entity_id} for entity in entities.files
+        ],
     }
+
+
+def _lookup_ip_entity(entities: EntitySet, target: str | None) -> IPEntity | None:
+    if not target:
+        return None
+    needle = target.strip().lower()
+    for ip in entities.ips:
+        address = (ip.address or "").strip().lower()
+        if address and address == needle:
+            return ip
+        if ip.entity_id.lower() == needle:
+            return ip
+    return None
+
+
+def _reason_mislabels_src_as_exfil_dest(reason: str) -> bool:
+    text = reason.lower()
+    if any(marker in text for marker in _EXFIL_DESTINATION_REASON_MARKERS):
+        return True
+    return "destination" in text and any(
+        token in text for token in ("exfil", "upload", "c2", "command and control")
+    )
+
+
+def _apply_block_ip_role_correction(
+    candidate: ActionCandidate,
+    *,
+    entities: EntitySet,
+) -> ActionCandidate:
+    """Keep block_ip on src IPs but fix misleading exfil-destination reasons (ISSUE-327)."""
+    if candidate.tool_name != "block_ip" or candidate.target_type != "ip":
+        return candidate
+    ip_entity = _lookup_ip_entity(entities, candidate.target)
+    if ip_entity is None:
+        return candidate
+    normalized = str((ip_entity.attributes or {}).get("normalized_field") or "").strip().lower()
+    if normalized not in _SOURCE_IP_FIELDS:
+        return candidate
+    if not _reason_mislabels_src_as_exfil_dest(candidate.reason):
+        return candidate
+    params = dict(candidate.parameters or {})
+    params["role"] = "source"
+    scope = str(ip_entity.scope or "unknown")
+    corrected_reason = f"Block {scope} source IP ({candidate.target})"
+    return replace(candidate, parameters=params, reason=corrected_reason)
 
 
 async def _upsert_action_row(session: AsyncSession, action: Action) -> str:
