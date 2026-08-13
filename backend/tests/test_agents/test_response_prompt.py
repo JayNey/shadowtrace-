@@ -84,3 +84,77 @@ def test_response_decision_summary_truncated_to_512_chars() -> None:
     payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
     assert len(payload["decision_summary"]) == 512
     assert payload["decision_summary"] == long_summary[:512]
+    assert payload["evidence"] == {}
+
+
+def test_response_empty_decision_summary_and_reasoning() -> None:
+    triage = TriageResult(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=False,
+        reasoning="",
+        decision_summary="",
+    )
+    messages = build_response_plan_messages(
+        triage_result=triage,
+        risk_assessment=_risk(),
+        evidence_output=None,
+        available_tools=["create_ticket"],
+        entities_summary={},
+    )
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    assert payload["decision_summary"] == ""
+    assert payload["triage_reasoning"] == ""
+    assert payload["evidence"] == {}
+
+
+def test_response_triage_reasoning_truncated_to_500_chars() -> None:
+    long_reasoning = "z" * 600
+    triage = TriageResult.model_construct(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=False,
+        reasoning=long_reasoning,
+        decision_summary="brief",
+    )
+    messages = build_response_plan_messages(
+        triage_result=triage,
+        risk_assessment=_risk(),
+        evidence_output=None,
+        available_tools=["create_ticket"],
+        entities_summary={},
+    )
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    assert payload["decision_summary"] == "brief"
+    assert len(payload["triage_reasoning"]) == 500
+    assert payload["triage_reasoning"] == long_reasoning[:500]
+
+
+def test_response_reasoning_none_coerced_to_empty_string() -> None:
+    triage = TriageResult.model_construct(
+        event_type=EventType.OTHER,
+        severity=Severity.LOW,
+        need_investigation=False,
+        reasoning=None,
+        decision_summary="kept",
+    )
+    messages = build_response_plan_messages(
+        triage_result=triage,
+        risk_assessment=_risk(),
+        evidence_output=None,
+        available_tools=["create_ticket"],
+        entities_summary={},
+    )
+    payload = json.loads(messages[1].content.split("Context:\n", 1)[1])
+    assert payload["decision_summary"] == "kept"
+    assert payload["triage_reasoning"] == ""
+
+
+def test_response_prompt_does_not_import_risk_private_helpers() -> None:
+    from pathlib import Path
+
+    from app.agents.prompts import response_prompt
+
+    source = Path(response_prompt.__file__).read_text(encoding="utf-8")
+    assert "from app.agents.prompts.risk_prompt" not in source
+    assert "_evidence_prompt_block" not in source
