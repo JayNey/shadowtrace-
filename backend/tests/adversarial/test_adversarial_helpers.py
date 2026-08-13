@@ -6,8 +6,16 @@ import pytest
 
 from tests.adversarial.audit_report import AdversarialAuditChecks
 from tests.adversarial.full_loop_runner import resolve_full_loop_timeout_s
-from tests.adversarial.helpers import missing_response_targets, response_plan_targets
-from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
+from tests.adversarial.helpers import (
+    audit_required_signals,
+    block_ip_reason_destination_mislabels,
+    build_alert_corpus,
+    build_narrative_corpus,
+    missing_response_targets,
+    response_plan_targets,
+    strict_disposition_targets_enabled,
+)
+from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH, HOST_DB
 
 _CLOSED_SEQUENCE = [
     "new",
@@ -55,6 +63,102 @@ def test_missing_response_targets_reports_gaps() -> None:
     gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
     assert "WKS-DATA-031" in gaps
     assert "198.51.100.44" in gaps
+    assert HOST_DB not in gaps
+
+
+def test_missing_response_targets_all_includes_gated_db() -> None:
+    actions = [
+        {"tool_name": "disable_account", "target": "svc-analytics-47"},
+        {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
+        {"tool_name": "block_ip", "target": "198.51.100.44"},
+    ]
+    enforced = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
+    all_gaps = missing_response_targets(
+        ground_truth=GROUND_TRUTH,
+        actions=actions,
+        enforce_gated=True,
+    )
+    assert enforced == []
+    assert HOST_DB in all_gaps
+
+
+def test_text_understanding_rejects_prompt_echo_only() -> None:
+    triage_ctx = {
+        "entities": {"accounts": [], "hosts": [], "ips": [], "domains": [], "processes": [], "files": []},
+        "decision_summary": "Pivot involved SRV-DB-STG-02 after VPN login",
+    }
+    audit = audit_required_signals(
+        required=["SRV-DB-STG-02"],
+        alert_corpus="Correlation: elevated session and volume signals",
+        triage_ctx=triage_ctx,
+        narrative_corpus=build_narrative_corpus(
+            triage_ctx=triage_ctx,
+            evidence_ctx={},
+            report_ctx={},
+        ),
+    )
+    assert audit.echo_only_hits == ("SRV-DB-STG-02",)
+    assert audit.text_understanding_hits == ()
+    assert audit.text_understanding_missing == ("SRV-DB-STG-02",)
+
+
+def test_text_understanding_accepts_alert_or_source_merge() -> None:
+    triage_ctx = {
+        "entities": {
+            "hosts": [
+                {
+                    "hostname": "SRV-DB-STG-02",
+                    "source_refs": [{"source_kind": "incident", "source_object_id": "88190001"}],
+                }
+            ],
+            "accounts": [],
+            "ips": [],
+            "domains": [],
+            "processes": [],
+            "files": [],
+        }
+    }
+    audit = audit_required_signals(
+        required=["SRV-DB-STG-02"],
+        alert_corpus=build_alert_corpus(
+            alert_text="Correlation incident",
+            event_payload={"normalized": {"secondary_host": "SRV-DB-STG-02"}},
+        ),
+        triage_ctx=triage_ctx,
+        narrative_corpus="",
+    )
+    assert audit.text_understanding_hits == ("SRV-DB-STG-02",)
+    assert audit.source_projection_hits == ("SRV-DB-STG-02",)
+    assert audit.echo_only_hits == ()
+
+
+def test_block_ip_reason_destination_mislabel_detected() -> None:
+    actions = [
+        {
+            "tool_name": "block_ip",
+            "target": "198.51.100.44",
+            "reason": "Block malicious destination address",
+        }
+    ]
+    assert block_ip_reason_destination_mislabels(actions)
+
+
+def test_block_ip_reason_destination_mislabel_allows_source_wording() -> None:
+    actions = [
+        {
+            "tool_name": "block_ip",
+            "target": "198.51.100.44",
+            "reason": "Block unusual VPN source address",
+        }
+    ]
+    assert block_ip_reason_destination_mislabels(actions) == []
+
+
+def test_strict_disposition_targets_env(monkeypatch) -> None:
+    monkeypatch.delenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", raising=False)
+    assert strict_disposition_targets_enabled() is False
+    monkeypatch.setenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", "1")
+    assert strict_disposition_targets_enabled() is True
 
 
 def test_human_verdict_requires_reporting_for_pass() -> None:

@@ -96,7 +96,13 @@ Do **not** claim autonomous investigation quality from Mock plumbing alone. Live
 | **Mock + scenario golden** | Regression / demo packs (e.g. `insider_data_exfiltration`, `adversarial_credential_db_staging_exfil`) | Same as Mock — golden content is scripted, not emergent reasoning |
 | **Live** (`LLM_MODE=openai_compatible` + API key) | Closer-to-production LLM behavior on unseen narratives | Vendor availability, cost, non-determinism |
 
-**Do not** interpret Mock adversarial audit **PASS** as proof of autonomous investigation quality. Mock results validate plumbing and scripted paths only; Live runs (or human red-team review) are required for capability claims.
+**Do not** interpret Mock adversarial audit **PASS** as proof of autonomous investigation quality. Mock results validate plumbing and scripted paths only; Live runs (or human red-team review) are required for capability claims. The `backend-closure-gates` CI job runs adversarial full-loop with default Mock LLM — a green gate is **not** Live investigation proof (ISSUE-334).
+
+### Provenance-aware quality audit (ISSUE-334)
+
+Entity/indicator hits in the full-loop artifact (`quality_audit`) count only when grounded in **original alert text** or **structured source merge** (`source_refs`). Prompt-appendix echo in LLM narrative fields is tracked as `echo_only_hits` and must not inflate text-understanding credit.
+
+`must_response_targets` includes staging DB host `SRV-DB-STG-02`; it is gated until ISSUE-328 lands. Default CI enforces non-gated targets only; set `ADVERSARIAL_STRICT_DISPOSITION_TARGETS=1` locally to hard-fail on DB isolation gaps.
 
 ### Mock LLM routing (ISSUE-199 / ISSUE-201)
 
