@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -738,7 +737,13 @@ async def test_resolve_writeback_replay_after_commit_schedules_pending_intent(
 
     manual = ManualResolutionService(session_factory, resume_runner=_noop_runner)
 
-    def _track_schedule() -> None:
+    def _track_schedule(
+        *,
+        event_id: str | None = None,
+        intent_id: str | None = None,
+        trigger: str = "unspecified",
+    ) -> None:
+        del event_id, intent_id, trigger
         schedule_calls.append("schedule")
         # Do not run in-process claim — simulate kill before dispatch.
 
@@ -781,7 +786,13 @@ async def test_resolve_writeback_replay_after_commit_schedules_pending_intent(
     assert schedule_calls == ["schedule"]
     tracked: list[str] = []
 
-    def _track2() -> None:
+    def _track2(
+        *,
+        event_id: str | None = None,
+        intent_id: str | None = None,
+        trigger: str = "unspecified",
+    ) -> None:
+        del event_id, intent_id, trigger
         tracked.append("replay")
 
     manual.schedule_dispatch = _track2  # type: ignore[method-assign]
@@ -814,9 +825,10 @@ def test_beat_schedule_includes_graph_resume_intent_tasks(
 
 def test_graph_resume_schedule_skipped_no_loop_is_observable(
     monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """ISSUE-324: no running loop must not silently skip graph resume dispatch."""
+    from unittest.mock import AsyncMock
+
     from app.core.config import get_settings
     from app.core.metrics import (
         dispatch_schedule_health_snapshot,
@@ -836,22 +848,25 @@ def test_graph_resume_schedule_skipped_no_loop_is_observable(
         _BoomDelay(),
     )
 
+    degraded = MagicMock()
+    degraded.set_flag = AsyncMock(return_value=["graph_resume_dispatch_unavailable=test_no_loop"])
     session_factory = MagicMock()
-    service = ManualResolutionService(session_factory)
+    service = ManualResolutionService(session_factory, degraded_flags=degraded)
 
-    with caplog.at_level(logging.WARNING, logger="app.services.manual_resolution_service"):
-        service.schedule_dispatch(
-            event_id="evt-no-loop",
-            intent_id="gri-no-loop",
-            trigger="test_no_loop",
-        )
+    service.schedule_dispatch(
+        event_id="evt-no-loop",
+        intent_id="gri-no-loop",
+        trigger="test_no_loop",
+    )
 
     snapshot = dispatch_schedule_health_snapshot()
     assert snapshot.get("graph_resume:resume_enqueue_failed") == 1
     assert snapshot.get("graph_resume:resume_schedule_skipped_no_loop") == 1
-    assert any(
-        "graph resume dispatch skipped: no running event loop" in record.message
-        for record in caplog.records
+    degraded.set_flag.assert_awaited_once_with(
+        "evt-no-loop",
+        "graph_resume_dispatch_unavailable",
+        "test_no_loop",
+        writer="ManualResolutionService",
     )
     get_settings.cache_clear()
 

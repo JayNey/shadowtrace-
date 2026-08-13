@@ -877,6 +877,7 @@ class DispositionSyncService:
         should_dispatch = False
         fallthrough_resume = False
         already_terminal = False
+        resume_intent_id: str | None = None
         event_id = ""
         adapter_label = "unknown"
         async with self._session_factory() as session:
@@ -935,19 +936,22 @@ class DispositionSyncService:
                         )
 
                         try:
-                            await self._manual_resolution.create_or_replay_resume_intent_in_session(
-                                session,
-                                event_id,
-                                resolution_source=RESOLUTION_SOURCE_WRITEBACK_MANUAL,
-                                subject_kind=SUBJECT_KIND_WRITEBACK,
-                                subject_id=writeback_id,
-                                resolution=resolution,
-                                principal=principal,
-                                comment=comment,
-                                evidence_ref=evidence_ref,
-                                operation_id=operation_id,
+                            resume_intent = (
+                                await self._manual_resolution.create_or_replay_resume_intent_in_session(
+                                    session,
+                                    event_id,
+                                    resolution_source=RESOLUTION_SOURCE_WRITEBACK_MANUAL,
+                                    subject_kind=SUBJECT_KIND_WRITEBACK,
+                                    subject_id=writeback_id,
+                                    resolution=resolution,
+                                    principal=principal,
+                                    comment=comment,
+                                    evidence_ref=evidence_ref,
+                                    operation_id=operation_id,
+                                )
                             )
                             should_dispatch = True
+                            resume_intent_id = resume_intent.intent_id
                         except IdempotencyKeyReuseError:
                             raise
                         except ValidationError:
@@ -1006,6 +1010,7 @@ class DispositionSyncService:
         if should_dispatch and self._manual_resolution is not None:
             self._manual_resolution.schedule_dispatch(
                 event_id=event_id,
+                intent_id=resume_intent_id,
                 trigger="resolve_writeback",
             )
         elif fallthrough_resume:

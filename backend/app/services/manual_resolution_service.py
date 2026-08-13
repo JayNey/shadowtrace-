@@ -462,7 +462,6 @@ class ManualResolutionService:
         progresses. When no running event loop exists, emit structured signals
         instead of silently returning (ISSUE-324).
         """
-        celery_enqueued = False
         try:
             from app.core.config import TaskMode, get_settings
 
@@ -472,7 +471,6 @@ class ManualResolutionService:
                 )
 
                 dispatch_pending_graph_resume_intents.delay()
-                celery_enqueued = True
                 record_dispatch_schedule(domain="graph_resume", outcome="resume_scheduled")
                 logger.debug(
                     "graph resume dispatch enqueued trigger=%s event_id=%s intent_id=%s",
@@ -493,8 +491,6 @@ class ManualResolutionService:
                 exc_info=True,
             )
 
-        if celery_enqueued:
-            return
         if self._dispatch_scheduled:
             return
         self._dispatch_scheduled = True
@@ -541,6 +537,7 @@ class ManualResolutionService:
         loop.create_task(_run())
 
     def _schedule_resume_dispatch_degraded_flag(self, event_id: str, *, trigger: str) -> None:
+        """Persist graph_resume_dispatch_unavailable even when called without a loop."""
         degraded = self._degraded
         if degraded is None:
             return
@@ -564,6 +561,16 @@ class ManualResolutionService:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            # This helper is primarily invoked from the no-loop schedule path.
+            try:
+                asyncio.run(_set_flag())
+            except Exception:
+                logger.warning(
+                    "failed to set graph_resume_dispatch_unavailable event=%s trigger=%s",
+                    event_id,
+                    trigger,
+                    exc_info=True,
+                )
             return
         loop.create_task(_set_flag())
 

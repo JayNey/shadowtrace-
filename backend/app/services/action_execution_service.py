@@ -365,19 +365,22 @@ class ActionExecutionService:
                         )
 
                         try:
-                            await self._manual_resolution.create_or_replay_resume_intent_in_session(
-                                session,
-                                event_id,
-                                resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
-                                subject_kind=SUBJECT_KIND_ACTION,
-                                subject_id=action_id,
-                                resolution=resolution,
-                                principal=principal,
-                                comment=comment,
-                                evidence_ref=evidence_ref,
-                                operation_id=operation_id,
+                            resume_intent = (
+                                await self._manual_resolution.create_or_replay_resume_intent_in_session(
+                                    session,
+                                    event_id,
+                                    resolution_source=RESOLUTION_SOURCE_ACTION_UNKNOWN,
+                                    subject_kind=SUBJECT_KIND_ACTION,
+                                    subject_id=action_id,
+                                    resolution=resolution,
+                                    principal=principal,
+                                    comment=comment,
+                                    evidence_ref=evidence_ref,
+                                    operation_id=operation_id,
+                                )
                             )
                             should_dispatch = True
+                            resume_intent_id = resume_intent.intent_id
                         except ValidationError as exc:
                             # Not on MANUAL_RESOLUTION hold — adjudication still succeeds.
                             logger.info(
