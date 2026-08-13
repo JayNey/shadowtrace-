@@ -121,6 +121,7 @@ def _project_single(
             break
 
     hostname = normalized.get("hostname") or normalized.get("host")
+    secondary_host = normalized.get("secondary_host")
     host_ip = normalized.get("ip")
     host_ip_str = str(host_ip) if host_ip else None
     if hostname or host_ip:
@@ -134,6 +135,18 @@ def _project_single(
                 attributes=dict(attrs),
             )
         )
+    if secondary_host and str(secondary_host).strip():
+        secondary = str(secondary_host).strip()
+        if secondary != str(hostname or "").strip():
+            counters["hosts"] += 1
+            hosts.append(
+                HostEntity(
+                    entity_id=f"src-host-{counters['hosts']}",
+                    hostname=secondary,
+                    source_refs=[ref],
+                    attributes={**attrs, "normalized_field": "secondary_host"},
+                )
+            )
 
     ip_candidates: list[tuple[str, str]] = []
     for key in ("src_ip", "dst_ip", "ip", "source_ip"):

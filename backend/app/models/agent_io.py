@@ -738,12 +738,31 @@ class PlannerAgentInput(AgentInput):
     revise_reason: str | None = None
 
 
+class TriageRelatedAlertHint(BaseModel):
+    """Bounded related-alert summary for triage LLM prompt grounding (ISSUE-325)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str = ""
+    tag: str = ""
+
+
+class TriageStructuredPromptContext(BaseModel):
+    """Structured ticket fields appended to triage LLM user prompt (ISSUE-325)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    normalized_fields: dict[str, str] = Field(default_factory=dict)
+    related_alerts: list[TriageRelatedAlertHint] = Field(default_factory=list)
+
+
 class TriageAgentInput(AgentInput):
     model_config = ConfigDict(extra="forbid")
 
     event_id: str
     raw_event_summary: str = ""
     hint_entities: EntitySet = Field(default_factory=EntitySet)
+    structured_prompt_context: TriageStructuredPromptContext | None = None
 
 
 class EvidenceAgentInput(AgentInput):

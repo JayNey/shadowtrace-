@@ -53,6 +53,7 @@ from app.models.entities import EntitySet
 from app.models.enums import DispositionPolicy, EventStatus, FinalVerdict
 from app.models.report import InvestigationReport
 from app.models.workflow import TransitionContext
+from app.orchestration.triage_input_builder import build_triage_agent_input
 from app.services.agent_task_coordinator import run_risk_score_with_ledger
 from app.services.analysis_only_complete_persistence import (
     persist_analysis_only_complete_authoritative,
@@ -606,11 +607,18 @@ class AnalysisOnlyPipeline:
 
     async def _run_triage(self, event_id: str, event: Any) -> tuple[TriageResult, str]:
         raw_summary = f"{event.title}. {event.description}"
-        triage_input = TriageAgentInput(
-            event_id=event_id,
-            raw_event_summary=raw_summary,
-            hint_entities=event.entities,
+        triage_input = await build_triage_agent_input(
+            event_id,
+            event_service=self._event_service,
         )
+        updates: dict[str, Any] = {}
+        if triage_input.raw_event_summary != raw_summary:
+            updates["raw_event_summary"] = raw_summary
+        event_entities = getattr(event, "entities", None)
+        if triage_input.hint_entities == EntitySet() and event_entities is not None:
+            updates["hint_entities"] = event_entities
+        if updates:
+            triage_input = triage_input.model_copy(update=updates)
         result = await self._triage.execute(triage_input)
         if not isinstance(result, TriageResult):
             raise TypeError("TriageAgent must return TriageResult")

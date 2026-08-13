@@ -586,6 +586,46 @@
       ],
       "title": "SourceReference",
       "type": "object"
+    },
+    "TriageRelatedAlertHint": {
+      "additionalProperties": false,
+      "description": "Bounded related-alert summary for triage LLM prompt grounding (ISSUE-325).",
+      "properties": {
+        "title": {
+          "default": "",
+          "title": "Title",
+          "type": "string"
+        },
+        "tag": {
+          "default": "",
+          "title": "Tag",
+          "type": "string"
+        }
+      },
+      "title": "TriageRelatedAlertHint",
+      "type": "object"
+    },
+    "TriageStructuredPromptContext": {
+      "additionalProperties": false,
+      "description": "Structured ticket fields appended to triage LLM user prompt (ISSUE-325).",
+      "properties": {
+        "normalized_fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Normalized Fields",
+          "type": "object"
+        },
+        "related_alerts": {
+          "items": {
+            "$ref": "#/$defs/TriageRelatedAlertHint"
+          },
+          "title": "Related Alerts",
+          "type": "array"
+        }
+      },
+      "title": "TriageStructuredPromptContext",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -601,6 +641,17 @@
     },
     "hint_entities": {
       "$ref": "#/$defs/EntitySet"
+    },
+    "structured_prompt_context": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TriageStructuredPromptContext"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [
