@@ -659,6 +659,323 @@ describe("EventDetailPage", () => {
     });
   });
 
+  it("does not paint entity required=true applicable=false as terminal writeback done", async () => {
+    const user = userEvent.setup();
+    mockListActions.mockResolvedValue({
+      data: {
+        total: 2,
+        page: 1,
+        page_size: 100,
+        items: [
+          {
+            action_id: "act-entity-331",
+            event_id: "evt-70",
+            action_level: "l3",
+            action_category: "response",
+            action_name: "阻断 IP",
+            tool_name: "block_ip",
+            execution_phase: "immediate",
+            parameters: {},
+            status: "success",
+            execution_owner: "xdr_managed",
+            writeback_required: true,
+            writeback_applicable: false,
+            writeback_status: null,
+            updated_at: null,
+          },
+          {
+            action_id: "act-terminal-331",
+            event_id: "evt-70",
+            action_level: "l1",
+            action_category: "response",
+            action_name: "更新外部事件终态",
+            tool_name: "update_source_event_disposition",
+            execution_phase: "post_verify",
+            activation_condition: "after_effect_resolution",
+            parameters: {},
+            status: "success",
+            execution_owner: "xdr_managed",
+            writeback_required: true,
+            writeback_applicable: true,
+            writeback_status: "confirmed",
+            updated_at: null,
+          },
+        ],
+      },
+    });
+    mockListDispositions.mockResolvedValue({
+      data: {
+        event_id: "evt-70",
+        items: [
+          {
+            disposition: {
+              disposition_id: "disp-entity-331",
+              action_id: "act-entity-331",
+              closure_cycle: 1,
+              intent_kind: "entity_action_submit",
+              source_locator: {
+                source_id: "mock-xdr",
+                source_type: "xdr",
+                object_kind: "event",
+                object_id: "source-event-70",
+              },
+              operation_code: "isolate_host",
+              operation_params: {},
+              target_results: [],
+              operator_id: "shadowtrace",
+              idempotency_key: "idem-entity-331",
+              execution_owner: "xdr_managed",
+            },
+            writeback_status: "accepted",
+          },
+        ],
+      },
+    });
+
+    renderPage("/events/evt-70#actions");
+    await user.click(await screen.findByRole("tab", { name: /安全处置/ }));
+    expect(await screen.findByTestId("action-writeback-act-entity-331")).toHaveTextContent(
+      "不承担终态写回",
+    );
+    expect(screen.getByTestId("action-writeback-act-terminal-331")).toHaveTextContent(
+      "终态写回已确认",
+    );
+    expect(screen.getAllByText("事件级").length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("tab", { name: /外部写回/ }));
+    const writebackPanel = await screen.findByRole("tabpanel", { name: /外部写回/ });
+    expect(await within(writebackPanel).findByText("实体侧效应已提交")).toBeInTheDocument();
+    expect(within(writebackPanel).queryByText("终态写回已确认")).not.toBeInTheDocument();
+  });
+
+  it("does not paint pending terminal receipts as confirmed-green", async () => {
+    const user = userEvent.setup();
+    const detail = makeDetail();
+    detail.event.event_context_snapshot = {
+      ...detail.event.event_context_snapshot,
+      disposition_receipts: [
+        {
+          writeback_id: "wb-pending-331",
+          sequence: 1,
+          disposition_id: "disp-pending-331",
+          action_id: "action-70",
+          source_record_id: "source-event-70",
+          status: "pending",
+          confirmation_evidence: null,
+          submitted_at: "2026-07-27T08:10:00Z",
+          confirmed_at: null,
+          simulated: false,
+        },
+      ],
+      writeback_summary: {
+        event_id: "evt-70",
+        closure_cycle: 2,
+        disposition_policy: "required",
+        required_action_count: 1,
+        applicable_action_count: 1,
+        blocked_action_ids: [],
+        readiness_counts: { ready: 1 },
+        aggregate_readiness: "ready",
+        writeback_counts: { pending: 1 },
+        aggregate_status: "pending",
+        terminal_event_action_id: "action-70",
+        terminal_event_writeback_id: "wb-pending-331",
+        terminal_event_disposition: "closed",
+        terminal_event_confirmed: false,
+        external_unsynced: true,
+        updated_at: "2026-07-27T08:10:00Z",
+      },
+    };
+    mockGetEvent.mockResolvedValue({ data: detail });
+    mockListActions.mockResolvedValue({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 100,
+        items: [
+          {
+            action_id: "action-70",
+            event_id: "evt-70",
+            action_level: "l1",
+            action_category: "response",
+            action_name: "更新外部事件终态",
+            tool_name: "update_source_event_disposition",
+            execution_phase: "post_verify",
+            activation_condition: "after_effect_resolution",
+            parameters: {},
+            status: "success",
+            execution_owner: "xdr_managed",
+            writeback_required: true,
+            writeback_applicable: true,
+            writeback_status: "pending",
+            updated_at: null,
+          },
+        ],
+      },
+    });
+    mockListDispositions.mockResolvedValue({
+      data: {
+        event_id: "evt-70",
+        items: [
+          {
+            disposition: {
+              disposition_id: "disp-pending-331",
+              action_id: "action-70",
+              closure_cycle: 2,
+              intent_kind: "event_status_update",
+              source_locator: {
+                source_id: "mock-xdr",
+                source_type: "xdr",
+                object_kind: "event",
+                object_id: "source-event-70",
+              },
+              operation_code: "close_event",
+              operation_params: {},
+              target_results: [],
+              operator_id: "shadowtrace",
+              idempotency_key: "idem-pending-331",
+              execution_owner: "xdr_managed",
+            },
+            writeback_status: "pending",
+          },
+        ],
+      },
+    });
+    mockGetWriteback.mockResolvedValue({
+      data: {
+        writeback_id: "wb-pending-331",
+        disposition_id: "disp-pending-331",
+        action_id: "action-70",
+        status: "pending",
+        confirmation_evidence: null,
+        evidence_tier: null,
+        provider_code: null,
+        message_code: null,
+        target_results: [],
+      },
+    });
+
+    renderPage("/events/evt-70#actions");
+    await user.click(await screen.findByRole("tab", { name: /外部写回/ }));
+    const row = await screen.findByTestId("writeback-row-wb-pending-331");
+    expect(row).not.toHaveStyle({ background: "rgba(82, 196, 26, 0.10)" });
+    expect(screen.queryByText("终态写回已确认")).not.toBeInTheDocument();
+  });
+
+  it("does not treat empty-string terminal writeback id as a confirmed terminal row", async () => {
+    const user = userEvent.setup();
+    const detail = makeDetail();
+    detail.event.event_context_snapshot = {
+      ...detail.event.event_context_snapshot,
+      disposition_receipts: [
+        {
+          writeback_id: "",
+          sequence: 1,
+          disposition_id: "disp-empty-331",
+          action_id: "act-entity-331",
+          source_record_id: "source-event-70",
+          status: "accepted",
+          confirmation_evidence: null,
+          submitted_at: "2026-07-27T08:10:00Z",
+          confirmed_at: null,
+          simulated: false,
+          target_results: [],
+        },
+      ],
+      writeback_summary: {
+        event_id: "evt-70",
+        closure_cycle: 1,
+        disposition_policy: "required",
+        required_action_count: 1,
+        applicable_action_count: 0,
+        blocked_action_ids: [],
+        readiness_counts: { not_required: 1 },
+        aggregate_readiness: "not_required",
+        writeback_counts: { accepted: 1 },
+        aggregate_status: "accepted",
+        terminal_event_action_id: "",
+        terminal_event_writeback_id: "",
+        terminal_event_disposition: null,
+        terminal_event_confirmed: false,
+        external_unsynced: true,
+        updated_at: "2026-07-27T08:10:00Z",
+      },
+    };
+    mockGetEvent.mockResolvedValue({ data: detail });
+    mockListActions.mockResolvedValue({
+      data: {
+        total: 1,
+        page: 1,
+        page_size: 100,
+        items: [
+          {
+            action_id: "act-entity-331",
+            event_id: "evt-70",
+            action_level: "l3",
+            action_category: "response",
+            action_name: "阻断 IP",
+            tool_name: "block_ip",
+            execution_phase: "immediate",
+            parameters: {},
+            status: "success",
+            execution_owner: "xdr_managed",
+            writeback_required: true,
+            writeback_applicable: false,
+            writeback_status: "accepted",
+            updated_at: null,
+          },
+        ],
+      },
+    });
+    mockListDispositions.mockResolvedValue({
+      data: {
+        event_id: "evt-70",
+        items: [
+          {
+            disposition: {
+              disposition_id: "disp-empty-331",
+              action_id: "act-entity-331",
+              closure_cycle: 1,
+              intent_kind: "entity_action_submit",
+              source_locator: {
+                source_id: "mock-xdr",
+                source_type: "xdr",
+                object_kind: "event",
+                object_id: "source-event-70",
+              },
+              operation_code: "isolate_host",
+              operation_params: {},
+              target_results: [],
+              operator_id: "shadowtrace",
+              idempotency_key: "idem-empty-331",
+              execution_owner: "xdr_managed",
+            },
+            writeback_status: "accepted",
+          },
+        ],
+      },
+    });
+    mockGetWriteback.mockResolvedValue({
+      data: {
+        writeback_id: "",
+        disposition_id: "disp-empty-331",
+        action_id: "act-entity-331",
+        status: "accepted",
+        confirmation_evidence: null,
+        evidence_tier: null,
+        provider_code: null,
+        message_code: null,
+        target_results: [],
+      },
+    });
+
+    renderPage("/events/evt-70#actions");
+    await user.click(await screen.findByRole("tab", { name: /外部写回/ }));
+    const writebackPanel = await screen.findByRole("tabpanel", { name: /外部写回/ });
+    expect(within(writebackPanel).queryByText(/终态 EVENT_STATUS_UPDATE/)).not.toBeInTheDocument();
+    expect(within(writebackPanel).queryByText("终态写回已确认")).not.toBeInTheDocument();
+    expect(await within(writebackPanel).findByText("实体侧效应已提交")).toBeInTheDocument();
+  });
+
   it("shows POST_VERIFY label after deferred action enters execution", async () => {
     const user = userEvent.setup();
     mockListActions.mockResolvedValue({

@@ -51,9 +51,11 @@ from app.models.agent_io import (
 from app.models.context import EventContext
 from app.models.enums import (
     ActionCategory,
+    ActionExecutionPhase,
     ActionLevel,
     ActionStatus,
     ExecutionOwner,
+    WritebackStatus,
 )
 from app.models.enums import (
     WritebackReadiness as WritebackReadinessEnum,
@@ -561,9 +563,7 @@ async def test_refresh_response_plan_snapshot_returns_none_on_overlay_read_failu
     dumped = await refresh_response_plan_snapshot(
         EVENT_ID,
         plan_raw=pending.model_dump(mode="json"),
-        session_factory=_SessionFactory(
-            _FakeSession([], error=RuntimeError("db timeout"))
-        ),
+        session_factory=_SessionFactory(_FakeSession([], error=RuntimeError("db timeout"))),
     )
     assert dumped is None
 
@@ -883,3 +883,315 @@ async def test_builder_rejects_unknown_fields_via_model() -> None:
             risk_assessment=_risk(),
             response_phase_status="bogus",  # type: ignore[arg-type]
         )
+
+
+def test_report_executed_actions_splits_writeback_obligation_and_applicability() -> None:
+    """ISSUE-331: entity actions keep required=true/applicable=false in report prose."""
+    builder = ReportSectionBuilder()
+    entity = Action(
+        action_id="act-entity-331",
+        event_id=EVENT_ID,
+        plan_revision=1,
+        action_fingerprint="fp-entity",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L3,
+        status=ActionStatus.SUCCESS,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+    )
+    terminal = Action(
+        action_id="act-terminal-331",
+        event_id=EVENT_ID,
+        plan_revision=1,
+        action_fingerprint="fp-terminal",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Update disposition",
+        tool_name="update_source_event_disposition",
+        action_level=ActionLevel.L1,
+        execution_phase=ActionExecutionPhase.POST_VERIFY,
+        activation_condition="after_effect_resolution",
+        status=ActionStatus.APPROVED,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=True,
+        writeback_readiness=WritebackReadiness.READY,
+    )
+    text = builder._executed_actions([entity, terminal], ReportPhaseStatus.EXECUTED)
+    entity_line = next(line for line in text.splitlines() if line.startswith("act-entity-331"))
+    terminal_line = next(line for line in text.splitlines() if line.startswith("act-terminal-331"))
+    assert "writeback_required=true | writeback_applicable=false" in entity_line
+    assert "writeback_not_applicable_reason=entity_side_effect" in entity_line
+    assert "writeback_required=false" not in entity_line
+    assert "writeback_required=true | writeback_applicable=true" in terminal_line
+    assert "writeback_status=null" in terminal_line
+
+
+def test_report_verification_results_marks_writeback_not_applicable() -> None:
+    """ISSUE-331: verification chapter must not imply entity row completed terminal wb."""
+    builder = ReportSectionBuilder()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.DISPOSITION,
+        results=[
+            VerificationActionResult(
+                action_id="act-entity-331",
+                effect_status=EffectStatus.SKIPPED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                writeback_status=None,
+                detail="writeback_not_applicable",
+                verification_phase=VerificationPhase.DISPOSITION,
+            )
+        ],
+    )
+    text = builder._verification_results(verification, ReportPhaseStatus.EXECUTED)
+    assert "writeback_applicable=false" in text
+    assert "writeback_not_applicable_reason=entity_side_effect" in text
+    assert "detail=writeback_not_applicable" in text
+    assert "writeback_applicable=true" not in text
+
+
+def test_report_verification_phase1_entity_not_executed_does_not_claim_applicable() -> None:
+    """ISSUE-331: Phase 1 entity rows must not invent writeback_applicable=true."""
+    builder = ReportSectionBuilder()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.PARTIAL,
+        verification_phase=VerificationPhase.EFFECT,
+        results=[
+            VerificationActionResult(
+                action_id="act-entity-331",
+                effect_status=EffectStatus.SKIPPED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                writeback_status=None,
+                detail="action_not_executed",
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ],
+    )
+    text = builder._verification_results(verification, ReportPhaseStatus.EXECUTED)
+    entity_line = next(line for line in text.splitlines() if line.startswith("act-entity-331"))
+    assert "writeback_required=true" in entity_line
+    assert "writeback_applicable=true" not in entity_line
+    assert "writeback_not_applicable_reason" not in entity_line
+
+
+def test_report_verification_ready_row_does_not_invent_applicable_from_readiness() -> None:
+    """ISSUE-331: READY without an Action join must not invent applicable=true."""
+    builder = ReportSectionBuilder()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.DISPOSITION,
+        results=[
+            VerificationActionResult(
+                action_id="act-terminal-331",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+                writeback_status=WritebackStatus.CONFIRMED,
+                verification_phase=VerificationPhase.DISPOSITION,
+            )
+        ],
+    )
+    text = builder._verification_results(verification, ReportPhaseStatus.EXECUTED)
+    terminal_line = next(line for line in text.splitlines() if line.startswith("act-terminal-331"))
+    assert "writeback_required=true" in terminal_line
+    assert "writeback_status=confirmed" in terminal_line
+    assert "writeback_applicable=true" not in terminal_line
+
+
+@pytest.mark.parametrize(
+    "readiness",
+    [
+        WritebackReadiness.SOURCE_UNRESOLVED,
+        WritebackReadiness.CAPABILITY_UNKNOWN,
+        WritebackReadiness.PERMISSION_DENIED,
+    ],
+)
+def test_report_verification_blocked_readiness_does_not_invent_applicable(
+    readiness: WritebackReadiness,
+) -> None:
+    builder = ReportSectionBuilder()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.PARTIAL,
+        verification_phase=VerificationPhase.DISPOSITION,
+        results=[
+            VerificationActionResult(
+                action_id="act-blocked-331",
+                effect_status=EffectStatus.UNVERIFIABLE,
+                writeback_required=True,
+                writeback_readiness=readiness,
+                writeback_status=None,
+                detail=f"writeback_blocked_{readiness.value}",
+                verification_phase=VerificationPhase.DISPOSITION,
+            )
+        ],
+    )
+    text = builder._verification_results(verification, ReportPhaseStatus.EXECUTED)
+    line = next(item for item in text.splitlines() if item.startswith("act-blocked-331"))
+    assert "writeback_required=true" in line
+    assert "writeback_applicable=true" not in line
+
+
+def test_report_verification_joins_action_applicable_for_entity_and_terminal() -> None:
+    """ISSUE-331: joined Action fields are the only source of applicable=true."""
+    builder = ReportSectionBuilder()
+    entity = Action(
+        action_id="act-entity-331",
+        event_id=EVENT_ID,
+        plan_revision=1,
+        action_fingerprint="fp-entity",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L3,
+        status=ActionStatus.SUCCESS,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+    )
+    terminal = Action(
+        action_id="act-terminal-331",
+        event_id=EVENT_ID,
+        plan_revision=1,
+        action_fingerprint="fp-terminal",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Update disposition",
+        tool_name="update_source_event_disposition",
+        action_level=ActionLevel.L1,
+        execution_phase=ActionExecutionPhase.POST_VERIFY,
+        activation_condition="after_effect_resolution",
+        status=ActionStatus.APPROVED,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=True,
+        writeback_readiness=WritebackReadiness.READY,
+        writeback_status=WritebackStatus.CONFIRMED,
+    )
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.DISPOSITION,
+        results=[
+            VerificationActionResult(
+                action_id="act-entity-331",
+                effect_status=EffectStatus.SKIPPED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                writeback_status=None,
+                detail="action_not_executed",
+                verification_phase=VerificationPhase.EFFECT,
+            ),
+            VerificationActionResult(
+                action_id="act-terminal-331",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+                writeback_status=WritebackStatus.CONFIRMED,
+                verification_phase=VerificationPhase.DISPOSITION,
+            ),
+        ],
+    )
+    text = builder._verification_results(
+        verification,
+        ReportPhaseStatus.EXECUTED,
+        [entity, terminal],
+    )
+    entity_line = next(line for line in text.splitlines() if line.startswith("act-entity-331"))
+    terminal_line = next(line for line in text.splitlines() if line.startswith("act-terminal-331"))
+    assert "writeback_required=true | writeback_applicable=false" in entity_line
+    assert "writeback_not_applicable_reason=entity_side_effect" in entity_line
+    assert "writeback_required=false" not in entity_line
+    assert "writeback_required=true | writeback_applicable=true" in terminal_line
+    assert "writeback_status=confirmed" in terminal_line
+
+
+def test_report_section_data_persists_writeback_applicability() -> None:
+    """ISSUE-331: executed_actions.data.writeback_rows survives LLM rewrite."""
+    entity = Action(
+        action_id="act-entity-331",
+        event_id=EVENT_ID,
+        plan_revision=1,
+        action_fingerprint="fp-entity-data",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Block IP",
+        tool_name="block_ip",
+        action_level=ActionLevel.L3,
+        status=ActionStatus.SUCCESS,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=False,
+        writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+    )
+    terminal = Action(
+        action_id="act-terminal-331",
+        event_id=EVENT_ID,
+        plan_revision=1,
+        action_fingerprint="fp-terminal-data",
+        action_category=ActionCategory.RESPONSE,
+        action_name="Update disposition",
+        tool_name="update_source_event_disposition",
+        action_level=ActionLevel.L1,
+        execution_phase=ActionExecutionPhase.POST_VERIFY,
+        activation_condition="after_effect_resolution",
+        status=ActionStatus.SUCCESS,
+        execution_owner=ExecutionOwner.XDR_MANAGED,
+        writeback_required=True,
+        writeback_applicable=True,
+        writeback_readiness=WritebackReadiness.READY,
+        writeback_status=WritebackStatus.CONFIRMED,
+    )
+    sections = ReportSectionBuilder().build(
+        event_id=EVENT_ID,
+        evidence_output=_evidence(),
+        risk_assessment=_risk(),
+        response_plan=ResponsePlan(
+            plan_id="plan-331",
+            actions=[entity, terminal],
+            strategy_summary="contain exfiltration",
+            generated_by=ResponsePlanGeneratedBy.TEMPLATE,
+        ),
+        verification_result=VerificationResult(
+            overall_status=VerificationOverallStatus.SUCCESS,
+            verification_phase=VerificationPhase.DISPOSITION,
+            results=[
+                VerificationActionResult(
+                    action_id="act-entity-331",
+                    effect_status=EffectStatus.SKIPPED,
+                    writeback_required=True,
+                    writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                    detail="writeback_not_applicable",
+                    verification_phase=VerificationPhase.DISPOSITION,
+                ),
+                VerificationActionResult(
+                    action_id="act-terminal-331",
+                    effect_status=EffectStatus.VERIFIED,
+                    writeback_required=True,
+                    writeback_readiness=WritebackReadiness.READY,
+                    writeback_status=WritebackStatus.CONFIRMED,
+                    verification_phase=VerificationPhase.DISPOSITION,
+                ),
+            ],
+        ),
+        response_phase_status=ReportPhaseStatus.EXECUTED,
+        verification_phase_status=ReportPhaseStatus.EXECUTED,
+    )
+    executed = next(section for section in sections if section.key == "executed_actions")
+    rows = {row["action_id"]: row for row in executed.data["writeback_rows"]}
+    assert rows["act-entity-331"]["writeback_required"] is True
+    assert rows["act-entity-331"]["writeback_applicable"] is False
+    assert rows["act-terminal-331"]["writeback_applicable"] is True
+    verification = next(section for section in sections if section.key == "verification_results")
+    entity_line = next(
+        line for line in verification.content.splitlines() if line.startswith("act-entity-331")
+    )
+    terminal_line = next(
+        line for line in verification.content.splitlines() if line.startswith("act-terminal-331")
+    )
+    assert "writeback_applicable=false" in entity_line
+    assert "writeback_applicable=true" in terminal_line
+    assert "writeback_required=false" not in entity_line
