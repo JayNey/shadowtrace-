@@ -49,7 +49,7 @@ async def test_not_required_post_evidence_fp_closes_without_scenario_dependency(
 ) -> None:
     """account_anomaly_fp closes only after evidence + org baseline, not fixture names."""
     from app.data_generators.scenarios import build_scenario
-    from app.data_generators.scenarios.account_anomaly_fp import SCENARIO_ID
+    from app.data_generators.scenarios.account_anomaly_fp import OPS_ACCOUNT, SCENARIO_ID
     from app.mock_xdr.api import create_app
     from app.mock_xdr.state import MockXDRState
 
@@ -74,7 +74,8 @@ async def test_not_required_post_evidence_fp_closes_without_scenario_dependency(
         row = (
             await session.scalars(
                 select(orm.SecurityEvent).where(
-                    orm.SecurityEvent.title == "Bulk login by ops account during change window"
+                    orm.SecurityEvent.title
+                    == f"Bulk login by {OPS_ACCOUNT} during change window"
                 )
             )
         ).first()
@@ -187,7 +188,7 @@ async def test_required_post_evidence_fp_adjudication_from_pipeline_without_jour
 ) -> None:
     """REQUIRED policy: pipeline produces fp_adjudication naturally and stays at REPORTING."""
     from app.data_generators.scenarios import build_scenario
-    from app.data_generators.scenarios.account_anomaly_fp import SCENARIO_ID
+    from app.data_generators.scenarios.account_anomaly_fp import OPS_ACCOUNT, SCENARIO_ID
     from app.mock_xdr.api import create_app
     from app.mock_xdr.state import MockXDRState
     from app.models.enums import DispositionPolicy, WritebackReadiness
@@ -214,7 +215,8 @@ async def test_required_post_evidence_fp_adjudication_from_pipeline_without_jour
         row = (
             await session.scalars(
                 select(orm.SecurityEvent).where(
-                    orm.SecurityEvent.title == "Bulk login by ops account during change window"
+                    orm.SecurityEvent.title
+                    == f"Bulk login by {OPS_ACCOUNT} during change window"
                 )
             )
         ).first()
