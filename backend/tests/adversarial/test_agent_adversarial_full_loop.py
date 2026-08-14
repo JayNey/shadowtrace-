@@ -455,6 +455,10 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     )
     assert report["checks"]["verdict_matches_expected"]
     assert report["checks"]["risk_score_at_least_minimum"]
+    if isinstance(risk_ctx, dict) and risk_ctx.get("severity"):
+        assert report["observed"]["severity"] == normalize_enum(risk_ctx.get("severity"))
+    if triage_severity and report["observed"]["severity"] != triage_severity:
+        assert report["observed"]["triage_severity"] == triage_severity
     # ISSUE-319: lock full-loop scorecard assembly (not only helper unit tests).
     assert report["audit_mode"] == "full_loop"
     assert report["checks"]["closed_reached"] is True

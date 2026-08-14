@@ -559,6 +559,8 @@ export interface EventContextSnapshot {
   evidence_output?: EvidenceOutput | null;
   storyline?: AttackStoryline | null;
   risk_assessment?: RiskAssessment | null;
+  /** ISSUE-330: bounded triage severity for explicit dual-source disclosure. */
+  triage_severity?: Severity | null;
   execution_jobs?: ExecutionJobResponse[];
   execution_summary?: {
     jobs?: ExecutionJobResponse[];

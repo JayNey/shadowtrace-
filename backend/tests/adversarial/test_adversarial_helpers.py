@@ -195,3 +195,15 @@ def test_resolve_observed_severity_prefers_risk_over_triage() -> None:
     )
     assert outward == "high"
     assert triage == "medium"
+
+
+def test_resolve_observed_severity_ignores_higher_triage_when_risk_missing() -> None:
+    from tests.adversarial.audit_report import resolve_observed_severity
+
+    outward, triage = resolve_observed_severity(
+        risk_ctx=None,
+        event_severity="medium",
+        triage_ctx={"severity": "high"},
+    )
+    assert outward == "medium"
+    assert triage == "high"

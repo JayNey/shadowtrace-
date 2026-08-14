@@ -173,6 +173,11 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     print("[adversarial-audit] checks:", json.dumps(report["checks"], ensure_ascii=False, indent=2))
     print(f"[adversarial-audit] full report → {ARTIFACT_PATH}")
 
+    if isinstance(risk_ctx, dict) and risk_ctx.get("severity"):
+        assert report["observed"]["severity"] == normalize_enum(risk_ctx.get("severity"))
+    if triage_severity and report["observed"]["severity"] != triage_severity:
+        assert report["observed"]["triage_severity"] == triage_severity
+
     # ISSUE-319: analysis-only audit must not require CLOSED / full-loop scoring.
     assert report["audit_mode"] == "analysis_only"
     assert "closed_reached" not in report["checks"]

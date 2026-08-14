@@ -129,7 +129,7 @@ describe("EventOverviewCard", () => {
   it("prefers risk_assessment severity and shows triage chip when divergent", () => {
     renderCard(
       makeDetail({
-        severity: "medium",
+        severity: "high",
         risk_score: 77,
         event_context_snapshot: {
           risk_assessment: {
@@ -140,14 +140,58 @@ describe("EventOverviewCard", () => {
             possible_false_positive: false,
             scoring_mode: "rule_only",
           },
-          triage_result: {
-            severity: "medium",
+          triage_severity: "medium",
+        },
+      }),
+    );
+    expect(screen.getByText("高")).toBeInTheDocument();
+    expect(screen.getByTestId("overview-triage-severity-tag")).toHaveTextContent("分诊 中");
+  });
+
+  it("hides triage chip when severities match", () => {
+    renderCard(
+      makeDetail({
+        severity: "high",
+        event_context_snapshot: {
+          risk_assessment: {
+            risk_score: 77,
+            severity: "high",
+            confidence: 0.8,
+            risk_factors: [],
+            possible_false_positive: false,
+            scoring_mode: "rule_only",
+          },
+          triage_severity: "high",
+        },
+      }),
+    );
+    expect(screen.queryByTestId("overview-triage-severity-tag")).not.toBeInTheDocument();
+  });
+
+  it("falls back to event.severity when risk_assessment is absent", () => {
+    renderCard(makeDetail({ severity: "medium", event_context_snapshot: {} }));
+    expect(screen.getByText("中")).toBeInTheDocument();
+    expect(screen.queryByTestId("overview-triage-severity-tag")).not.toBeInTheDocument();
+  });
+
+  it("does not show triage chip when API snapshot omits triage_severity", () => {
+    renderCard(
+      makeDetail({
+        severity: "high",
+        event_context_snapshot: {
+          risk_assessment: {
+            risk_score: 77,
+            severity: "high",
+            confidence: 0.8,
+            risk_factors: [],
+            possible_false_positive: false,
+            scoring_mode: "rule_only",
           },
         },
       }),
     );
     expect(screen.getByText("高")).toBeInTheDocument();
-    expect(screen.getByTestId("overview-triage-severity-tag")).toHaveTextContent("分诊 medium");
+    expect(screen.queryByTestId("overview-triage-severity-tag")).not.toBeInTheDocument();
   });
 
   it("submits trimmed reason and refreshes on success", async () => {

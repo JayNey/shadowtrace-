@@ -8,7 +8,9 @@ from typing import Any
 from app.agents.triage_risk_consistency import (
     INCONSISTENCY_DISCLOSURE_HEADER,
     format_triage_decision_excerpt,
+    resolve_outward_severity,
     should_flag_triage_risk_inconsistency,
+    strip_triage_machine_prefix,
 )
 from app.models.action import Action, ImpactAssessment
 from app.models.agent_io import (
@@ -151,7 +153,9 @@ def build_decision_brief(
     """Bounded decision brief for template enrichment (no CoT / prompt text)."""
     event_type = triage_result.event_type.value if triage_result else "unknown"
     need_investigation = triage_result.need_investigation if triage_result is not None else None
-    outward_severity = risk_assessment.severity
+    outward_severity = (
+        resolve_outward_severity(risk_assessment=risk_assessment) or risk_assessment.severity
+    )
     parts = [
         f"事件类型 {event_type}",
         f"严重级别 {outward_severity.value}",
@@ -226,10 +230,7 @@ def build_actions_status_summary(
         return f"处置阶段状态={phase}。\nRESPONSE 动作 0 个。"
     counts = _action_status_counts(response_actions)
     count_text = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
-    return (
-        f"处置阶段状态={phase}。\n"
-        f"RESPONSE 动作共 {len(response_actions)} 个（{count_text}）。"
-    )
+    return f"处置阶段状态={phase}。\nRESPONSE 动作共 {len(response_actions)} 个（{count_text}）。"
 
 
 class ReportSectionBuilder:
@@ -580,9 +581,12 @@ class ReportSectionBuilder:
         event_type = triage_result.event_type.value if triage_result else "unknown"
         # Prefer auditable decision_summary; keep deprecated reasoning only as
         # a last-resort display field (never as enrichment CoT).
-        decision_summary = ((triage_result.decision_summary if triage_result else "") or "").strip()
+        raw_decision_summary = (
+            (triage_result.decision_summary if triage_result else "") or ""
+        ).strip()
+        decision_notes = strip_triage_machine_prefix(raw_decision_summary)
         reasoning = ""
-        if not decision_summary and triage_result is not None:
+        if not raw_decision_summary and triage_result is not None:
             reasoning = (triage_result.reasoning or "").strip()
         brief = decision_brief or build_decision_brief(
             triage_result=triage_result,
@@ -665,8 +669,10 @@ class ReportSectionBuilder:
                 f"{replan_count} 轮重规划仍未能通过验证，已标记 escalated=true，"
                 "需安全运营人员接管后续调查与处置。"
             )
-        if decision_summary:
-            lines.append(f"decision_summary: {decision_summary}")
+        if triage_result is not None and triage_result.severity is not risk_assessment.severity:
+            lines.append(f"triage_severity: {triage_result.severity.value}")
+        if decision_notes:
+            lines.append(f"decision_summary: {decision_notes}")
         elif reasoning:
             lines.append(f"triage_reasoning: {reasoning}")
         if triage_result is not None and should_flag_triage_risk_inconsistency(

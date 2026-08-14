@@ -168,6 +168,21 @@ def test_format_triage_decision_excerpt_labels_divergent_severity() -> None:
     assert "severity=medium" not in excerpt
 
 
+def test_format_triage_decision_excerpt_match_strips_machine_prefix() -> None:
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        decision_summary=(
+            "event_type=data_exfiltration, severity=high, need_investigation=True; "
+            "notes only"
+        ),
+    )
+    excerpt = format_triage_decision_excerpt(triage, outward_severity=Severity.HIGH)
+    assert excerpt == "分诊结论：notes only"
+    assert "severity=" not in excerpt.lower()
+
+
 def test_resolve_outward_severity_prefers_risk_assessment() -> None:
     assert (
         resolve_outward_severity(
@@ -186,3 +201,13 @@ def test_resolve_observed_severity_never_falls_back_to_triage() -> None:
     )
     assert outward == "high"
     assert triage == "medium"
+
+
+def test_resolve_observed_severity_ignores_higher_triage_when_risk_missing() -> None:
+    outward, triage = resolve_observed_severity(
+        risk_ctx=None,
+        event_severity="medium",
+        triage_ctx={"severity": "high"},
+    )
+    assert outward == "medium"
+    assert triage == "high"

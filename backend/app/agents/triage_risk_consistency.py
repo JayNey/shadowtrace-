@@ -107,7 +107,9 @@ def format_triage_decision_excerpt(
         return None
     notes = strip_triage_machine_prefix(summary)
     if triage.severity is outward_severity:
-        return f"分诊结论：{summary[:max_chars]}"
+        if not notes:
+            return None
+        return f"分诊结论：{notes[:max_chars]}"
     parts = [f"分诊严重级别 {triage.severity.value}"]
     if notes:
         parts.append(notes)

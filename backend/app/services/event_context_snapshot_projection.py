@@ -32,6 +32,7 @@ SNAPSHOT_SUMMARY_KEYS = frozenset(
         "report_quality",
         "analysis_only_complete",
         "risk_assessment",
+        "triage_severity",
         "classification_override",
         "execution_substate",
     }
@@ -234,6 +235,19 @@ def _bound_risk_assessment(risk: dict[str, Any]) -> dict[str, Any]:
     return _fit_bytes(cleaned, max_bytes=_MAX_RISK_ASSESSMENT_BYTES)
 
 
+_ALLOWED_TRIAGE_SEVERITY = frozenset({"low", "medium", "high", "critical"})
+
+
+def bound_triage_severity(value: Any) -> str | None:
+    """ISSUE-330: API-safe triage severity token; never copies the triage payload."""
+    if value is None:
+        return None
+    text = value.value if isinstance(value, Enum) else str(value).strip().lower()
+    if text in _ALLOWED_TRIAGE_SEVERITY:
+        return text
+    return None
+
+
 def _storyline_needs_reproject(storyline: dict[str, Any]) -> bool:
     heavy = ("phases", "entries", "claim_refs", "prompt", "messages")
     return any(key in storyline for key in heavy)
@@ -336,6 +350,14 @@ def project_snapshot_for_api(snapshot: dict[str, Any] | None) -> dict[str, Any] 
     if isinstance(risk, dict):
         projected["risk_assessment"] = _bound_risk_assessment(risk)
 
+    triage_severity = bound_triage_severity(snapshot.get("triage_severity"))
+    if triage_severity is None:
+        triage = snapshot.get("triage_result")
+        if isinstance(triage, dict):
+            triage_severity = bound_triage_severity(triage.get("severity"))
+    if triage_severity is not None:
+        projected["triage_severity"] = triage_severity
+
     if "analysis_only_complete" in snapshot:
         projected["analysis_only_complete"] = bool(snapshot.get("analysis_only_complete"))
     if "report_generated" in snapshot:
@@ -432,6 +454,7 @@ def _hard_project_api_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 __all__ = [
     "SNAPSHOT_SUMMARY_KEYS",
+    "bound_triage_severity",
     "build_evidence_snapshot_summary",
     "build_storyline_snapshot_summary",
     "merge_analysis_only_complete_into_snapshot",

@@ -51,6 +51,7 @@ def test_build_decision_brief_omits_triage_snapshot_when_severities_match() -> N
     assert "严重级别 high" in brief
     assert "分诊结论" in brief
     assert "分诊快照" not in brief
+    assert "severity=" not in brief.lower()
 
 
 def test_severity_level_section_exposes_triage_severity_when_divergent() -> None:
@@ -65,6 +66,11 @@ def test_severity_level_section_exposes_triage_severity_when_divergent() -> None
     severity_section = next(section for section in sections if section.key == "severity_level")
     assert "severity=high" in severity_section.content
     assert "triage_severity=medium" in severity_section.content
+    overview = next(section for section in sections if section.key == "overview")
+    assert "severity: high" in overview.content
+    assert "triage_severity: medium" in overview.content
+    assert "severity=medium" not in overview.content.lower()
+    assert "external upload suspected" in overview.content
 
 
 def _empty_evidence():
