@@ -867,24 +867,10 @@ class ToolAgentInput(AgentInput):
     action_id: str | None = None
 
 
-# P0 LangGraph node agents (ISSUE-305). ``memory_agent`` and ``tool_agent`` are
-# intentionally excluded — Memory runs post-close; tools run via ToolExecutor.
-GRAPH_EXECUTABLE_AGENTS: frozenset[str] = frozenset(
-    {
-        "triage_agent",
-        "planner_agent",
-        "evidence_agent",
-        "graph_agent",
-        "rag_agent",
-        "risk_agent",
-        "response_agent",
-        "verify_agent",
-        "report_agent",
-    }
-)
-
 # Agents that may appear in ``ExecutionPlan.steps`` and are honored by
-# orchestration (including deferred response/report steps and SuperAgent hooks).
+# SuperAgent within the planner node. Distinct from ``GRAPH_EXECUTABLE_AGENTS``
+# in ``app.orchestration.workflow_graph`` (fixed LangGraph P0 nodes).
+# ``memory_agent`` / ``tool_agent`` are intentionally excluded (ISSUE-305).
 PLAN_STEP_ASSIGNABLE_AGENTS: frozenset[str] = frozenset(
     {
         "evidence_agent",

@@ -928,6 +928,63 @@ def test_plan_step_assignable_excludes_memory_and_tool_agent() -> None:
     assert "tool_agent" not in PLAN_STEP_ASSIGNABLE_AGENTS
 
 
+# SuperAgent ``_execute_single_step`` match arms — keep in sync with PLAN_STEP_ASSIGNABLE_AGENTS.
+_SUPER_AGENT_PLAN_STEP_HANDLERS = frozenset(
+    {
+        "evidence_agent",
+        "rag_agent",
+        "risk_agent",
+        "report_agent",
+        "response_agent",
+        "graph_agent",
+        "storyline_service",
+        "react",
+    }
+)
+
+
+def test_plan_step_assignable_agents_match_super_agent_dispatch() -> None:
+    """Planner/SuperAgent assignable set must match SuperAgent step dispatch (ISSUE-986)."""
+    assert PLAN_STEP_ASSIGNABLE_AGENTS == _SUPER_AGENT_PLAN_STEP_HANDLERS
+
+
+def test_graph_executable_agents_align_with_p0_node_sequence() -> None:
+    """GRAPH_EXECUTABLE_AGENTS must mirror P0 agent-backed LangGraph nodes (ISSUE-986)."""
+    from app.orchestration.workflow_graph import (
+        GRAPH_EXECUTABLE_AGENTS,
+        P0_GRAPH_NODE_TO_AGENT,
+        P0_NODE_SEQUENCE,
+    )
+
+    expected = frozenset(
+        P0_GRAPH_NODE_TO_AGENT[node]
+        for node in P0_NODE_SEQUENCE
+        if node in P0_GRAPH_NODE_TO_AGENT
+    )
+    assert GRAPH_EXECUTABLE_AGENTS == expected
+    assert "memory_agent" not in GRAPH_EXECUTABLE_AGENTS
+    assert "tool_agent" not in GRAPH_EXECUTABLE_AGENTS
+    assert "storyline_service" not in GRAPH_EXECUTABLE_AGENTS
+    assert "react" not in GRAPH_EXECUTABLE_AGENTS
+    # Fixed graph nodes (triage/planner/verify) are not plan-step assignable.
+    assert {"triage_agent", "planner_agent", "verify_agent"}.issubset(GRAPH_EXECUTABLE_AGENTS)
+    assert {"triage_agent", "planner_agent", "verify_agent"}.isdisjoint(
+        PLAN_STEP_ASSIGNABLE_AGENTS
+    )
+    assert PLAN_STEP_ASSIGNABLE_AGENTS & GRAPH_EXECUTABLE_AGENTS == frozenset(
+        {
+            "evidence_agent",
+            "graph_agent",
+            "risk_agent",
+            "response_agent",
+            "report_agent",
+        }
+    )
+    # rag_agent is plan-assignable but only wired as optional post-evidence node.
+    assert "rag_agent" in PLAN_STEP_ASSIGNABLE_AGENTS
+    assert "rag_agent" not in GRAPH_EXECUTABLE_AGENTS
+
+
 def test_default_plans_only_use_assignable_agents() -> None:
     from app.agents.rules.default_plans import DEFAULT_PLANS, get_default_plan
 
