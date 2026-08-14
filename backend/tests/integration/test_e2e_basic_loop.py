@@ -46,6 +46,7 @@ from tests.integration.conftest import (
     FailingLLMClient,
 )
 from tests.integration.rag_scenario_fixtures import (
+    FakeContextStore,
     FakeEventService,
     FakeWorkingMemory,
     main_evidence,
@@ -680,6 +681,7 @@ async def test_basic_loop_survives_rag_failure() -> None:
         risk_agent=risk_agent,
         report_agent=_StubAgent(report),
         event_service=event_service,
+        context_store=FakeContextStore(),
     )
     result = await pipeline.run(event_id)
 

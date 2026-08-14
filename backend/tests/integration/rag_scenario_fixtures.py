@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.models.agent_io import CollectionStatus, EvidenceOutput, TriageResult
+from app.models.context import EventContext
 from app.models.entities import (
     AccountEntity,
     DomainEntity,
@@ -17,6 +18,26 @@ from app.models.entities import (
 from app.models.enums import EventStatus, EventType, EvidenceSource, FinalVerdict, Severity
 from app.models.evidence import Evidence
 from app.models.ids import new_evidence_id
+
+
+class FakeContextStore:
+    def __init__(self) -> None:
+        self.values: dict[tuple[str, str], Any] = {}
+
+    async def get(self, event_id: str, key: str) -> Any:
+        return self.values.get((event_id, key))
+
+    async def set(self, event_id: str, key: str, value: Any, version: int | None = None) -> Any:
+        del version
+        self.values[(event_id, key)] = value
+        return SimpleNamespace(redis_ok=True, version=1)
+
+    async def refresh_closed_snapshot(self, event_id: str) -> None:
+        del event_id
+
+    async def get_full_context(self, event_id: str) -> EventContext:
+        del event_id
+        return EventContext()
 
 
 class FakeWorkingMemory:
@@ -90,6 +111,48 @@ class FakeEventService:
         reason: str | None = None,
     ) -> None:
         self.transitions.append(target)
+
+    async def publish_risk_assessment(
+        self,
+        event_id: str,
+        *,
+        assessment: Any,
+        verdict: FinalVerdict,
+        operator: str,
+        publication: Any,
+    ) -> tuple[bool, Any, Any]:
+        del publication
+        await self.update_risk_fields(
+            event_id,
+            risk_score=assessment.risk_score,
+            severity=assessment.severity,
+            confidence=assessment.confidence,
+            operator=operator,
+            factor_names=[f.factor_name for f in assessment.risk_factors],
+            risk_assessment=assessment.model_dump(mode="json"),
+        )
+        await self.set_final_verdict(event_id, verdict, operator=operator)
+        return False, object(), object()
+
+    async def publish_final_verdict_mutation(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def sync_event_summary_mutation(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+    async def merge_report_generated_context_snapshot(
+        self,
+        event_id: str,
+        generated: bool,
+    ) -> None:
+        del event_id, generated
+
+    async def merge_analysis_only_complete_context_snapshot(
+        self,
+        event_id: str,
+        complete: bool,
+    ) -> None:
+        del event_id, complete
 
 
 def make_evidence_item(
