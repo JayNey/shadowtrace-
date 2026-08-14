@@ -18,6 +18,10 @@ from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
 
 AdversarialAuditMode = Literal["analysis_only", "full_loop"]
 
+# ISSUE-065 / ISSUE-347: informative only — never folded into scored PASS dimensions.
+OUTPUT_QUALITY_PASS_THRESHOLD = 0.75
+_EVAL_ERROR_REASON_PREFIX = "eval_error_defaulted"
+
 _ANALYSIS_SCORED_CHECKS = frozenset(
     {
         "event_type_acceptable",
@@ -51,6 +55,9 @@ class AdversarialAuditChecks:
     ``collection_status=failed`` and mandatory ``query_dns`` skips at the
     certification layer without coupling ``MIN_EVIDENCE_SOURCES`` into
     ``validate_closed_gate`` (ISSUE-312).
+
+    ``output_quality`` lives in the ``unscored`` bucket (ISSUE-347): visibility
+    only, never a scored dimension and never wired into ``validate_closed_gate``.
     """
 
     ground_truth: dict[str, Any]
@@ -67,6 +74,8 @@ class AdversarialAuditChecks:
     triage_severity: str | None = None
     audit_mode: AdversarialAuditMode = "analysis_only"
     evidence_gaps: list[dict[str, Any]] | None = None
+    quality_scores: list[dict[str, Any]] | None = None
+    output_quality_blocking: bool = False
 
     def __post_init__(self) -> None:
         if self.audit_mode not in {"analysis_only", "full_loop"}:
@@ -122,7 +131,7 @@ class AdversarialAuditChecks:
         analysis_passed = sum(
             1 for key, value in checks.items() if key in _ANALYSIS_SCORED_CHECKS and value is True
         )
-        return {
+        payload: dict[str, Any] = {
             "generated_at": datetime.now(UTC).isoformat(),
             "audit_mode": self.audit_mode,
             "ground_truth": gt,
@@ -149,7 +158,14 @@ class AdversarialAuditChecks:
                 "analysis_total_dimensions": len(_ANALYSIS_SCORED_CHECKS),
             },
             "verdict_for_human": _human_verdict(checks, audit_mode=self.audit_mode),
+            "unscored": {
+                "output_quality": build_output_quality_unscored(
+                    self.quality_scores,
+                    output_quality_blocking=self.output_quality_blocking,
+                ),
+            },
         }
+        return payload
 
     def write_json(self, path: Path) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,6 +234,73 @@ def _is_expected_query_dns_skip(gap: dict[str, Any]) -> bool:
     detail = gap.get("detail") if isinstance(gap.get("detail"), dict) else {}
     description = str(detail.get("description") or "").strip()
     return description == _GENERIC_QUERY_DNS_SKIP_DESCRIPTION
+
+
+def coerce_quality_scores(raw: Any) -> list[dict[str, Any]]:
+    """Normalize WorkingMemory ``quality_scores`` payloads for audit reports."""
+    if not isinstance(raw, list):
+        return []
+    return [entry for entry in raw if isinstance(entry, dict)]
+
+
+def build_output_quality_unscored(
+    quality_scores: list[dict[str, Any]] | None,
+    *,
+    output_quality_blocking: bool = False,
+) -> dict[str, Any]:
+    """Summarize OutputQuality scores for adversarial visibility (ISSUE-347).
+
+    Lives in the ``unscored`` bucket: does not affect ``verdict_for_human`` or
+    scored dimensions, and must not be wired into ``validate_closed_gate``.
+    """
+    agents: dict[str, Any] = {}
+    eval_error_agents: list[str] = []
+    passing = 0
+    scores: list[float] = []
+
+    for item in quality_scores or []:
+        if not isinstance(item, dict):
+            continue
+        agent_name = str(item.get("agent_name") or "").strip()
+        if not agent_name:
+            continue
+        raw_score = item.get("score", 0.0)
+        try:
+            score = round(float(raw_score), 4)
+        except (TypeError, ValueError):
+            score = 0.0
+        verdict = str(item.get("verdict") or "")
+        reasons = item.get("reasons") if isinstance(item.get("reasons"), list) else []
+        eval_error = any(
+            isinstance(reason, str) and reason.startswith(_EVAL_ERROR_REASON_PREFIX)
+            for reason in reasons
+        )
+        if eval_error:
+            eval_error_agents.append(agent_name)
+        agents[agent_name] = {
+            "score": score,
+            "verdict": verdict,
+            "metrics": item.get("metrics") if isinstance(item.get("metrics"), dict) else {},
+            "evaluated_by": item.get("evaluated_by"),
+            "eval_error": eval_error,
+            "reasons": [str(reason) for reason in reasons[:5]],
+        }
+        scores.append(score)
+        if verdict == "pass":
+            passing += 1
+
+    return {
+        "present": bool(agents),
+        "pass_threshold": OUTPUT_QUALITY_PASS_THRESHOLD,
+        "blocking_profile": output_quality_blocking,
+        "agents": agents,
+        "summary": {
+            "agents_evaluated": len(agents),
+            "agents_passing": passing,
+            "minimum_score": min(scores) if scores else None,
+            "eval_error_agents": eval_error_agents,
+        },
+    }
 
 
 def _human_verdict(
