@@ -84,7 +84,14 @@ def test_missing_response_targets_all_includes_gated_db() -> None:
 
 def test_text_understanding_rejects_prompt_echo_only() -> None:
     triage_ctx = {
-        "entities": {"accounts": [], "hosts": [], "ips": [], "domains": [], "processes": [], "files": []},
+        "entities": {
+            "accounts": [],
+            "hosts": [],
+            "ips": [],
+            "domains": [],
+            "processes": [],
+            "files": [],
+        },
         "decision_summary": "Pivot involved SRV-DB-STG-02 after VPN login",
     }
     audit = audit_required_signals(
@@ -102,7 +109,73 @@ def test_text_understanding_rejects_prompt_echo_only() -> None:
     assert audit.text_understanding_missing == ("SRV-DB-STG-02",)
 
 
-def test_text_understanding_accepts_alert_or_source_merge() -> None:
+def test_text_understanding_alert_only_without_source_refs() -> None:
+    audit = audit_required_signals(
+        required=["SRV-DB-STG-02"],
+        alert_corpus="RDP pivot onto SRV-DB-STG-02 after VPN login",
+        triage_ctx={
+            "entities": {
+                "hosts": [],
+                "accounts": [],
+                "ips": [],
+                "domains": [],
+                "processes": [],
+                "files": [],
+            }
+        },
+        narrative_corpus="",
+    )
+    assert audit.text_understanding_hits == ("SRV-DB-STG-02",)
+    assert audit.source_projection_hits == ()
+    assert audit.echo_only_hits == ()
+    assert audit.text_understanding_missing == ()
+
+
+def test_source_projection_is_not_text_understanding_credit() -> None:
+    triage_ctx = {
+        "entities": {
+            "hosts": [
+                {
+                    "hostname": "SRV-DB-STG-02",
+                    "source_refs": [{"source_kind": "incident", "source_object_id": "88190001"}],
+                    "attributes": {"provenance": "source"},
+                }
+            ],
+            "accounts": [],
+            "ips": [],
+            "domains": [],
+            "processes": [],
+            "files": [],
+        }
+    }
+    audit = audit_required_signals(
+        required=["SRV-DB-STG-02"],
+        alert_corpus="Correlation: elevated session and volume signals",
+        triage_ctx=triage_ctx,
+        narrative_corpus="",
+    )
+    assert audit.source_projection_hits == ("SRV-DB-STG-02",)
+    assert audit.text_understanding_hits == ()
+    assert audit.text_understanding_missing == ("SRV-DB-STG-02",)
+    assert audit.echo_only_hits == ()
+
+
+def test_build_alert_corpus_excludes_normalized_hosts() -> None:
+    corpus = build_alert_corpus(
+        alert_text="Correlation incident",
+        event_payload={
+            "title": "Correlation incident",
+            "description": "Elevated session volume",
+            "normalized": {"secondary_host": "SRV-DB-STG-02", "hostname": "WKS-DATA-031"},
+        },
+    )
+    assert "SRV-DB-STG-02" not in corpus
+    assert "WKS-DATA-031" not in corpus
+    assert "Correlation incident" in corpus
+    assert "Elevated session volume" in corpus
+
+
+def test_llm_copied_source_refs_are_not_source_projection() -> None:
     triage_ctx = {
         "entities": {
             "hosts": [
@@ -116,20 +189,55 @@ def test_text_understanding_accepts_alert_or_source_merge() -> None:
             "domains": [],
             "processes": [],
             "files": [],
-        }
+        },
+        "decision_summary": "Host SRV-DB-STG-02 appeared in the prompt appendix",
     }
     audit = audit_required_signals(
         required=["SRV-DB-STG-02"],
-        alert_corpus=build_alert_corpus(
-            alert_text="Correlation incident",
-            event_payload={"normalized": {"secondary_host": "SRV-DB-STG-02"}},
-        ),
+        alert_corpus="Correlation: elevated session and volume signals",
         triage_ctx=triage_ctx,
-        narrative_corpus="",
+        narrative_corpus=build_narrative_corpus(
+            triage_ctx=triage_ctx,
+            evidence_ctx={},
+            report_ctx={},
+        ),
     )
-    assert audit.text_understanding_hits == ("SRV-DB-STG-02",)
-    assert audit.source_projection_hits == ("SRV-DB-STG-02",)
-    assert audit.echo_only_hits == ()
+    assert audit.source_projection_hits == ()
+    assert audit.text_understanding_hits == ()
+    assert audit.echo_only_hits == ("SRV-DB-STG-02",)
+
+
+def test_narrative_corpus_ignores_evidence_tool_hostnames() -> None:
+    corpus = build_narrative_corpus(
+        triage_ctx={"decision_summary": "Account abuse over VPN"},
+        evidence_ctx={
+            "entities": {"hosts": [{"hostname": "SRV-DB-STG-02"}]},
+            "tool_results": [{"hostname": "SRV-DB-STG-02"}],
+        },
+        report_ctx={"sections": [{"content": "Executive summary without the staging host"}]},
+    )
+    assert "srv-db-stg-02" not in corpus
+    assert "account abuse over vpn" in corpus
+
+
+def test_missing_db_gap_recorded_but_not_required_when_plan_includes_host() -> None:
+    with_db = [
+        {"tool_name": "disable_account", "target": "svc-analytics-47"},
+        {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
+        {"tool_name": "block_ip", "target": "198.51.100.44"},
+        {"tool_name": "isolate_host", "target": HOST_DB},
+    ]
+    without_db = with_db[:-1]
+    assert missing_response_targets(ground_truth=GROUND_TRUTH, actions=with_db) == []
+    assert HOST_DB not in missing_response_targets(ground_truth=GROUND_TRUTH, actions=with_db)
+    all_with = missing_response_targets(
+        ground_truth=GROUND_TRUTH, actions=with_db, enforce_gated=True
+    )
+    all_without = missing_response_targets(
+        ground_truth=GROUND_TRUTH, actions=without_db, enforce_gated=True
+    )
+    assert HOST_DB not in all_with
+    assert HOST_DB in all_without
 
 
 def test_block_ip_reason_destination_mislabel_detected() -> None:
@@ -138,6 +246,7 @@ def test_block_ip_reason_destination_mislabel_detected() -> None:
             "tool_name": "block_ip",
             "target": "198.51.100.44",
             "reason": "Block malicious destination address",
+            "parameters": {"normalized_field": "src_ip"},
         }
     ]
     assert block_ip_reason_destination_mislabels(actions)
@@ -149,16 +258,36 @@ def test_block_ip_reason_destination_mislabel_allows_source_wording() -> None:
             "tool_name": "block_ip",
             "target": "198.51.100.44",
             "reason": "Block unusual VPN source address",
+            "parameters": {"normalized_field": "src_ip"},
+        }
+    ]
+    assert block_ip_reason_destination_mislabels(actions) == []
+
+
+def test_block_ip_destination_wording_on_dst_ip_is_not_a_gap() -> None:
+    actions = [
+        {
+            "tool_name": "block_ip",
+            "target": "198.51.100.77",
+            "reason": "Block malicious destination address",
+            "parameters": {"normalized_field": "dst_ip"},
         }
     ]
     assert block_ip_reason_destination_mislabels(actions) == []
 
 
 def test_strict_disposition_targets_env(monkeypatch) -> None:
+    actions = [
+        {"tool_name": "disable_account", "target": "svc-analytics-47"},
+        {"tool_name": "isolate_host", "target": "WKS-DATA-031"},
+        {"tool_name": "block_ip", "target": "198.51.100.44"},
+    ]
     monkeypatch.delenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", raising=False)
     assert strict_disposition_targets_enabled() is False
+    assert HOST_DB not in missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
     monkeypatch.setenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", "1")
     assert strict_disposition_targets_enabled() is True
+    assert HOST_DB in missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
 
 
 def test_human_verdict_requires_reporting_for_pass() -> None:

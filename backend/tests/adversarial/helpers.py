@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 from app.ingestion.source_ingester import SourceIngester
 from app.models.enums import EventStatus, SourceObjectKind
 from app.services.event_service import EventService
-from tests.adversarial.audit_report import collect_entity_tokens
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH, INCIDENT_ID
 
 ALL_SOURCE_KINDS = [
@@ -26,7 +26,20 @@ _ENTITY_VALUE_FIELDS = (
     "fqdn",
     "name",
     "path",
+    "ip",
 )
+
+_NARRATIVE_KEYS = (
+    "decision_summary",
+    "reasoning",
+    "summary",
+    "executive_summary",
+    "narrative",
+    "analysis",
+    "conclusion",
+)
+
+_SOURCE_NORMALIZED_FIELDS = frozenset({"src_ip", "source_ip", "internal_ip", "src"})
 
 
 def _truthy_env(name: str) -> bool:
@@ -151,32 +164,21 @@ def missing_response_targets(
 
 
 def build_alert_corpus(*, alert_text: str = "", event_payload: dict[str, Any] | None = None) -> str:
-    """Original alert / incident text available before LLM narrative (ISSUE-334)."""
+    """Original alert narrative (title / description) before LLM or structured merge."""
     parts: list[str] = []
-    if alert_text.strip():
-        parts.append(alert_text.strip())
+    seen: set[str] = set()
+
+    def _add(raw: object) -> None:
+        text = str(raw or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(text)
+
+    _add(alert_text)
     if not event_payload:
         return "\n".join(parts)
-
-    title = str(event_payload.get("title") or "").strip()
-    if title:
-        parts.append(title)
-
-    normalized = event_payload.get("normalized")
-    if isinstance(normalized, dict):
-        for key in (
-            "description",
-            "account",
-            "hostname",
-            "secondary_host",
-            "src_ip",
-            "internal_ip",
-            "domain",
-            "file",
-        ):
-            value = normalized.get(key)
-            if value:
-                parts.append(str(value))
+    _add(event_payload.get("title"))
+    _add(event_payload.get("description"))
     return "\n".join(parts)
 
 
@@ -207,30 +209,52 @@ def _iter_structured_entities(triage_ctx: dict[str, Any]) -> Iterable[tuple[str,
         for entity in rows:
             if not isinstance(entity, dict):
                 continue
-            has_source_refs = bool(entity.get("source_refs"))
+            is_source = _entity_has_source_provenance(entity)
             for value in _entity_search_values(entity):
-                yield value, has_source_refs
+                yield value, is_source
+
+
+def _entity_has_source_provenance(entity: dict[str, Any]) -> bool:
+    attrs = entity.get("attributes")
+    if not isinstance(attrs, dict):
+        return False
+    return str(attrs.get("provenance") or "").strip().lower() == "source"
 
 
 def _is_source_projection_hit(token: str, *, triage_ctx: dict[str, Any]) -> bool:
     needle = token.lower()
-    for value, has_source_refs in _iter_structured_entities(triage_ctx):
-        if has_source_refs and value.lower() == needle:
+    for value, is_source in _iter_structured_entities(triage_ctx):
+        if is_source and value.lower() == needle:
             return True
     return False
 
 
-def is_text_understanding_hit(
-    token: str,
-    *,
-    alert_corpus: str,
-    triage_ctx: dict[str, Any],
-) -> bool:
-    """Count entity/indicator only when grounded in alert text or source merge (ISSUE-334)."""
-    needle = token.lower()
-    if needle in alert_corpus.lower():
-        return True
-    return _is_source_projection_hit(token, triage_ctx=triage_ctx)
+def is_text_understanding_hit(token: str, *, alert_corpus: str) -> bool:
+    """Count as text understanding only when grounded in original alert narrative."""
+    needle = token.strip().lower()
+    if not needle:
+        return False
+    return needle in alert_corpus.lower()
+
+
+def _top_level_narrative_texts(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    texts: list[str] = []
+    for key in _NARRATIVE_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value.strip())
+    sections = payload.get("sections")
+    if isinstance(sections, list):
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            for key in ("content", "summary", "title"):
+                value = section.get(key)
+                if isinstance(value, str) and value.strip():
+                    texts.append(value.strip())
+    return texts
 
 
 def build_narrative_corpus(
@@ -241,27 +265,31 @@ def build_narrative_corpus(
     extra_sources: list[Any] | None = None,
 ) -> str:
     """LLM narrative fields where prompt-appendix echo may appear."""
-    sources: list[Any] = [
-        {"decision_summary": triage_ctx.get("decision_summary")},
-        evidence_ctx,
-        report_ctx,
-    ]
+    texts = (
+        _top_level_narrative_texts(triage_ctx)
+        + _top_level_narrative_texts(evidence_ctx)
+        + _top_level_narrative_texts(report_ctx)
+    )
     if extra_sources:
-        sources.extend(extra_sources)
-    return "\n".join(collect_entity_tokens(sources)).lower()
+        for source in extra_sources:
+            if isinstance(source, dict):
+                texts.extend(_top_level_narrative_texts(source))
+            elif isinstance(source, str) and source.strip():
+                texts.append(source.strip())
+    return "\n".join(texts).lower()
 
 
 @dataclass(frozen=True, slots=True)
 class SignalAuditResult:
-  required: tuple[str, ...]
-  text_understanding_hits: tuple[str, ...]
-  source_projection_hits: tuple[str, ...]
-  echo_only_hits: tuple[str, ...]
-  text_understanding_missing: tuple[str, ...]
+    required: tuple[str, ...]
+    text_understanding_hits: tuple[str, ...]
+    source_projection_hits: tuple[str, ...]
+    echo_only_hits: tuple[str, ...]
+    text_understanding_missing: tuple[str, ...]
 
-  @property
-  def substring_hits(self) -> tuple[str, ...]:
-    return self.text_understanding_hits + self.echo_only_hits
+    @property
+    def substring_hits(self) -> tuple[str, ...]:
+        return self.text_understanding_hits + self.echo_only_hits
 
 
 def audit_required_signals(
@@ -280,14 +308,16 @@ def audit_required_signals(
         token = str(raw).strip()
         if not token:
             continue
-        if is_text_understanding_hit(token, alert_corpus=alert_corpus, triage_ctx=triage_ctx):
+        in_alert = is_text_understanding_hit(token, alert_corpus=alert_corpus)
+        in_source = _is_source_projection_hit(token, triage_ctx=triage_ctx)
+        if in_alert:
             understanding.append(token)
-            if _is_source_projection_hit(token, triage_ctx=triage_ctx):
-                source_projection.append(token)
-            continue
-        if token.lower() in narrative_corpus:
+        if in_source:
+            source_projection.append(token)
+        if not in_alert and token.lower() in narrative_corpus:
             echo_only.append(token)
-        missing.append(token)
+        if not in_alert:
+            missing.append(token)
 
     return SignalAuditResult(
         required=tuple(required),
@@ -301,7 +331,7 @@ def audit_required_signals(
 def block_ip_reason_destination_mislabels(
     actions: list[dict[str, object]] | tuple[dict[str, object], ...],
 ) -> list[dict[str, str]]:
-    """Weak guard: block_ip reason must not label a source IP as destination (ISSUE-327/334)."""
+    """Weak guard: only flag src_ip (etc.) labeled as destination in block_ip reason."""
     gaps: list[dict[str, str]] = []
     for action in actions:
         if not isinstance(action, dict):
@@ -312,14 +342,15 @@ def block_ip_reason_destination_mislabels(
         reason_lower = reason.lower()
         if "destination" not in reason_lower and "dest " not in reason_lower:
             continue
-        target = str(action.get("target") or "")
         parameters = action.get("parameters")
         normalized_field = ""
         if isinstance(parameters, dict):
             normalized_field = str(parameters.get("normalized_field") or "")
+        if normalized_field.strip().lower() not in _SOURCE_NORMALIZED_FIELDS:
+            continue
         gaps.append(
             {
-                "target": target,
+                "target": str(action.get("target") or ""),
                 "reason": reason[:240],
                 "normalized_field": normalized_field,
             }
