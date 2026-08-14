@@ -5,7 +5,12 @@ from __future__ import annotations
 import pytest
 
 from app.models.evidence import SKIP_GAP_REASONS, skipped_entity_description
-from tests.adversarial.audit_report import AdversarialAuditChecks, evaluate_evidence_collection_ok
+from tests.adversarial.audit_report import (
+    AdversarialAuditChecks,
+    _writeback_certification_label,
+    build_writeback_certification,
+    evaluate_evidence_collection_ok,
+)
 from tests.adversarial.full_loop_runner import resolve_full_loop_timeout_s
 from tests.adversarial.helpers import (
     assert_opaque_alert_quality,
@@ -906,3 +911,82 @@ def test_scorecard_complete_report_quality_has_no_note() -> None:
     report = _analysis_pass_checks(report_quality="complete").to_dict()
     assert report["score"]["report_quality_complete"] is True
     assert report["score"]["report_quality_note"] is None
+
+
+def test_writeback_certification_label_mock_simulated_not_readback_verified() -> None:
+    label = _writeback_certification_label(
+        confirmation_evidence="readback_verified",
+        simulated=True,
+        disposition_is_mock=True,
+    )
+    assert label == "mock_simulated"
+
+
+def test_writeback_certification_label_mock_adapter_acknowledged() -> None:
+    label = _writeback_certification_label(
+        confirmation_evidence="adapter_acknowledged",
+        simulated=True,
+        disposition_is_mock=True,
+    )
+    assert label == "adapter_acknowledged"
+
+
+def test_writeback_certification_label_live_readback_verified() -> None:
+    label = _writeback_certification_label(
+        confirmation_evidence="readback_verified",
+        simulated=False,
+        disposition_is_mock=False,
+    )
+    assert label == "readback_verified"
+
+
+def test_full_loop_human_verdict_annotates_mock_writeback() -> None:
+    cert = build_writeback_certification(
+        confirmation_evidence="readback_verified",
+        simulated=True,
+        disposition_is_mock=True,
+        receipt_status="confirmed",
+    )
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_CLOSED_SEQUENCE,
+        writeback_certification=cert,
+    ).to_dict()
+    verdict = report["verdict_for_human"]
+    assert verdict.startswith("PASS")
+    assert "writeback=simulated" in verdict
+    assert "certification=mock_simulated" in verdict
+    assert "readback_verified" not in verdict
+
+
+def test_build_writeback_certification_exports_raw_receipt_fields() -> None:
+    cert = build_writeback_certification(
+        confirmation_evidence="adapter_acknowledged",
+        simulated=True,
+        disposition_is_mock=True,
+        receipt_status="confirmed",
+        mock_cert_strict=False,
+    )
+    assert cert["confirmation_evidence"] == "adapter_acknowledged"
+    assert cert["simulated"] is True
+    assert cert["certification_label"] == "adapter_acknowledged"
+    assert cert["tier_ok"] is True
+
+
+def test_build_writeback_certification_mock_cert_strict_requires_tier() -> None:
+    weak = build_writeback_certification(
+        confirmation_evidence="adapter_acknowledged",
+        simulated=True,
+        disposition_is_mock=True,
+        receipt_status="confirmed",
+        mock_cert_strict=True,
+    )
+    assert weak["tier_ok"] is False
+    strong = build_writeback_certification(
+        confirmation_evidence="readback_verified",
+        simulated=True,
+        disposition_is_mock=True,
+        receipt_status="confirmed",
+        mock_cert_strict=True,
+    )
+    assert strong["tier_ok"] is True
