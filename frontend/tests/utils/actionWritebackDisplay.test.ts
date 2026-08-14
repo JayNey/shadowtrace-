@@ -68,4 +68,40 @@ describe("resolveWritebackReceiptDisplay", () => {
     expect(display.isConfirmedApplicableWriteback).toBe(true);
     expect(display.tone).toBe("success");
   });
+
+  it("does not paint orphan confirmed receipts as terminal success", () => {
+    const display = resolveWritebackReceiptDisplay({
+      status: "confirmed",
+      matchingAction: null,
+      terminal: false,
+    });
+    expect(display.isConfirmedApplicableWriteback).toBe(false);
+    expect(display.tone).not.toBe("success");
+  });
+
+  it("labels entity failed receipts as error, not obligation-neutral", () => {
+    const display = resolveWritebackReceiptDisplay({
+      status: "failed",
+      intentKind: "entity_action_submit",
+      matchingAction: {
+        writeback_required: true,
+        writeback_applicable: false,
+      },
+      terminal: false,
+    });
+    expect(display.tone).toBe("error");
+    expect(display.label).toContain("实体侧效应");
+    expect(display.isConfirmedApplicableWriteback).toBe(false);
+  });
+
+  it("labels entity_action_submit confirmed without matchingAction as side-effect", () => {
+    const display = resolveWritebackReceiptDisplay({
+      status: "confirmed",
+      intentKind: "entity_action_submit",
+      matchingAction: null,
+      terminal: false,
+    });
+    expect(display.tone).not.toBe("success");
+    expect(display.label).toBe("实体侧效应已确认");
+  });
 });

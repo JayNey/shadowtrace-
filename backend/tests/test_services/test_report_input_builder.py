@@ -55,6 +55,7 @@ from app.models.enums import (
     ActionLevel,
     ActionStatus,
     ExecutionOwner,
+    WritebackStatus,
 )
 from app.models.enums import (
     WritebackReadiness as WritebackReadinessEnum,
@@ -562,9 +563,7 @@ async def test_refresh_response_plan_snapshot_returns_none_on_overlay_read_failu
     dumped = await refresh_response_plan_snapshot(
         EVENT_ID,
         plan_raw=pending.model_dump(mode="json"),
-        session_factory=_SessionFactory(
-            _FakeSession([], error=RuntimeError("db timeout"))
-        ),
+        session_factory=_SessionFactory(_FakeSession([], error=RuntimeError("db timeout"))),
     )
     assert dumped is None
 
@@ -922,10 +921,13 @@ def test_report_executed_actions_splits_writeback_obligation_and_applicability()
         writeback_readiness=WritebackReadiness.READY,
     )
     text = builder._executed_actions([entity, terminal], ReportPhaseStatus.EXECUTED)
-    assert "writeback_required=True | writeback_applicable=False" in text
-    assert "writeback_not_applicable_reason=entity_side_effect" in text
-    assert "writeback_required=True | writeback_applicable=True" in text
-    assert "writeback_status=null" in text
+    entity_line = next(line for line in text.splitlines() if line.startswith("act-entity-331"))
+    terminal_line = next(line for line in text.splitlines() if line.startswith("act-terminal-331"))
+    assert "writeback_required=true | writeback_applicable=false" in entity_line
+    assert "writeback_not_applicable_reason=entity_side_effect" in entity_line
+    assert "writeback_required=false" not in entity_line
+    assert "writeback_required=true | writeback_applicable=true" in terminal_line
+    assert "writeback_status=null" in terminal_line
 
 
 def test_report_verification_results_marks_writeback_not_applicable() -> None:
@@ -950,3 +952,52 @@ def test_report_verification_results_marks_writeback_not_applicable() -> None:
     assert "writeback_applicable=false" in text
     assert "writeback_not_applicable_reason=entity_side_effect" in text
     assert "detail=writeback_not_applicable" in text
+    assert "writeback_applicable=true" not in text
+
+
+def test_report_verification_phase1_entity_not_executed_does_not_claim_applicable() -> None:
+    """ISSUE-331: Phase 1 entity rows must not invent writeback_applicable=true."""
+    builder = ReportSectionBuilder()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.PARTIAL,
+        verification_phase=VerificationPhase.EFFECT,
+        results=[
+            VerificationActionResult(
+                action_id="act-entity-331",
+                effect_status=EffectStatus.SKIPPED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.NOT_REQUIRED,
+                writeback_status=None,
+                detail="action_not_executed",
+                verification_phase=VerificationPhase.EFFECT,
+            )
+        ],
+    )
+    text = builder._verification_results(verification, ReportPhaseStatus.EXECUTED)
+    entity_line = next(line for line in text.splitlines() if line.startswith("act-entity-331"))
+    assert "writeback_required=true" in entity_line
+    assert "writeback_applicable=true" not in entity_line
+    assert "writeback_not_applicable_reason" not in entity_line
+
+
+def test_report_verification_ready_row_can_claim_applicable() -> None:
+    """ISSUE-331: readiness-proven terminal rows may disclose applicable=true."""
+    builder = ReportSectionBuilder()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.DISPOSITION,
+        results=[
+            VerificationActionResult(
+                action_id="act-terminal-331",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+                writeback_status=WritebackStatus.CONFIRMED,
+                verification_phase=VerificationPhase.DISPOSITION,
+            )
+        ],
+    )
+    text = builder._verification_results(verification, ReportPhaseStatus.EXECUTED)
+    terminal_line = next(line for line in text.splitlines() if line.startswith("act-terminal-331"))
+    assert "writeback_required=true | writeback_applicable=true" in terminal_line
+    assert "writeback_status=confirmed" in terminal_line

@@ -23,7 +23,7 @@ from app.models.agent_io import (
     VerificationResult,
 )
 from app.models.detection_context_snapshot import DetectionContextSnapshot
-from app.models.enums import ActionCategory, FinalVerdict, Severity
+from app.models.enums import ActionCategory, FinalVerdict, Severity, WritebackReadiness
 from app.models.evidence import EvidenceGap
 from app.models.report import ReportSection
 
@@ -83,11 +83,15 @@ def _fmt_ts(value: datetime | None) -> str:
     return value.isoformat()
 
 
+def _fmt_bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
 def _action_writeback_report_fields(action: Action) -> str:
     """Human-readable writeback obligation vs applicability (ISSUE-331)."""
     parts = [
-        f"writeback_required={action.writeback_required}",
-        f"writeback_applicable={action.writeback_applicable}",
+        f"writeback_required={_fmt_bool(action.writeback_required)}",
+        f"writeback_applicable={_fmt_bool(action.writeback_applicable)}",
     ]
     if action.writeback_required and not action.writeback_applicable:
         parts.append("writeback_not_applicable_reason=entity_side_effect")
@@ -97,7 +101,12 @@ def _action_writeback_report_fields(action: Action) -> str:
 
 
 def _verification_writeback_report_fields(item: VerificationActionResult) -> str:
-    """Split event-level obligation from per-action applicability in reports."""
+    """Split event-level obligation from per-action applicability in reports.
+
+    Never invent ``writeback_applicable=true``. Claim applicable only when
+    readiness proves this row owns a writeback; ``detail=writeback_not_applicable``
+    is the explicit entity-side-effect signal.
+    """
     if not item.writeback_required:
         return "writeback_required=false | writeback_applicable=false"
     if item.detail == "writeback_not_applicable":
@@ -106,9 +115,9 @@ def _verification_writeback_report_fields(item: VerificationActionResult) -> str
             "writeback_not_applicable_reason=entity_side_effect"
         )
     wb = item.writeback_status.value if item.writeback_status is not None else "null"
-    return (
-        f"writeback_required=true | writeback_applicable=true | writeback_status={wb}"
-    )
+    if item.writeback_readiness is WritebackReadiness.NOT_REQUIRED:
+        return f"writeback_required=true | writeback_status={wb}"
+    return f"writeback_required=true | writeback_applicable=true | writeback_status={wb}"
 
 
 def _bullet(lines: list[str], empty: str) -> str:

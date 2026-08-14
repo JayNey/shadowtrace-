@@ -161,12 +161,26 @@ export function resolveWritebackReceiptDisplay(input: {
     };
   }
 
-  if (
-    actionDisplay &&
-    !actionDisplay.isConfirmedApplicableWriteback &&
-    matchingAction?.writeback_required &&
-    !matchingAction?.writeback_applicable
-  ) {
+  const isEntitySideEffect =
+    matchingAction?.writeback_required === true &&
+    matchingAction.writeback_applicable === false;
+  if (isEntitySideEffect || intentKind === "entity_action_submit") {
+    if (status === "failed" || status === "conflict") {
+      return {
+        label: status === "conflict" ? "实体侧效应冲突" : "实体侧效应失败",
+        tone: "error",
+        tooltip: `实体动作回执为 ${status}；本动作不承担终态 disposition。`,
+        isConfirmedApplicableWriteback: false,
+      };
+    }
+    if (status === "unknown") {
+      return {
+        label: "实体侧效应未知",
+        tone: "warning",
+        tooltip: "实体动作回执状态未知；不得以本行代替 EVENT_STATUS_UPDATE。",
+        isConfirmedApplicableWriteback: false,
+      };
+    }
     if (status === "accepted") {
       return {
         label: "实体侧效应已提交",
@@ -185,24 +199,26 @@ export function resolveWritebackReceiptDisplay(input: {
         isConfirmedApplicableWriteback: false,
       };
     }
-    return actionDisplay;
-  }
-
-  if (intentKind === "entity_action_submit" && status === "accepted") {
-    return {
-      label: "实体侧效应已提交",
-      tone: "info",
-      tooltip: "entity_action_submit 已提交；终态写回以 EVENT_STATUS_UPDATE 为准。",
-      isConfirmedApplicableWriteback: false,
-    };
+    if (isEntitySideEffect && actionDisplay) {
+      return actionDisplay;
+    }
   }
 
   if (status === "confirmed") {
+    if (matchingAction?.writeback_applicable === true) {
+      return {
+        label: STATUS_LABELS.confirmed,
+        tone: "success",
+        tooltip: "本动作承担可写回义务且回执已确认。",
+        isConfirmedApplicableWriteback: true,
+      };
+    }
     return {
       label: STATUS_LABELS.confirmed,
-      tone: "success",
-      tooltip: "写回回执已确认。",
-      isConfirmedApplicableWriteback: Boolean(matchingAction?.writeback_applicable),
+      tone: "info",
+      tooltip:
+        "写回回执已确认，但未证明本行承担终态 disposition，不得视为 EVENT_STATUS_UPDATE 完成。",
+      isConfirmedApplicableWriteback: false,
     };
   }
 

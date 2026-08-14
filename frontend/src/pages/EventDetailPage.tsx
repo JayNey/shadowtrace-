@@ -20,6 +20,7 @@ import { ArrowLeftOutlined, ReloadOutlined } from "@ant-design/icons";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import type { ColumnsType } from "antd/es/table";
 import { resolveWritebackReceiptDisplay } from "../utils/actionWritebackDisplay";
+import { triageContextFromSnapshot } from "../utils/evidenceContext";
 import ReportViewer from "../components/report/ReportViewer";
 import { coerceInvestigationReport } from "../types/report";
 import { ApiError } from "../services/apiClient";
@@ -363,7 +364,9 @@ function WritebackPanel({
         attempt: job?.attempt,
         terminal:
           (closureCycle === undefined || disposition.closure_cycle === closureCycle) &&
-          (writeback?.writeback_id === terminalWritebackId || actionId === terminalActionId),
+          ((terminalWritebackId != null &&
+            writeback?.writeback_id === terminalWritebackId) ||
+            (terminalActionId != null && actionId === terminalActionId)),
       };
     });
     const knownDispositionIds = new Set(
@@ -390,8 +393,9 @@ function WritebackPanel({
           execution_phase: action?.execution_phase,
           attempt: job?.attempt,
           terminal:
-            writeback.writeback_id === terminalWritebackId ||
-            writeback.action_id === terminalActionId,
+            (terminalWritebackId != null &&
+              writeback.writeback_id === terminalWritebackId) ||
+            (terminalActionId != null && writeback.action_id === terminalActionId),
         };
       });
     return [...dispositionRows, ...orphanReceipts];
