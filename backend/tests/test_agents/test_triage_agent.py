@@ -303,6 +303,15 @@ class TestExtractIOCs:
         iocs = _extract_iocs("some text", entities)
         assert "192.168.1.1" not in iocs
 
+    def test_entity_domain_included(self):
+        """ISSUE-338: validated EntitySet.domains must merge into ioc_list."""
+        entities = EntitySet(
+            domains=[DomainEntity(entity_id="dom-1", fqdn="storage-sync-cdn.example")]
+        )
+        iocs = _extract_iocs("Connection from 198.51.100.44", entities)
+        assert "storage-sync-cdn.example" in iocs
+        assert "198.51.100.44" in iocs
+
 
 # --------------------------------------------------------------------------- #
 # Tests: _map_event_type

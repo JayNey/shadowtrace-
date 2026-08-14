@@ -216,12 +216,16 @@ def _extract_iocs(
     for url in _IOC_URL_PATTERN.findall(alert_text):
         iocs.add(url)
 
-    # Include external IPs from entities.
+    # Include external IPs and validated domain FQDNs from entities.
     if entities is not None:
         for ip_entity in entities.ips:
             addr = ip_entity.address or ""
             if addr and not is_internal_ip(addr):
                 iocs.add(addr)
+        for domain_entity in entities.domains:
+            fqdn = (domain_entity.fqdn or "").strip()
+            if fqdn:
+                iocs.add(fqdn)
 
     # Sort: IPs via ipaddress for natural ordering, everything else
     # lexicographically.  This avoids "8.8.8.8" < "10.0.0.1" in string sort.

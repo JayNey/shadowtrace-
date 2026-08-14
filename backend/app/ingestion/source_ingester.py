@@ -1288,6 +1288,9 @@ def _source_processing_order(item: Any) -> int:
     return 99
 
 
+_RAW_PAYLOAD_NORMALIZED_KEYS = ("domain", "fqdn")
+
+
 def _supporting_projection(item: SourceAsset | SourceLog) -> dict[str, Any]:
     """Preserve typed SourceAsset/SourceLog fields in the query projection."""
     projected = dict(item.normalized)
@@ -1298,6 +1301,16 @@ def _supporting_projection(item: SourceAsset | SourceLog) -> dict[str, Any]:
     )
     for key, value in typed.items():
         projected.setdefault(key, value)
+    raw_payload = item.raw_payload or {}
+    for key in _RAW_PAYLOAD_NORMALIZED_KEYS:
+        if projected.get(key):
+            continue
+        raw_value = raw_payload.get(key)
+        if raw_value is None:
+            continue
+        text = str(raw_value).strip()
+        if text:
+            projected[key] = text
     if isinstance(item, SourceAsset):
         projected.setdefault("channel", "asset")
     else:

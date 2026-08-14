@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.adapters.source.base import BaseSourceAdapter, SourcePage
 from app.db import models as orm
-from app.ingestion.source_ingester import CheckpointConflictError, SourceIngester
+from app.ingestion.source_ingester import (
+    CheckpointConflictError,
+    SourceIngester,
+    _supporting_projection,
+)
 from app.models.enums import (
     CapabilityState,
     ConnectorCapability,
@@ -814,3 +818,60 @@ async def test_persist_supporting_object_refreshes_on_stale_skip(
     assert event_after is not None
     hostnames = {h.hostname for h in event_after.entities.hosts if h.hostname}
     assert "DEV-WKS-012" in hostnames
+
+
+def test_supporting_projection_promotes_domain_from_raw_payload() -> None:
+    """ISSUE-338: raw_payload.domain must land in projected normalized for enricher."""
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-338",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            device_source="nfw",
+            raw_payload={"domain": "storage-sync-cdn.example", "bytes_out": 934_281_600},
+        )
+    )
+    assert projected["domain"] == "storage-sync-cdn.example"
+
+
+def test_supporting_projection_prefers_normalized_domain_over_raw_payload() -> None:
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-pref",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            normalized={"domain": "entity.example"},
+            raw_payload={"domain": "raw.example"},
+        )
+    )
+    assert projected["domain"] == "entity.example"
+
+
+def test_raw_payload_domain_projection_enriches_entity_set() -> None:
+    """ISSUE-338: projected log normalized must seed EntitySet.domains."""
+    from app.services.source_entity_enricher import enrich_entities_from_source
+
+    ref = _ref(
+        SourceObjectKind.LOG,
+        "LOG-domain-enrich",
+        "conn-log",
+        updated_at=datetime(2026, 7, 13, 12, 0, tzinfo=UTC),
+    )
+    projected = _supporting_projection(
+        SourceLog(
+            reference=ref,
+            device_source="nfw",
+            raw_payload={"domain": "storage-sync-cdn.example", "bytes_out": 934_281_600},
+        )
+    )
+    enrichment = enrich_entities_from_source([(ref, projected)])
+    domains = {domain.fqdn for domain in enrichment.entity_set.domains if domain.fqdn}
+    assert "storage-sync-cdn.example" in domains

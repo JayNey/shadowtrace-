@@ -50,6 +50,40 @@ def test_mandatory_baseline_is_entity_and_event_aware() -> None:
     assert "query_edr_process" in mandatory
     assert "query_network_flow" in mandatory
     assert "query_threat_intel" in mandatory
+    assert "query_dns" in mandatory
+
+
+def test_mandatory_baseline_ip_only_ioc_skips_query_dns() -> None:
+    """ISSUE-338: IP-only ioc_list must not force query_dns into mandatory baseline."""
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(
+            ips=[IPEntity(entity_id="i1", address="198.51.100.44", scope="external")]
+        ),
+        ioc_list=["198.51.100.44", "198.51.100.77"],
+        reasoning="test",
+    )
+    mandatory = resolve_mandatory_baseline(triage)
+    assert "query_dns" not in mandatory
+    assert "query_network_flow" in mandatory
+    assert "query_threat_intel" in mandatory
+
+
+def test_mandatory_baseline_fqdn_ioc_includes_query_dns() -> None:
+    """ISSUE-332/338: FQDN in ioc_list still mandates query_dns."""
+    triage = TriageResult(
+        event_type=EventType.DATA_EXFILTRATION,
+        severity=Severity.HIGH,
+        need_investigation=True,
+        entities=EntitySet(),
+        ioc_list=["198.51.100.44", "storage-sync-cdn.example"],
+        reasoning="test",
+    )
+    mandatory = resolve_mandatory_baseline(triage)
+    assert "query_dns" in mandatory
+    assert "query_threat_intel" in mandatory
 
 
 def test_sanitize_rejects_response_and_disposition_tools() -> None:
