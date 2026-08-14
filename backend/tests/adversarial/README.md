@@ -58,12 +58,19 @@ Redis (same as integration tests):
 ```bash
 cd backend
 
-# Analysis-only audit (→ REPORTING) — only when tests/adversarial/*.py exists
-uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+# Helper / scorecard unit tests (default pytest; no Postgres)
+uv run --frozen pytest tests/adversarial/test_adversarial_helpers.py -q
+
+# Analysis-only audit (→ REPORTING) — deselects unless -o addopts= (pyproject excludes adversarial_audit)
+uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py \
+  -m adversarial_audit -v -s -o addopts=
 
 # Production full loop — only when tests/adversarial/*.py exists
-uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py -v -s
+uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_full_loop.py \
+  -m adversarial_audit -v -s -o addopts=
 ```
+
+`pytest tests/adversarial/ -q` (Issue #965) runs helper/unit tests and **deselects** the two dynamic modules. Use the `-m adversarial_audit -o addopts=` commands above for analysis-only / full-loop.
 
 When the adversarial pytest tree is **not** checked in, validate golden packs via:
 

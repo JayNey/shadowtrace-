@@ -7,15 +7,17 @@ import pytest
 from tests.adversarial.audit_report import AdversarialAuditChecks
 from tests.adversarial.full_loop_runner import resolve_full_loop_timeout_s
 from tests.adversarial.helpers import (
+    assert_opaque_alert_quality,
     audit_required_signals,
     block_ip_reason_destination_mislabels,
     build_alert_corpus,
     build_narrative_corpus,
     missing_response_targets,
+    opaque_scorecard_tokens,
     response_plan_targets,
     strict_disposition_targets_enabled,
 )
-from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH, HOST_DB
+from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH, HOST_DB, VPN_SRC_IP
 
 _CLOSED_SEQUENCE = [
     "new",
@@ -58,7 +60,8 @@ def test_response_plan_targets_normalizes_case() -> None:
     assert response_plan_targets(actions) == {"wks-data-031", "198.51.100.44"}
 
 
-def test_missing_response_targets_reports_gaps() -> None:
+def test_missing_response_targets_reports_gaps(monkeypatch) -> None:
+    monkeypatch.delenv("ADVERSARIAL_STRICT_DISPOSITION_TARGETS", raising=False)
     actions = [{"tool_name": "disable_account", "target": "svc-analytics-47"}]
     gaps = missing_response_targets(ground_truth=GROUND_TRUTH, actions=actions)
     assert "WKS-DATA-031" in gaps
@@ -240,6 +243,70 @@ def test_missing_db_gap_recorded_but_not_required_when_plan_includes_host() -> N
     assert HOST_DB in all_without
 
 
+def test_opaque_alert_quality_rejects_source_projection_credit() -> None:
+    triage_ctx = {
+        "entities": {
+            "hosts": [
+                {
+                    "hostname": "SRV-DB-STG-02",
+                    "attributes": {"provenance": "source"},
+                }
+            ],
+            "accounts": [],
+            "ips": [],
+            "domains": [],
+            "processes": [],
+            "files": [],
+        }
+    }
+    entity_audit = audit_required_signals(
+        required=["SRV-DB-STG-02"],
+        alert_corpus="Correlation: elevated session and volume signals",
+        triage_ctx=triage_ctx,
+        narrative_corpus="",
+    )
+    indicator_audit = audit_required_signals(
+        required=["198.51.100.44"],
+        alert_corpus="Correlation: elevated session and volume signals",
+        triage_ctx={"entities": {"ips": []}},
+        narrative_corpus="",
+    )
+    assert_opaque_alert_quality(
+        alert_corpus="Correlation: elevated session and volume signals",
+        entity_audit=entity_audit,
+        indicator_audit=indicator_audit,
+        opaque_tokens=opaque_scorecard_tokens(GROUND_TRUTH),
+    )
+
+
+def test_opaque_alert_quality_fails_when_host_leaks_into_corpus() -> None:
+    entity_audit = audit_required_signals(
+        required=["SRV-DB-STG-02"],
+        alert_corpus="RDP pivot onto SRV-DB-STG-02 after VPN login",
+        triage_ctx={"entities": {"hosts": []}},
+        narrative_corpus="",
+    )
+    indicator_audit = audit_required_signals(
+        required=[],
+        alert_corpus="RDP pivot onto SRV-DB-STG-02 after VPN login",
+        triage_ctx={"entities": {"ips": []}},
+        narrative_corpus="",
+    )
+    with pytest.raises(AssertionError, match="opaque alert corpus"):
+        assert_opaque_alert_quality(
+            alert_corpus="RDP pivot onto SRV-DB-STG-02 after VPN login",
+            entity_audit=entity_audit,
+            indicator_audit=indicator_audit,
+            opaque_tokens=("SRV-DB-STG-02",),
+        )
+
+
+def test_collect_entity_tokens_removed_from_scorecard() -> None:
+    import tests.adversarial.audit_report as audit_report
+
+    assert not hasattr(audit_report, "collect_entity_tokens")
+
+
 def test_block_ip_reason_destination_mislabel_detected() -> None:
     actions = [
         {
@@ -274,6 +341,43 @@ def test_block_ip_destination_wording_on_dst_ip_is_not_a_gap() -> None:
         }
     ]
     assert block_ip_reason_destination_mislabels(actions) == []
+
+
+def test_block_ip_reason_reads_action_entity_attributes() -> None:
+    actions = [
+        {
+            "tool_name": "block_ip",
+            "target": VPN_SRC_IP,
+            "reason": "Block malicious destination address",
+            "parameters": {},
+            "attributes": {"normalized_field": "src_ip"},
+        }
+    ]
+    gaps = block_ip_reason_destination_mislabels(actions)
+    assert gaps and gaps[0]["normalized_field"] == "src_ip"
+
+
+def test_block_ip_reason_reads_triage_ip_normalized_field() -> None:
+    actions = [
+        {
+            "tool_name": "block_ip",
+            "target": VPN_SRC_IP,
+            "reason": "Block malicious destination address",
+            "parameters": {},
+        }
+    ]
+    triage_ctx = {
+        "entities": {
+            "ips": [
+                {
+                    "address": VPN_SRC_IP,
+                    "attributes": {"normalized_field": "src_ip", "provenance": "source"},
+                }
+            ]
+        }
+    }
+    gaps = block_ip_reason_destination_mislabels(actions, triage_ctx=triage_ctx)
+    assert gaps and gaps[0]["normalized_field"] == "src_ip"
 
 
 def test_strict_disposition_targets_env(monkeypatch) -> None:

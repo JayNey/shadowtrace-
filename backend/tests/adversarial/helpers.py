@@ -287,9 +287,61 @@ class SignalAuditResult:
     echo_only_hits: tuple[str, ...]
     text_understanding_missing: tuple[str, ...]
 
-    @property
-    def substring_hits(self) -> tuple[str, ...]:
-        return self.text_understanding_hits + self.echo_only_hits
+
+def opaque_scorecard_tokens(ground_truth: dict[str, object]) -> tuple[str, ...]:
+    """Ground-truth entities/indicators that this scenario's alert title must omit."""
+    tokens: list[str] = []
+    for key in ("must_identify_entities", "must_identify_indicators"):
+        for item in ground_truth.get(key) or []:
+            text = str(item).strip()
+            if text:
+                tokens.append(text)
+    return tuple(tokens)
+
+
+def assert_opaque_alert_quality(
+    *,
+    alert_corpus: str,
+    entity_audit: SignalAuditResult,
+    indicator_audit: SignalAuditResult,
+    opaque_tokens: Iterable[str],
+) -> None:
+    """Pin source/echo buckets so they cannot fill text-understanding credit.
+
+    Live tests must assert tokens are absent from the original alert corpus;
+    checking ``source_projection_hits - understanding`` against ``entities_found``
+    is identity-true when ``entities_found`` is copied from understanding hits.
+    """
+    corpus_lower = alert_corpus.lower()
+    audits = (entity_audit, indicator_audit)
+    for token in opaque_tokens:
+        needle = str(token).strip()
+        if not needle:
+            continue
+        assert needle.lower() not in corpus_lower, (
+            f"ISSUE-334: opaque alert corpus must not contain {needle!r}; "
+            "ingest leaked a source field into title/description"
+        )
+        for audit in audits:
+            if needle not in audit.required:
+                continue
+            assert needle not in audit.text_understanding_hits, (
+                f"ISSUE-334: {needle!r} must not receive text-understanding credit"
+            )
+            assert needle in audit.text_understanding_missing, (
+                f"ISSUE-334: {needle!r} must be listed in text_understanding_missing"
+            )
+    for audit in audits:
+        assert set(audit.echo_only_hits).isdisjoint(set(audit.text_understanding_hits)), (
+            "ISSUE-334: prompt echo must not count as text understanding"
+        )
+        for token in audit.source_projection_hits:
+            if token in audit.text_understanding_hits:
+                continue
+            assert token in audit.text_understanding_missing, (
+                "ISSUE-334: source projection must not fill text-understanding credit; "
+                f"token={token!r} missing={audit.text_understanding_missing}"
+            )
 
 
 def audit_required_signals(
@@ -328,8 +380,49 @@ def audit_required_signals(
     )
 
 
+def _block_ip_normalized_field(
+    action: dict[str, object],
+    *,
+    triage_ctx: dict[str, Any] | None = None,
+) -> str:
+    """Resolve src/dst role from action dump or matching triage IP entity."""
+    parameters = action.get("parameters")
+    if isinstance(parameters, dict):
+        raw = str(parameters.get("normalized_field") or "").strip()
+        if raw:
+            return raw
+    attributes = action.get("attributes")
+    if isinstance(attributes, dict):
+        raw = str(attributes.get("normalized_field") or "").strip()
+        if raw:
+            return raw
+    hints = action.get("source_hints")
+    if isinstance(hints, dict):
+        raw = str(hints.get("normalized_field") or "").strip()
+        if raw:
+            return raw
+    target = str(action.get("target") or "").strip().lower()
+    entities = triage_ctx.get("entities") if isinstance(triage_ctx, dict) else None
+    if not target or not isinstance(entities, dict):
+        return ""
+    rows = entities.get("ips")
+    if not isinstance(rows, list):
+        return ""
+    for ip in rows:
+        if not isinstance(ip, dict):
+            continue
+        address = str(ip.get("address") or ip.get("ip") or "").strip().lower()
+        if address != target:
+            continue
+        attrs = ip.get("attributes") if isinstance(ip.get("attributes"), dict) else {}
+        return str(attrs.get("normalized_field") or "").strip()
+    return ""
+
+
 def block_ip_reason_destination_mislabels(
     actions: list[dict[str, object]] | tuple[dict[str, object], ...],
+    *,
+    triage_ctx: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Weak guard: only flag src_ip (etc.) labeled as destination in block_ip reason."""
     gaps: list[dict[str, str]] = []
@@ -342,10 +435,7 @@ def block_ip_reason_destination_mislabels(
         reason_lower = reason.lower()
         if "destination" not in reason_lower and "dest " not in reason_lower:
             continue
-        parameters = action.get("parameters")
-        normalized_field = ""
-        if isinstance(parameters, dict):
-            normalized_field = str(parameters.get("normalized_field") or "")
+        normalized_field = _block_ip_normalized_field(action, triage_ctx=triage_ctx)
         if normalized_field.strip().lower() not in _SOURCE_NORMALIZED_FIELDS:
             continue
         gaps.append(

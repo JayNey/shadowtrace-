@@ -3,12 +3,14 @@
 Run (requires Postgres + Redis, same as integration tests):
 
     cd backend
-    uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+    uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py \\
+        -m adversarial_audit -v -s -o addopts=
 
 For a closer-to-production evaluation, set a real LLM before running:
 
     LLM_MODE=live LLM_API_BASE_URL=... LLM_API_KEY=... \\
-      uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py -v -s
+      uv run --frozen python -m pytest tests/adversarial/test_agent_adversarial_audit.py \\
+        -m adversarial_audit -v -s -o addopts=
 
 Reports are written to ``tests/adversarial/artifacts/latest_audit.json``.
 """
@@ -35,10 +37,12 @@ from tests.adversarial.audit_report import (
     resolve_observed_severity,
 )
 from tests.adversarial.helpers import (
+    assert_opaque_alert_quality,
     audit_required_signals,
     build_alert_corpus,
     build_narrative_corpus,
     ingest_true_positive_event,
+    opaque_scorecard_tokens,
 )
 from tests.adversarial.scenario_credential_db_staging_exfil import GROUND_TRUTH
 
@@ -213,14 +217,12 @@ async def test_adversarial_credential_db_staging_exfil_audit(
     if triage_severity and report["observed"]["severity"] != triage_severity:
         assert report["observed"]["triage_severity"] == triage_severity
 
-    source_only = [
-        token
-        for token in entity_audit.source_projection_hits
-        if token not in entity_audit.text_understanding_hits
-    ]
-    assert set(entity_audit.echo_only_hits).isdisjoint(set(entity_audit.text_understanding_hits))
-    for token in source_only:
-        assert token not in entities_found
+    assert_opaque_alert_quality(
+        alert_corpus=alert_corpus,
+        entity_audit=entity_audit,
+        indicator_audit=indicator_audit,
+        opaque_tokens=opaque_scorecard_tokens(GROUND_TRUTH),
+    )
 
     # ISSUE-319: analysis-only audit must not require CLOSED / full-loop scoring.
     assert report["audit_mode"] == "analysis_only"

@@ -17,7 +17,7 @@ Default runner timeout: ~120s (Mock). Override with ``ADVERSARIAL_FULL_LOOP_TIME
     export DATABASE_URL=postgresql+asyncpg://shadowtrace:shadowtrace@localhost:5432/shadowtrace
     export REDIS_URL=redis://localhost:6379/0
     uv run --frozen python -m pytest \\
-        tests/adversarial/test_agent_adversarial_full_loop.py -m adversarial_audit -v -s
+        tests/adversarial/test_agent_adversarial_full_loop.py -m adversarial_audit -v -s -o addopts=
 
 Artifact: ``tests/adversarial/artifacts/latest_full_loop_audit.json``
 """
@@ -45,12 +45,14 @@ from tests.adversarial.audit_report import (
 )
 from tests.adversarial.full_loop_runner import run_production_full_loop
 from tests.adversarial.helpers import (
+    assert_opaque_alert_quality,
     audit_required_signals,
     block_ip_reason_destination_mislabels,
     build_alert_corpus,
     build_narrative_corpus,
     ingest_true_positive_event,
     missing_response_targets,
+    opaque_scorecard_tokens,
     response_plan_targets,
     strict_disposition_targets_enabled,
 )
@@ -126,9 +128,7 @@ def _assert_executed_report_not_all_pending(sections: list[Any]) -> None:
         total = sum(data_counts.values())
         pending = data_counts.get("pending", 0)
         if total > 0:
-            assert pending < total, (
-                f"ISSUE-329: report data still pending=all ({data_counts})"
-            )
+            assert pending < total, f"ISSUE-329: report data still pending=all ({data_counts})"
         return
 
     parsed = _parse_action_status_counts(blob)
@@ -139,8 +139,7 @@ def _assert_executed_report_not_all_pending(sections: list[Any]) -> None:
         return
     pending = counts.get("pending", 0)
     assert pending < total, (
-        f"ISSUE-329: report still shows executed + pending=all ({counts}); "
-        f"content={blob[:500]}"
+        f"ISSUE-329: report still shows executed + pending=all ({counts}); content={blob[:500]}"
     )
 
 
@@ -159,7 +158,10 @@ def _assert_entity_writeback_not_claimed_applicable(sections: list[Any]) -> None
             for row in rows:
                 if not isinstance(row, dict):
                     continue
-                if row.get("writeback_required") is True and row.get("writeback_applicable") is False:
+                if (
+                    row.get("writeback_required") is True
+                    and row.get("writeback_applicable") is False
+                ):
                     assert row.get("writeback_applicable") is not True, (
                         f"ISSUE-331: entity writeback_row claimed applicable=true ({row})"
                     )
@@ -340,7 +342,10 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         actions=list(loop_result.response_plan_actions),
         enforce_gated=True,
     )
-    block_ip_reason_gaps = block_ip_reason_destination_mislabels(loop_result.response_plan_actions)
+    block_ip_reason_gaps = block_ip_reason_destination_mislabels(
+        loop_result.response_plan_actions,
+        triage_ctx=triage_ctx if isinstance(triage_ctx, dict) else None,
+    )
 
     event_payload = event_final.model_dump(mode="json")
     alert_corpus = build_alert_corpus(
@@ -448,7 +453,6 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
             "source_projection_hits": list(entity_audit.source_projection_hits),
             "echo_only_hits": list(entity_audit.echo_only_hits),
             "text_understanding_missing": list(entity_audit.text_understanding_missing),
-            "substring_false_green": list(entity_audit.echo_only_hits),
         },
         "indicators": {
             "text_understanding_hits": list(indicator_audit.text_understanding_hits),
@@ -515,17 +519,12 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
                 f"all_gaps={disposition_gaps_all}"
             )
             assert HOST_DB not in disposition_gaps_enforced
-    source_only_entities = [
-        token
-        for token in entity_audit.source_projection_hits
-        if token not in entity_audit.text_understanding_hits
-    ]
-    assert set(entity_audit.echo_only_hits).isdisjoint(set(entity_audit.text_understanding_hits))
-    for token in source_only_entities:
-        assert token not in entities_found, (
-            "ISSUE-334: source projection must not fill text-understanding credit; "
-            f"token={token!r} entities_found={entities_found}"
-        )
+    assert_opaque_alert_quality(
+        alert_corpus=alert_corpus,
+        entity_audit=entity_audit,
+        indicator_audit=indicator_audit,
+        opaque_tokens=opaque_scorecard_tokens(GROUND_TRUTH),
+    )
     assert prod["tools_invoked"], "expected tool_call_log rows from evidence/verify/execute"
     assert prod["llm_invoked"], "expected llm_call_log rows from live/mock LLM agents"
     assert prod["disposition_writeback_ok"], (
