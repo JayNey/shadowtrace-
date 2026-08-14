@@ -1067,9 +1067,12 @@ class ReportSectionBuilder:
             ]
             for item in verification_result.results:
                 receipt = ",".join(item.writeback_ids) if item.writeback_ids else "-"
+                writeback_fields = _verification_writeback_report_fields(
+                    item, actions_by_id.get(item.action_id)
+                )
                 lines.append(
                     f"{item.action_id} | effect={item.effect_status.value} | "
-                    f"{_verification_writeback_report_fields(item, actions_by_id.get(item.action_id))} | "
+                    f"{writeback_fields} | "
                     f"readiness={item.writeback_readiness.value} | "
                     f"receipt_refs={receipt} | detail={item.detail or '-'}"
                 )

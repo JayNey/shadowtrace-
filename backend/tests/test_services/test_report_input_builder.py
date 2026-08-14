@@ -1108,6 +1108,46 @@ def test_report_verification_joins_action_applicable_for_entity_and_terminal() -
     assert "writeback_required=false" not in entity_line
     assert "writeback_required=true | writeback_applicable=true" in terminal_line
     assert "writeback_status=confirmed" in terminal_line
+    assert entity_line == (
+        "act-entity-331 | effect=skipped | "
+        "writeback_required=true | writeback_applicable=false | "
+        "writeback_not_applicable_reason=entity_side_effect | writeback_status=null | "
+        "readiness=not_required | receipt_refs=- | detail=action_not_executed"
+    )
+    assert terminal_line == (
+        "act-terminal-331 | effect=verified | "
+        "writeback_required=true | writeback_applicable=true | "
+        "writeback_status=confirmed | "
+        "readiness=ready | receipt_refs=- | detail=-"
+    )
+
+
+def test_report_verification_line_keeps_six_segment_order() -> None:
+    """ISSUE-335: E501 split must keep action_id/effect/writeback/readiness/receipt/detail."""
+    builder = ReportSectionBuilder()
+    verification = VerificationResult(
+        overall_status=VerificationOverallStatus.SUCCESS,
+        verification_phase=VerificationPhase.DISPOSITION,
+        results=[
+            VerificationActionResult(
+                action_id="act-terminal-335",
+                effect_status=EffectStatus.VERIFIED,
+                writeback_required=True,
+                writeback_readiness=WritebackReadiness.READY,
+                writeback_status=WritebackStatus.CONFIRMED,
+                writeback_ids=["wbk-335"],
+                detail="readback_verified",
+                verification_phase=VerificationPhase.DISPOSITION,
+            )
+        ],
+    )
+    text = builder._verification_results(verification, ReportPhaseStatus.EXECUTED)
+    line = next(item for item in text.splitlines() if item.startswith("act-terminal-335"))
+    assert line == (
+        "act-terminal-335 | effect=verified | "
+        "writeback_required=true | writeback_status=confirmed | "
+        "readiness=ready | receipt_refs=wbk-335 | detail=readback_verified"
+    )
 
 
 def test_report_section_data_persists_writeback_applicability() -> None:
