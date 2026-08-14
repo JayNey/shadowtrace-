@@ -1,6 +1,6 @@
 /** Per-action writeback lamp — splits obligation vs applicability (ISSUE-331). */
 
-import { Tooltip, Typography } from "antd";
+import { Tooltip, Typography, theme } from "antd";
 import {
   CheckCircleFilled,
   CloseCircleFilled,
@@ -18,14 +18,6 @@ export interface ActionWritebackStatusProps extends ActionWritebackInput {
   "data-testid"?: string;
 }
 
-const TONE_COLORS: Record<ActionWritebackDisplayTone, string> = {
-  neutral: "#8c8c8c",
-  success: "#52c41a",
-  warning: "#faad14",
-  error: "#ff4d4f",
-  info: "#1677ff",
-};
-
 function ToneIcon({ tone }: { tone: ActionWritebackDisplayTone }) {
   if (tone === "success") return <CheckCircleFilled />;
   if (tone === "error") return <CloseCircleFilled />;
@@ -40,12 +32,20 @@ export default function ActionWritebackStatus({
   writeback_status,
   "data-testid": testId,
 }: ActionWritebackStatusProps) {
+  const { token } = theme.useToken();
+  const toneColors: Record<ActionWritebackDisplayTone, string> = {
+    neutral: token.colorTextSecondary,
+    success: token.colorSuccess,
+    warning: token.colorWarning,
+    error: token.colorError,
+    info: token.colorInfo,
+  };
   const display = resolveActionWritebackDisplay({
     writeback_required,
     writeback_applicable,
     writeback_status,
   });
-  const color = TONE_COLORS[display.tone];
+  const color = toneColors[display.tone];
 
   return (
     <Tooltip title={display.tooltip}>

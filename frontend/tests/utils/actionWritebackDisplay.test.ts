@@ -37,6 +37,17 @@ describe("resolveActionWritebackDisplay", () => {
     expect(display.isConfirmedApplicableWriteback).toBe(false);
     expect(display.tone).toBe("neutral");
   });
+
+  it("treats omitted applicable as unknown, not entity_side_effect", () => {
+    const display = resolveActionWritebackDisplay({
+      writeback_required: true,
+      writeback_status: "confirmed",
+    });
+    expect(display.isConfirmedApplicableWriteback).toBe(false);
+    expect(display.tone).not.toBe("success");
+    expect(display.label).toContain("适用性未知");
+    expect(display.label).not.toContain("不承担终态写回");
+  });
 });
 
 describe("resolveWritebackReceiptDisplay", () => {
@@ -103,5 +114,35 @@ describe("resolveWritebackReceiptDisplay", () => {
     });
     expect(display.tone).not.toBe("success");
     expect(display.label).toBe("实体侧效应已确认");
+  });
+
+  it("does not let terminal=true bypass entity ACCEPTED side-effect labelling", () => {
+    const display = resolveWritebackReceiptDisplay({
+      status: "accepted",
+      intentKind: "entity_action_submit",
+      matchingAction: {
+        writeback_required: true,
+        writeback_applicable: false,
+      },
+      terminal: true,
+    });
+    expect(display.label).toBe("实体侧效应已提交");
+    expect(display.tone).not.toBe("success");
+    expect(display.isConfirmedApplicableWriteback).toBe(false);
+  });
+
+  it("keeps in-progress entity receipts visible instead of collapsing to obligation copy", () => {
+    const display = resolveWritebackReceiptDisplay({
+      status: "sending",
+      intentKind: "entity_action_submit",
+      matchingAction: {
+        writeback_required: true,
+        writeback_applicable: false,
+      },
+      terminal: false,
+    });
+    expect(display.label).toBe("发送中");
+    expect(display.tone).not.toBe("success");
+    expect(display.label).not.toContain("不承担终态写回");
   });
 });

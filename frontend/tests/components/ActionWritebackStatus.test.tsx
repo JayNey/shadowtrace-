@@ -16,6 +16,7 @@ describe("ActionWritebackStatus", () => {
     );
     expect(screen.getByTestId("entity-writeback")).toHaveTextContent("不承担终态写回");
     expect(screen.queryByText("终态写回已确认")).not.toBeInTheDocument();
+    expect(screen.getByTestId("entity-writeback").querySelector(".anticon-check-circle")).toBeNull();
   });
 
   it("renders success only for applicable confirmed writeback", () => {

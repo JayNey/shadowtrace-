@@ -201,10 +201,12 @@ function ActionsPanel({
       key: "writeback_obligation",
       width: 120,
       render: (_value, action) =>
-        action.writeback_required ? (
+        action.writeback_required === true ? (
           <Tag color="blue">事件级</Tag>
-        ) : (
+        ) : action.writeback_required === false ? (
           <Tag>无</Tag>
+        ) : (
+          <Tag>未知</Tag>
         ),
     },
     {
@@ -297,6 +299,10 @@ function ActionsPanel({
   );
 }
 
+function isNonEmptyId(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.length > 0;
+}
+
 interface WritebackRow {
   rowKey: string;
   disposition_id: string;
@@ -364,9 +370,9 @@ function WritebackPanel({
         attempt: job?.attempt,
         terminal:
           (closureCycle === undefined || disposition.closure_cycle === closureCycle) &&
-          ((terminalWritebackId != null &&
+          ((isNonEmptyId(terminalWritebackId) &&
             writeback?.writeback_id === terminalWritebackId) ||
-            (terminalActionId != null && actionId === terminalActionId)),
+            (isNonEmptyId(terminalActionId) && actionId === terminalActionId)),
       };
     });
     const knownDispositionIds = new Set(
@@ -393,9 +399,9 @@ function WritebackPanel({
           execution_phase: action?.execution_phase,
           attempt: job?.attempt,
           terminal:
-            (terminalWritebackId != null &&
+            (isNonEmptyId(terminalWritebackId) &&
               writeback.writeback_id === terminalWritebackId) ||
-            (terminalActionId != null && writeback.action_id === terminalActionId),
+            (isNonEmptyId(terminalActionId) && writeback.action_id === terminalActionId),
         };
       });
     return [...dispositionRows, ...orphanReceipts];
@@ -520,7 +526,7 @@ function WritebackPanel({
           data-testid="simulated-receipt-warning"
         />
       )}
-      {terminalWritebackId && (
+      {isNonEmptyId(terminalWritebackId) && (
         <Typography.Text>
           当前 closure_cycle：{closureCycle ?? "暂无数据"}；终态 EVENT_STATUS_UPDATE：{" "}
           <Typography.Text code>{terminalWritebackId}</Typography.Text>
@@ -533,12 +539,21 @@ function WritebackPanel({
         pagination={{ pageSize: 10, hideOnSinglePage: true }}
         locale={{ emptyText: "暂无数据" }}
         scroll={{ x: 1600 }}
-        onRow={(row) => ({
-          "data-testid": `writeback-row-${row.writeback_id ?? row.disposition_id}`,
-          style: row.terminal
-            ? { background: "rgba(82, 196, 26, 0.10)", borderLeft: "3px solid #52c41a" }
-            : undefined,
-        })}
+        onRow={(row) => {
+          const matchingAction = actions.find((item) => item.action_id === row.action_id);
+          const display = resolveWritebackReceiptDisplay({
+            status: row.status,
+            intentKind: row.intent_kind,
+            matchingAction,
+            terminal: row.terminal,
+          });
+          return {
+            "data-testid": `writeback-row-${row.writeback_id ?? row.disposition_id}`,
+            style: display.isConfirmedApplicableWriteback
+              ? { background: "rgba(82, 196, 26, 0.10)", borderLeft: "3px solid #52c41a" }
+              : undefined,
+          };
+        }}
       />
     </Space>
   );

@@ -23,7 +23,7 @@ from app.models.agent_io import (
     VerificationResult,
 )
 from app.models.detection_context_snapshot import DetectionContextSnapshot
-from app.models.enums import ActionCategory, FinalVerdict, Severity, WritebackReadiness
+from app.models.enums import ActionCategory, FinalVerdict, Severity
 from app.models.evidence import EvidenceGap
 from app.models.report import ReportSection
 
@@ -100,24 +100,50 @@ def _action_writeback_report_fields(action: Action) -> str:
     return " | ".join(parts)
 
 
-def _verification_writeback_report_fields(item: VerificationActionResult) -> str:
+def _writeback_row_summaries(response_actions: list[Action]) -> list[dict[str, Any]]:
+    """Structured writeback split for report data (survives LLM chapter rewrite)."""
+    return [
+        {
+            "action_id": action.action_id,
+            "tool_name": action.tool_name,
+            "writeback_required": action.writeback_required,
+            "writeback_applicable": action.writeback_applicable,
+        }
+        for action in response_actions
+    ]
+
+
+def _verification_writeback_report_fields(
+    item: VerificationActionResult,
+    action: Action | None = None,
+) -> str:
     """Split event-level obligation from per-action applicability in reports.
 
-    Never invent ``writeback_applicable=true``. Claim applicable only when
-    readiness proves this row owns a writeback; ``detail=writeback_not_applicable``
-    is the explicit entity-side-effect signal.
+    Never invent ``writeback_applicable=true`` from readiness. Prefer Action
+    true fields when the row can be joined by ``action_id``. Without an
+    Action, only emit ``applicable=false`` on explicit
+    ``detail=writeback_not_applicable``; otherwise omit applicable entirely
+    so deferred terminal rows are not labelled entity-side-effect.
     """
+    wb = item.writeback_status.value if item.writeback_status is not None else "null"
+    if action is not None:
+        parts = [
+            f"writeback_required={_fmt_bool(action.writeback_required)}",
+            f"writeback_applicable={_fmt_bool(action.writeback_applicable)}",
+        ]
+        if action.writeback_required and not action.writeback_applicable:
+            parts.append("writeback_not_applicable_reason=entity_side_effect")
+        parts.append(f"writeback_status={wb}")
+        return " | ".join(parts)
     if not item.writeback_required:
-        return "writeback_required=false | writeback_applicable=false"
+        return f"writeback_required=false | writeback_applicable=false | writeback_status={wb}"
     if item.detail == "writeback_not_applicable":
         return (
             "writeback_required=true | writeback_applicable=false | "
-            "writeback_not_applicable_reason=entity_side_effect"
+            "writeback_not_applicable_reason=entity_side_effect | "
+            f"writeback_status={wb}"
         )
-    wb = item.writeback_status.value if item.writeback_status is not None else "null"
-    if item.writeback_readiness is WritebackReadiness.NOT_REQUIRED:
-        return f"writeback_required=true | writeback_status={wb}"
-    return f"writeback_required=true | writeback_applicable=true | writeback_status={wb}"
+    return f"writeback_required=true | writeback_status={wb}"
 
 
 def _bullet(lines: list[str], empty: str) -> str:
@@ -380,7 +406,11 @@ class ReportSectionBuilder:
             response_phase_status,
             actions_status_summary=actions_status_summary,
         )
-        verification = self._verification_results(verification_result, verification_phase_status)
+        verification = self._verification_results(
+            verification_result,
+            verification_phase_status,
+            response_actions,
+        )
         recommendations = self._recommendations(
             risk_assessment=risk_assessment,
             response_actions=response_actions,
@@ -445,6 +475,7 @@ class ReportSectionBuilder:
                 "action_ids": [a.action_id for a in response_actions],
                 ACTIONS_STATUS_SUMMARY_LABEL: actions_status_summary,
                 "action_status_counts": _action_status_counts(response_actions),
+                "writeback_rows": _writeback_row_summaries(response_actions),
                 **(
                     {"degraded": True}
                     if response_phase_status is ReportPhaseStatus.UNAVAILABLE
@@ -1026,7 +1057,9 @@ class ReportSectionBuilder:
         self,
         verification_result: VerificationResult | None,
         verification_phase_status: ReportPhaseStatus = ReportPhaseStatus.NOT_EXECUTED,
+        response_actions: list[Action] | None = None,
     ) -> str:
+        actions_by_id = {action.action_id: action for action in (response_actions or [])}
         if verification_result is not None and verification_result.results:
             lines = [
                 f"overall_status={verification_result.overall_status.value}",
@@ -1036,7 +1069,7 @@ class ReportSectionBuilder:
                 receipt = ",".join(item.writeback_ids) if item.writeback_ids else "-"
                 lines.append(
                     f"{item.action_id} | effect={item.effect_status.value} | "
-                    f"{_verification_writeback_report_fields(item)} | "
+                    f"{_verification_writeback_report_fields(item, actions_by_id.get(item.action_id))} | "
                     f"readiness={item.writeback_readiness.value} | "
                     f"receipt_refs={receipt} | detail={item.detail or '-'}"
                 )

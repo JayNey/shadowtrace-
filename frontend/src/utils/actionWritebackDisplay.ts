@@ -3,7 +3,8 @@
   ``writeback_required`` is an event-level business obligation snapshot.
   ``writeback_applicable`` marks whether *this* action owns a terminal
   disposition writeback. UI must not treat required=true as "writeback done"
-  when applicable=false (entity side effects).
+  when applicable=false (entity side effects). Missing fields are unknown,
+  not entity_side_effect / 无需写回.
 */
 
 import type { WritebackStatus } from "../types/event";
@@ -43,29 +44,46 @@ const STATUS_LABELS: Record<WritebackStatus, string> = {
 export function resolveActionWritebackDisplay(
   action: ActionWritebackInput,
 ): ActionWritebackDisplay {
-  const required = Boolean(action.writeback_required);
-  const applicable = Boolean(action.writeback_applicable);
+  const required = action.writeback_required;
+  const applicable = action.writeback_applicable;
   const statusRaw = action.writeback_status;
   const status =
     typeof statusRaw === "string" && statusRaw.length > 0
       ? (statusRaw.toLowerCase() as WritebackStatus)
       : null;
 
-  if (!required) {
+  if (required !== true) {
+    if (required === false) {
+      return {
+        label: "无需写回",
+        tone: "neutral",
+        tooltip: "本动作不承担事件级写回义务（writeback_required=false）。",
+        isConfirmedApplicableWriteback: false,
+      };
+    }
     return {
-      label: "无需写回",
+      label: "写回义务未知",
       tone: "neutral",
-      tooltip: "本动作不承担事件级写回义务（writeback_required=false）。",
+      tooltip: "writeback_required 缺失，不得将本行动作视为已完成终态写回。",
       isConfirmedApplicableWriteback: false,
     };
   }
 
-  if (!applicable) {
+  if (applicable !== true) {
+    if (applicable === false) {
+      return {
+        label: "事件级义务 · 本动作不承担终态写回",
+        tone: "neutral",
+        tooltip:
+          "writeback_required=true 表示事件需要终态写回；本动作 writeback_applicable=false（entity_side_effect），不得以 SUCCESS/ACCEPTED 冒充终态写回完成。闭环以 EVENT_STATUS_UPDATE 的 CONFIRMED 为准。",
+        isConfirmedApplicableWriteback: false,
+      };
+    }
     return {
-      label: "事件级义务 · 本动作不承担终态写回",
+      label: "写回适用性未知",
       tone: "neutral",
       tooltip:
-        "writeback_required=true 表示事件需要终态写回；本动作 writeback_applicable=false（entity_side_effect），不得以 SUCCESS/ACCEPTED 冒充终态写回完成。闭环以 EVENT_STATUS_UPDATE 的 CONFIRMED 为准。",
+        "writeback_required=true 但 writeback_applicable 缺失；fail-closed，不得显示终态完成。",
       isConfirmedApplicableWriteback: false,
     };
   }
@@ -128,7 +146,12 @@ export function resolveWritebackReceiptDisplay(input: {
     ? resolveActionWritebackDisplay(matchingAction)
     : null;
 
-  if (terminal) {
+  const isEntitySideEffect =
+    matchingAction?.writeback_required === true &&
+    matchingAction.writeback_applicable === false;
+  const isEntityIntent = intentKind === "entity_action_submit";
+
+  if (terminal && !isEntitySideEffect && !isEntityIntent) {
     if (status === "confirmed") {
       return {
         label: "终态写回已确认",
@@ -161,10 +184,7 @@ export function resolveWritebackReceiptDisplay(input: {
     };
   }
 
-  const isEntitySideEffect =
-    matchingAction?.writeback_required === true &&
-    matchingAction.writeback_applicable === false;
-  if (isEntitySideEffect || intentKind === "entity_action_submit") {
+  if (isEntitySideEffect || isEntityIntent) {
     if (status === "failed" || status === "conflict") {
       return {
         label: status === "conflict" ? "实体侧效应冲突" : "实体侧效应失败",
@@ -196,6 +216,14 @@ export function resolveWritebackReceiptDisplay(input: {
         tone: "info",
         tooltip:
           "实体动作回执已确认，但不承担终态 disposition；不得以本行代替 EVENT_STATUS_UPDATE。",
+        isConfirmedApplicableWriteback: false,
+      };
+    }
+    if (status === "pending" || status === "sending" || status === "partial") {
+      return {
+        label: STATUS_LABELS[status],
+        tone: "info",
+        tooltip: `实体动作回执为 ${status}；本动作不承担终态 disposition。`,
         isConfirmedApplicableWriteback: false,
       };
     }

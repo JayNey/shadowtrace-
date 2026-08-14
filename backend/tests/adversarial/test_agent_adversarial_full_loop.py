@@ -136,6 +136,36 @@ def _assert_executed_report_not_all_pending(sections: list[Any]) -> None:
     )
 
 
+def _assert_entity_writeback_not_claimed_applicable(sections: list[Any]) -> None:
+    """ISSUE-331: entity required=true rows must not claim applicable=true.
+
+    Prefer builder ``data.writeback_rows`` (survives LLM chapter rewrite).
+    Content is a fallback for entity_side_effect lines.
+    """
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        data = section.get("data") if isinstance(section.get("data"), dict) else {}
+        rows = data.get("writeback_rows")
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("writeback_required") is True and row.get("writeback_applicable") is False:
+                    assert row.get("writeback_applicable") is not True, (
+                        f"ISSUE-331: entity writeback_row claimed applicable=true ({row})"
+                    )
+        content = str(section.get("content") or "")
+        for line in content.splitlines():
+            if "writeback_not_applicable_reason=entity_side_effect" in line:
+                assert "writeback_applicable=true" not in line, (
+                    f"ISSUE-331: entity report line claimed applicable=true: {line}"
+                )
+                assert "writeback_applicable=false" in line, (
+                    f"ISSUE-331: entity report line missing applicable=false: {line}"
+                )
+
+
 async def _closure_diagnostics(
     session_factory: async_sessionmaker[AsyncSession],
     context_store: EventContextStore,
@@ -450,6 +480,7 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     )
     assert report_sections, "ISSUE-329: persisted report must include sections"
     _assert_executed_report_not_all_pending(report_sections)
+    _assert_entity_writeback_not_claimed_applicable(report_sections)
     assert EventStatus.EXECUTING_RESPONSE.value in status_sequence, (
         "expected audited transition through executing_response"
     )
