@@ -22,7 +22,9 @@ from app.agents.response_agent import (
     build_mock_capability_manifest,
     compute_action_fingerprint,
     derive_stable_action_id,
+    expand_rule_candidates,
     generate_response_plan_id,
+    resolve_entity_targets,
 )
 from app.agents.rules.default_response_rules import DEFAULT_RESPONSE_RULES, get_rule_actions
 from app.core.llm.base import InMemoryLLMCallAuditRecorder
@@ -1473,7 +1475,8 @@ async def test_deferred_writeback_blocked_when_locator_missing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_playbook_expands_all_entity_targets() -> None:
+async def test_playbook_block_ip_expands_external_targets_only() -> None:
+    """ISSUE-339: playbook block_ip expansion omits RFC1918; external dest remains."""
     event_id = f"evt-{uuid4().hex[:8]}"
     wm = _FakeWorkingMemory()
     _seed_wm(wm, event_id, triage=_triage(event_type=EventType.DATA_EXFILTRATION))
@@ -1502,8 +1505,8 @@ async def test_playbook_expands_all_entity_targets() -> None:
     plan = await agent.execute(_agent_input(event_id))
     block_actions = [a for a in plan.actions if a.tool_name == "block_ip"]
     targets = {a.target for a in block_actions}
-    assert "203.0.113.50" in targets
-    assert "10.0.0.5" in targets
+    assert targets == {"203.0.113.50"}
+    assert "10.0.0.5" not in targets
 
 
 def test_response_policy_filter_freezes_l1_ticket_tools_as_direct() -> None:
@@ -1896,6 +1899,136 @@ def test_apply_block_ip_role_correction_uses_internal_scope_in_reason() -> None:
     corrected = _apply_block_ip_role_correction(candidate, entities=entities)
     assert "internal" in corrected.reason.lower()
     assert "external" not in corrected.reason.lower()
+
+
+def _exfil_entity_set() -> EntitySet:
+    """DATA_EXFIL adversarial mix: VPN src, upload dst, internal WKS/DB (ISSUE-339)."""
+    return EntitySet(
+        accounts=[
+            AccountEntity(entity_id="acct-1", username="svc-analytics-47", source_refs=[_ref()]),
+        ],
+        ips=[
+            IPEntity(
+                entity_id="ip-vpn-src",
+                address="198.51.100.44",
+                scope="external",
+                source_refs=[_ref()],
+                attributes={"normalized_field": "src_ip"},
+            ),
+            IPEntity(
+                entity_id="ip-upload-dst",
+                address="198.51.100.77",
+                scope="external",
+                source_refs=[_ref()],
+                attributes={"normalized_field": "dst_ip"},
+            ),
+            IPEntity(
+                entity_id="ip-wks",
+                address="10.44.12.31",
+                scope="internal",
+                source_refs=[_ref()],
+                attributes={"normalized_field": "dst_ip"},
+            ),
+            IPEntity(
+                entity_id="ip-db",
+                address="10.44.20.88",
+                scope="internal",
+                source_refs=[_ref()],
+                attributes={"normalized_field": "dst_ip"},
+            ),
+        ],
+        hosts=[
+            HostEntity(entity_id="host-wks", hostname="WKS-DATA-031", source_refs=[_ref()]),
+            HostEntity(entity_id="host-db", hostname="SRV-DB-STG-02", source_refs=[_ref()]),
+        ],
+    )
+
+
+def test_resolve_entity_targets_block_ip_rule_expansion_excludes_rfc1918_and_vpn_src() -> None:
+    """ISSUE-339: rule block_ip only expands external exfil/C2 destinations."""
+    entities = _exfil_entity_set()
+    pairs = resolve_entity_targets("block_ip", entities)
+    targets = {target for _type, target in pairs}
+    assert targets == {"198.51.100.77"}
+    assert "198.51.100.44" not in targets
+    assert "10.44.12.31" not in targets
+    assert "10.44.20.88" not in targets
+
+
+def test_resolve_entity_targets_block_ip_include_internal_ip_opt_in() -> None:
+    entities = _exfil_entity_set()
+    pairs = resolve_entity_targets("block_ip", entities, include_internal_ip=True)
+    targets = {target for _type, target in pairs}
+    assert "10.44.12.31" in targets
+    assert "10.44.20.88" in targets
+    assert "198.51.100.44" not in targets
+
+
+def test_expand_rule_candidates_block_ip_data_exfil_high_excludes_internal() -> None:
+    """Contract: DATA_EXFIL HIGH rule fallback block_ip candidates omit RFC1918."""
+    entities = _exfil_entity_set()
+    rule_actions = get_rule_actions(EventType.DATA_EXFILTRATION, Severity.HIGH)
+    candidates = expand_rule_candidates(rule_actions, entities)
+    block_targets = {item.target for item in candidates if item.tool_name == "block_ip"}
+    assert block_targets == {"198.51.100.77"}
+    assert "disable_account" in {item.tool_name for item in candidates}
+
+
+@pytest.mark.asyncio
+async def test_llm_explicit_internal_block_ip_not_dropped_by_rule_filter() -> None:
+    """ISSUE-339: LLM explicit block_ip on internal IP survives PolicyFilter."""
+    internal_ip = "10.44.12.31"
+    event_id = f"evt-{uuid4().hex[:8]}"
+    wm = _FakeWorkingMemory()
+    _seed_wm(
+        wm,
+        event_id,
+        triage=_triage(entities=_exfil_entity_set()),
+    )
+
+    class _InternalBlockLLM:
+        async def chat(self, *args: Any, **kwargs: Any) -> Any:
+            import json
+
+            from app.core.llm.base import LLMResponse
+
+            payload = {
+                "actions": [
+                    {
+                        "tool_name": "block_ip",
+                        "target_type": "ip",
+                        "target": internal_ip,
+                        "parameters": {},
+                        "reason": "Analyst-directed block of staging workstation IP",
+                    },
+                    {
+                        "tool_name": "disable_account",
+                        "target_type": "account",
+                        "target": "svc-analytics-47",
+                        "parameters": {},
+                        "reason": "Disable compromised service account",
+                    },
+                ],
+                "strategy_summary": "LLM explicit internal block",
+            }
+            return LLMResponse(
+                content=json.dumps(payload),
+                model_name="mock",
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            )
+
+    agent = ResponseAgent(
+        llm_client=_InternalBlockLLM(),
+        working_memory=wm,
+        event_service=_FakeEventService(final_verdict=FinalVerdict.CONFIRMED_THREAT),
+        capability_manifest=build_mock_capability_manifest(),
+    )
+    plan = await agent.execute(_agent_input(event_id))
+    block_targets = {action.target for action in plan.actions if action.tool_name == "block_ip"}
+    assert internal_ip in block_targets
+    assert plan.generated_by is ResponsePlanGeneratedBy.LLM
 
 
 def test_infer_host_kind_skips_ambiguous_and_overbroad_names() -> None:

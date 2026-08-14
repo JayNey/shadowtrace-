@@ -447,11 +447,40 @@ class ResponsePolicyFilter:
         return True, False, WritebackReadiness.NOT_REQUIRED, None
 
 
+_BLOCK_IP_SOURCE_FIELDS = frozenset({"src_ip", "source_ip"})
+_BLOCK_IP_DESTINATION_FIELDS = frozenset({"dst_ip"})
+
+
+def _block_ip_sort_key(ip: IPEntity) -> tuple[int, int]:
+    normalized = str((ip.attributes or {}).get("normalized_field") or "").strip().lower()
+    dest_rank = 0 if normalized in _BLOCK_IP_DESTINATION_FIELDS else 1
+    ext_rank = 0 if ip.scope == "external" else 1
+    return (dest_rank, ext_rank)
+
+
+def _filter_block_ip_entities(
+    ips: list[IPEntity],
+    *,
+    include_internal_ip: bool,
+) -> list[IPEntity]:
+    """Default block_ip expansion: external exfil/C2 destinations only (ISSUE-339)."""
+    filtered = ips
+    if not include_internal_ip:
+        filtered = [ip for ip in filtered if ip.scope == "external"]
+    return [
+        ip
+        for ip in filtered
+        if str((ip.attributes or {}).get("normalized_field") or "").strip().lower()
+        not in _BLOCK_IP_SOURCE_FIELDS
+    ]
+
+
 def resolve_entity_targets(
     tool_name: str,
     entities: EntitySet,
     *,
     prefer_external_ip: bool = True,
+    include_internal_ip: bool = False,
 ) -> list[tuple[str, str]]:
     """Map a tool to zero or more (target_type, canonical_target) pairs."""
     meta = baseline_tool_index().get(tool_name)
@@ -471,7 +500,11 @@ def resolve_entity_targets(
             )
         elif target_type == "ip":
             ips = list(entities.ips)
-            if prefer_external_ip:
+            if tool_name == "block_ip":
+                ips = _filter_block_ip_entities(ips, include_internal_ip=include_internal_ip)
+                if prefer_external_ip:
+                    ips.sort(key=_block_ip_sort_key)
+            elif prefer_external_ip:
                 ips.sort(key=lambda item: 0 if item.scope == "external" else 1)
             targets.extend(
                 ("ip", ip.address or ip.entity_id) for ip in ips if ip.address or ip.entity_id
@@ -1416,7 +1449,7 @@ _HOST_SERVER_MARKERS = re.compile(
     r"(?:^|[-_])(?:srv|db|web|dc|sql|ad|fs|mail|server)(?:[-_]|$)",
     re.IGNORECASE,
 )
-_SOURCE_IP_FIELDS = frozenset({"src_ip", "source_ip"})
+_SOURCE_IP_FIELDS = _BLOCK_IP_SOURCE_FIELDS
 _EXFIL_DESTINATION_REASON_MARKERS = (
     "exfiltration destination",
     "exfil dest",
@@ -1652,4 +1685,5 @@ __all__ = [
     "derive_stable_action_id",
     "expand_rule_candidates",
     "generate_response_plan_id",
+    "resolve_entity_targets",
 ]
