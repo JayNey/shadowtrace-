@@ -931,9 +931,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     input.event_id,
                     exc.error_message,
                 )
-                playbook_resolution_failed_note = (
-                    f"playbook resolution failed ({exc.error_code})"
-                )
+                playbook_resolution_failed_note = f"playbook resolution failed ({exc.error_code})"
             except ValidationError as exc:
                 logger.warning(
                     "ResponseAgent playbook ref invalid event=%s err=%s",
@@ -951,6 +949,7 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     f"playbook {playbook.playbook_id}",
                 )
 
+        llm_fallback_reason = "llm empty"
         if self.llm_client is not None and triage is not None:
             try:
                 llm_candidates, strategy_summary = await self._generate_with_llm(
@@ -975,10 +974,11 @@ class ResponseAgent(BaseAgent[ResponseAgentInput, ResponsePlan]):
                     input.event_id,
                     exc,
                 )
+                llm_fallback_reason = "llm failed"
 
         rule_actions = get_rule_actions(event_type, severity)
         if playbook_resolution_failed_note:
-            strategy = f"{playbook_resolution_failed_note}; llm empty; rule fallback"
+            strategy = f"{playbook_resolution_failed_note}; {llm_fallback_reason}; rule fallback"
         else:
             strategy = "DEFAULT_RESPONSE_RULES fallback"
         return (
