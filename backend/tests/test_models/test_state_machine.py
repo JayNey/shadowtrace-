@@ -71,6 +71,7 @@ def _terminal_ok(**overrides: object) -> TerminalEventWritebackView:
         "actual_disposition": SourceDisposition.CONTAINED,
         "receipt_status": WritebackStatus.CONFIRMED,
         "plan_revision": 1,
+        "simulated": False,
         "confirmation_evidence": ConfirmationEvidence.READBACK_VERIFIED,
     }
     base.update(overrides)
@@ -96,6 +97,7 @@ def _applicable_ok(**overrides: object) -> ClosedGateActionView:
 def _closed_ctx(**overrides: object) -> TransitionContext:
     base: dict[str, object] = {
         "disposition_policy": DispositionPolicy.REQUIRED,
+        "disposition_is_mock": False,
         "report_exists": True,
         "applicable_required_actions": [_applicable_ok()],
         "terminal_event_writeback": _terminal_ok(),
@@ -377,6 +379,33 @@ def test_closed_gate_does_not_consult_min_evidence_sources() -> None:
 # --------------------------------------------------------------------------- #
 # CLOSED gate — simulated receipt gating (ISSUE-227)
 # --------------------------------------------------------------------------- #
+
+
+def test_transition_context_defaults_disposition_is_mock_false() -> None:
+    """ISSUE-345: undeclared TransitionContext is fail-closed for CLOSED gate."""
+    assert TransitionContext().disposition_is_mock is False
+
+
+def test_closed_gate_default_ctx_rejects_simulated_terminal() -> None:
+    """ISSUE-345: default context + simulated receipt must not pass CLOSED."""
+    with pytest.raises(
+        InvalidStateTransitionError, match="non-simulated terminal receipt"
+    ) as exc_info:
+        validate_closed_gate(
+            TransitionContext(
+                disposition_policy=DispositionPolicy.REQUIRED,
+                report_exists=True,
+                applicable_required_actions=[_applicable_ok()],
+                terminal_event_writeback=_terminal_ok(simulated=True),
+                current_plan_revision=1,
+                current_closure_cycle=1,
+                side_effect_convergence=SideEffectConvergenceSummary(
+                    event_id="evt-default-mock-contract",
+                    current_plan_revision=1,
+                ),
+            )
+        )
+    assert exc_info.value.error_code == "closed_simulated_receipt_rejected"
 
 
 def test_closed_gate_mock_accepts_simulated_terminal() -> None:

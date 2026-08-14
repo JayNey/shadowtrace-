@@ -2245,6 +2245,7 @@ def _closed_gate_terminal_ctx(**overrides: object) -> TransitionContext:
     )
     base: dict[str, object] = {
         "disposition_policy": DispositionPolicy.REQUIRED,
+        "disposition_is_mock": False,
         "report_exists": True,
         "applicable_required_actions": [
             ClosedGateActionView(
