@@ -334,9 +334,7 @@ async def _build_terminal_writeback_view(
         simulated = bool(latest_receipt.simulated)
         if latest_receipt.confirmation_evidence:
             try:
-                confirmation_evidence = ConfirmationEvidence(
-                    latest_receipt.confirmation_evidence
-                )
+                confirmation_evidence = ConfirmationEvidence(latest_receipt.confirmation_evidence)
             except ValueError:
                 confirmation_evidence = None
 
