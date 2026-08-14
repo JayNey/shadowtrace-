@@ -184,6 +184,11 @@ async def test_adversarial_credential_db_staging_exfil_audit(
         evidence_collection_status=str(
             evidence_ctx.get("collection_status") or evidence_ctx.get("status") or ""
         ),
+        evidence_gaps=(
+            list(evidence_ctx.get("gaps") or [])
+            if isinstance(evidence_ctx.get("gaps"), list)
+            else None
+        ),
         status_sequence=await _audit_status_sequence(session_factory, event_id),
     )
     report = checks.to_dict()

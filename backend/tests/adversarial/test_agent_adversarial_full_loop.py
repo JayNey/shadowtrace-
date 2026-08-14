@@ -459,6 +459,11 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
         evidence_collection_status=str(
             evidence_ctx.get("collection_status") or evidence_ctx.get("status") or ""
         ),
+        evidence_gaps=(
+            list(evidence_ctx.get("gaps") or [])
+            if isinstance(evidence_ctx.get("gaps"), list)
+            else None
+        ),
         status_sequence=status_sequence,
         audit_mode="full_loop",
     )
@@ -650,7 +655,8 @@ async def test_adversarial_noisy_production_full_response_closed_loop(
     # ISSUE-319: lock full-loop scorecard assembly (not only helper unit tests).
     assert report["audit_mode"] == "full_loop"
     assert report["checks"]["closed_reached"] is True
-    assert report["score"]["total_dimensions"] == 6
-    assert report["score"]["passed"] == 6
+    assert report["checks"]["evidence_collection_ok"] is True
+    assert report["score"]["total_dimensions"] == 7
+    assert report["score"]["passed"] == 7
     assert report["verdict_for_human"].startswith("PASS")
     assert "CLOSED" in report["verdict_for_human"]

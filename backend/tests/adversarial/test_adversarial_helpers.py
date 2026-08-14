@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.adversarial.audit_report import AdversarialAuditChecks
+from tests.adversarial.audit_report import AdversarialAuditChecks, evaluate_evidence_collection_ok
 from tests.adversarial.full_loop_runner import resolve_full_loop_timeout_s
 from tests.adversarial.helpers import (
     assert_opaque_alert_quality,
@@ -427,8 +427,9 @@ def test_full_loop_pass_requires_closed() -> None:
         status_sequence=_REPORTING_ONLY_SEQUENCE,
     ).to_dict()
     assert report["checks"]["closed_reached"] is False
-    assert report["score"]["total_dimensions"] == 6
-    assert report["score"]["passed"] == 5
+    assert report["checks"]["evidence_collection_ok"] is True
+    assert report["score"]["total_dimensions"] == 7
+    assert report["score"]["passed"] == 6
     assert report["verdict_for_human"].startswith("FAIL")
     assert "not release-grade" in report["verdict_for_human"]
     assert "PASS" not in report["verdict_for_human"]
@@ -440,7 +441,8 @@ def test_full_loop_pass_when_closed_and_analysis_met() -> None:
         status_sequence=_CLOSED_SEQUENCE,
     ).to_dict()
     assert report["checks"]["closed_reached"] is True
-    assert report["score"]["passed"] == report["score"]["total_dimensions"] == 6
+    assert report["checks"]["evidence_collection_ok"] is True
+    assert report["score"]["passed"] == report["score"]["total_dimensions"] == 7
     assert report["verdict_for_human"].startswith("PASS")
     assert "CLOSED" in report["verdict_for_human"]
 
@@ -483,7 +485,9 @@ def test_full_loop_writeback_ok_does_not_override_closed_gate() -> None:
     ).to_dict()
     assert production_checks["disposition_writeback_ok"] is True
     assert report["checks"]["closed_reached"] is False
-    assert report["score"]["passed"] == 5
+    assert report["checks"]["evidence_collection_ok"] is True
+    assert report["score"]["passed"] == 6
+    assert report["score"]["total_dimensions"] == 7
     assert report["verdict_for_human"].startswith("FAIL")
     assert "PASS" not in report["verdict_for_human"]
 
@@ -544,3 +548,75 @@ def test_resolve_observed_severity_ignores_higher_triage_when_risk_missing() -> 
     )
     assert outward == "medium"
     assert triage == "high"
+
+
+def test_evidence_collection_ok_true_for_completed_without_gaps() -> None:
+    ok, detail = evaluate_evidence_collection_ok(collection_status="completed", gaps=[])
+    assert ok is True
+    assert detail["failure_reasons"] == []
+
+
+def test_evidence_collection_ok_fails_on_collection_failed() -> None:
+    ok, detail = evaluate_evidence_collection_ok(collection_status="failed", gaps=[])
+    assert ok is False
+    assert detail["failure_reasons"] == ["collection_status_failed"]
+
+
+def test_evidence_collection_ok_fails_on_mandatory_dns_invalid_entity() -> None:
+    gaps = [
+        {
+            "missing_source": "dns",
+            "reason": "invalid_entity",
+            "detail": {
+                "tool_name": "query_dns",
+                "description": "domain rejected by validator",
+            },
+        }
+    ]
+    ok, detail = evaluate_evidence_collection_ok(collection_status="degraded", gaps=gaps)
+    assert ok is False
+    assert detail["failure_reasons"] == ["mandatory_query_dns_skipped"]
+    assert detail["mandatory_query_dns_skips"]
+
+
+def test_evidence_collection_ok_exempts_ip_only_dns_skip() -> None:
+    gaps = [
+        {
+            "missing_source": "dns",
+            "reason": "source_skipped",
+            "detail": {
+                "tool_name": "query_dns",
+                "description": "required entity missing or invalid for query_dns",
+            },
+        }
+    ]
+    ok, detail = evaluate_evidence_collection_ok(collection_status="degraded", gaps=gaps)
+    assert ok is True
+    assert detail["expected_query_dns_skips"]
+    assert detail["mandatory_query_dns_skips"] == []
+
+
+def test_full_loop_closed_with_failed_collection_is_not_pass() -> None:
+    report = _analysis_pass_checks(
+        audit_mode="full_loop",
+        status_sequence=_CLOSED_SEQUENCE,
+        evidence_collection_status="failed",
+    ).to_dict()
+    assert report["checks"]["closed_reached"] is True
+    assert report["checks"]["evidence_collection_ok"] is False
+    assert report["score"]["passed"] == 6
+    assert report["score"]["total_dimensions"] == 7
+    assert report["verdict_for_human"].startswith("FAIL")
+    assert "evidence collection incomplete" in report["verdict_for_human"]
+    assert "PASS" not in report["verdict_for_human"]
+
+
+def test_analysis_only_annotates_incomplete_collection() -> None:
+    report = _analysis_pass_checks(
+        evidence_collection_status="failed",
+    ).to_dict()
+    assert report["checks"]["evidence_collection_ok"] is False
+    assert report["score"]["total_dimensions"] == 5
+    assert report["verdict_for_human"].startswith("PARTIAL")
+    assert "evidence_collection_ok" in report["verdict_for_human"]
+    assert not report["verdict_for_human"].startswith("PASS")
