@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -19,7 +20,7 @@ import pytest
 import pytest_asyncio
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -41,6 +42,7 @@ from app.models.enums import (
     ActionCategory,
     ActionExecutionPhase,
     ActionStatus,
+    ConfirmationEvidence,
     DispositionIntentKind,
     DispositionPolicy,
     EventStatus,
@@ -439,6 +441,7 @@ async def _seed_terminal_writeback_fixture(
     target_disposition: SourceDisposition = SourceDisposition.CONTAINED,
     command_payload: dict[str, object] | None = None,
     receipt_simulated: bool | None = None,
+    receipt_confirmation_evidence: ConfirmationEvidence | None = None,
     action_name: str = TERMINAL_DISPOSITION_TOOL,
 ) -> str:
     action_id = f"act-term-{_sfx()}"
@@ -515,9 +518,26 @@ async def _seed_terminal_writeback_fixture(
                         source_record_id=source_record_id,
                         status=WritebackStatus.CONFIRMED.value,
                         simulated=receipt_simulated,
+                        confirmation_evidence=(
+                            receipt_confirmation_evidence.value
+                            if receipt_confirmation_evidence is not None
+                            else None
+                        ),
                     )
                 )
     return action_id
+
+
+@contextmanager
+def _live_disposition_mode(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    from app.core.config import get_settings
+
+    monkeypatch.setenv("DISPOSITION_MODE", "live_xdr")
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -1684,6 +1704,146 @@ async def test_build_terminal_writeback_view_projects_simulated_from_receipt(
 
 
 @pytest.mark.asyncio
+async def test_build_terminal_writeback_view_projects_confirmation_evidence_from_receipt(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+) -> None:
+    """ISSUE-333: confirmation_evidence on TerminalEventWritebackView comes from receipt."""
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+    )
+    await _seed_terminal_writeback_fixture(
+        session_factory,
+        event_id,
+        approved=SourceDisposition.CONTAINED,
+        target_disposition=SourceDisposition.CONTAINED,
+        receipt_simulated=False,
+        receipt_confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+    )
+
+    async with session_factory() as session:
+        view = await _build_terminal_writeback_view(session, event_id, 1)
+
+    assert view is not None
+    assert view.confirmation_evidence is ConfirmationEvidence.READBACK_VERIFIED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw_evidence", ["", "not-an-enum"])
+async def test_build_terminal_writeback_view_empty_or_garbage_evidence_is_none(
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    raw_evidence: str,
+) -> None:
+    """ISSUE-333: blank/invalid receipt evidence projects as None (fail-closed)."""
+    event_id = await _create_event(
+        session_factory,
+        store,
+        disposition_policy=DispositionPolicy.REQUIRED.value,
+    )
+    action_id = await _seed_terminal_writeback_fixture(
+        session_factory,
+        event_id,
+        approved=SourceDisposition.CONTAINED,
+        target_disposition=SourceDisposition.CONTAINED,
+        receipt_simulated=False,
+        receipt_confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+    )
+    async with session_factory() as session:
+        async with session.begin():
+            await session.execute(
+                update(orm.DispositionReceipt)
+                .where(orm.DispositionReceipt.action_id == action_id)
+                .values(confirmation_evidence=raw_evidence)
+            )
+    async with session_factory() as session:
+        view = await _build_terminal_writeback_view(session, event_id, 1)
+    assert view is not None
+    assert view.confirmation_evidence is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "receipt_confirmation_evidence",
+    [ConfirmationEvidence.ADAPTER_ACKNOWLEDGED, None],
+)
+async def test_close_rejected_when_non_mock_and_weak_confirmation_evidence(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+    receipt_confirmation_evidence: ConfirmationEvidence | None,
+) -> None:
+    """ISSUE-333: live disposition mode must block CLOSED on ACK or missing evidence."""
+    with _live_disposition_mode(monkeypatch):
+        event_id = await _create_event(
+            session_factory,
+            store,
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            severity=Severity.LOW.value,
+        )
+        await _walk_to_reporting(state_machine, event_id)
+        await _add_report(session_factory, event_id)
+        await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+        await _seed_terminal_writeback_fixture(
+            session_factory,
+            event_id,
+            approved=SourceDisposition.CONTAINED,
+            target_disposition=SourceDisposition.CONTAINED,
+            receipt_simulated=False,
+            receipt_confirmation_evidence=receipt_confirmation_evidence,
+        )
+
+        with pytest.raises(
+            InvalidStateTransitionError, match="strong confirmation_evidence"
+        ) as exc:
+            await state_machine.transition(
+                event_id,
+                EventStatus.CLOSED,
+                operator="SuperAgent",
+                reason="weak evidence in live mode",
+            )
+        assert exc.value.error_code == "closed_weak_confirmation_evidence"
+
+
+@pytest.mark.asyncio
+async def test_close_succeeds_when_live_xdr_and_readback_verified_terminal(
+    state_machine: StateMachineService,
+    session_factory: async_sessionmaker[AsyncSession],
+    store: EventContextStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ISSUE-333: live mode still CLOSES when terminal evidence is readback_verified."""
+    with _live_disposition_mode(monkeypatch):
+        event_id = await _create_event(
+            session_factory,
+            store,
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            severity=Severity.LOW.value,
+        )
+        await _walk_to_reporting(state_machine, event_id)
+        await _add_report(session_factory, event_id)
+        await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+        await _seed_terminal_writeback_fixture(
+            session_factory,
+            event_id,
+            approved=SourceDisposition.CONTAINED,
+            target_disposition=SourceDisposition.CONTAINED,
+            receipt_simulated=False,
+            receipt_confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+        )
+        result = await state_machine.transition(
+            event_id,
+            EventStatus.CLOSED,
+            operator="SuperAgent",
+            reason="strong evidence in live mode",
+        )
+        assert result.status is EventStatus.CLOSED
+
+
+@pytest.mark.asyncio
 async def test_close_rejected_when_non_mock_and_simulated_terminal_receipt(
     state_machine: StateMachineService,
     session_factory: async_sessionmaker[AsyncSession],
@@ -1691,37 +1851,34 @@ async def test_close_rejected_when_non_mock_and_simulated_terminal_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """ISSUE-227: live disposition mode must block CLOSED on simulated terminal."""
-    from app.core.config import get_settings
-
-    monkeypatch.setenv("DISPOSITION_MODE", "live_xdr")
-    get_settings.cache_clear()
-
-    event_id = await _create_event(
-        session_factory,
-        store,
-        disposition_policy=DispositionPolicy.REQUIRED.value,
-        severity=Severity.LOW.value,
-    )
-    await _walk_to_reporting(state_machine, event_id)
-    await _add_report(session_factory, event_id)
-    await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
-    await _seed_terminal_writeback_fixture(
-        session_factory,
-        event_id,
-        approved=SourceDisposition.CONTAINED,
-        target_disposition=SourceDisposition.CONTAINED,
-        receipt_simulated=True,
-    )
-
-    with pytest.raises(InvalidStateTransitionError, match="non-simulated terminal receipt") as exc:
-        await state_machine.transition(
-            event_id,
-            EventStatus.CLOSED,
-            operator="SuperAgent",
-            reason="simulated terminal in live mode",
+    with _live_disposition_mode(monkeypatch):
+        event_id = await _create_event(
+            session_factory,
+            store,
+            disposition_policy=DispositionPolicy.REQUIRED.value,
+            severity=Severity.LOW.value,
         )
-    assert exc.value.error_code == "closed_simulated_receipt_rejected"
-    get_settings.cache_clear()
+        await _walk_to_reporting(state_machine, event_id)
+        await _add_report(session_factory, event_id)
+        await _seed_applicable_confirmed_writeback_action(session_factory, event_id)
+        await _seed_terminal_writeback_fixture(
+            session_factory,
+            event_id,
+            approved=SourceDisposition.CONTAINED,
+            target_disposition=SourceDisposition.CONTAINED,
+            receipt_simulated=True,
+        )
+
+        with pytest.raises(
+            InvalidStateTransitionError, match="non-simulated terminal receipt"
+        ) as exc:
+            await state_machine.transition(
+                event_id,
+                EventStatus.CLOSED,
+                operator="SuperAgent",
+                reason="simulated terminal in live mode",
+            )
+        assert exc.value.error_code == "closed_simulated_receipt_rejected"
 
 
 @pytest.mark.asyncio

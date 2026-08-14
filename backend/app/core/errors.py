@@ -81,6 +81,7 @@ ERROR_CODE_REGISTRY: dict[str, ErrorCategory] = {
     # State machine
     "invalid_state_transition": ErrorCategory.PERMANENT,
     "closed_simulated_receipt_rejected": ErrorCategory.PERMANENT,
+    "closed_weak_confirmation_evidence": ErrorCategory.PERMANENT,
     "closed_requires_report": ErrorCategory.PERMANENT,
     "invalid_verdict_status_combination": ErrorCategory.PERMANENT,
     # Tools / LLM / budget / guardrail

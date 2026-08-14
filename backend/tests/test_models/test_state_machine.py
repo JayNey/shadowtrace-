@@ -71,6 +71,7 @@ def _terminal_ok(**overrides: object) -> TerminalEventWritebackView:
         "actual_disposition": SourceDisposition.CONTAINED,
         "receipt_status": WritebackStatus.CONFIRMED,
         "plan_revision": 1,
+        "confirmation_evidence": ConfirmationEvidence.READBACK_VERIFIED,
     }
     base.update(overrides)
     return TerminalEventWritebackView(**base)  # type: ignore[arg-type]
@@ -402,15 +403,124 @@ def test_closed_gate_non_mock_rejects_simulated_terminal() -> None:
     assert exc_info.value.error_code == "closed_simulated_receipt_rejected"
 
 
-def test_closed_gate_non_mock_accepts_unsimulated_terminal() -> None:
-    """Non-mock disposition accepts terminal receipt when simulated is not True."""
-    # simulated=False → real writeback
+# --------------------------------------------------------------------------- #
+# CLOSED gate — confirmation_evidence tier (ISSUE-333)
+# --------------------------------------------------------------------------- #
+
+
+def test_closed_gate_non_mock_rejects_adapter_acknowledged_terminal() -> None:
+    with pytest.raises(
+        InvalidStateTransitionError, match="strong confirmation_evidence"
+    ) as exc_info:
+        validate_closed_gate(
+            _closed_ctx(
+                disposition_is_mock=False,
+                terminal_event_writeback=_terminal_ok(
+                    simulated=False,
+                    confirmation_evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+                ),
+            )
+        )
+    assert exc_info.value.error_code == "closed_weak_confirmation_evidence"
+
+
+def test_closed_gate_non_mock_rejects_status_queried_terminal() -> None:
+    with pytest.raises(
+        InvalidStateTransitionError, match="strong confirmation_evidence"
+    ) as exc_info:
+        validate_closed_gate(
+            _closed_ctx(
+                disposition_is_mock=False,
+                terminal_event_writeback=_terminal_ok(
+                    simulated=False,
+                    confirmation_evidence=ConfirmationEvidence.STATUS_QUERIED,
+                ),
+            )
+        )
+    assert exc_info.value.error_code == "closed_weak_confirmation_evidence"
+
+
+def test_closed_gate_non_mock_rejects_missing_confirmation_evidence() -> None:
+    with pytest.raises(
+        InvalidStateTransitionError, match="strong confirmation_evidence"
+    ) as exc_info:
+        validate_closed_gate(
+            _closed_ctx(
+                disposition_is_mock=False,
+                terminal_event_writeback=_terminal_ok(
+                    simulated=False,
+                    confirmation_evidence=None,
+                ),
+            )
+        )
+    assert exc_info.value.error_code == "closed_weak_confirmation_evidence"
+
+
+def test_closed_gate_non_mock_accepts_readback_verified_terminal() -> None:
     validate_closed_gate(
         _closed_ctx(
             disposition_is_mock=False,
-            terminal_event_writeback=_terminal_ok(simulated=False),
+            terminal_event_writeback=_terminal_ok(
+                simulated=False,
+                confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+            ),
         )
     )
+
+
+def test_closed_gate_non_mock_accepts_manual_confirmed_terminal() -> None:
+    validate_closed_gate(
+        _closed_ctx(
+            disposition_is_mock=False,
+            terminal_event_writeback=_terminal_ok(
+                simulated=False,
+                confirmation_evidence=ConfirmationEvidence.MANUAL_CONFIRMED,
+            ),
+        )
+    )
+
+
+def test_closed_gate_mock_accepts_adapter_acknowledged_simulated_terminal() -> None:
+    """Mock P0 demo: simulated CONFIRMED with weak evidence may still close."""
+    validate_closed_gate(
+        _closed_ctx(
+            disposition_is_mock=True,
+            terminal_event_writeback=_terminal_ok(
+                simulated=True,
+                confirmation_evidence=ConfirmationEvidence.ADAPTER_ACKNOWLEDGED,
+            ),
+        )
+    )
+
+
+def test_closed_gate_non_mock_accepts_unsimulated_terminal() -> None:
+    """Non-mock disposition accepts terminal receipt when simulated is not True."""
+    validate_closed_gate(
+        _closed_ctx(
+            disposition_is_mock=False,
+            terminal_event_writeback=_terminal_ok(
+                simulated=False,
+                confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+            ),
+        )
+    )
+
+
+def test_closed_gate_non_mock_simulated_true_rejected_before_evidence_tier() -> None:
+    """ISSUE-227 simulated check still short-circuits before ISSUE-333 evidence."""
+    with pytest.raises(
+        InvalidStateTransitionError, match="non-simulated terminal receipt"
+    ) as exc_info:
+        validate_closed_gate(
+            _closed_ctx(
+                disposition_is_mock=False,
+                terminal_event_writeback=_terminal_ok(
+                    simulated=True,
+                    confirmation_evidence=ConfirmationEvidence.READBACK_VERIFIED,
+                ),
+            )
+        )
+    assert exc_info.value.error_code == "closed_simulated_receipt_rejected"
 
 
 def test_closed_gate_non_mock_rejects_unknown_simulated_terminal() -> None:
